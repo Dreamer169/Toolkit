@@ -88,6 +88,29 @@ class BaseController:
         self.wait_time     = (wait_ms or BOT_PROTECTION_WAIT) * 1000  # ms
         self.max_retries   = max_captcha_retries
 
+    def _build_proxy_cfg(self):
+        """
+        Chromium 不支持带认证的 SOCKS5，因此：
+        有凭据时 → 启动本地 Socks5Relay（无认证），转发到上游带认证的代理
+        无凭据时 → 直接传给 Chromium
+        """
+        if not self.proxy:
+            return None
+        import re, sys, os
+        m = re.match(r'(socks5h?|http|https)://([^:]+):([^@]+)@([^:]+):(\d+)', self.proxy)
+        if m:
+            _scheme, user, password, host, port = m.groups()
+            # 启动本地无认证中转代理
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from socks5_relay import Socks5Relay
+            relay = Socks5Relay(host, int(port), user, password)
+            local_port = relay.start()
+            self._relay = relay  # 保持引用，防止 GC
+            print(f"[relay] 本地中转代理启动：127.0.0.1:{local_port} → {host}:{port}", flush=True)
+            return {"server": f"socks5://127.0.0.1:{local_port}", "bypass": "localhost"}
+        # 无凭据格式，直接用
+        return {"server": self.proxy, "bypass": "localhost"}
+
     def outlook_register(self, page, email, password):
         """
         完全复刻原版 BaseBrowserController.outlook_register()
@@ -224,11 +247,10 @@ class PatchrightController(BaseController):
     def launch(self, headless=True):
         from patchright.sync_api import sync_playwright
         p = sync_playwright().start()
-        proxy_cfg = {"server": self.proxy, "bypass": "localhost"} if self.proxy else None
         b = p.chromium.launch(
             headless=headless,
             args=["--lang=zh-CN", "--no-sandbox", "--disable-dev-shm-usage"],
-            proxy=proxy_cfg,
+            proxy=self._build_proxy_cfg(),
         )
         return p, b
 
@@ -290,11 +312,10 @@ class PlaywrightController(BaseController):
     def launch(self, headless=True):
         from playwright.sync_api import sync_playwright
         p = sync_playwright().start()
-        proxy_cfg = {"server": self.proxy, "bypass": "localhost"} if self.proxy else None
         b = p.chromium.launch(
             headless=headless,
             args=["--lang=zh-CN", "--no-sandbox", "--disable-dev-shm-usage"],
-            proxy=proxy_cfg,
+            proxy=self._build_proxy_cfg(),
         )
         return p, b
 
