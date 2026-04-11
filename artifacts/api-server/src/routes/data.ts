@@ -307,4 +307,38 @@ router.get("/data/stats", async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
 });
 
+// ─── 打码服务配置 ────────────────────────────────────────────────────────────
+router.get("/data/captcha-config", async (_req, res) => {
+  try {
+    const row = await queryOne<{ value: string }>(
+      "SELECT value FROM configs WHERE key = 'captcha_config'"
+    );
+    const cfg = row ? JSON.parse(row.value) : { service: "", apiKey: "" };
+    // 隐藏 apiKey，只返回 masked 版本
+    const masked = cfg.apiKey ? cfg.apiKey.slice(0, 6) + "****" + cfg.apiKey.slice(-4) : "";
+    res.json({ success: true, service: cfg.service || "", apiKeyMasked: masked, hasKey: !!cfg.apiKey });
+  } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
+router.post("/data/captcha-config", async (req, res) => {
+  const { service = "", apiKey = "" } = req.body as { service?: string; apiKey?: string };
+  try {
+    // 如果 apiKey 含 **** 说明前端传回了掩码，保留已存的 key
+    let finalKey = apiKey;
+    if (apiKey.includes("****")) {
+      const existing = await queryOne<{ value: string }>(
+        "SELECT value FROM configs WHERE key = 'captcha_config'"
+      );
+      if (existing) finalKey = (JSON.parse(existing.value) as { apiKey?: string }).apiKey || "";
+    }
+    const cfg = JSON.stringify({ service, apiKey: finalKey });
+    await execute(
+      `INSERT INTO configs(key, value) VALUES('captcha_config', $1)
+       ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value`,
+      [cfg]
+    );
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
 export default router;

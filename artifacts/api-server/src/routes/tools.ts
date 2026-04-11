@@ -764,6 +764,20 @@ router.post("/tools/outlook/register", async (req, res) => {
     } catch {}
   }
 
+  // 读取打码服务配置（可选）
+  let captchaService = "";
+  let captchaKey     = "";
+  try {
+    const { query: cfgQ } = await import("../db.js");
+    const rows = await cfgQ<{ value: string }>(
+      "SELECT value FROM configs WHERE key = 'captcha_config' LIMIT 1"
+    );
+    if (rows[0]) {
+      const cfg = JSON.parse(rows[0].value) as { service?: string; apiKey?: string };
+      if (cfg.service && cfg.apiKey) { captchaService = cfg.service; captchaKey = cfg.apiKey; }
+    }
+  } catch {}
+
   const n   = Math.min(10, Math.max(1, count));
   const eng = ["patchright", "playwright"].includes(engine) ? engine : "patchright";
   const jobId = `reg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -797,6 +811,10 @@ router.post("/tools/outlook/register", async (req, res) => {
     "--retries",  String(retries),
   ];
   if (proxy) args.push("--proxy", proxy);
+  if (captchaService && captchaKey) {
+    args.push("--captcha-service", captchaService, "--captcha-key", captchaKey);
+    job.logs.push({ type: "log", message: `🔑 打码服务: ${captchaService}` });
+  }
 
   const child = spawn("python3", args, { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
 

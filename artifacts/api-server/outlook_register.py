@@ -83,10 +83,12 @@ def gen_email_username():
 
 # ─── 基础控制器 ───────────────────────────────────────────────────────────────
 class BaseController:
-    def __init__(self, proxy="", wait_ms=None, max_captcha_retries=MAX_CAPTCHA_RETRIES):
-        self.proxy         = proxy
-        self.wait_time     = (wait_ms or BOT_PROTECTION_WAIT) * 1000  # ms
-        self.max_retries   = max_captcha_retries
+    def __init__(self, proxy="", wait_ms=None, max_captcha_retries=MAX_CAPTCHA_RETRIES,
+                 captcha_solver=None):
+        self.proxy          = proxy
+        self.wait_time      = (wait_ms or BOT_PROTECTION_WAIT) * 1000  # ms
+        self.max_retries    = max_captcha_retries
+        self.captcha_solver = captcha_solver   # captcha_solver.py 中的 Solver 对象
 
     def _build_proxy_cfg(self):
         """
@@ -111,6 +113,116 @@ class BaseController:
         # 无凭据格式，直接用
         return {"server": self.proxy, "bypass": "localhost"}
 
+    # ── 打码服务辅助 ──────────────────────────────────────────────────────────
+    def _start_blob_capture(self, page):
+        """
+        拦截 FunCaptcha 网络请求，提取 sessionToken（blob）。
+        在浏览器导航前调用，返回一个 list，稍后通过 list[0] 读取。
+        """
+        blob_container: list[str] = []
+
+        def on_request(request):
+            url = request.url
+            # Arkose Labs 的 iframe 地址含 sessionToken 参数
+            if "hsprotect.net" in url or "arkoselabs.com" in url:
+                import urllib.parse
+                parsed = urllib.parse.urlparse(url)
+                qs = urllib.parse.parse_qs(parsed.query)
+                for key in ("sessionToken", "session_token", "token", "id"):
+                    if key in qs and qs[key]:
+                        val = qs[key][0]
+                        if len(val) > 20 and not blob_container:
+                            blob_container.append(val)
+                            print(f"[captcha] 捕获到 blob (len={len(val)})", flush=True)
+
+        page.on("request", on_request)
+        return blob_container
+
+    def _inject_captcha_token(self, page, token: str) -> bool:
+        """
+        将打码服务返回的 token 注入到 Arkose/FunCaptcha 验证流程。
+        尝试多种注入方式，任一成功即返回 True。
+        """
+        print(f"[captcha] 注入 token (len={len(token)})…", flush=True)
+        script = f"""
+        (function() {{
+            var tk = {json.dumps(token)};
+            // 方式1: Microsoft 专用回调
+            try {{
+                if (window.ArkoseEnforcement && typeof window.ArkoseEnforcement.setAnswerToken === 'function') {{
+                    window.ArkoseEnforcement.setAnswerToken(tk);
+                    return 'ArkoseEnforcement.setAnswerToken';
+                }}
+            }} catch(e) {{}}
+            // 方式2: 隐藏 input 字段
+            var fields = document.querySelectorAll(
+                'input[name*="arkose"], input[name*="enforcement"], input[name*="fc-token"], ' +
+                'input[name*="FunCaptcha-Token"], input[id*="arkose"], input[type="hidden"]'
+            );
+            var injected = false;
+            fields.forEach(function(el) {{
+                el.value = tk;
+                el.dispatchEvent(new Event('change', {{bubbles: true}}));
+                injected = true;
+            }});
+            if (injected) return 'hidden-input';
+            // 方式3: postMessage 给所有 frame
+            document.querySelectorAll('iframe').forEach(function(fr) {{
+                try {{
+                    fr.contentWindow.postMessage({{
+                        eventId: 'challenge-complete',
+                        payload: {{sessionToken: tk}}
+                    }}, '*');
+                }} catch(e) {{}}
+            }});
+            window.postMessage({{
+                eventId: 'challenge-complete',
+                payload: {{sessionToken: tk}}
+            }}, '*');
+            return 'postMessage';
+        }})()
+        """
+        try:
+            method = page.evaluate(script)
+            print(f"[captcha] 注入成功，方式={method}", flush=True)
+            return True
+        except Exception as ex:
+            print(f"[captcha] 注入失败: {ex}", flush=True)
+            return False
+
+    def _solve_with_service(self, page, blob_container: list) -> bool:
+        """
+        调用 self.captcha_solver 解题并注入 token。
+        成功返回 True，失败返回 False。
+        """
+        if not self.captcha_solver:
+            return False
+        try:
+            page_url = page.url or "https://signup.live.com/signup"
+            blob = blob_container[0] if blob_container else None
+            print(f"[captcha] 调用打码服务… blob={'有' if blob else '无'}", flush=True)
+            token = self.captcha_solver.solve(page_url, blob=blob)
+            ok = self._inject_captcha_token(page, token)
+            if ok:
+                # 等待注入生效，然后检查是否通过
+                page.wait_for_timeout(3000)
+                # 如果验证质询 iframe 消失，说明通过了
+                try:
+                    page.wait_for_selector(
+                        'iframe[title="验证质询"]', state="detached", timeout=8000)
+                    print("[captcha] ✅ 打码服务验证通过", flush=True)
+                    return True
+                except Exception:
+                    # 可能直接跳到下一步（验证质询不会 detach 而是直接消失）
+                    if (not page.locator('iframe[title="验证质询"]').count()
+                            or page.get_by_text("取消").count()):
+                        print("[captcha] ✅ 打码服务验证通过（无 iframe detach）", flush=True)
+                        return True
+            return False
+        except Exception as ex:
+            print(f"[captcha] 打码服务失败: {ex}", flush=True)
+            return False
+
     def outlook_register(self, page, email, password):
         """
         完全复刻原版 BaseBrowserController.outlook_register()
@@ -120,6 +232,9 @@ class BaseController:
         year  = str(random.randint(1960, 2005))
         month = str(random.randint(1, 12))
         day   = str(random.randint(1, 28))
+
+        # 启动 FunCaptcha blob 捕获（在导航前挂钩）
+        blob_container = self._start_blob_capture(page)
 
         # ── Step 1: 打开注册页，等待同意按钮 ──────────────────────────────
         try:
@@ -225,7 +340,7 @@ class BaseController:
                 return False, "验证码类型错误，非按压验证码", email
 
             # ── CAPTCHA ──────────────────────────────────────────────────
-            captcha_ok = self.handle_captcha(page)
+            captcha_ok = self.handle_captcha(page, blob_container)
             if not captcha_ok:
                 return False, "验证码处理失败", email
 
@@ -234,7 +349,7 @@ class BaseController:
 
         return True, "注册成功", email
 
-    def handle_captcha(self, page):
+    def handle_captcha(self, page, blob_container=None):
         raise NotImplementedError
 
 
@@ -254,7 +369,22 @@ class PatchrightController(BaseController):
         )
         return p, b
 
-    def handle_captcha(self, page):
+    def handle_captcha(self, page, blob_container=None):
+        """
+        优先使用无障碍挑战（免费）。
+        如果失败且配置了打码服务，则自动降级到 2captcha/CapMonster。
+        """
+        # ── 方式1：无障碍挑战（双 iframe 按钮点击）────────────────────────
+        accessibility_ok = self._try_accessibility_challenge(page)
+        if accessibility_ok:
+            return True
+
+        # ── 方式2：打码服务降级 ──────────────────────────────────────────
+        print("[captcha] 无障碍挑战失败，尝试打码服务…", flush=True)
+        return self._solve_with_service(page, blob_container or [])
+
+    def _try_accessibility_challenge(self, page) -> bool:
+        """点击无障碍挑战按钮（原版逻辑）"""
         frame1 = page.frame_locator('iframe[title="验证质询"]')
         frame2 = frame1.frame_locator('iframe[style*="display: block"]')
 
@@ -319,12 +449,27 @@ class PlaywrightController(BaseController):
         )
         return p, b
 
-    def handle_captcha(self, page):
-        page.wait_for_event(
-            "request",
-            lambda req: req.url.startswith("blob:https://iframe.hsprotect.net/"),
-            timeout=22000,
-        )
+    def handle_captcha(self, page, blob_container=None):
+        """
+        优先使用 Enter 键 + hsprotect.net 流量监听（原版逻辑）。
+        如果失败且配置了打码服务，则自动降级到 2captcha/CapMonster。
+        """
+        ok = self._try_enter_challenge(page)
+        if ok:
+            return True
+        print("[captcha] Enter挑战失败，尝试打码服务…", flush=True)
+        return self._solve_with_service(page, blob_container or [])
+
+    def _try_enter_challenge(self, page) -> bool:
+        """原版 Enter键 + hsprotect.net 流量监听逻辑"""
+        try:
+            page.wait_for_event(
+                "request",
+                lambda req: req.url.startswith("blob:https://iframe.hsprotect.net/"),
+                timeout=22000,
+            )
+        except Exception:
+            return False
         page.wait_for_timeout(800)
 
         for _ in range(self.max_retries + 1):
@@ -356,21 +501,24 @@ class PlaywrightController(BaseController):
             except Exception:
                 page.wait_for_timeout(5000)
                 page.keyboard.press("Enter")
-                page.wait_for_event(
-                    "request",
-                    lambda req: req.url.startswith("https://browser.events.data.microsoft.com"),
-                    timeout=10000,
-                )
                 try:
                     page.wait_for_event(
                         "request",
-                        lambda req: req.url.startswith(
-                            "https://collector-pxzc5j78di.hsprotect.net/assets/js/bundle"
-                        ),
-                        timeout=4000,
+                        lambda req: req.url.startswith("https://browser.events.data.microsoft.com"),
+                        timeout=10000,
                     )
+                    try:
+                        page.wait_for_event(
+                            "request",
+                            lambda req: req.url.startswith(
+                                "https://collector-pxzc5j78di.hsprotect.net/assets/js/bundle"
+                            ),
+                            timeout=4000,
+                        )
+                    except Exception:
+                        break
                 except Exception:
-                    break
+                    return False
                 page.wait_for_timeout(500)
         else:
             return False
@@ -443,21 +591,41 @@ def register_one(ctrl, engine_name: str, headless: bool) -> dict:
 # ─── 入口 ─────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Outlook 批量注册 (参考 outlook-batch-manager)")
-    parser.add_argument("--count",      type=int,   default=1,          help="注册数量")
-    parser.add_argument("--proxy",      type=str,   default="",         help="代理, 如 socks5://127.0.0.1:1080")
-    parser.add_argument("--engine",     type=str,   default="patchright", choices=["patchright","playwright"])
-    parser.add_argument("--headless",   type=str,   default="true",     help="true/false")
-    parser.add_argument("--wait",       type=int,   default=BOT_PROTECTION_WAIT, help="bot_protection_wait (秒)")
-    parser.add_argument("--retries",    type=int,   default=MAX_CAPTCHA_RETRIES)
-    parser.add_argument("--delay",      type=int,   default=5,          help="每次注册间隔秒数")
-    parser.add_argument("--output",     type=str,   default="",         help="输出文件")
+    parser.add_argument("--count",           type=int,   default=1,            help="注册数量")
+    parser.add_argument("--proxy",           type=str,   default="",           help="代理, 如 socks5://127.0.0.1:1080")
+    parser.add_argument("--engine",          type=str,   default="patchright", choices=["patchright","playwright"])
+    parser.add_argument("--headless",        type=str,   default="true",       help="true/false")
+    parser.add_argument("--wait",            type=int,   default=BOT_PROTECTION_WAIT, help="bot_protection_wait (秒)")
+    parser.add_argument("--retries",         type=int,   default=MAX_CAPTCHA_RETRIES)
+    parser.add_argument("--delay",           type=int,   default=5,            help="每次注册间隔秒数")
+    parser.add_argument("--output",          type=str,   default="",           help="输出文件")
+    parser.add_argument("--captcha-service", type=str,   default="",           help="打码服务: 2captcha | capmonster")
+    parser.add_argument("--captcha-key",     type=str,   default="",           help="打码服务 API Key")
     args = parser.parse_args()
 
     headless = args.headless.lower() != "false"
     CtrlCls  = PatchrightController if args.engine == "patchright" else PlaywrightController
-    ctrl     = CtrlCls(proxy=args.proxy or "", wait_ms=args.wait, max_captcha_retries=args.retries)
 
-    print(f"\n🚀 Outlook 批量注册  引擎={args.engine}  headless={headless}  count={args.count}")
+    # 构建打码服务 solver（可选）
+    solver = None
+    captcha_service = args.captcha_service or ""
+    captcha_key     = args.captcha_key     or ""
+    if captcha_service and captcha_key:
+        import sys as _sys, os as _os
+        _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+        from captcha_solver import build_solver
+        solver = build_solver(captcha_service, captcha_key)
+        print(f"[captcha] 打码服务已启用: {captcha_service}", flush=True)
+
+    ctrl = CtrlCls(
+        proxy=args.proxy or "",
+        wait_ms=args.wait,
+        max_captcha_retries=args.retries,
+        captcha_solver=solver,
+    )
+
+    svc_hint = f"  打码服务={captcha_service}" if solver else ""
+    print(f"\n🚀 Outlook 批量注册  引擎={args.engine}  headless={headless}  count={args.count}{svc_hint}")
     print(f"   bot_protection_wait={args.wait}s  max_captcha_retries={args.retries}")
     print(f"   入口URL: {REGISTER_URL}\n{'─'*60}")
 

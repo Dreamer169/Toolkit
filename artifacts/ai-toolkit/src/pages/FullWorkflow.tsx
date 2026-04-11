@@ -62,6 +62,13 @@ export default function FullWorkflow() {
   const [result, setResult] = useState<{ ok: boolean; email?: string; password?: string; msg?: string } | null>(null);
   const [saved, setSaved] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
+  // 打码服务配置
+  const [captchaService, setCaptchaService] = useState("2captcha");
+  const [captchaKey, setCaptchaKey] = useState("");
+  const [captchaHasKey, setCaptchaHasKey] = useState(false);
+  const [captchaKeyMasked, setCaptchaKeyMasked] = useState("");
+  const [captchaSaveMsg, setCaptchaSaveMsg] = useState("");
+  const [captchaShowInput, setCaptchaShowInput] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const sinceRef = useRef(0);
@@ -72,12 +79,39 @@ export default function FullWorkflow() {
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
-  // 加载代理池数量
+  // 加载代理池数量 + 打码配置
   useEffect(() => {
     fetch(`${API}/data/proxies`).then(r => r.json()).then(d => {
       if (d.success) setPoolCount(d.total);
     }).catch(() => {});
+    fetch(`${API}/data/captcha-config`).then(r => r.json()).then(d => {
+      if (d.success) {
+        if (d.service) setCaptchaService(d.service);
+        setCaptchaHasKey(d.hasKey);
+        setCaptchaKeyMasked(d.apiKeyMasked || "");
+      }
+    }).catch(() => {});
   }, []);
+
+  async function saveCaptchaConfig() {
+    setCaptchaSaveMsg("保存中…");
+    try {
+      const r = await fetch(`${API}/data/captcha-config`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ service: captchaService, apiKey: captchaKey || captchaKeyMasked }),
+      });
+      const d = await r.json();
+      if (d.success) {
+        setCaptchaSaveMsg("✅ 已保存");
+        setCaptchaHasKey(!!captchaKey || captchaHasKey);
+        if (captchaKey) { setCaptchaKeyMasked(captchaKey.slice(0,6) + "****" + captchaKey.slice(-4)); setCaptchaKey(""); }
+        setCaptchaShowInput(false);
+      } else {
+        setCaptchaSaveMsg("❌ 保存失败");
+      }
+    } catch { setCaptchaSaveMsg("❌ 网络错误"); }
+    setTimeout(() => setCaptchaSaveMsg(""), 3000);
+  }
 
   async function pickProxyFromPool() {
     const r = await fetch(`${API}/data/proxies/pick`).then(r => r.json()).catch(() => ({}));
@@ -203,6 +237,71 @@ export default function FullWorkflow() {
         <p className="text-gray-400 text-sm mt-1">
           自动串联：身份生成 → 浏览器指纹配置 → Outlook 注册（patchright 随机指纹） → 自动入库
         </p>
+      </div>
+
+      {/* 打码服务配置面板（始终可见）*/}
+      <div className={`rounded-lg border p-4 ${captchaHasKey ? "bg-emerald-950/30 border-emerald-700/40" : "bg-amber-950/30 border-amber-700/40"}`}>
+        <div className="flex items-center gap-3 flex-wrap">
+          <span className="text-lg">{captchaHasKey ? "🔑" : "⚠️"}</span>
+          <div className="flex-1 min-w-0">
+            <p className={`text-sm font-medium ${captchaHasKey ? "text-emerald-300" : "text-amber-300"}`}>
+              {captchaHasKey ? `打码服务已配置 (${captchaService})` : "未配置打码服务（CAPTCHA 将依赖无障碍挑战，成功率较低）"}
+            </p>
+            <p className="text-xs text-gray-500 mt-0.5">
+              {captchaHasKey ? `Key: ${captchaKeyMasked}` : "支持 2captcha 或 CapMonster，无障碍挑战失败时自动降级使用打码服务"}
+            </p>
+          </div>
+          <button onClick={() => setCaptchaShowInput(v => !v)}
+            className="px-3 py-1.5 rounded text-xs border border-[#30363d] bg-[#21262d] text-gray-300 hover:text-white whitespace-nowrap">
+            {captchaShowInput ? "收起" : captchaHasKey ? "修改配置" : "配置打码服务"}
+          </button>
+        </div>
+        {captchaShowInput && (
+          <div className="mt-3 space-y-2 pt-3 border-t border-[#30363d]">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-xs text-gray-400">打码服务商</label>
+                <select value={captchaService} onChange={e => setCaptchaService(e.target.value)}
+                  className="w-full mt-1 bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-white text-xs">
+                  <option value="2captcha">2captcha.com</option>
+                  <option value="capmonster">CapMonster Cloud</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-gray-400">API Key</label>
+                <input type="password" value={captchaKey} onChange={e => setCaptchaKey(e.target.value)}
+                  placeholder={captchaHasKey ? captchaKeyMasked : "粘贴 API Key"}
+                  className="w-full mt-1 bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-white font-mono text-xs" />
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <button onClick={saveCaptchaConfig}
+                className="px-4 py-1.5 bg-emerald-700 hover:bg-emerald-600 rounded text-xs text-white">
+                保存
+              </button>
+              {captchaHasKey && (
+                <button onClick={async () => {
+                  await fetch(`${API}/data/captcha-config`, {
+                    method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ service: "", apiKey: "" }),
+                  });
+                  setCaptchaHasKey(false); setCaptchaKeyMasked(""); setCaptchaShowInput(false);
+                  setCaptchaSaveMsg("✅ 已清除"); setTimeout(() => setCaptchaSaveMsg(""), 2000);
+                }} className="px-4 py-1.5 bg-red-900/50 hover:bg-red-800 border border-red-700/50 rounded text-xs text-red-300">
+                  清除 Key
+                </button>
+              )}
+              {captchaSaveMsg && <span className="text-xs text-gray-400">{captchaSaveMsg}</span>}
+            </div>
+            <p className="text-xs text-gray-600">
+              获取 API Key：
+              <a href="https://2captcha.com" target="_blank" className="text-blue-500 hover:underline">2captcha.com</a>
+              {" 或 "}
+              <a href="https://capmonster.cloud" target="_blank" className="text-blue-500 hover:underline">capmonster.cloud</a>
+              {" · 支持 FunCaptcha / Arkose Labs，注册成功率大幅提升"}
+            </p>
+          </div>
+        )}
       </div>
 
       {/* 步骤指示器 */}
