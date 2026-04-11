@@ -1037,7 +1037,9 @@ router.post("/tools/outlook/register", async (req, res) => {
       // 过滤无意义行和 JSON 结果块
       if (!t) continue;
       if (t.startsWith("──") || t.startsWith("🚀")) continue;
-      if (t.startsWith("[") || t.startsWith("{") || t === "]" || t === "}") continue;
+      // 只过滤独立的 JSON 括号行，不要过滤 [captcha]、[relay]、[register] 这类前缀
+      if (t === "[" || t === "{" || t === "]" || t === "}") continue;
+      if (t.startsWith("{") || (t.startsWith("[{") && t.endsWith("}]"))) continue; // JSON object/array行
       if (t.startsWith('"') && t.includes(":")) continue;  // JSON 字段行
       if (/^\s*"(email|username|password|success|error|elapsed|engine)"\s*:/.test(t)) continue;
       if (t === "── JSON 结果 ──") continue;
