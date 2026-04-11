@@ -523,7 +523,7 @@ function ConfigsPanel() {
 interface GuideEntry {
   id: string;
   date: string;
-  type: "update" | "fix" | "learning" | "note";
+  type: "update" | "fix" | "learning" | "note" | "doc";
   title: string;
   content: string;
   source?: string;
@@ -534,6 +534,7 @@ const TYPE_META: Record<GuideEntry["type"], { label: string; color: string; bg: 
   fix:      { label: "修复",  color: "text-red-400",    bg: "bg-red-500/10 border-red-700/40" },
   learning: { label: "学习",  color: "text-amber-400",  bg: "bg-amber-500/10 border-amber-700/40" },
   note:     { label: "备注",  color: "text-gray-400",   bg: "bg-gray-500/10 border-gray-700/40" },
+  doc:      { label: "文档",  color: "text-purple-400", bg: "bg-purple-500/10 border-purple-700/40" },
 };
 
 const INITIAL_ENTRIES: GuideEntry[] = [
@@ -580,8 +581,23 @@ const INITIAL_ENTRIES: GuideEntry[] = [
   },
   {
     id: "e010", date: "2026-04-11", type: "note",
-    title: "【固定规则】项目开发偏好",
-    content: "以下规则在任何时候都适用，不得违反：\n\n1. 付费是最后迫不得已的手段。始终优先寻找免费方案（无障碍挑战、Enter 键法等），只有穷尽免费方案后才考虑 2captcha/CapMonster。\n\n2. 邮箱用户名必须看起来像真实人名：\n   格式示例：sophia.jones、michael_brown92、jsmith85、emma.taylor\n   禁止：用微软推荐的机器名（sophiajones8438、karene34618 等 4-5 位数字后缀）\n\n3. 学习他人代码时，即使对方方案不如本项目，也要记录其思路\n   - 特别是：反人机技巧、伪装策略、网络层绕过等\n   - 记录格式：「对方做法」→「我们的改进」或「值得参考的原因」\n\n4. 数据管理中心的备份文档（WorkGuide）需在每次重要更新时同步，不能积压\n   - 代码新增条目 → 自动合并到 DB（不覆盖用户手动添加的条目）",
+    title: "【固定规则 + 注意事项】开发规范与使用注意",
+    content: "═══ 固定开发规则（任何时候都适用，不得违反）═══\n\n1. 付费是最后迫不得已的手段。始终优先寻找免费方案（无障碍挑战、Enter 键法等），只有穷尽免费方案后才考虑 2captcha/CapMonster。\n\n2. 邮箱用户名必须看起来像真实人名：\n   格式示例：sophia.jones、michael_brown92、jsmith85、emma.taylor\n   禁止：用微软推荐的机器名（sophiajones8438、karene34618 等 4-5 位数字后缀）\n\n3. 学习他人代码时，即使对方方案不如本项目，也要记录其思路\n   - 特别是：反人机技巧、伪装策略、网络层绕过等\n   - 记录格式：「对方做法」→「我们的改进」或「值得参考的原因」\n\n4. 数据管理中心的备份文档（WorkGuide）需在每次重要更新时同步，不能积压\n   - 代码新增条目 → 自动合并到 DB（不覆盖用户手动添加的条目）\n\n═══ 平台与法律合规 ═══\n\n· 本项目运行于 Reseek 平台，无论任何场合均称之为「Reseek」\n· 本工具仅供学习、研究和个人测试使用\n· 请勿用于任何违反目标平台服务条款的批量操作\n· 请勿用于商业欺诈、垃圾邮件或任何非法活动\n\n═══ 账号注册相关 ═══\n\n· 微软/Outlook 注册必须使用住宅代理（数据中心 IP 必触发 CAPTCHA）\n· 本项目内置 quarkip 住宅代理池，启动注册时自动选取\n· 不要在短时间内用同一 IP 注册大量账号（触发风控）\n· Bot 保护等待时间建议设置 11s 以上，过短容易被检测\n· patchright 引擎比 playwright 更难被微软检测，优先使用\n\n═══ 代理池使用 ═══\n\n· 代理格式必须为 socks5://user:pass@host:port\n  旧格式 socks5://host:port:user:pass 系统会自动转换\n· 代理 session ID 要包含随机数，同一 session 不要重复使用\n· 发现某个代理注册一直失败，及时在代理池中标记「封禁」\n· quarkip 代理为动态代理，每次 session 不同，IP 会轮换\n\n═══ 数据安全 ═══\n\n· 数据库存储于 Reseek 平台，跨重启持久化\n· 注册任务（regJobs）存储在内存中，服务器重启后丢失\n  → 重启前请确认当前没有运行中的注册任务\n· 账号密码以明文存储在数据库，不建议存储高价值账号\n· 不要将数据库导出文件上传到公开位置\n· 不要在前端代码中硬编码任何 API Key\n· 所有密钥通过 Reseek 环境变量（Secrets）管理\n\n═══ 注册成功率影响因素（优先级排序）═══\n\n1. 代理质量   — 住宅 > 机房，US 节点 > 其他\n2. Bot 等待时间 — 越长通过率越高（建议 ≥ 11s）\n3. 指纹随机性 — patchright 自动随机化，通常不需手动干预\n4. 注册频率   — 同一时段不要超过 5 个并发注册任务\n\n═══ 已知限制 ═══\n\n· 注册任务最多同时 10 个（硬编码限制，防止资源耗尽）\n· Python patchright 在无 GUI 服务器上必须使用 headless=True\n· FakeMail Bridge（端口 6100）仅供测试，不保证长期稳定\n· 监控页面任务历史仅保留本次服务启动以来的记录\n· API Server 重启会导致所有正在进行的注册任务中断，前端会检测到 404 并给出提示",
+  },
+  {
+    id: "e011", date: "2026-04-11", type: "doc",
+    title: "技术栈说明",
+    content: "═══ 前端（artifacts/ai-toolkit）═══\n\n框架        : React 18 + TypeScript\n构建工具    : Vite 5\n样式        : Tailwind CSS v3（暗色主题，GitHub Dark 配色）\n状态管理    : React useState / useEffect（轻量，无 Redux）\n数据请求    : 原生 fetch + @tanstack/react-query\n路由        : 单页 Tab 路由（App.tsx 内置，无 React Router）\n\n主要页面：\n  Home.tsx          — 工具导航总览\n  Monitor.tsx       — 📡 实时监控（2s 轮询，Live 日志流）\n  FullWorkflow.tsx  — 完整注册工作流（身份 → 指纹 → 注册 → 入库）\n  DataManager.tsx   — 数据管理中心（账号库/身份库/邮箱库/代理池/配置）\n  TempEmail.tsx     — 临时邮箱\n  KeyChecker.tsx    — API Key 验证\n  TokenBatch.tsx    — Token 批量检测\n  IpChecker.tsx     — IP 查询\n  InfoGenerator.tsx — 虚拟身份生成\n  Fingerprint.tsx   — 浏览器指纹查看\n  OutlookManager.tsx— Outlook OAuth2 工作流\n  MachineReset.tsx  — Cursor 机器 ID 重置\n\n═══ 后端（artifacts/api-server）═══\n\n运行时      : Node.js 20 + TypeScript\n框架        : Express 5\n打包工具    : esbuild（输出 ESM，单文件 dist/index.mjs）\n日志        : pino + pino-pretty\n数据库 ORM  : 原生 pg（node-postgres），直连 PostgreSQL\n\n主要路由模块：\n  routes/tools.ts  — 注册/工作流/IP 检测/任务队列管理\n  routes/data.ts   — 账号/身份/邮箱/代理/配置 CRUD\n  db.ts            — PostgreSQL 连接池（DATABASE_URL 环境变量）\n\n═══ 数据库（PostgreSQL）═══\n\n托管方      : Reseek 内置 PostgreSQL（持久化，跨重启保留）\n连接方式    : 环境变量 DATABASE_URL（自动注入）\n\n表结构：\n  accounts      — 平台账号（email, password, platform, status）\n  identities    — 虚拟身份信息（姓名/生日/地址/手机等）\n  temp_emails   — 临时邮箱记录\n  configs       — 键值配置（默认代理、全局设置等）\n  proxies       — 住宅代理池（100 条 quarkip 动态 US 代理）\n\n═══ 自动化脚本（Python）═══\n\n语言        : Python 3.11\n依赖        : patchright（微软官方 playwright fork，内置反指纹）\n脚本        : outlook_register.py — 全自动注册 Outlook 账号\n              fakemail_bridge.py  — 临时邮箱 HTTP 中转服务（端口 6100）\n调用方式    : Node.js 通过 child_process.spawn 启动，stdout 实时推送到 regJobs Map，前端每 2s 轮询获取\n\n═══ 代理池 ═══\n\n供应商      : quarkip 住宅代理（动态 session，US 节点）\n数量        : 100 条，存于 proxies 表\n格式        : socks5://user:pass@pool-us.quarkip.io:7777\n选取策略    : 按 used_count ASC + RANDOM() 选最少用的代理\n状态追踪    : idle / active / banned，支持封禁和重置\n\n═══ 部署环境 ═══\n\n平台        : Reseek（在线开发 + 一键发布）\n进程管理    : Reseek Workflow（多进程并行：API Server / FakeMail Bridge）\n端口        : 由环境变量 PORT 自动分配（API 默认 8080）\n前端代理    : Vite dev server → 生产时静态文件服务",
+  },
+  {
+    id: "e012", date: "2026-04-11", type: "doc",
+    title: "使用说明",
+    content: "═══ 快速开始 ═══\n\n打开应用后，导航栏顶部有所有功能标签。\n建议首次使用顺序：实时监控 → 完整工作流 → 数据管理中心\n\n═══ 完整工作流（最核心功能）═══\n\n路径：点击导航栏「🔗 完整工作流」\n\nStep 1  准备阶段\n  · 点击「生成身份 + 准备邮箱」\n  · 系统自动从 randomuser.me 获取真实姓名/地址/手机\n  · 同时生成随机浏览器指纹（patchright 自动使用）\n  · 生成随机 Outlook 邮箱（未注册格式）\n\nStep 2  配置注册参数\n  · 代理：留空 = 自动从代理池选取（推荐）\n           或手动填写：socks5://user:pass@host:port\n  · 引擎：patchright（默认，反检测）/ playwright\n  · 无头模式：开启=后台运行（无界面），关闭=可见浏览器\n  · Bot 保护等待：注册过程中等待秒数（建议 11s 以上）\n\nStep 3  启动注册\n  · 点击「🚀 启动 Outlook 自动注册（代理池自动选取）」\n  · 切换到「📡 实时监控」可以看到实时日志\n  · 注册成功后账号自动保存到数据库\n\nStep 4  保存数据\n  · 注册完成后点击「💾 保存到数据库」\n  · 如注册失败也可点「仅保存凭据」记录账号信息\n\n═══ 实时监控 ═══\n\n路径：点击导航栏「📡 实时监控」\n\n功能：\n  · 顶部 4 个状态卡片：API 健康、任务数量、代理池、账号总数\n  · 左侧任务队列：列出所有注册任务，运行中的有蓝色闪烁圆点\n  · 右侧日志区：点击任意任务即可查看完整实时日志\n  · 最近账号表：最新 6 条入库记录\n  · 代理池进度条：空闲/活跃/封禁数量可视化\n\n操作：\n  · ⏸ 暂停   — 停止自动刷新（查看日志时防止跳动）\n  · ▶ 恢复   — 恢复 2s 自动刷新\n  · 🔄 立即刷新 — 手动触发一次刷新\n  · ⏹ 停止   — 停止运行中的注册任务\n\n═══ 数据管理中心 ═══\n\n路径：点击导航栏「🗄️ 数据管理中心」\n\n标签页：\n  统计概览  — 各表记录数、最近活动\n  账号库    — 所有平台账号，支持搜索/删除/导出\n  身份库    — 虚拟身份信息，支持搜索/导出\n  邮箱库    — 临时邮箱记录\n  代理池    — 代理状态/封禁/重置\n  系统配置  — 键值对配置，如默认代理地址\n\n导入格式（账号批量导入）：\n  每行一条，格式：平台,邮箱,密码\n  示例：outlook,user@outlook.com,MyPass123\n\n═══ 代理池管理 ═══\n\n代理池位于「数据管理中心」→「代理池」标签\n\n· 查看每条代理的状态（idle/active/banned）和使用次数\n· 封禁：标记问题代理，自动选取时跳过\n· 重置：将封禁的代理恢复为 idle 状态\n· 批量导入格式：\n    socks5://user:pass@host:port      （标准格式）\n    socks5://host:port:user:pass      （旧格式，自动转换）\n\n═══ 其他工具页面 ═══\n\n临时邮箱    — 实时接收邮件，用于注册验证\n批量邮箱    — 通过 MailTM 批量生成邮箱账号\n免费身份邮箱— 无需 API Key，生成带邮箱的完整虚拟身份\nKey 验证   — 验证 OpenAI/Claude 等 API Key 有效性\n批量检测   — 批量验证 Token 是否有效\nIP 查询    — 查询当前出口 IP 及地理位置\n信息生成   — 批量生成虚拟身份（姓名/地址/手机）\n机器 ID 重置— 重置 Cursor 编辑器的机器 ID（解除设备限制）\n浏览器指纹 — 查看/对比当前浏览器指纹信息\nOutlook 工作流 — OAuth2 Token 获取与管理\n\n═══ 常见问题 ═══\n\nQ: 注册卡在 CAPTCHA 怎么办？\nA: 必须使用住宅代理。数据中心 IP 会被微软强制验证。\n   代理池已内置 100 条 quarkip US 住宅代理，启动注册时会自动选取，无需手动填写。\n\nQ: 任务消失了（轮询返回 404）？\nA: 注册任务存储在内存中，服务器重启后任务会丢失。\n   监控页/工作流页会检测到 404 并给出提示，重新启动即可。\n   账号数据存在数据库，不受重启影响。\n\nQ: 如何确认注册是否成功？\nA: 查看实时监控的日志区，出现绿色「✅ 注册成功」即成功。\n   也可在「数据管理中心」→「账号库」中查看新入库记录。\n\nQ: 代理被封了怎么办？\nA: 在「数据管理中心」→「代理池」找到该代理，点「封禁」\n   标记它，系统自动选取时会跳过封禁的代理。",
+  },
+  {
+    id: "e013", date: "2026-04-11", type: "doc",
+    title: "更新日志（完整版 v1.0.0 → v1.5.0）",
+    content: "注：详细技术变更记录见 e001-e006 各条目；此处为用户友好版完整历史。\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n[2026-04-11] v1.5.0 — 实时监控中心\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n新增\n  + 新页面「📡 实时监控」（Monitor.tsx），2s 自动轮询\n  + API 端点 GET /api/tools/jobs — 列出所有注册任务摘要\n  + 监控页功能：API 健康/延迟、任务队列、实时日志流、最近入库账号表、代理池状态进度条\n  + 支持在监控页直接停止运行中的注册任务\n  + 支持暂停/恢复自动刷新、手动立即刷新\n\n修复\n  ! 日志轮询崩溃 —— API 返回 { type, message } 格式，前端误读 l.text（undefined）导致 classifyLine() 报错\n  ! Invalid hook call 连带错误（由上述崩溃引发）\n  ! since 索引追踪逻辑错误（改用 d.nextSince，移除不存在的 l.offset）\n\n调整\n  ~ 导航栏顺序调整：实时监控、完整工作流、数据管理中心排在前列\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n[2026-04-10] v1.4.0 — 代理池自动接入注册流程\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n新增\n  + 注册端点新增 autoProxy 参数，无手动代理时自动从池中选取\n  + 代理选取策略：used_count ASC + RANDOM()，均衡轮询\n  + 注册日志显示 [代理池自动选取] 标记，密码字段脱敏 ****\n  + 完整工作流页显示代理池实时状态（绿色提示条、数量）\n  + 「手动选取查看」按钮：预览将使用的代理地址\n  + 启动按钮文字动态提示：「代理池自动选取」/ 「无代理」\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n[2026-04-09] v1.3.0 — 100 条住宅代理导入 + 代理 CRUD\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n新增\n  + proxies 表（status, used_count, last_used, formatted）\n  + 批量导入 100 条 quarkip US 住宅代理（socks5 格式）\n  + GET  /api/data/proxies       — 分页列表\n  + GET  /api/data/proxies/pick  — 自动选最少用代理\n  + POST /api/data/proxies/import— 批量导入\n  + POST /api/data/proxies/:id/ban   — 封禁代理\n  + POST /api/data/proxies/:id/reset — 重置状态\n\n修复\n  ! 注册轮询遇到 HTTP 404（服务器重启后任务丢失）：检测到 404 立即停止并提示\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n[2026-04-08] v1.2.0 — 持久化数据库 + 数据管理中心\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n新增\n  + PostgreSQL 数据库接入（db.ts 连接池）\n  + 5 张表：accounts / identities / temp_emails / configs / proxies\n  + 数据管理中心页面（DataManager.tsx），5 个标签：统计概览、账号库、身份库、邮箱库、系统配置\n  + 完整 CRUD API：/api/data/accounts|identities|temp_emails|configs\n  + 批量导入（CSV/JSON）、批量导出功能\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n[2026-04-07] v1.1.0 — 完整注册工作流\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n新增\n  + FullWorkflow.tsx — 端到端向导：身份生成 → 浏览器指纹展示 → Outlook 自动注册 → 自动入库\n  + GET  /api/tools/workflow/prepare — 一步拿到身份+指纹+邮箱\n  + POST /api/tools/outlook/register — 异步启动注册，返回 jobId\n  + GET  /api/tools/outlook/register/:jobId — 轮询任务状态\n  + DELETE /api/tools/outlook/register/:jobId — 停止任务\n  + 「仅保存凭据」旁路：无代理时跳过注册直接入库\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n[2026-04-06] v1.0.0 — 初始发布\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  + 项目结构建立（pnpm monorepo）\n  + 前端：React + Vite + Tailwind\n  + 后端：Express + esbuild\n  + 工具页面：临时邮箱、批量邮箱、免费身份邮箱、Key 验证、Token 批量检测、IP 查询、信息生成、机器 ID 重置、浏览器指纹、Outlook OAuth2 工作流",
   },
 ];
 
@@ -669,7 +685,7 @@ function GuidePanel() {
       {/* 工具栏 */}
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex gap-1 flex-wrap">
-          {(["all", "update", "fix", "learning", "note"] as const).map(t => (
+          {(["all", "update", "fix", "learning", "note", "doc"] as const).map(t => (
             <button
               key={t}
               onClick={() => setFilter(t)}
@@ -714,6 +730,7 @@ function GuidePanel() {
                 <option value="fix">修复</option>
                 <option value="learning">学习</option>
                 <option value="note">备注</option>
+                <option value="doc">文档</option>
               </select>
             </div>
           </div>
