@@ -1,6 +1,121 @@
 import { Router, type IRouter } from "express";
+import { createHash, randomBytes, randomUUID } from "crypto";
 
 const router: IRouter = Router();
+
+// ── 工具函数 ──────────────────────────────────────────────
+function newMachineId() {
+  return createHash("sha256").update(randomBytes(32)).digest("hex");
+}
+function newUUID() { return randomUUID(); }
+function newSqmId() { return `{${randomUUID().toUpperCase()}}`; }
+
+const UA_POOL = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:124.0) Gecko/20100101 Firefox/124.0",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1",
+  "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+];
+
+const SCREEN_PROFILES = [
+  { w: 1920, h: 1080, dpr: 1.0, innerW: 1920, innerH: 937 },
+  { w: 2560, h: 1440, dpr: 1.0, innerW: 2560, innerH: 1297 },
+  { w: 1366, h: 768,  dpr: 1.0, innerW: 1366, innerH: 625 },
+  { w: 1440, h: 900,  dpr: 2.0, innerW: 1440, innerH: 757 },
+  { w: 1512, h: 982,  dpr: 2.0, innerW: 1512, innerH: 839 },
+  { w: 2880, h: 1800, dpr: 2.0, innerW: 1440, innerH: 837 },
+  { w: 1280, h: 720,  dpr: 1.0, innerW: 1280, innerH: 577 },
+  { w: 3840, h: 2160, dpr: 2.0, innerW: 1920, innerH: 1017 },
+  { w: 1600, h: 900,  dpr: 1.25, innerW: 1280, innerH: 720 },
+  { w: 2560, h: 1600, dpr: 2.0, innerW: 1280, innerH: 798 },
+];
+
+const TIMEZONES = [
+  { tz: "America/New_York",    offset: -5, locale: "en-US" },
+  { tz: "America/Chicago",     offset: -6, locale: "en-US" },
+  { tz: "America/Los_Angeles", offset: -8, locale: "en-US" },
+  { tz: "Europe/London",       offset: 0,  locale: "en-GB" },
+  { tz: "Europe/Paris",        offset: 1,  locale: "fr-FR" },
+  { tz: "Asia/Tokyo",          offset: 9,  locale: "ja-JP" },
+  { tz: "Asia/Shanghai",       offset: 8,  locale: "zh-CN" },
+  { tz: "Asia/Singapore",      offset: 8,  locale: "en-SG" },
+  { tz: "Australia/Sydney",    offset: 10, locale: "en-AU" },
+  { tz: "Europe/Berlin",       offset: 1,  locale: "de-DE" },
+];
+
+const WEBGL_PROFILES = [
+  { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+  { vendor: "Google Inc. (AMD)",    renderer: "ANGLE (AMD, AMD Radeon RX 6800 XT Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+  { vendor: "Google Inc. (Intel)", renderer: "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+  { vendor: "Apple Inc.",           renderer: "Apple M3 Pro" },
+  { vendor: "Apple Inc.",           renderer: "Apple M2" },
+  { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+  { vendor: "Google Inc. (AMD)",    renderer: "ANGLE (AMD, AMD Radeon RX 7900 XTX Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+  { vendor: "Mesa/X.org",           renderer: "Mesa Intel(R) UHD Graphics 620 (KBL GT2)" },
+];
+
+const FONT_SETS: Record<string, string[]> = {
+  windows: ["Arial","Calibri","Cambria","Candara","Comic Sans MS","Consolas","Constantia","Corbel","Courier New","Georgia","Impact","Lucida Console","Palatino Linotype","Segoe UI","Tahoma","Times New Roman","Trebuchet MS","Verdana"],
+  mac:     ["Arial","Helvetica Neue","Georgia","Courier New","Times New Roman","Gill Sans","Palatino","Optima","Futura","Baskerville","Menlo","Monaco","SF Pro Display"],
+  linux:   ["Arial","Courier New","DejaVu Sans","DejaVu Serif","FreeMono","Liberation Mono","Liberation Sans","Times New Roman","Ubuntu","Noto Sans"],
+};
+
+function rand<T>(arr: T[]): T { return arr[Math.floor(Math.random() * arr.length)]; }
+function randInt(min: number, max: number) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+function randHex(len: number) { return randomBytes(len).toString("hex").slice(0, len); }
+
+function generateFingerprint() {
+  const ua = rand(UA_POOL);
+  const screen = rand(SCREEN_PROFILES);
+  const tz = rand(TIMEZONES);
+  const webgl = rand(WEBGL_PROFILES);
+  const isMac = ua.includes("Macintosh") || ua.includes("Mac OS X");
+  const isWin = ua.includes("Windows");
+  const isMobile = ua.includes("iPhone") || ua.includes("Android");
+  const fontSet = isMac ? "mac" : isWin ? "windows" : "linux";
+  const canvasHash = randHex(16);
+  const audioHash = (Math.random() * 0.0001 + 0.9999).toFixed(8);
+
+  return {
+    userAgent: ua,
+    platform: isMobile ? (ua.includes("iPhone") ? "iPhone" : "Linux armv8l") : isMac ? "MacIntel" : "Win32",
+    language: tz.locale,
+    languages: [tz.locale, "en-US"],
+    timezone: tz.tz,
+    timezoneOffset: tz.offset * -60,
+    screen: {
+      width: screen.w, height: screen.h,
+      availWidth: screen.w, availHeight: screen.h - 48,
+      colorDepth: 24, pixelDepth: 24,
+    },
+    viewport: {
+      innerWidth: screen.innerW, innerHeight: screen.innerH,
+      outerWidth: screen.w, outerHeight: screen.h - 80,
+    },
+    devicePixelRatio: screen.dpr,
+    webgl: webgl,
+    canvas: { hash: canvasHash, winding: true },
+    audio: { hash: audioHash, oscillator: (Math.random() * 0.001 + 0.124).toFixed(8) },
+    fonts: FONT_SETS[fontSet],
+    plugins: isMobile ? [] : [
+      "PDF Viewer", "Chrome PDF Viewer", "Chromium PDF Viewer",
+      "Microsoft Edge PDF Viewer", "WebKit built-in PDF",
+    ].slice(0, randInt(0, 5)),
+    doNotTrack: Math.random() > 0.7 ? "1" : null,
+    cookieEnabled: true,
+    hardwareConcurrency: rand([2, 4, 6, 8, 10, 12, 16, 20]),
+    deviceMemory: rand([2, 4, 8, 16, 32]),
+    maxTouchPoints: isMobile ? randInt(2, 5) : 0,
+    connectionType: rand(["4g", "4g", "4g", "wifi", "wifi"]),
+    generatedAt: new Date().toISOString(),
+  };
+}
 
 const MAILTM_BASE = "https://api.mail.tm";
 
@@ -291,6 +406,116 @@ router.post("/tools/token-batch-check", async (req, res) => {
   } catch (e: unknown) {
     res.status(500).json({ success: false, error: String(e) });
   }
+});
+
+// ── 机器ID重置 ────────────────────────────────────────────
+router.get("/tools/machine-id/generate", (_req, res) => {
+  const machineId    = newMachineId();
+  const macMachineId = newMachineId();
+  const devDeviceId  = newUUID();
+  const sqmId        = newSqmId();
+
+  const paths = {
+    windows: `%APPDATA%\\Cursor\\User\\globalStorage\\storage.json`,
+    mac:     `~/Library/Application Support/Cursor/User/globalStorage/storage.json`,
+    linux:   `~/.config/Cursor/User/globalStorage/storage.json`,
+  };
+
+  const winScript = `@echo off
+:: Cursor 机器ID重置脚本 (Windows) - 由 AI Account Toolkit 生成
+taskkill /F /IM cursor.exe 2>nul
+set "FILE=%APPDATA%\\Cursor\\User\\globalStorage\\storage.json"
+if exist "%FILE%" copy "%FILE%" "%FILE%.backup" >nul
+echo 正在写入新机器ID...
+powershell -Command "$j = Get-Content '%FILE%' -Raw | ConvertFrom-Json; $j.'telemetry.machineId'='${machineId}'; $j.'telemetry.macMachineId'='${macMachineId}'; $j.'telemetry.devDeviceId'='${devDeviceId}'; $j.'telemetry.sqmId'='${sqmId}'; $j | ConvertTo-Json -Depth 10 | Set-Content '%FILE%'"
+echo 完成！请重新启动 Cursor。
+pause`;
+
+  const macScript = `#!/bin/bash
+# Cursor 机器ID重置脚本 (macOS) - 由 AI Account Toolkit 生成
+pkill -f "Cursor" 2>/dev/null
+FILE="$HOME/Library/Application Support/Cursor/User/globalStorage/storage.json"
+[ -f "$FILE" ] && cp "$FILE" "$FILE.backup"
+python3 - <<'EOF'
+import json, os
+f = os.path.expanduser("~/Library/Application Support/Cursor/User/globalStorage/storage.json")
+with open(f) as fp: data = json.load(fp)
+data["telemetry.machineId"]    = "${machineId}"
+data["telemetry.macMachineId"] = "${macMachineId}"
+data["telemetry.devDeviceId"]  = "${devDeviceId}"
+data["telemetry.sqmId"]        = "${sqmId}"
+with open(f, "w") as fp: json.dump(data, fp, indent=2)
+print("完成！请重新启动 Cursor。")
+EOF`;
+
+  const linuxScript = `#!/bin/bash
+# Cursor 机器ID重置脚本 (Linux) - 由 AI Account Toolkit 生成
+pkill -f "cursor" 2>/dev/null
+FILE="$HOME/.config/Cursor/User/globalStorage/storage.json"
+[ -f "$FILE" ] && cp "$FILE" "$FILE.backup"
+python3 - <<'EOF'
+import json, os
+f = os.path.expanduser("~/.config/Cursor/User/globalStorage/storage.json")
+with open(f) as fp: data = json.load(fp)
+data["telemetry.machineId"]    = "${machineId}"
+data["telemetry.macMachineId"] = "${macMachineId}"
+data["telemetry.devDeviceId"]  = "${devDeviceId}"
+data["telemetry.sqmId"]        = "${sqmId}"
+with open(f, "w") as fp: json.dump(data, fp, indent=2)
+print("完成！请重新启动 Cursor。")
+EOF`;
+
+  res.json({
+    success: true,
+    ids: { machineId, macMachineId, devDeviceId, sqmId },
+    paths,
+    scripts: { windows: winScript, mac: macScript, linux: linuxScript },
+    json_patch: {
+      "telemetry.machineId":    machineId,
+      "telemetry.macMachineId": macMachineId,
+      "telemetry.devDeviceId":  devDeviceId,
+      "telemetry.sqmId":        sqmId,
+    },
+  });
+});
+
+router.get("/tools/machine-id/script/:os", (req, res) => {
+  const os = (req.params as { os: string }).os;
+  const machineId    = newMachineId();
+  const macMachineId = newMachineId();
+  const devDeviceId  = newUUID();
+  const sqmId        = newSqmId();
+
+  let script = "";
+  let filename = "";
+  let contentType = "text/plain";
+
+  if (os === "windows") {
+    filename = "cursor_reset.bat";
+    contentType = "application/octet-stream";
+    script = `@echo off\r\ntaskkill /F /IM cursor.exe 2>nul\r\nset "FILE=%APPDATA%\\Cursor\\User\\globalStorage\\storage.json"\r\nif exist "%FILE%" copy "%FILE%" "%FILE%.backup" >nul\r\npowershell -Command "$j = Get-Content '%FILE%' -Raw | ConvertFrom-Json; $j.'telemetry.machineId'='${machineId}'; $j.'telemetry.macMachineId'='${macMachineId}'; $j.'telemetry.devDeviceId'='${devDeviceId}'; $j.'telemetry.sqmId'='${sqmId}'; $j | ConvertTo-Json -Depth 10 | Set-Content '%FILE%'"\r\necho 完成！请重新启动 Cursor。\r\npause\r\n`;
+  } else if (os === "mac" || os === "linux") {
+    filename = os === "mac" ? "cursor_reset_mac.sh" : "cursor_reset_linux.sh";
+    contentType = "application/octet-stream";
+    const filePath = os === "mac"
+      ? `~/Library/Application Support/Cursor/User/globalStorage/storage.json`
+      : `~/.config/Cursor/User/globalStorage/storage.json`;
+    script = `#!/bin/bash\npkill -f "Cursor" 2>/dev/null\nFILE="${filePath}"\n[ -f "$FILE" ] && cp "$FILE" "$FILE.backup"\npython3 -c "\nimport json, os\nf = os.path.expanduser('${filePath}')\nwith open(f) as fp: data = json.load(fp)\ndata['telemetry.machineId']='${machineId}'\ndata['telemetry.macMachineId']='${macMachineId}'\ndata['telemetry.devDeviceId']='${devDeviceId}'\ndata['telemetry.sqmId']='${sqmId}'\nwith open(f,'w') as fp: json.dump(data, fp, indent=2)\nprint('完成！请重新启动 Cursor。')\n"\n`;
+  } else {
+    res.status(400).json({ success: false, error: "os 必须是 windows / mac / linux" });
+    return;
+  }
+
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.setHeader("Content-Type", contentType);
+  res.send(script);
+});
+
+// ── 浏览器指纹 ────────────────────────────────────────────
+router.get("/tools/fingerprint/generate", (req, res) => {
+  const count = Math.min(10, Math.max(1, Number(req.query.count) || 1));
+  const profiles = Array.from({ length: count }, generateFingerprint);
+  res.json({ success: true, count, profiles });
 });
 
 router.get("/tools/ip-check", async (req, res) => {
