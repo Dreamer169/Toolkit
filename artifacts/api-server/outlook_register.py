@@ -63,20 +63,22 @@ def gen_email_username():
              "Stewart","Morales","Murphy","Cook","Rogers","Bennett","Gray","Hughes","Patel","Parker"]
     fn = random.choice(FIRST)
     ln = random.choice(LAST)
-    y2 = str(random.randint(70, 99))
-    n2 = str(random.randint(10, 99))
-    n3 = str(random.randint(100, 999))
+    y2 = str(random.randint(70, 99))   # 出生年份后两位，如 85
+    n2 = str(random.randint(10, 99))   # 两位数，如 42
+    # 权重：更像真实人名的格式权重高；纯名字最佳（被占概率高），带年份次之
     patterns = [
-        fn + ln,
-        fn + ln + y2,
-        fn.lower() + "." + ln.lower(),
-        fn.lower() + ln.lower() + n2,
-        fn[0].lower() + ln.lower() + y2,
-        fn.lower() + "_" + ln.lower(),
-        fn.lower() + "_" + ln.lower() + n2,
-        fn + ln + n3,
-        fn[0].lower() + "." + ln.lower() + n2,
-        fn.lower() + ln[0].lower() + n3,
+        fn.lower() + "." + ln.lower(),          # karen.ramirez  ← 最真实
+        fn.lower() + "_" + ln.lower(),          # karen_ramirez
+        fn[0].lower() + "." + ln.lower(),       # k.ramirez
+        fn + "." + ln,                          # Karen.Ramirez
+        fn + ln,                                # KarenRamirez
+        fn.lower() + "." + ln.lower() + y2,     # karen.ramirez85
+        fn.lower() + "_" + ln.lower() + y2,     # karen_ramirez85
+        fn + ln + y2,                           # KarenRamirez85
+        fn[0].lower() + ln.lower() + y2,        # kramirez85
+        fn.lower() + ln.lower() + n2,           # karenramirez42
+        fn[0].lower() + "." + ln.lower() + n2,  # k.ramirez42
+        fn.lower() + "." + ln[0].lower() + y2,  # karen.r85
     ]
     return random.choice(patterns), fn, ln
 
@@ -258,21 +260,12 @@ class BaseController:
             page.locator('[data-testid="primaryButton"]').click(timeout=5000)
             page.wait_for_timeout(max(2000, 0.04 * self.wait_time))
 
-            # 检测用户名是否被占用，尝试 Microsoft 推荐的备用名
+            # 检测用户名是否被占用 → 始终用我们自己的人名格式重新生成
+            # 不采用微软推荐名（karene34618 风格），保持真实人名外观
             for _attempt in range(3):
                 if page.get_by_text("已被占用").count() or page.get_by_text("username is taken").count():
-                    # 取第一个建议的用户名
-                    suggestion_locs = page.locator('[data-testid="suggestion"], [role="option"]').all()
-                    picked = None
-                    if suggestion_locs:
-                        try:
-                            picked = suggestion_locs[0].inner_text().strip()
-                        except Exception:
-                            pass
-                    if not picked:
-                        # 生成新用户名
-                        new_user, _, _ = gen_email_username()
-                        picked = new_user + str(random.randint(10, 99))
+                    # 重新生成一个人名格式用户名（gen_email_username 已含带数字的模式）
+                    picked, _, _ = gen_email_username()
                     print(f"  ⚠ 用户名被占，切换为: {picked}")
                     email = picked
                     email_input = page.locator('[aria-label="新建电子邮件"]')

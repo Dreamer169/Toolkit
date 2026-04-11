@@ -567,6 +567,22 @@ const INITIAL_ENTRIES: GuideEntry[] = [
     source: "https://github.com/SHANMUGAM070106/cursor-free-vip",
     content: "项目定位：专用于 Cursor AI 账号自动化（cursor.sh 注册、机器 ID 重置、Token 限额绕过），1500+ Stars，Python 实现。\n\n关键技术点：\n1. DrissionPage — 类似 patchright 的浏览器自动化库，支持 Chromium；与本项目 patchright 方案同级，无需引入。\n2. block_domain.txt 域名黑名单 — 动态过滤被 Cursor 拒绝的临时邮箱域名（从 GitHub raw 拉取，本地兜底）。本项目可考虑为 Outlook 注册引入类似的域名过滤机制。\n3. bypass_token_limit.py — 通过修改 Cursor workbench.desktop.main.js（JS 注入）绕过 Token 限额，与本项目机器 ID 重置功能互补（不同层面的限制）。\n4. cursor_register_github.py / cursor_register_google.py — 第三方 OAuth 注册 Cursor，本项目目前聚焦 Outlook 直接注册，此方向可后续扩展。\n\n结论：项目专注 Cursor 生态，与本项目 Outlook/ChatGPT 注册方向差异较大，block_domain.txt 思路值得参考，其余不直接引入。",
   },
+  {
+    id: "e008", date: "2026-04-11", type: "fix",
+    title: "CAPTCHA 无障碍绕过突破（locator.click + dispatch_event）",
+    content: "根本原因：headless 模式下跨域嵌套 iframe 内调用 bounding_box() 返回 None，之前代码立刻返回 False 放弃，但截图证明按钮确实存在。\n\n修复：\n1. 用 locator.wait_for(state='attached') + locator.click(force=True) 替代 bounding_box()+page.mouse.click()；Playwright/patchright 通过 CDP 直接穿透 iframe，不依赖坐标。\n2. 若 click() 超时，用 locator.dispatch_event('click') 兜底 —— 在实际测试中正是 dispatch_event 触发了「再次按下」按钮成功。\n3. 多个内层 iframe 候选选择器（display:block / display: block / tabindex=0 / :first-child）+ page.frames() 全局扫描兜底。\n4. 成功率：3/3 连续注册，每次 41-43s，完全免费无需打码服务。\n\n同期修复：注册成功账号现在自动写入 PostgreSQL accounts 表（ON CONFLICT DO NOTHING）。",
+  },
+  {
+    id: "e009", date: "2026-04-11", type: "learning",
+    title: "学习参考：hrhcode/outlook-batch-manager（原版源码）",
+    source: "https://github.com/hrhcode/outlook-batch-manager",
+    content: "原版项目核心反人机技术（按优先级排序）：\n\n1. 【首选】patchright（headless=False + 真实 Display）\n   - 双 iframe 结构：iframe[title=\"验证质询\"] → iframe[style*=\"display: block\"]\n   - 点击 [aria-label=\"可访问性挑战\"] → 点击 [aria-label=\"再次按下\"]\n   - 用 bounding_box()+page.mouse.click 随机偏移模拟真实点击\n   - ⚠ 原版依赖 headless=False，在无显示器服务器上需要 Xvfb\n   - 我们的改进：用 locator.click+dispatch_event 在 headless=True 下实现同等效果\n\n2. 【次选】playwright（headless=False）Enter 键法\n   - 监听 blob:https://iframe.hsprotect.net/ 请求确认 CAPTCHA 已加载\n   - 连续 Enter+等待 11.5s+Enter 触发无障碍音频通道\n   - 监听 browser.events.data.microsoft.com 请求判断是否通过\n   - ⚠ 需要真实 Display，服务器上同样依赖 Xvfb\n\n3. 人机等待时间 bot_protection_wait=11s\n   - 所有操作按 wait_time 比例放慢（delay=0.006*wait_time 等）\n   - 建议：11-15s，过低容易触发机器人检测\n\n4. 用户名策略（原版）\n   - random_email() 生成 12-14 位纯小写随机字母串\n   - 本项目改进：用真实人名（FirstLast85/first.last 等格式）更像真实账号\n   - ⚠ 用户名被占时绝对不用微软推荐名（karene34618 风格），重新生成人名格式\n\n5. Faker 生成真实个人信息（姓名、生日），所有字段与真实注册一致",
+  },
+  {
+    id: "e010", date: "2026-04-11", type: "note",
+    title: "【固定规则】项目开发偏好",
+    content: "以下规则在任何时候都适用，不得违反：\n\n1. 付费是最后迫不得已的手段。始终优先寻找免费方案（无障碍挑战、Enter 键法等），只有穷尽免费方案后才考虑 2captcha/CapMonster。\n\n2. 邮箱用户名必须看起来像真实人名：\n   格式示例：sophia.jones、michael_brown92、jsmith85、emma.taylor\n   禁止：用微软推荐的机器名（sophiajones8438、karene34618 等 4-5 位数字后缀）\n\n3. 学习他人代码时，即使对方方案不如本项目，也要记录其思路\n   - 特别是：反人机技巧、伪装策略、网络层绕过等\n   - 记录格式：「对方做法」→「我们的改进」或「值得参考的原因」\n\n4. 数据管理中心的备份文档（WorkGuide）需在每次重要更新时同步，不能积压\n   - 代码新增条目 → 自动合并到 DB（不覆盖用户手动添加的条目）",
+  },
 ];
 
 function GuidePanel() {
@@ -589,7 +605,19 @@ function GuidePanel() {
     if (d.success) {
       const raw = (d.map as Record<string, string>)["work_guide_entries"];
       if (raw) {
-        try { setEntries(JSON.parse(raw)); } catch { setEntries(INITIAL_ENTRIES); }
+        try {
+          const dbEntries = JSON.parse(raw) as GuideEntry[];
+          // 实时合并：代码新增的 INITIAL_ENTRIES 条目自动追加到 DB，不覆盖用户手动添加
+          const dbIds = new Set(dbEntries.map(e => e.id));
+          const newFromCode = INITIAL_ENTRIES.filter(e => !dbIds.has(e.id));
+          if (newFromCode.length > 0) {
+            const merged = [...dbEntries, ...newFromCode];
+            await save(merged);
+            setEntries(merged);
+          } else {
+            setEntries(dbEntries);
+          }
+        } catch { setEntries(INITIAL_ENTRIES); }
       } else {
         // 首次加载，写入初始数据
         await save(INITIAL_ENTRIES);
