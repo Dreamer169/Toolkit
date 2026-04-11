@@ -961,4 +961,61 @@ router.get("/tools/info-generate", async (req, res) => {
   }
 });
 
+// ── 完整工作流：一键准备 ─────────────────────────────────
+router.get("/tools/workflow/prepare", async (req, res) => {
+  try {
+    // 1. 生成随机身份
+    let identity: Record<string, unknown> | null = null;
+    try {
+      const r = await fetch("https://randomuser.me/api/?nat=us&results=1&noinfo");
+      if (r.ok) {
+        const d = await r.json() as { results: RandomUserResult[] };
+        const p = d.results[0];
+        identity = {
+          firstName: p.name.first, lastName: p.name.last,
+          name: `${p.name.first} ${p.name.last}`, gender: p.gender,
+          email: p.email, username: p.login.username, password: p.login.password,
+          phone: p.phone,
+          address: `${p.location.street.number} ${p.location.street.name}`,
+          city: p.location.city, state: p.location.state,
+          zip: String(p.location.postcode), country: "United States",
+          birthday: new Date(p.dob.date).toISOString().split("T")[0],
+          age: p.dob.age,
+        };
+      }
+    } catch {}
+
+    // 2. 生成浏览器指纹
+    const fingerprint = generateFingerprint();
+
+    // 3. 生成 Outlook 注册用用户名
+    const FIRST = ["James","John","Robert","Michael","William","David","Richard","Joseph","Thomas","Christopher","Daniel","Matthew","Anthony","Mark","Steven","Paul","Andrew","Joshua","Benjamin","Samuel","Emma","Olivia","Ava","Sophia","Isabella"];
+    const LAST  = ["Smith","Johnson","Williams","Brown","Jones","Garcia","Miller","Davis","Rodriguez","Martinez","Hernandez","Lopez","Wilson","Anderson","Thomas","Taylor","Moore","Jackson","Lee","Perez"];
+    const fn = FIRST[Math.floor(Math.random() * FIRST.length)];
+    const ln = LAST[Math.floor(Math.random() * LAST.length)];
+    const y2 = String(Math.floor(Math.random() * 30) + 70);
+    const n2 = String(Math.floor(Math.random() * 90) + 10);
+    const patterns = [`${fn}${ln}`, `${fn}${ln}${y2}`, `${fn.toLowerCase()}.${ln.toLowerCase()}`, `${fn.toLowerCase()}${ln.toLowerCase()}${n2}`, `${fn[0].toLowerCase()}${ln.toLowerCase()}${y2}`];
+    const outlookUsername = patterns[Math.floor(Math.random() * patterns.length)];
+    const outlookEmail = `${outlookUsername}@outlook.com`;
+
+    // 4. 随机强密码
+    const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*";
+    let password = "";
+    while (true) {
+      password = Array.from({ length: 14 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+      if (/[a-z]/.test(password) && /[A-Z]/.test(password) && /[0-9]/.test(password) && /[!@#$%^&*]/.test(password)) break;
+    }
+
+    res.json({
+      success: true,
+      identity,
+      fingerprint,
+      outlook: { email: outlookEmail, username: outlookUsername, password },
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
 export default router;

@@ -1,0 +1,383 @@
+import { useState, useRef, useEffect } from "react";
+
+const API = import.meta.env.BASE_URL.replace(/\/$/, "") + "/api";
+
+type Phase = "idle" | "preparing" | "ready" | "registering" | "done" | "error";
+
+interface Identity {
+  name: string; firstName: string; lastName: string; gender: string;
+  birthday: string; age: number; phone: string; email: string;
+  username: string; password: string; address: string;
+  city: string; state: string; zip: string; country: string;
+}
+interface Fingerprint {
+  userAgent: string; platform: string; language: string;
+  timezone: string; screen: { width: number; height: number };
+  devicePixelRatio: number; hardwareConcurrency: number; deviceMemory: number;
+  canvas: { hash: string }; audio: { hash: string };
+  webgl: { vendor: string; renderer: string };
+}
+interface PrepareData {
+  identity: Identity | null;
+  fingerprint: Fingerprint;
+  outlook: { email: string; username: string; password: string };
+}
+
+interface LogLine { ts: number; text: string; level: "info"|"ok"|"warn"|"error" }
+
+function colorClass(level: LogLine["level"]) {
+  return { info:"text-gray-300", ok:"text-emerald-400", warn:"text-amber-400", error:"text-red-400" }[level];
+}
+
+function classifyLine(t: string): LogLine["level"] {
+  const l = t.toLowerCase();
+  if (l.includes("✅") || l.includes("success") || l.includes("注册成功") || l.includes("ok")) return "ok";
+  if (l.includes("❌") || l.includes("error") || l.includes("fail") || l.includes("失败")) return "error";
+  if (l.includes("⚠️") || l.includes("warn") || l.includes("captcha") || l.includes("重试")) return "warn";
+  return "info";
+}
+
+function Step({ n, label, active, done }: { n: number; label: string; active: boolean; done: boolean }) {
+  return (
+    <div className={`flex items-center gap-2 text-sm transition-all ${active ? "text-white" : done ? "text-emerald-400" : "text-gray-600"}`}>
+      <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${active ? "bg-emerald-600 text-white" : done ? "bg-emerald-900 text-emerald-400 border border-emerald-700" : "bg-[#21262d] text-gray-600"}`}>
+        {done ? "✓" : n}
+      </div>
+      {label}
+    </div>
+  );
+}
+
+export default function FullWorkflow() {
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [data, setData] = useState<PrepareData | null>(null);
+  const [proxy, setProxy] = useState("");
+  const [engine, setEngine] = useState("patchright");
+  const [headless, setHeadless] = useState(true);
+  const [wait, setWait] = useState(11);
+  const [logs, setLogs] = useState<LogLine[]>([]);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [result, setResult] = useState<{ ok: boolean; email?: string; password?: string; msg?: string } | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [saveMsg, setSaveMsg] = useState("");
+  const logRef = useRef<HTMLDivElement>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const sinceRef = useRef(0);
+
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [logs]);
+
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
+  async function prepare() {
+    setPhase("preparing");
+    setData(null); setLogs([]); setResult(null); setSaved(false); setSaveMsg("");
+    try {
+      const r = await fetch(`${API}/tools/workflow/prepare`);
+      const d = await r.json();
+      if (!d.success) throw new Error(d.error);
+      setData(d);
+      setPhase("ready");
+    } catch (e) {
+      setPhase("error");
+      setLogs([{ ts: Date.now(), text: `准备失败: ${e}`, level: "error" }]);
+    }
+  }
+
+  function addLog(text: string) {
+    setLogs(prev => [...prev, { ts: Date.now(), text, level: classifyLine(text) }]);
+  }
+
+  async function startRegistration() {
+    if (!data) return;
+    setPhase("registering");
+    setLogs([{ ts: Date.now(), text: "🚀 启动完整工作流...", level: "info" }]);
+    sinceRef.current = 0;
+
+    try {
+      const r = await fetch(`${API}/tools/outlook/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          count: 1, proxy, engine, headless: headless ? "true" : "false",
+          wait, retries: 2, delay: 0,
+        }),
+      });
+      const d = await r.json();
+      if (!d.success || !d.jobId) { addLog("❌ 启动失败: " + (d.error || "未知")); setPhase("error"); return; }
+      setJobId(d.jobId);
+      addLog(`📋 任务 ID: ${d.jobId}`);
+      addLog(`🪪 身份: ${data.outlook.email} / ${data.outlook.password}`);
+      addLog(`🎭 指纹: UA=${data.fingerprint.userAgent.slice(0,60)}…`);
+      addLog(`🖥️  屏幕: ${data.fingerprint.screen.width}×${data.fingerprint.screen.height} | DPR: ${data.fingerprint.devicePixelRatio}`);
+      addLog(`⏱️  Bot 保护等待: ${wait}s | 引擎: ${engine}`);
+      startPolling(d.jobId);
+    } catch (e) {
+      addLog("❌ 请求失败: " + e); setPhase("error");
+    }
+  }
+
+  function startPolling(id: string) {
+    pollRef.current = setInterval(async () => {
+      try {
+        const r = await fetch(`${API}/tools/outlook/register/${id}?since=${sinceRef.current}`);
+        const d = await r.json();
+        if (!d.success) return;
+        (d.lines ?? []).forEach((l: { text: string; offset: number }) => {
+          addLog(l.text);
+          if (l.offset >= sinceRef.current) sinceRef.current = l.offset + 1;
+        });
+        if (d.done) {
+          clearInterval(pollRef.current!);
+          const ok = d.accounts?.length > 0 || d.lines?.some((l: { text: string }) => l.text.includes("成功") || l.text.includes("✅"));
+          const email = d.accounts?.[0]?.email ?? data?.outlook.email;
+          const password = d.accounts?.[0]?.password ?? data?.outlook.password;
+          setResult({ ok, email, password, msg: ok ? "注册成功" : "注册失败（CAPTCHA 或代理问题）" });
+          setPhase("done");
+        }
+      } catch {}
+    }, 2000);
+  }
+
+  async function saveToDb() {
+    if (!data || !result) return;
+    setSaveMsg("保存中…");
+    const errors: string[] = [];
+
+    // 保存账号
+    const a = await fetch(`${API}/data/accounts`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ platform: "outlook", email: result.email, password: result.password ?? data.outlook.password, status: result.ok ? "active" : "inactive", notes: result.ok ? "" : "注册失败" }),
+    }).then(r => r.json()).catch(() => ({ success: false }));
+    if (!a.success) errors.push("账号保存失败");
+
+    // 保存身份信息
+    if (data.identity) {
+      const b = await fetch(`${API}/data/identities`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ first_name: data.identity.firstName, last_name: data.identity.lastName, gender: data.identity.gender === "female" ? "Female" : "Male", birthday: data.identity.birthday, phone: data.identity.phone, email: data.identity.email, address: data.identity.address, city: data.identity.city, state: data.identity.state, zip: data.identity.zip, country: data.identity.country, username: data.identity.username, password: data.identity.password }),
+      }).then(r => r.json()).catch(() => ({ success: false }));
+      if (!b.success) errors.push("身份保存失败");
+    }
+
+    if (errors.length === 0) { setSaved(true); setSaveMsg("✅ 账号 + 身份信息已保存到数据库"); }
+    else setSaveMsg("⚠️ 部分保存失败: " + errors.join("，"));
+  }
+
+  const step1Done = phase !== "idle";
+  const step2Done = ["ready","registering","done","error"].includes(phase);
+  const step3Done = ["done","error"].includes(phase);
+  const step4Done = phase === "done" && saved;
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-bold text-white">完整工作流</h1>
+        <p className="text-gray-400 text-sm mt-1">
+          自动串联：身份生成 → 浏览器指纹配置 → Outlook 注册（patchright 随机指纹） → 自动入库
+        </p>
+      </div>
+
+      {/* 步骤指示器 */}
+      <div className="flex gap-6 overflow-x-auto pb-1">
+        <Step n={1} label="准备身份 + 指纹" active={phase==="preparing"} done={step1Done} />
+        <div className="text-gray-700 self-center">→</div>
+        <Step n={2} label="配置注册参数" active={phase==="ready"} done={step2Done} />
+        <div className="text-gray-700 self-center">→</div>
+        <Step n={3} label="Outlook 自动注册" active={phase==="registering"} done={step3Done} />
+        <div className="text-gray-700 self-center">→</div>
+        <Step n={4} label="自动入库" active={phase==="done" && !saved} done={step4Done} />
+      </div>
+
+      {/* Step 1：准备 */}
+      {phase === "idle" && (
+        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-6 text-center space-y-4">
+          <div className="text-4xl">🚀</div>
+          <p className="text-gray-300">点击下方按钮，自动生成真实身份、浏览器指纹和 Outlook 账号信息</p>
+          <button onClick={prepare} className="px-8 py-3 bg-emerald-700 rounded-lg text-white font-semibold hover:bg-emerald-600 transition-colors">
+            开始准备
+          </button>
+        </div>
+      )}
+
+      {phase === "preparing" && (
+        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-8 text-center">
+          <div className="animate-spin text-3xl mb-3">⚙️</div>
+          <p className="text-gray-400">正在生成身份信息和浏览器指纹…</p>
+        </div>
+      )}
+
+      {/* Step 2：展示准备结果 + 配置 */}
+      {data && (phase === "ready" || phase === "registering" || phase === "done" || phase === "error") && (
+        <div className="grid md:grid-cols-2 gap-4">
+          {/* 身份信息 */}
+          <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4 space-y-3">
+            <h3 className="text-sm font-semibold text-white flex items-center gap-2">🪪 生成的身份信息</h3>
+            {data.identity ? (
+              <div className="grid grid-cols-2 gap-y-1.5 text-xs">
+                {[
+                  ["姓名", data.identity.name],
+                  ["性别", data.identity.gender === "female" ? "女" : "男"],
+                  ["生日", `${data.identity.birthday} (${data.identity.age}岁)`],
+                  ["手机", data.identity.phone],
+                  ["邮箱", data.identity.email],
+                  ["用户名", data.identity.username],
+                  ["城市", `${data.identity.city}, ${data.identity.state}`],
+                  ["地址", data.identity.address],
+                ].map(([k, v]) => (
+                  <div key={k} className="contents">
+                    <span className="text-gray-500">{k}</span>
+                    <span className="text-gray-200 font-mono break-all">{v}</span>
+                  </div>
+                ))}
+              </div>
+            ) : <p className="text-gray-600 text-xs">身份信息获取失败（网络问题），注册仍可继续</p>}
+          </div>
+
+          {/* 浏览器指纹 */}
+          <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4 space-y-3">
+            <h3 className="text-sm font-semibold text-white flex items-center gap-2">🎭 浏览器指纹（patchright 随机化）</h3>
+            <div className="grid grid-cols-2 gap-y-1.5 text-xs">
+              {[
+                ["引擎", "patchright (Chromium)"],
+                ["User-Agent", data.fingerprint.userAgent.slice(0, 40) + "…"],
+                ["平台", data.fingerprint.platform],
+                ["语言", data.fingerprint.language],
+                ["时区", data.fingerprint.timezone],
+                ["分辨率", `${data.fingerprint.screen.width}×${data.fingerprint.screen.height}`],
+                ["DPR", String(data.fingerprint.devicePixelRatio)],
+                ["CPU核心", String(data.fingerprint.hardwareConcurrency)],
+                ["内存", `${data.fingerprint.deviceMemory}GB`],
+                ["Canvas 哈希", data.fingerprint.canvas.hash],
+                ["音频哈希", data.fingerprint.audio.hash.slice(0, 12) + "…"],
+                ["GPU", (data.fingerprint.webgl?.renderer ?? "").slice(0, 30) + "…"],
+              ].map(([k, v]) => (
+                <div key={k} className="contents">
+                  <span className="text-gray-500">{k}</span>
+                  <span className="text-gray-200 font-mono break-all">{v}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Outlook 账号计划 */}
+          <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4 space-y-2">
+            <h3 className="text-sm font-semibold text-white">📧 待注册账号</h3>
+            <div className="grid grid-cols-2 gap-y-2 text-xs">
+              <span className="text-gray-500">邮箱地址</span>
+              <span className="text-white font-mono">{data.outlook.email}</span>
+              <span className="text-gray-500">密码</span>
+              <span className="text-white font-mono">{data.outlook.password}</span>
+            </div>
+          </div>
+
+          {/* 注册配置 */}
+          <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4 space-y-3">
+            <h3 className="text-sm font-semibold text-white">⚙️ 注册配置</h3>
+            <div className="space-y-2 text-xs">
+              <div>
+                <label className="text-gray-400">代理地址（无代理 = 服务器 IP，大概率在 CAPTCHA 卡住）</label>
+                <input value={proxy} onChange={e => setProxy(e.target.value)} placeholder="socks5://user:pass@host:port" disabled={phase !== "ready"} className="w-full mt-1 bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-white font-mono disabled:opacity-50" />
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="text-gray-400">引擎</label>
+                  <select value={engine} onChange={e => setEngine(e.target.value)} disabled={phase !== "ready"} className="w-full mt-1 bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-white disabled:opacity-50">
+                    <option value="patchright">patchright</option>
+                    <option value="playwright">playwright</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-gray-400">Bot 等待(s)</label>
+                  <input type="number" value={wait} onChange={e => setWait(Number(e.target.value))} min={5} max={60} disabled={phase !== "ready"} className="w-full mt-1 bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-white disabled:opacity-50" />
+                </div>
+                <div className="flex flex-col">
+                  <label className="text-gray-400">无头模式</label>
+                  <button onClick={() => phase === "ready" && setHeadless(h => !h)} className={`mt-1 px-3 py-1.5 rounded text-xs border transition-colors ${headless ? "bg-emerald-900/40 border-emerald-700 text-emerald-300" : "bg-[#21262d] border-[#30363d] text-gray-400"} ${phase !== "ready" ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}>
+                    {headless ? "开启" : "关闭"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 启动注册按钮 */}
+      {phase === "ready" && (
+        <div className="flex gap-3">
+          <button onClick={startRegistration} className="flex-1 py-3 bg-blue-700 hover:bg-blue-600 rounded-lg text-white font-semibold transition-colors">
+            🚀 启动 Outlook 自动注册
+          </button>
+          <button onClick={prepare} className="px-4 py-3 bg-[#21262d] border border-[#30363d] rounded-lg text-gray-400 hover:text-white text-sm">
+            重新生成
+          </button>
+        </div>
+      )}
+
+      {/* 实时日志 */}
+      {logs.length > 0 && (
+        <div className="bg-[#0d1117] border border-[#30363d] rounded-lg overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-2 bg-[#161b22] border-b border-[#30363d]">
+            <span className="text-xs font-semibold text-gray-400">📋 实时注册日志</span>
+            {phase === "registering" && (
+              <span className="flex items-center gap-1.5 text-xs text-emerald-400">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                运行中…
+              </span>
+            )}
+          </div>
+          <div ref={logRef} className="h-48 overflow-y-auto p-3 font-mono text-xs space-y-0.5">
+            {logs.map((l, i) => (
+              <div key={i} className={colorClass(l.level)}>
+                <span className="text-gray-600 mr-2">{new Date(l.ts).toLocaleTimeString("zh-CN", { hour12: false })}</span>
+                {l.text}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 结果 + 入库 */}
+      {phase === "done" && result && (
+        <div className={`border rounded-lg p-5 space-y-4 ${result.ok ? "bg-emerald-900/20 border-emerald-700" : "bg-red-900/20 border-red-800"}`}>
+          <div className="flex items-center gap-3">
+            <span className="text-2xl">{result.ok ? "✅" : "❌"}</span>
+            <div>
+              <div className={`font-semibold ${result.ok ? "text-emerald-300" : "text-red-300"}`}>{result.msg}</div>
+              {result.ok && <div className="text-sm text-gray-400 mt-0.5">{result.email} / {result.password}</div>}
+            </div>
+          </div>
+          {!saved && (
+            <button onClick={saveToDb} className="px-5 py-2 bg-emerald-700 hover:bg-emerald-600 rounded text-sm text-white transition-colors">
+              💾 保存到数据库（账号 + 身份信息）
+            </button>
+          )}
+          {saveMsg && <p className={`text-sm ${saved ? "text-emerald-400" : "text-amber-400"}`}>{saveMsg}</p>}
+          <button onClick={() => { setPhase("idle"); setData(null); setLogs([]); setResult(null); setSaved(false); setSaveMsg(""); }} className="px-4 py-2 bg-[#21262d] border border-[#30363d] rounded text-xs text-gray-400 hover:text-white">
+            重新开始
+          </button>
+        </div>
+      )}
+
+      {/* 错误重试 */}
+      {phase === "error" && !result && (
+        <div className="bg-red-900/20 border border-red-800 rounded-lg p-4 flex items-center justify-between">
+          <span className="text-red-300 text-sm">准备阶段出错</span>
+          <button onClick={prepare} className="px-4 py-2 bg-[#21262d] border border-[#30363d] rounded text-xs text-gray-400 hover:text-white">重试</button>
+        </div>
+      )}
+
+      {/* 说明 */}
+      <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4 text-xs text-gray-500 space-y-1.5">
+        <p className="text-gray-400 font-medium">工作流说明</p>
+        <p>• <span className="text-gray-300">身份信息</span>：从 randomuser.me 获取真实随机美国人身份（姓名/生日/手机/地址）</p>
+        <p>• <span className="text-gray-300">浏览器指纹</span>：patchright 每次启动自动随机化 Canvas/WebGL/音频哈希、UA、时区、分辨率——无需手动配置</p>
+        <p>• <span className="text-gray-300">机器 ID</span>：与 Cursor 机器 ID 重置无关，注册走的是浏览器自动化，每次都是全新浏览器实例</p>
+        <p>• <span className="text-gray-300">CAPTCHA</span>：Microsoft 对数据中心 IP 强制要求，必须使用住宅代理才能通过</p>
+        <p>• <span className="text-gray-300">自动入库</span>：注册完成后点「保存到数据库」，账号和身份信息同时存入「数据管理中心」</p>
+      </div>
+    </div>
+  );
+}
