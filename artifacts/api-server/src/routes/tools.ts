@@ -708,80 +708,111 @@ router.get("/tools/outlook/profile", async (req, res) => {
   }
 });
 
-// ── Playwright/Patchright Outlook 批量注册 (SSE) ─────────
+// ── Outlook 注册：后台任务 + 轮询 ─────────────────────────
+// 避免代理/浏览器 12s 断连问题，改为异步任务模式
+
+interface RegJob {
+  status: "running" | "done" | "stopped";
+  logs: Array<{ type: string; message: string }>;
+  accounts: Array<{ email: string; password: string }>;
+  exitCode: number | null;
+  startedAt: number;
+  child?: ReturnType<import("child_process").ChildProcess["kill"] extends (...args: unknown[]) => unknown ? never : never>;
+}
+
+const regJobs = new Map<string, RegJob>();
+
+// 清理超过 30 分钟的旧任务
+function cleanOldJobs() {
+  const cutoff = Date.now() - 30 * 60 * 1000;
+  for (const [id, job] of regJobs.entries()) {
+    if (job.startedAt < cutoff) regJobs.delete(id);
+  }
+}
+
+// 启动注册任务，立即返回 jobId
 router.post("/tools/outlook/register", async (req, res) => {
   const {
-    count   = 1,
-    proxy   = "",
+    count    = 1,
+    proxy    = "",
     headless = true,
-    delay   = 5,
-    engine  = "patchright",
-    wait    = 11,
-    retries = 2,
+    delay    = 5,
+    engine   = "patchright",
+    wait     = 11,
+    retries  = 2,
   } = req.body as {
     count?: number; proxy?: string; headless?: boolean; delay?: number;
     engine?: string; wait?: number; retries?: number;
   };
-  const n    = Math.min(10, Math.max(1, count));
-  const eng  = ["patchright", "playwright"].includes(engine) ? engine : "patchright";
 
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
+  const n   = Math.min(10, Math.max(1, count));
+  const eng = ["patchright", "playwright"].includes(engine) ? engine : "patchright";
+  const jobId = `reg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-  const send = (data: object) => { try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch {} };
+  const job: RegJob = {
+    status: "running",
+    logs: [],
+    accounts: [],
+    exitCode: null,
+    startedAt: Date.now(),
+  };
+  job.logs.push({ type: "start", message: `启动 ${eng} 注册 ${n} 个 Outlook 账号 (bot_protection_wait=${wait}s)...` });
+  regJobs.set(jobId, job);
+  cleanOldJobs();
 
+  // 立即响应 jobId（不等待注册完成）
+  res.json({ success: true, jobId, message: "注册任务已启动" });
+
+  // 后台异步执行
   const { spawn } = await import("child_process");
   const scriptPath = new URL("../outlook_register.py", import.meta.url).pathname;
   const args = [
     scriptPath,
-    "--count",   String(n),
+    "--count",    String(n),
     "--headless", headless ? "true" : "false",
-    "--delay",   String(delay),
-    "--engine",  eng,
-    "--wait",    String(wait),
-    "--retries", String(retries),
+    "--delay",    String(delay),
+    "--engine",   eng,
+    "--wait",     String(wait),
+    "--retries",  String(retries),
   ];
   if (proxy) args.push("--proxy", proxy);
-
-  send({ type: "start", message: `启动 ${eng} 注册 ${n} 个 Outlook 账号 (bot_protection_wait=${wait}s)...` });
 
   const child = spawn("python3", args, { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
 
   let jsonBuf = "";
   let inJson  = false;
-  const accounts: Array<{ email: string; password: string; engine: string }> = [];
 
   child.stdout.on("data", (chunk: Buffer) => {
     const raw = chunk.toString();
-
-    // collect JSON block at the end
-    if (raw.includes("── JSON 结果 ──") || inJson) {
-      inJson = true;
-      jsonBuf += raw;
-    }
+    if (raw.includes("── JSON 结果 ──") || inJson) { inJson = true; jsonBuf += raw; }
 
     const lines = raw.split("\n").filter(Boolean);
     for (const line of lines) {
       const t = line.trim();
-      if (!t || t.startsWith("──") || t.startsWith("🚀") || t.startsWith("[{") || t.startsWith("{") || t === "]" || t === "}") continue;
+      // 过滤无意义行和 JSON 结果块
+      if (!t) continue;
+      if (t.startsWith("──") || t.startsWith("🚀")) continue;
+      if (t.startsWith("[") || t.startsWith("{") || t === "]" || t === "}") continue;
+      if (t.startsWith('"') && t.includes(":")) continue;  // JSON 字段行
+      if (/^\s*"(email|username|password|success|error|elapsed|engine)"\s*:/.test(t)) continue;
+      if (t === "── JSON 结果 ──") continue;
 
-      if (t.includes("⚠")) {
-        send({ type: "warn", message: t });
-      } else if (t.includes("✅") && t.includes("@outlook.com")) {
-        // parse success line: "✅ 注册成功  |  user@outlook.com  密码: xxx  耗时: 80s"
-        const emailM = t.match(/([\w.\-+]+@outlook\.com)/);
+      let type = "log";
+      if (t.includes("⚠"))                         type = "warn";
+      else if (t.includes("❌"))                    type = "error";
+      else if (t.includes("✅") && t.includes("|")) type = "success";  // 带账号信息的成功行
+      else if (t === "✅ 成功: 0 / 1" || t.startsWith("✅ 成功:")) type = "done";
+
+      job.logs.push({ type, message: t });
+
+      // 解析成功账号行
+      if (type === "success" && t.includes("@outlook.com")) {
+        const emailM = t.match(/([\w.\-+]+@(?:outlook|hotmail|live)\.com)/);
         const passM  = t.match(/密码:\s*(\S+)/);
         if (emailM && passM) {
-          accounts.push({ email: emailM[1], password: passM[1], engine: eng });
-          send({ type: "success", message: t, account: { email: emailM[1], password: passM[1] } });
-        } else {
-          send({ type: "success", message: t });
+          const already = job.accounts.find(a => a.email === emailM[1]);
+          if (!already) job.accounts.push({ email: emailM[1], password: passM[1] });
         }
-      } else if (t.includes("❌")) {
-        send({ type: "error", message: t });
-      } else {
-        send({ type: "log", message: t });
       }
     }
   });
@@ -789,27 +820,70 @@ router.post("/tools/outlook/register", async (req, res) => {
   child.stderr.on("data", (chunk: Buffer) => {
     const msg = chunk.toString().trim();
     if (msg && !msg.includes("DeprecationWarning") && !msg.includes("FutureWarning") && !msg.includes("UserWarning")) {
-      send({ type: "log", message: `[sys] ${msg.slice(0, 300)}` });
+      // only push meaningful stderr
+      const lines = msg.split("\n");
+      for (const l of lines) {
+        const lt = l.trim();
+        if (lt && lt.length > 5) job.logs.push({ type: "log", message: `[sys] ${lt.slice(0, 200)}` });
+      }
     }
   });
 
   child.on("close", (code) => {
-    // Try to parse JSON results block for a clean accounts list
+    // 解析 JSON 结果块
     try {
       const jsonStart = jsonBuf.indexOf("[");
       if (jsonStart >= 0) {
-        const parsed = JSON.parse(jsonBuf.slice(jsonStart).replace(/\n──.*$/s, "").trim()) as Array<Record<string, unknown>>;
-        const ok = parsed.filter((r) => r.success);
-        if (ok.length) {
-          send({ type: "accounts", accounts: ok });
+        const cleaned = jsonBuf.slice(jsonStart).split("\n── JSON")[0].trim();
+        const parsed = JSON.parse(cleaned) as Array<Record<string, unknown>>;
+        for (const r of parsed) {
+          if (r.success && r.email && r.password) {
+            const already = job.accounts.find(a => a.email === r.email);
+            if (!already) job.accounts.push({ email: String(r.email), password: String(r.password) });
+          }
         }
       }
     } catch {}
-    send({ type: "done", exitCode: code, total: accounts.length, message: `注册任务完成 · 成功 ${accounts.length} 个` });
-    res.end();
-  });
 
-  req.on("close", () => { try { child.kill(); } catch {} });
+    const okCount = job.accounts.length;
+    job.logs.push({
+      type: "done",
+      message: `注册任务完成 · 成功 ${okCount} 个 / 共 ${n} 个` + (okCount > 0 ? ` ✅` : ` (需要住宅代理才能通过 CAPTCHA)`),
+    });
+    job.status   = "done";
+    job.exitCode = code;
+  });
+});
+
+// 查询任务状态（前端每 2s 轮询）
+router.get("/tools/outlook/register/:jobId", (req, res) => {
+  const job = regJobs.get(req.params.jobId);
+  if (!job) {
+    res.status(404).json({ success: false, error: "任务不存在" });
+    return;
+  }
+
+  const since   = Number(req.query.since ?? 0);   // 上次已读的日志索引
+  const newLogs = job.logs.slice(since);
+
+  res.json({
+    success:  true,
+    status:   job.status,
+    accounts: job.accounts,
+    logs:     newLogs,
+    nextSince: job.logs.length,
+    exitCode:  job.exitCode,
+  });
+});
+
+// 停止任务
+router.delete("/tools/outlook/register/:jobId", (req, res) => {
+  const job = regJobs.get(req.params.jobId);
+  if (!job) { res.status(404).json({ success: false }); return; }
+  try { (job as unknown as { _child?: { kill: () => void } })._child?.kill(); } catch {}
+  job.status = "stopped";
+  job.logs.push({ type: "warn", message: "⚠ 用户停止了任务" });
+  res.json({ success: true });
 });
 
 router.get("/tools/ip-check", async (req, res) => {

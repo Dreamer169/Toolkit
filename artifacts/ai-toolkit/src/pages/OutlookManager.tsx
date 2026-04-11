@@ -38,57 +38,87 @@ export default function OutlookManager() {
   const [regBusy,    setRegBusy]     = useState(false);
   const [regLogs,    setRegLogs]     = useState<SseEvent[]>([]);
   const [regAccounts,setRegAccounts] = useState<RegAccount[]>([]);
-  const logsEndRef = useRef<HTMLDivElement>(null);
-  const xhrRef     = useRef<XMLHttpRequest|null>(null);
+  const [regJobId,   setRegJobId]    = useState<string|null>(null);
+  const [regStatus,  setRegStatus]   = useState<string>("idle");
+  const logsEndRef  = useRef<HTMLDivElement>(null);
+  const pollRef2    = useRef<ReturnType<typeof setInterval>|null>(null);
+  const sinceRef    = useRef(0);
 
   useEffect(() => { logsEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [regLogs]);
 
-  const startRegister = () => {
+  const stopPolling = () => {
+    if (pollRef2.current) { clearInterval(pollRef2.current); pollRef2.current = null; }
+  };
+
+  const startPolling = (jobId: string) => {
+    sinceRef.current = 0;
+    stopPolling();
+    pollRef2.current = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/tools/outlook/register/${jobId}?since=${sinceRef.current}`);
+        const d = await r.json() as {
+          success: boolean; status: string; logs: SseEvent[];
+          accounts: RegAccount[]; nextSince: number;
+        };
+        if (!d.success) return;
+
+        if (d.logs?.length) {
+          setRegLogs(prev => [...prev, ...d.logs]);
+          sinceRef.current = d.nextSince;
+        }
+        if (d.accounts?.length) {
+          setRegAccounts(d.accounts);
+        }
+        setRegStatus(d.status);
+
+        if (d.status === "done" || d.status === "stopped") {
+          stopPolling();
+          setRegBusy(false);
+        }
+      } catch {}
+    }, 2000);
+  };
+
+  const startRegister = async () => {
     if (regBusy) return;
     setRegBusy(true);
     setRegLogs([]);
+    setRegAccounts([]);
+    setRegJobId(null);
+    setRegStatus("running");
+    sinceRef.current = 0;
 
-    const xhr = new XMLHttpRequest();
-    xhrRef.current = xhr;
-    xhr.open("POST", "/api/tools/outlook/register", true);
-    xhr.setRequestHeader("Content-Type", "application/json");
-    xhr.setRequestHeader("Accept", "text/event-stream");
-
-    let buf = "";
-    xhr.onprogress = () => {
-      const newData = xhr.responseText.slice(buf.length);
-      buf = xhr.responseText;
-      const chunks = newData.split("\n\n").filter(Boolean);
-      for (const chunk of chunks) {
-        const line = chunk.replace(/^data:\s*/, "");
-        try {
-          const ev = JSON.parse(line) as SseEvent & { accounts?: RegAccount[] };
-          if (ev.type === "accounts" && ev.accounts) {
-            setRegAccounts(prev => [...prev, ...ev.accounts!]);
-          } else if (ev.account) {
-            setRegAccounts(prev => [...prev, ev.account!]);
-          }
-          if (ev.message) setRegLogs(prev => [...prev, ev]);
-        } catch {}
+    try {
+      const r = await fetch("/api/tools/outlook/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          count: regCount, proxy: regProxy, headless: regHeadless,
+          delay: regDelay, engine: regEngine, wait: regWait, retries: regRetries,
+        }),
+      });
+      const d = await r.json() as { success: boolean; jobId?: string; message?: string };
+      if (d.success && d.jobId) {
+        setRegJobId(d.jobId);
+        setRegLogs([{ type: "start", message: d.message ?? "任务已启动，正在轮询进度..." }]);
+        startPolling(d.jobId);
+      } else {
+        setRegLogs([{ type: "error", message: "启动失败" }]);
+        setRegBusy(false);
       }
-    };
-    xhr.onloadend = () => setRegBusy(false);
-    xhr.onerror   = () => setRegBusy(false);
-
-    xhr.send(JSON.stringify({
-      count:   regCount,
-      proxy:   regProxy,
-      headless: regHeadless,
-      delay:   regDelay,
-      engine:  regEngine,
-      wait:    regWait,
-      retries: regRetries,
-    }));
+    } catch (e) {
+      setRegLogs([{ type: "error", message: String(e) }]);
+      setRegBusy(false);
+    }
   };
 
-  const stopRegister = () => {
-    xhrRef.current?.abort();
+  const stopRegister = async () => {
+    stopPolling();
+    if (regJobId) {
+      try { await fetch(`/api/tools/outlook/register/${regJobId}`, { method: "DELETE" }); } catch {}
+    }
     setRegBusy(false);
+    setRegStatus("stopped");
     setRegLogs(prev => [...prev, { type: "warn", message: "⚠ 用户手动停止" }]);
   };
 
@@ -275,7 +305,7 @@ export default function OutlookManager() {
                         <div key={i} className="bg-[#161b22] rounded-lg px-3 py-2 flex items-start justify-between gap-2">
                           <div className="flex-1 min-w-0">
                             <p className="text-xs font-medium text-gray-200 truncate">{m.subject}</p>
-                            <p className="text-[11px] text-gray-500">{m.from?.address ?? m.from}</p>
+                            <p className="text-[11px] text-gray-500">{m.from}</p>
                           </div>
                           {code && <button onClick={() => copy(code, `vc-${i}`)} className={`text-xs px-2 py-0.5 rounded border font-mono font-bold ${copied === `vc-${i}` ? "bg-emerald-500/20 border-emerald-500/30 text-emerald-400" : "bg-yellow-500/10 border-yellow-500/30 text-yellow-400"}`}>{copied === `vc-${i}` ? "已复制" : `验证码: ${code}`}</button>}
                         </div>
@@ -387,19 +417,29 @@ export default function OutlookManager() {
 
           {/* 实时日志流 */}
           {regLogs.length > 0 && (
-            <div className="bg-[#0d1117] border border-[#21262d] rounded-xl overflow-hidden">
+            <div className={`bg-[#0d1117] border rounded-xl overflow-hidden transition-colors ${
+              regStatus === "done" ? "border-purple-500/30" :
+              regBusy ? "border-blue-500/30" : "border-[#21262d]"
+            }`}>
               <div className="flex items-center justify-between px-4 py-2 border-b border-[#21262d]">
-                <span className="text-xs text-gray-500 font-semibold">实时日志</span>
-                <span className="text-[10px] text-gray-600">{regLogs.length} 条</span>
+                <div className="flex items-center gap-2">
+                  {regBusy && <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" />}
+                  {regStatus === "done" && <span className="w-2 h-2 rounded-full bg-purple-400" />}
+                  <span className="text-xs text-gray-400 font-semibold">
+                    {regBusy ? "注册中（每 2s 更新）" : regStatus === "done" ? "任务完成" : "实时日志"}
+                  </span>
+                  {regJobId && <span className="text-[10px] text-gray-600 font-mono">#{regJobId.slice(-8)}</span>}
+                </div>
+                <span className="text-[10px] text-gray-600">{regLogs.length} 条日志</span>
               </div>
-              <div className="p-3 max-h-48 overflow-y-auto space-y-0.5 font-mono text-[11px]">
+              <div className="p-3 max-h-56 overflow-y-auto space-y-0.5 font-mono text-[11px]">
                 {regLogs.map((ev, i) => (
                   <div key={i} className={`leading-relaxed ${
-                    ev.type === "success" ? "text-emerald-400" :
+                    ev.type === "success" ? "text-emerald-400 font-bold" :
                     ev.type === "error"   ? "text-red-400" :
                     ev.type === "warn"    ? "text-yellow-400" :
                     ev.type === "start"   ? "text-blue-400" :
-                    ev.type === "done"    ? "text-purple-400" :
+                    ev.type === "done"    ? "text-purple-300 font-semibold" :
                     "text-gray-500"
                   }`}>{ev.message}</div>
                 ))}
