@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback } from "react";
 const API = import.meta.env.BASE_URL.replace(/\/$/, "") + "/api";
 
 type Platform = "outlook" | "chatgpt" | "claude" | "gemini" | "cursor" | "grok" | "codex" | "other";
-type Tab = "accounts" | "identities" | "emails" | "configs" | "stats";
+type Tab = "accounts" | "identities" | "emails" | "configs" | "stats" | "guide";
 
 interface Account {
   id: number; platform: string; email: string; password: string;
@@ -519,12 +519,251 @@ function ConfigsPanel() {
   );
 }
 
+// ─── Work Guide ──────────────────────────────────────────────────────────────
+interface GuideEntry {
+  id: string;
+  date: string;
+  type: "update" | "fix" | "learning" | "note";
+  title: string;
+  content: string;
+  source?: string;
+}
+
+const TYPE_META: Record<GuideEntry["type"], { label: string; color: string; bg: string }> = {
+  update:   { label: "更新",  color: "text-blue-400",   bg: "bg-blue-500/10 border-blue-700/40" },
+  fix:      { label: "修复",  color: "text-red-400",    bg: "bg-red-500/10 border-red-700/40" },
+  learning: { label: "学习",  color: "text-amber-400",  bg: "bg-amber-500/10 border-amber-700/40" },
+  note:     { label: "备注",  color: "text-gray-400",   bg: "bg-gray-500/10 border-gray-700/40" },
+};
+
+const INITIAL_ENTRIES: GuideEntry[] = [
+  {
+    id: "e001", date: "2026-04-11", type: "update", title: "实时监控中心上线",
+    content: "新增 Monitor.tsx 页面，每 2s 自动轮询；包含 API 健康检测、注册任务队列（实时日志流）、代理池进度条、最近入库账号表，支持暂停/恢复刷新、手动停止任务。\n后端新增 GET /api/tools/jobs 端点，返回所有任务摘要（id/status/logCount/accountCount/lastLog）。",
+  },
+  {
+    id: "e002", date: "2026-04-11", type: "fix", title: "修复日志轮询崩溃（classifyLine TypeError）",
+    content: "API 返回日志格式为 { type, message }，前端误读 l.text（undefined），传入 classifyLine() 调用 .toLowerCase() 崩溃。\n修复：改用 l.message ?? l.text ?? \"\" 兜底，空字符串时跳过；since 索引改用 d.nextSince，移除不存在的 l.offset 字段。",
+  },
+  {
+    id: "e003", date: "2026-04-10", type: "update", title: "代理池自动接入注册流程",
+    content: "注册端点新增 autoProxy 参数；无手动代理时从 proxies 表按 used_count ASC + RANDOM() 自动选取，选中后更新 used_count / last_used / status=active。\n完整工作流页面新增代理池状态提示（绿色 / 黄色 / 蓝色三态），按钮文字动态显示「代理池自动选取」。",
+  },
+  {
+    id: "e004", date: "2026-04-10", type: "update", title: "100 条 quarkip 住宅代理导入",
+    content: "proxies 表上线，新增 pick/import/ban/reset 四个端点。批量导入 100 条 quarkip US 动态住宅代理（socks5://user:pass@pool-us.quarkip.io:7777 格式），session ID 带时间戳保证每次 IP 不同。",
+  },
+  {
+    id: "e005", date: "2026-04-09", type: "fix", title: "修复注册任务无限轮询（服务器重启后 404）",
+    content: "注册任务存储在内存 regJobs Map 中，服务器重启后任务丢失，前端轮询收到 404 时之前会永久卡死。\n修复：检测到 404 立即 clearInterval 并推送提示消息「任务已失效（服务器重启导致），请重新启动注册」。",
+  },
+  {
+    id: "e006", date: "2026-04-09", type: "update", title: "持久化数据库 + 数据管理中心",
+    content: "PostgreSQL 接入，建立 accounts / identities / temp_emails / configs / proxies 五张表。DataManager.tsx 提供统计/账号库/身份库/邮箱库/系统配置五个标签页，支持搜索、批量导入（CSV/JSON）、多格式导出。",
+  },
+  {
+    id: "e007", date: "2026-04-11", type: "learning",
+    title: "学习参考：cursor-free-vip（SHANMUGAM070106）",
+    source: "https://github.com/SHANMUGAM070106/cursor-free-vip",
+    content: "项目定位：专用于 Cursor AI 账号自动化（cursor.sh 注册、机器 ID 重置、Token 限额绕过），1500+ Stars，Python 实现。\n\n关键技术点：\n1. DrissionPage — 类似 patchright 的浏览器自动化库，支持 Chromium；与本项目 patchright 方案同级，无需引入。\n2. block_domain.txt 域名黑名单 — 动态过滤被 Cursor 拒绝的临时邮箱域名（从 GitHub raw 拉取，本地兜底）。本项目可考虑为 Outlook 注册引入类似的域名过滤机制。\n3. bypass_token_limit.py — 通过修改 Cursor workbench.desktop.main.js（JS 注入）绕过 Token 限额，与本项目机器 ID 重置功能互补（不同层面的限制）。\n4. cursor_register_github.py / cursor_register_google.py — 第三方 OAuth 注册 Cursor，本项目目前聚焦 Outlook 直接注册，此方向可后续扩展。\n\n结论：项目专注 Cursor 生态，与本项目 Outlook/ChatGPT 注册方向差异较大，block_domain.txt 思路值得参考，其余不直接引入。",
+  },
+];
+
+function GuidePanel() {
+  const [entries, setEntries] = useState<GuideEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showAdd, setShowAdd] = useState(false);
+  const [filter, setFilter] = useState<GuideEntry["type"] | "all">("all");
+  const [form, setForm] = useState<Partial<GuideEntry>>({
+    date: new Date().toISOString().slice(0, 10),
+    type: "note",
+    title: "",
+    content: "",
+    source: "",
+  });
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const d = await fetch(`${API}/data/configs`).then(r => r.json()).catch(() => ({}));
+    if (d.success) {
+      const raw = (d.map as Record<string, string>)["work_guide_entries"];
+      if (raw) {
+        try { setEntries(JSON.parse(raw)); } catch { setEntries(INITIAL_ENTRIES); }
+      } else {
+        // 首次加载，写入初始数据
+        await save(INITIAL_ENTRIES);
+        setEntries(INITIAL_ENTRIES);
+      }
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function save(data: GuideEntry[]) {
+    await fetch(`${API}/data/configs/batch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ configs: { work_guide_entries: JSON.stringify(data) } }),
+    }).catch(() => {});
+  }
+
+  async function addEntry() {
+    if (!form.title || !form.content) return;
+    setSaving(true);
+    const newEntry: GuideEntry = {
+      id: `e${Date.now()}`,
+      date: form.date || new Date().toISOString().slice(0, 10),
+      type: (form.type as GuideEntry["type"]) || "note",
+      title: form.title,
+      content: form.content,
+      source: form.source || undefined,
+    };
+    const updated = [newEntry, ...entries];
+    await save(updated);
+    setEntries(updated);
+    setSaving(false);
+    setShowAdd(false);
+    setForm({ date: new Date().toISOString().slice(0, 10), type: "note", title: "", content: "", source: "" });
+  }
+
+  async function deleteEntry(id: string) {
+    const updated = entries.filter(e => e.id !== id);
+    await save(updated);
+    setEntries(updated);
+  }
+
+  const visible = filter === "all" ? entries : entries.filter(e => e.type === filter);
+
+  return (
+    <div className="space-y-4">
+      {/* 工具栏 */}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex gap-1 flex-wrap">
+          {(["all", "update", "fix", "learning", "note"] as const).map(t => (
+            <button
+              key={t}
+              onClick={() => setFilter(t)}
+              className={`px-3 py-1 rounded-full text-xs transition-colors ${
+                filter === t
+                  ? "bg-white/10 text-white"
+                  : "text-gray-500 hover:text-gray-300"
+              }`}
+            >
+              {t === "all" ? "全部" : TYPE_META[t].label}
+              {t !== "all" && (
+                <span className="ml-1 text-gray-600">
+                  {entries.filter(e => e.type === t).length}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+        <button
+          onClick={() => setShowAdd(v => !v)}
+          className="ml-auto px-4 py-1.5 bg-blue-700 hover:bg-blue-600 rounded text-xs text-white transition-colors"
+        >
+          {showAdd ? "✕ 取消" : "+ 新增记录"}
+        </button>
+      </div>
+
+      {/* 新增表单 */}
+      {showAdd && (
+        <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-4 space-y-3">
+          <h3 className="text-sm font-semibold text-white">新增工作记录</h3>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs text-gray-500 block mb-1">日期</label>
+              <input type="date" value={form.date} onChange={e => setForm(p => ({...p, date: e.target.value}))}
+                className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white" />
+            </div>
+            <div>
+              <label className="text-xs text-gray-500 block mb-1">类型</label>
+              <select value={form.type} onChange={e => setForm(p => ({...p, type: e.target.value as GuideEntry["type"]}))}
+                className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white">
+                <option value="update">更新</option>
+                <option value="fix">修复</option>
+                <option value="learning">学习</option>
+                <option value="note">备注</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">标题</label>
+            <input value={form.title} onChange={e => setForm(p => ({...p, title: e.target.value}))}
+              placeholder="简短描述…"
+              className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white" />
+          </div>
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">来源 URL（可选）</label>
+            <input value={form.source} onChange={e => setForm(p => ({...p, source: e.target.value}))}
+              placeholder="https://github.com/..."
+              className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white font-mono text-xs" />
+          </div>
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">详细内容</label>
+            <textarea value={form.content} onChange={e => setForm(p => ({...p, content: e.target.value}))}
+              rows={5} placeholder="详细说明、学习要点、变更内容…"
+              className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white font-mono resize-y" />
+          </div>
+          <div className="flex justify-end gap-2">
+            <button onClick={() => setShowAdd(false)} className="px-4 py-2 text-xs text-gray-400 hover:text-white">取消</button>
+            <button onClick={addEntry} disabled={saving || !form.title || !form.content}
+              className="px-5 py-2 bg-blue-700 hover:bg-blue-600 rounded text-xs text-white disabled:opacity-40 transition-colors">
+              {saving ? "保存中…" : "💾 保存"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 时间线 */}
+      {loading ? (
+        <div className="text-center py-12 text-gray-600 animate-pulse text-sm">加载中…</div>
+      ) : visible.length === 0 ? (
+        <div className="text-center py-12 text-gray-600 text-sm">暂无记录</div>
+      ) : (
+        <div className="space-y-3">
+          {visible.map(entry => {
+            const meta = TYPE_META[entry.type];
+            return (
+              <div key={entry.id} className={`border rounded-xl p-4 space-y-2 ${meta.bg}`}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className={`text-xs font-bold px-2 py-0.5 rounded-full border ${meta.bg} ${meta.color}`}>
+                      {meta.label}
+                    </span>
+                    <span className="text-white text-sm font-semibold">{entry.title}</span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-xs text-gray-600">{entry.date}</span>
+                    <button onClick={() => deleteEntry(entry.id)}
+                      className="text-gray-700 hover:text-red-400 text-xs transition-colors">✕</button>
+                  </div>
+                </div>
+                {entry.source && (
+                  <a href={entry.source} target="_blank" rel="noopener noreferrer"
+                    className="text-xs text-blue-500 hover:text-blue-400 font-mono flex items-center gap-1">
+                    🔗 {entry.source}
+                  </a>
+                )}
+                <pre className="text-xs text-gray-400 whitespace-pre-wrap leading-5 font-sans">{entry.content}</pre>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main Page ───────────────────────────────────────────────────────────────
 export default function DataManager() {
   const [tab, setTab] = useState<Tab>("stats");
 
   const TABS: { key: Tab; label: string }[] = [
     { key:"stats",      label:"📊 数据统计" },
+    { key:"guide",      label:"📋 工作指南" },
     { key:"accounts",   label:"🔑 账号库" },
     { key:"identities", label:"🪪 身份库" },
     { key:"emails",     label:"📬 邮箱库" },
@@ -554,6 +793,7 @@ export default function DataManager() {
       </div>
 
       {tab === "stats"      && <StatsPanel />}
+      {tab === "guide"      && <GuidePanel />}
       {tab === "accounts"   && <AccountsPanel />}
       {tab === "identities" && <IdentitiesPanel />}
       {tab === "emails"     && <EmailsPanel />}
