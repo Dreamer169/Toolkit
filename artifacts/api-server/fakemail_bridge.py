@@ -26,6 +26,9 @@ _inboxes: dict = {}
 _inbox_lock = threading.Lock()
 
 
+def _s(v):
+    return str(v).strip() if v is not None else ""
+
 def get_identity():
     try:
         from fng_api import getIdentity
@@ -35,19 +38,52 @@ def get_identity():
             return None, "No email in identity"
         login, domain = email.lower().split("@", 1)
         return {
+            # 基本账号信息
             "email": email.strip(),
             "login": login.strip(),
             "domain": domain.strip(),
-            "name": i.name.strip() if i.name else "",
-            "phone": i.phone.strip() if i.phone else "",
-            "address": i.street.strip() if i.street else "",
-            "city": i.city.strip() if i.city else "",
-            "state": i.state.strip() if i.state else "",
-            "zip": i.zip.strip() if i.zip else "",
-            "username": i.username.strip() if i.username else login,
-            "password": i.password.strip() if i.password else "",
-            "birthday": i.birthday.strip() if i.birthday else "",
-            "ssn": i.ssn.strip() if i.ssn else "",
+            "username": _s(i.username) or login,
+            "password": _s(i.password),
+            "guid": _s(i.guid),
+            # 个人信息
+            "name": _s(i.name),
+            "phone": _s(i.phone),
+            "birthday": _s(i.birthday),
+            "birthdayDay": _s(i.birthdayDay),
+            "birthdayMonth": _s(i.birthdayMonth),
+            "birthdayYear": _s(i.birthdayYear),
+            "age": _s(i.age),
+            "zodiac": _s(i.zodiac),
+            "blood": _s(i.blood),
+            "color": _s(i.color),
+            "motherMaidenName": _s(i.motherMaidenName),
+            # 地址信息
+            "street": _s(i.street),
+            "city": _s(i.city),
+            "state": _s(i.state),
+            "zip": _s(i.zip),
+            "coords": _s(i.coords),
+            "countryCode": _s(i.countryCode),
+            # 工作信息
+            "company": _s(i.company),
+            "occupation": _s(i.occupation),
+            "website": _s(i.website),
+            # 体格信息
+            "height": _s(i.height),
+            "heightcm": _s(i.heightcm),
+            "weight": _s(i.weight),
+            "weightkg": _s(i.weightkg),
+            "vehicle": _s(i.vehicle),
+            # 财务信息
+            "ssn": _s(i.ssn),
+            "card": _s(i.card),
+            "cvv2": _s(i.cvv2),
+            "expiration": _s(i.expiration),
+            "moneygram": _s(i.moneygram),
+            "westernunion": _s(i.westernunion),
+            "ups": _s(i.ups),
+            # 技术信息
+            "useragent": _s(i.useragent),
         }, None
     except Exception as e:
         return None, str(e)
