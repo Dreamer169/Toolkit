@@ -11,10 +11,11 @@ import FreeEmail from "@/pages/FreeEmail";
 import MachineReset from "@/pages/MachineReset";
 import Fingerprint from "@/pages/Fingerprint";
 import OutlookManager from "@/pages/OutlookManager";
+import DataManager from "@/pages/DataManager";
 
 const queryClient = new QueryClient();
 
-type Tab = "home" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "machine-reset" | "fingerprint" | "outlook" | "team-register" | "openai-pool";
+type Tab = "home" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "machine-reset" | "fingerprint" | "outlook" | "team-register" | "openai-pool" | "data-manager";
 
 const tabs: { id: Tab; label: string; icon: string; badge?: string; group?: string }[] = [
   { id: "home",          label: "工具导航",       icon: "🗂️" },
@@ -30,6 +31,7 @@ const tabs: { id: Tab; label: string; icon: string; badge?: string; group?: stri
   { id: "fingerprint",   label: "浏览器指纹",     icon: "🎭", badge: "新增" },
   { id: "team-register", label: "Team 注册面板",  icon: "🤖", badge: "Python 原版" },
   { id: "openai-pool",   label: "账号池编排器",    icon: "🏊", badge: "Python 原版" },
+  { id: "data-manager",  label: "数据管理中心",    icon: "🗄️", badge: "持久化" },
 ];
 
 function App() {
@@ -111,6 +113,7 @@ function App() {
             {tab === "machine-reset" && <MachineReset />}
             {tab === "fingerprint" && <Fingerprint />}
             {tab === "outlook" && <OutlookManager />}
+            {tab === "data-manager" && <DataManager />}
           </main>
         )}
 
