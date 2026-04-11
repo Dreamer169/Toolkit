@@ -119,21 +119,32 @@ export default function FullWorkflow() {
   }
 
   function startPolling(id: string) {
+    let staleTicks = 0;
     pollRef.current = setInterval(async () => {
       try {
         const r = await fetch(`${API}/tools/outlook/register/${id}?since=${sinceRef.current}`);
-        const d = await r.json();
-        if (!d.success) return;
-        (d.lines ?? []).forEach((l: { text: string; offset: number }) => {
-          addLog(l.text);
-          if (l.offset >= sinceRef.current) sinceRef.current = l.offset + 1;
-        });
-        if (d.done) {
+        if (r.status === 404) {
           clearInterval(pollRef.current!);
-          const ok = d.accounts?.length > 0 || d.lines?.some((l: { text: string }) => l.text.includes("成功") || l.text.includes("✅"));
+          addLog("⚠️ 任务已失效（服务器重启导致），请重新启动注册");
+          setResult({ ok: false, msg: "任务丢失（服务器重启），请重试" });
+          setPhase("done");
+          return;
+        }
+        const d = await r.json();
+        if (!d.success) { staleTicks++; if (staleTicks > 10) { clearInterval(pollRef.current!); setPhase("error"); } return; }
+        staleTicks = 0;
+        const newLines: { text: string; offset?: number }[] = d.logs ?? d.lines ?? [];
+        newLines.forEach((l) => {
+          addLog(l.text);
+          if ((l.offset ?? 0) >= sinceRef.current) sinceRef.current = (l.offset ?? 0) + 1;
+        });
+        if (d.nextSince) sinceRef.current = d.nextSince;
+        if (d.status === "done") {
+          clearInterval(pollRef.current!);
+          const ok = (d.accounts?.length ?? 0) > 0;
           const email = d.accounts?.[0]?.email ?? data?.outlook.email;
           const password = d.accounts?.[0]?.password ?? data?.outlook.password;
-          setResult({ ok, email, password, msg: ok ? "注册成功" : "注册失败（CAPTCHA 或代理问题）" });
+          setResult({ ok, email, password, msg: ok ? "✅ 注册成功！账号已激活" : "❌ 注册失败（CAPTCHA 无法通过——需要住宅代理）" });
           setPhase("done");
         }
       } catch {}
@@ -306,13 +317,41 @@ export default function FullWorkflow() {
 
       {/* 启动注册按钮 */}
       {phase === "ready" && (
-        <div className="flex gap-3">
-          <button onClick={startRegistration} className="flex-1 py-3 bg-blue-700 hover:bg-blue-600 rounded-lg text-white font-semibold transition-colors">
-            🚀 启动 Outlook 自动注册
+        <div className="space-y-3">
+          {/* 代理警告 */}
+          {!proxy && (
+            <div className="bg-amber-900/30 border border-amber-700/50 rounded-lg px-4 py-3 flex items-start gap-3">
+              <span className="text-amber-400 text-lg flex-shrink-0">⚠️</span>
+              <div className="text-sm">
+                <p className="text-amber-300 font-medium">未填写代理——注册会在 CAPTCHA 卡住</p>
+                <p className="text-amber-500 text-xs mt-0.5">微软对数据中心 IP 强制验证。填写住宅代理后再点「启动注册」，或直接点下方「仅保存凭据」跳过注册步骤。</p>
+              </div>
+            </div>
+          )}
+          <div className="flex gap-3">
+            <button onClick={startRegistration} className={`flex-1 py-3 rounded-lg text-white font-semibold transition-colors ${proxy ? "bg-blue-700 hover:bg-blue-600" : "bg-blue-900/60 hover:bg-blue-800/60 border border-blue-700/50"}`}>
+              🚀 启动 Outlook 自动注册{!proxy ? "（无代理）" : ""}
+            </button>
+            <button onClick={prepare} className="px-4 py-3 bg-[#21262d] border border-[#30363d] rounded-lg text-gray-400 hover:text-white text-sm">
+              重新生成
+            </button>
+          </div>
+          <button
+            onClick={async () => {
+              if (!data) return;
+              setSaved(false); setSaveMsg("");
+              const a = await fetch(`${API}/data/accounts`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ platform:"outlook", email: data.outlook.email, password: data.outlook.password, status:"inactive", notes:"已生成待注册" }) }).then(r=>r.json()).catch(()=>({}));
+              if (data.identity) {
+                await fetch(`${API}/data/identities`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ first_name: data.identity.firstName, last_name: data.identity.lastName, gender: data.identity.gender === "female" ? "Female" : "Male", birthday: data.identity.birthday, phone: data.identity.phone, email: data.identity.email, address: data.identity.address, city: data.identity.city, state: data.identity.state, zip: data.identity.zip, country: data.identity.country, username: data.identity.username, password: data.identity.password }) }).then(r=>r.json()).catch(()=>{});
+              }
+              if (a.success) { setSaved(true); setSaveMsg("✅ 凭据已保存到数据库（状态：待注册）——有代理时可回来启动注册"); }
+              else setSaveMsg("❌ 保存失败：" + (a.error || "未知"));
+            }}
+            className="w-full py-2 bg-[#21262d] border border-[#30363d] rounded-lg text-sm text-gray-400 hover:text-white hover:bg-[#30363d] transition-colors"
+          >
+            💾 仅保存凭据到数据库（跳过注册，稍后手动用代理注册）
           </button>
-          <button onClick={prepare} className="px-4 py-3 bg-[#21262d] border border-[#30363d] rounded-lg text-gray-400 hover:text-white text-sm">
-            重新生成
-          </button>
+          {saveMsg && <p className={`text-sm ${saved ? "text-emerald-400" : "text-red-400"}`}>{saveMsg}</p>}
         </div>
       )}
 
