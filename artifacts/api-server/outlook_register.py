@@ -391,7 +391,25 @@ class PatchrightController(BaseController):
         p = sync_playwright().start()
         b = p.chromium.launch(
             headless=headless,
-            args=["--lang=zh-CN", "--no-sandbox", "--disable-dev-shm-usage"],
+            args=[
+                "--lang=en-US,en",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--disable-extensions",
+                "--disable-gpu",
+                "--disable-software-rasterizer",
+                "--disable-web-security",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--ignore-certificate-errors",
+                "--allow-running-insecure-content",
+                "--disable-background-networking",
+                "--disable-sync",
+                "--metrics-recording-only",
+                "--mute-audio",
+            ],
             proxy=self._build_proxy_cfg(),
         )
         return p, b
@@ -644,11 +662,72 @@ def register_one(ctrl, engine_name: str, headless: bool) -> dict:
         result["error"] = "浏览器启动失败"
         return result
 
+    # ── 浏览器指纹伪装（与住宅代理地区匹配）──────────────────────────────
+    # 常见 US 用户分辨率与像素比
+    SCREEN_PRESETS = [
+        (1920, 1080, 1),
+        (1366, 768,  1),
+        (1440, 900,  1),
+        (1536, 864,  1),
+        (2560, 1440, 2),
+        (1600, 900,  1),
+        (1280, 800,  1),
+        (1680, 1050, 1),
+    ]
+    sw, sh, dpr = random.choice(SCREEN_PRESETS)
+    # 窗口比屏幕略小（浏览器 chrome 占用部分空间）
+    vw = sw - random.randint(0, 40)
+    vh = sh - random.randint(60, 130)
+
+    # 常见 Chrome UA（匹配 patchright 基于的 Chromium 版本）
+    CHROME_UAS = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    ]
+    user_agent = random.choice(CHROME_UAS)
+
+    # US 时区随机选取
+    US_TIMEZONES = [
+        "America/New_York", "America/Chicago", "America/Denver",
+        "America/Los_Angeles", "America/Phoenix", "America/Detroit",
+    ]
+    timezone_id = random.choice(US_TIMEZONES)
+
     context = b.new_context(
-        locale="zh-CN",
-        timezone_id="Asia/Shanghai",
-        viewport={"width": random.randint(1280, 1920), "height": random.randint(768, 1080)},
+        locale="en-US",
+        timezone_id=timezone_id,
+        viewport={"width": vw, "height": vh},
+        screen={"width": sw, "height": sh},
+        device_scale_factor=dpr,
+        color_scheme="light",
+        user_agent=user_agent,
+        java_script_enabled=True,
+        accept_downloads=False,
+        extra_http_headers={
+            "Accept-Language": "en-US,en;q=0.9",
+            "sec-ch-ua": '"Chromium";v="131", "Google Chrome";v="131", "Not_A Brand";v="24"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"' if "Windows" in user_agent else '"macOS"',
+            "sec-fetch-dest": "document",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-site": "none",
+            "sec-fetch-user": "?1",
+            "upgrade-insecure-requests": "1",
+        },
     )
+    # 注入额外 JS 指纹（navigator 属性）
+    context.add_init_script(f"""
+        Object.defineProperty(navigator, 'hardwareConcurrency', {{ get: () => {random.choice([4, 6, 8, 12, 16])} }});
+        Object.defineProperty(navigator, 'deviceMemory', {{ get: () => {random.choice([4, 8, 16])} }});
+        Object.defineProperty(navigator, 'platform', {{ get: () => '{"Win32" if "Windows" in user_agent else "MacIntel"}' }});
+        Object.defineProperty(navigator, 'language', {{ get: () => 'en-US' }});
+        Object.defineProperty(navigator, 'languages', {{ get: () => ['en-US', 'en'] }});
+        Object.defineProperty(screen, 'colorDepth', {{ get: () => 24 }});
+        Object.defineProperty(screen, 'pixelDepth', {{ get: () => 24 }});
+    """)
     page = context.new_page()
     t0 = time.time()
 
