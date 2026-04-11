@@ -897,6 +897,22 @@ router.get("/tools/outlook/register/:jobId", (req, res) => {
   });
 });
 
+// 列出所有任务（实时监控用）
+router.get("/tools/jobs", (_req, res) => {
+  const jobs = Array.from(regJobs.entries()).map(([id, job]) => ({
+    id,
+    status: job.status,
+    startedAt: job.startedAt,
+    logCount: job.logs.length,
+    accountCount: job.accounts.length,
+    exitCode: job.exitCode,
+    lastLog: job.logs.at(-1) ?? null,
+  }));
+  // 最新的排前面
+  jobs.sort((a, b) => b.startedAt - a.startedAt);
+  res.json({ success: true, jobs });
+});
+
 // 停止任务
 router.delete("/tools/outlook/register/:jobId", (req, res) => {
   const job = regJobs.get(req.params.jobId);

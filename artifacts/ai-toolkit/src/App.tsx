@@ -13,13 +13,17 @@ import Fingerprint from "@/pages/Fingerprint";
 import OutlookManager from "@/pages/OutlookManager";
 import DataManager from "@/pages/DataManager";
 import FullWorkflow from "@/pages/FullWorkflow";
+import Monitor from "@/pages/Monitor";
 
 const queryClient = new QueryClient();
 
-type Tab = "home" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "machine-reset" | "fingerprint" | "outlook" | "team-register" | "openai-pool" | "data-manager" | "full-workflow";
+type Tab = "home" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "machine-reset" | "fingerprint" | "outlook" | "team-register" | "openai-pool" | "data-manager" | "full-workflow" | "monitor";
 
 const tabs: { id: Tab; label: string; icon: string; badge?: string; group?: string }[] = [
   { id: "home",          label: "工具导航",       icon: "🗂️" },
+  { id: "monitor",       label: "实时监控",       icon: "📡", badge: "Live" },
+  { id: "full-workflow", label: "完整工作流",      icon: "🔗", badge: "一键生成" },
+  { id: "data-manager",  label: "数据管理中心",    icon: "🗄️", badge: "持久化" },
   { id: "email",         label: "临时邮箱",       icon: "📬", badge: "真实可用" },
   { id: "bulk-email",    label: "批量邮箱",       icon: "📮", badge: "MailTM" },
   { id: "free-email",    label: "免费身份邮箱",    icon: "🆓", badge: "无需Key" },
@@ -32,8 +36,6 @@ const tabs: { id: Tab; label: string; icon: string; badge?: string; group?: stri
   { id: "fingerprint",   label: "浏览器指纹",     icon: "🎭", badge: "新增" },
   { id: "team-register", label: "Team 注册面板",  icon: "🤖", badge: "Python 原版" },
   { id: "openai-pool",   label: "账号池编排器",    icon: "🏊", badge: "Python 原版" },
-  { id: "data-manager",  label: "数据管理中心",    icon: "🗄️", badge: "持久化" },
-  { id: "full-workflow", label: "完整工作流",      icon: "🔗", badge: "一键生成" },
 ];
 
 function App() {
@@ -117,6 +119,7 @@ function App() {
             {tab === "outlook" && <OutlookManager />}
             {tab === "data-manager" && <DataManager />}
             {tab === "full-workflow" && <FullWorkflow />}
+            {tab === "monitor" && <Monitor />}
           </main>
         )}
 
