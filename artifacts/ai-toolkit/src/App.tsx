@@ -4,16 +4,22 @@ import Home from "@/pages/Home";
 import TempEmail from "@/pages/TempEmail";
 import KeyChecker from "@/pages/KeyChecker";
 import TokenBatch from "@/pages/TokenBatch";
+import IpChecker from "@/pages/IpChecker";
+import BulkEmail from "@/pages/BulkEmail";
+import InfoGenerator from "@/pages/InfoGenerator";
 
 const queryClient = new QueryClient();
 
-type Tab = "home" | "email" | "keycheck" | "tokencheck";
+type Tab = "home" | "email" | "bulk-email" | "keycheck" | "tokencheck" | "ip" | "info";
 
 const tabs: { id: Tab; label: string; icon: string; badge?: string }[] = [
   { id: "home", label: "工具导航", icon: "🗂️" },
   { id: "email", label: "临时邮箱", icon: "📬", badge: "真实可用" },
+  { id: "bulk-email", label: "批量邮箱", icon: "📮", badge: "真实可用" },
   { id: "keycheck", label: "Key 验证", icon: "🔑", badge: "真实可用" },
   { id: "tokencheck", label: "批量检测", icon: "⚡", badge: "真实可用" },
+  { id: "ip", label: "IP 查询", icon: "🌐", badge: "真实可用" },
+  { id: "info", label: "信息生成", icon: "👤", badge: "真实可用" },
 ];
 
 function App() {
@@ -49,12 +55,12 @@ function App() {
               </a>
             </div>
 
-            <nav className="flex gap-1 py-1.5">
+            <nav className="flex gap-0.5 py-1.5 overflow-x-auto scrollbar-none">
               {tabs.map((t) => (
                 <button
                   key={t.id}
                   onClick={() => setTab(t.id)}
-                  className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm transition-all relative ${
+                  className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm transition-all relative whitespace-nowrap shrink-0 ${
                     tab === t.id
                       ? "bg-blue-600/20 text-blue-400"
                       : "text-gray-400 hover:text-gray-200 hover:bg-[#21262d]"
@@ -74,10 +80,13 @@ function App() {
         </header>
 
         <main className="max-w-7xl mx-auto px-4 py-8">
-          {tab === "home" && <HomeContent />}
+          {tab === "home" && <Home />}
           {tab === "email" && <TempEmail />}
+          {tab === "bulk-email" && <BulkEmail />}
           {tab === "keycheck" && <KeyChecker />}
           {tab === "tokencheck" && <TokenBatch />}
+          {tab === "ip" && <IpChecker />}
+          {tab === "info" && <InfoGenerator />}
         </main>
 
         <footer className="mt-8 border-t border-[#21262d]">
@@ -96,10 +105,6 @@ function App() {
       </div>
     </QueryClientProvider>
   );
-}
-
-function HomeContent() {
-  return <Home />;
 }
 
 export default App;

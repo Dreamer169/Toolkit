@@ -293,4 +293,79 @@ router.post("/tools/token-batch-check", async (req, res) => {
   }
 });
 
+router.get("/tools/ip-check", async (req, res) => {
+  try {
+    const r = await fetch("https://ipapi.co/json/");
+    const data = await r.json() as Record<string, unknown>;
+    res.json({ success: true, info: data });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+router.post("/tools/proxy-check", async (req, res) => {
+  const { proxy } = req.body as { proxy?: string };
+  if (!proxy) {
+    res.status(400).json({ success: false, error: "proxy 不能为空" });
+    return;
+  }
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    const r = await fetch("https://ipapi.co/json/", {
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    const data = await r.json() as Record<string, unknown>;
+    res.json({ success: true, info: data, note: "当前环境无法直接测试外部代理，显示的是服务器本身 IP。如需测试代理请在本地环境运行" });
+  } catch (e: unknown) {
+    res.json({ success: false, error: `连接失败: ${String(e)}` });
+  }
+});
+
+interface RandomUserResult {
+  gender: string;
+  name: { first: string; last: string };
+  location: {
+    street: { number: number; name: string };
+    city: string;
+    state: string;
+    postcode: number | string;
+    country: string;
+  };
+  email: string;
+  login: { username: string; password: string };
+  phone: string;
+  dob: { date: string };
+}
+
+router.get("/tools/info-generate", async (req, res) => {
+  const count = Math.min(20, Math.max(1, Number(req.query.count) || 1));
+  try {
+    const r = await fetch(
+      `https://randomuser.me/api/?nat=us&results=${count}&noinfo`
+    );
+    const d = await r.json() as { results: RandomUserResult[] };
+    const data = d.results.map((p: RandomUserResult) => ({
+      firstName: p.name.first,
+      lastName: p.name.last,
+      name: `${p.name.first} ${p.name.last}`,
+      gender: p.gender,
+      email: p.email,
+      username: p.login.username,
+      password: p.login.password,
+      phone: p.phone,
+      address: `${p.location.street.number} ${p.location.street.name}`,
+      city: p.location.city,
+      state: p.location.state,
+      zip: String(p.location.postcode),
+      country: "United States",
+      dob: new Date(p.dob.date).toLocaleDateString("en-US"),
+    }));
+    res.json({ success: true, data });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
 export default router;
