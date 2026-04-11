@@ -817,40 +817,61 @@ class PatchrightController(BaseController):
             print("[captcha] ✅ 无障碍按钮点击成功", flush=True)
             page.wait_for_timeout(2000)
 
-            # ── 点击后等待音频挑战界面加载（5s）────────────────────────────
-            page.wait_for_timeout(5000)
+            # ── 点击后等待音频挑战界面加载（8s）────────────────────────────
+            page.wait_for_timeout(8000)
 
-            # ── 截图 + 全面诊断（所有 frames）────────────────────────────────
+            # ── 截图 + 深度诊断（hsprotect frames 完整 HTML）────────────────
             try:
                 page.screenshot(path=f"/tmp/outlook_captcha_after_a11y_{attempt}.png")
                 print(f"[captcha] 截图已保存 /tmp/outlook_captcha_after_a11y_{attempt}.png", flush=True)
             except Exception:
                 pass
-            # 扫描所有 frames，特别关注音频元素和输入框
+            # 扫描所有 frames：打印 hsprotect.net frames 的完整 body
             all_frames_now = page.frames
-            print(f"[captcha] 点击后帧扫描（{len(all_frames_now)} frames）：", flush=True)
-            for _df in all_frames_now:
+            print(f"[captcha] 点击后帧深度扫描（{len(all_frames_now)} frames）：", flush=True)
+            for _fi, _df in enumerate(all_frames_now):
                 try:
                     detail = _df.evaluate("""
                         () => {
-                            const body = document.body ? document.body.innerHTML.substring(0, 300) : '';
-                            const audios = Array.from(document.querySelectorAll('audio'));
-                            const inputs = Array.from(document.querySelectorAll('input[type="text"],input[type="tel"]'));
+                            const body = document.body ? document.body.innerHTML : '';
+                            // 宽泛音频选择器
+                            const audios = Array.from(document.querySelectorAll(
+                                'audio, video, [src*=".mp3"],[src*=".wav"],[src*=".ogg"],[src*="audio"],' +
+                                '[data-src*="mp3"],[data-src*="audio"],source'
+                            ));
+                            const inputs = Array.from(document.querySelectorAll(
+                                'input[type="text"],input[type="tel"],input[placeholder],textarea'
+                            ));
+                            const playBtns = Array.from(document.querySelectorAll(
+                                '[class*="play"],[aria-label*="play"],[aria-label*="Play"],' +
+                                '[class*="audio"],[class*="sound"],[class*="listen"]'
+                            ));
                             return {
-                                url: window.location.href.substring(0, 60),
-                                audios: audios.map(a => a.src || a.currentSrc || '').filter(Boolean),
+                                url: window.location.href.substring(0, 80),
+                                audios: audios.slice(0,5).map(a => ({
+                                    tag: a.tagName, src: (a.src||a.getAttribute('src')||a.currentSrc||'').substring(0,100),
+                                    dataSrc: (a.getAttribute('data-src')||'').substring(0,80)
+                                })),
                                 inputs: inputs.length,
-                                bodySnippet: body.substring(0, 200)
+                                inputPH: inputs.slice(0,3).map(i => i.placeholder||i.type),
+                                playBtns: playBtns.length,
+                                bodyLen: body.length,
+                                bodySnippet: body.substring(0, 600)
                             };
                         }
                     """)
-                    if detail.get('audios') or detail.get('inputs'):
-                        print(f"[captcha]   🔊 {detail['url']}: audios={detail['audios']}, inputs={detail['inputs']}", flush=True)
-                        print(f"[captcha]      body: {detail.get('bodySnippet','')[:200]}", flush=True)
+                    url = detail.get('url', '')[:50]
+                    has_audio = bool(detail.get('audios'))
+                    has_input = detail.get('inputs', 0) > 0
+                    body_len  = detail.get('bodyLen', 0)
+                    if 'hsprotect.net' in url or has_audio or has_input or detail.get('playBtns'):
+                        print(f"[captcha]   🔍 frame[{_fi}] {url}", flush=True)
+                        print(f"[captcha]      audios={detail.get('audios')} inputs={detail.get('inputs')} playBtns={detail.get('playBtns')} bodyLen={body_len}", flush=True)
+                        print(f"[captcha]      body: {detail.get('bodySnippet','')[:400]}", flush=True)
                     else:
-                        print(f"[captcha]   frame {detail['url']}: 无音频/输入", flush=True)
-                except Exception:
-                    pass
+                        print(f"[captcha]   frame[{_fi}] {url}: bodyLen={body_len}", flush=True)
+                except Exception as _fe:
+                    print(f"[captcha]   frame[{_fi}] 读取异常: {_fe}", flush=True)
 
             # ── Whisper 音频 CAPTCHA 解法 ──────────────────────────────────
             audio_solved = self._solve_audio_challenge(page, frame2)
