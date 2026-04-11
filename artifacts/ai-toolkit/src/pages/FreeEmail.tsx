@@ -1,25 +1,19 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, ReactNode } from "react";
+import { QRCodeSVG } from "qrcode.react";
 
 interface Identity {
-  // 账号
   email: string; login: string; domain: string;
   username: string; password: string; guid: string;
-  // 个人
   name: string; phone: string; birthday: string;
   birthdayDay: string; birthdayMonth: string; birthdayYear: string;
   age: string; zodiac: string; blood: string; color: string;
   motherMaidenName: string;
-  // 地址
   street: string; city: string; state: string; zip: string;
   coords: string; countryCode: string;
-  // 工作
   company: string; occupation: string; website: string;
-  // 体格
   height: string; heightcm: string; weight: string; weightkg: string; vehicle: string;
-  // 财务
   ssn: string; card: string; cvv2: string; expiration: string;
   moneygram: string; westernunion: string; ups: string;
-  // 技术
   useragent: string;
 }
 
@@ -35,6 +29,7 @@ export default function FreeEmail() {
   const [watching, setWatching] = useState(false);
   const [selectedMsg, setSelectedMsg] = useState<Message | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const [showQR, setShowQR] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const generate = async () => {
@@ -42,6 +37,7 @@ export default function FreeEmail() {
     setMessages([]);
     setSelectedMsg(null);
     setWatching(false);
+    setShowQR(false);
     if (pollRef.current) clearInterval(pollRef.current);
     try {
       const r = await fetch("/api/fakemail/identity");
@@ -122,15 +118,20 @@ export default function FreeEmail() {
     copy(lines.join("\n"), "all");
   };
 
+  const getQRContent = (id: Identity) =>
+    `姓名: ${id.name}\n邮箱: ${id.email}\n密码: ${id.password}\n用户名: ${id.username}\n电话: +${id.countryCode} ${id.phone}\n地址: ${id.street}, ${id.city}, ${id.state} ${id.zip}\n生日: ${id.birthday}\nSSN: ${id.ssn}\n信用卡: ${id.card} CVV:${id.cvv2} 有效期:${id.expiration}`;
+
+  const getFirstName = (name: string) => name.split(" ")[0].replace(/\./g, "").trim();
+
   const extractCode = (text: string) => {
     const m = text?.match(/\b(\d{6})\b/) || text?.match(/\b([A-Z0-9]{8,})\b/);
     return m ? m[1] : null;
   };
 
-  const F = ({ label, value, k, mono = true, full = false }: {
-    label: string; value: string; k: string; mono?: boolean; full?: boolean;
+  const F = ({ label, value, k, mono = true }: {
+    label: string; value: string; k: string; mono?: boolean;
   }) => (
-    <div className={`flex items-start gap-2 py-1.5 border-b border-[#21262d] last:border-0 ${full ? "col-span-2" : ""}`}>
+    <div className="flex items-start gap-2 py-1.5 border-b border-[#21262d] last:border-0">
       <span className="text-[11px] text-gray-500 w-20 shrink-0 pt-0.5">{label}</span>
       <span className={`text-[12px] text-gray-200 flex-1 break-all leading-relaxed ${mono ? "font-mono" : ""}`}>{value || "—"}</span>
       {value && (
@@ -148,7 +149,7 @@ export default function FreeEmail() {
     </div>
   );
 
-  const Section = ({ title, icon, children }: { title: string; icon: string; children: React.ReactNode }) => (
+  const Section = ({ title, icon, children }: { title: string; icon: string; children: ReactNode }) => (
     <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4">
       <h3 className="text-xs font-semibold text-gray-400 mb-3 flex items-center gap-2">
         <span>{icon}</span>{title}
@@ -190,6 +191,79 @@ export default function FreeEmail() {
 
       {identity && (
         <>
+          {/* 三个快捷功能横幅 */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {/* 名字含义 */}
+            <a
+              href={`https://www.behindthename.com/name/${getFirstName(identity.name).toLowerCase()}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-3 bg-[#161b22] border border-[#21262d] hover:border-purple-500/50 rounded-xl px-4 py-3 transition-all group"
+            >
+              <span className="text-2xl">📖</span>
+              <div>
+                <p className="text-xs font-medium text-gray-200 group-hover:text-purple-300 transition-colors">
+                  好奇 <span className="text-purple-400 font-bold">{getFirstName(identity.name)}</span> 是什么意思？
+                </p>
+                <p className="text-[11px] text-gray-500 mt-0.5">点击查看名字含义 →</p>
+              </div>
+            </a>
+
+            {/* SSN 在线查询 */}
+            <a
+              href={`https://www.ssn-search.com/`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-3 bg-[#161b22] border border-[#21262d] hover:border-yellow-500/50 rounded-xl px-4 py-3 transition-all group"
+            >
+              <span className="text-2xl">🔍</span>
+              <div>
+                <p className="text-xs font-medium text-gray-200 group-hover:text-yellow-300 transition-colors">
+                  SSN <span className="text-yellow-400 font-mono font-bold">{identity.ssn}</span>
+                </p>
+                <p className="text-[11px] text-gray-500 mt-0.5">点击查询是否已泄露在线 →</p>
+              </div>
+            </a>
+
+            {/* QR 码 */}
+            <button
+              onClick={() => setShowQR(!showQR)}
+              className="flex items-center gap-3 bg-[#161b22] border border-[#21262d] hover:border-emerald-500/50 rounded-xl px-4 py-3 transition-all group text-left"
+            >
+              <span className="text-2xl">📱</span>
+              <div>
+                <p className="text-xs font-medium text-gray-200 group-hover:text-emerald-300 transition-colors">
+                  查看此身份的 QR 码
+                </p>
+                <p className="text-[11px] text-gray-500 mt-0.5">{showQR ? "点击收起 ▲" : "点击展开 ▼"}</p>
+              </div>
+            </button>
+          </div>
+
+          {/* QR 码展开区 */}
+          {showQR && (
+            <div className="bg-[#161b22] border border-emerald-500/30 rounded-xl p-6 flex flex-col sm:flex-row items-center gap-6">
+              <div className="bg-white p-3 rounded-xl shadow-lg">
+                <QRCodeSVG
+                  value={getQRContent(identity)}
+                  size={160}
+                  bgColor="#ffffff"
+                  fgColor="#000000"
+                  level="M"
+                />
+              </div>
+              <div className="flex-1">
+                <p className="text-sm font-semibold text-emerald-400 mb-2">此身份的 QR 码</p>
+                <p className="text-xs text-gray-400 leading-relaxed mb-3">
+                  扫描此二维码可在手机上快速查看该身份的完整信息，包含姓名、邮箱、密码、电话、地址、SSN 和信用卡信息。
+                </p>
+                <div className="text-[11px] font-mono text-gray-500 bg-[#0d1117] rounded-lg p-3 whitespace-pre-wrap leading-relaxed max-h-32 overflow-y-auto">
+                  {getQRContent(identity)}
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* 账号信息 + 收件箱并排 */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <Section title="账号信息" icon="🔑">
@@ -309,9 +383,9 @@ export default function FreeEmail() {
             </Section>
           </div>
 
-          {/* User Agent */}
+          {/* 技术信息 */}
           <Section title="技术信息" icon="🌐">
-            <F label="User Agent" value={identity.useragent} k="ua" full />
+            <F label="User Agent" value={identity.useragent} k="ua" />
           </Section>
         </>
       )}
@@ -320,7 +394,7 @@ export default function FreeEmail() {
         <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-8 text-center">
           <div className="text-4xl mb-3">🆔</div>
           <p className="text-gray-400 text-sm">点击上方按钮生成完整美国身份</p>
-          <p className="text-gray-600 text-xs mt-1">包含 31 个字段：账号、个人、地址、工作、体格、财务、技术信息 + 真实收件箱</p>
+          <p className="text-gray-600 text-xs mt-1">包含 31 个字段：账号、个人、地址、工作、体格、财务、技术信息 + 真实收件箱 + 名字含义 + SSN 查询 + QR 码</p>
         </div>
       )}
 
@@ -329,7 +403,7 @@ export default function FreeEmail() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-[11px] text-gray-500">
           <div className="flex gap-2"><span className="text-blue-400 shrink-0">①</span><span><strong className="text-gray-400">fakenamegenerator.com</strong> 提供 31 个字段的真实风格美国身份（含信用卡、SSN、坐标等）</span></div>
           <div className="flex gap-2"><span className="text-blue-400 shrink-0">②</span><span>邮箱由 <strong className="text-gray-400">fakemailgenerator.com</strong> 真实托管，可接收任意来源邮件，免费无限制</span></div>
-          <div className="flex gap-2"><span className="text-blue-400 shrink-0">③</span><span>收件箱通过 <strong className="text-gray-400">socket.io</strong> 实时监听，验证码自动识别，一键复制，全程零 API Key</span></div>
+          <div className="flex gap-2"><span className="text-blue-400 shrink-0">③</span><span><strong className="text-gray-400">behindthename.com</strong> 查名字含义 / <strong className="text-gray-400">QR 码</strong>包含完整身份信息 / SSN 在线泄露查询</span></div>
         </div>
       </div>
     </div>
