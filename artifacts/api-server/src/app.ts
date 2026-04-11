@@ -60,4 +60,18 @@ app.use(
   }),
 );
 
+app.use(
+  "/api/fakemail",
+  createProxyMiddleware({
+    target: "http://localhost:6100",
+    changeOrigin: true,
+    pathRewrite: { "^/api/fakemail": "" },
+    on: {
+      error: (_err, _req, res) => {
+        (res as express.Response).status(502).json({ success: false, error: "FakeMail 服务未启动" });
+      },
+    },
+  }),
+);
+
 export default app;

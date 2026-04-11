@@ -7,15 +7,17 @@ import TokenBatch from "@/pages/TokenBatch";
 import IpChecker from "@/pages/IpChecker";
 import BulkEmail from "@/pages/BulkEmail";
 import InfoGenerator from "@/pages/InfoGenerator";
+import FreeEmail from "@/pages/FreeEmail";
 
 const queryClient = new QueryClient();
 
-type Tab = "home" | "email" | "bulk-email" | "keycheck" | "tokencheck" | "ip" | "info" | "team-register" | "openai-pool";
+type Tab = "home" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "team-register" | "openai-pool";
 
 const tabs: { id: Tab; label: string; icon: string; badge?: string; group?: string }[] = [
   { id: "home", label: "工具导航", icon: "🗂️" },
   { id: "email", label: "临时邮箱", icon: "📬", badge: "真实可用" },
   { id: "bulk-email", label: "批量邮箱", icon: "📮", badge: "真实可用" },
+  { id: "free-email", label: "免费身份邮箱", icon: "🆓", badge: "无需Key" },
   { id: "keycheck", label: "Key 验证", icon: "🔑", badge: "真实可用" },
   { id: "tokencheck", label: "批量检测", icon: "⚡", badge: "真实可用" },
   { id: "ip", label: "IP 查询", icon: "🌐", badge: "真实可用" },
@@ -95,6 +97,7 @@ function App() {
             {tab === "home" && <Home />}
             {tab === "email" && <TempEmail />}
             {tab === "bulk-email" && <BulkEmail />}
+            {tab === "free-email" && <FreeEmail />}
             {tab === "keycheck" && <KeyChecker />}
             {tab === "tokencheck" && <TokenBatch />}
             {tab === "ip" && <IpChecker />}

@@ -24,6 +24,10 @@ args = "artifacts/team-all-in-one: ChatGPT 注册面板"
 task = "workflow.run"
 args = "artifacts/openai-pool: 账号池编排器"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "artifacts/api-server: FakeMail Bridge"
+
 [[workflows.workflow]]
 name = "artifacts/team-all-in-one: ChatGPT 注册面板"
 author = "agent"
@@ -48,6 +52,18 @@ waitForPort = 8000
 [workflows.workflow.metadata]
 outputType = "console"
 
+[[workflows.workflow]]
+name = "artifacts/api-server: FakeMail Bridge"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd artifacts/api-server && FAKEMAIL_PORT=6100 python3 fakemail_bridge.py"
+waitForPort = 6100
+
+[workflows.workflow.metadata]
+outputType = "console"
+
 [agent]
 stack = "PNPM_WORKSPACE"
 expertMode = true
@@ -59,6 +75,10 @@ timeoutMs = 20000
 [[ports]]
 localPort = 5000
 externalPort = 5000
+
+[[ports]]
+localPort = 6100
+externalPort = 3001
 
 [[ports]]
 localPort = 8000
