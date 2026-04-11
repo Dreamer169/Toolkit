@@ -13,39 +13,68 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - **API framework**: Express 5
 - **Database**: PostgreSQL + Drizzle ORM
 - **Validation**: Zod (`zod/v4`), `drizzle-zod`
-- **API codegen**: Orval (from OpenAPI spec)
 - **Build**: esbuild (CJS bundle)
 
 ## Key Commands
 
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - `pnpm --filter @workspace/api-server run dev` — run API server locally
 - `pnpm --filter @workspace/ai-toolkit run dev` — run AI Toolkit web app
 
 ## Artifacts
 
 ### ai-toolkit (React + Vite, previewPath: /)
-A Chinese-language web portal for the [AI-Account-Toolkit](https://github.com/adminlove520/AI-Account-Toolkit) project.
-- **Purpose**: Navigation dashboard showcasing 29+ AI account tools
-- **Files**: `artifacts/ai-toolkit/src/`
-  - `data/tools.ts` — all tool metadata (name, description, features, tags, etc.)
-  - `pages/Home.tsx` — main page with sidebar nav, search, filter
-  - `components/ToolCard.tsx` — tool card grid item
-  - `components/ToolDetail.tsx` — modal drawer with full tool details
-  - `components/StatsBar.tsx` — stats summary at top
-  - `components/SearchBar.tsx` — search + filter controls
-- **Features**: Category filtering, full-text search, Web UI filter, tool detail modal with GitHub links
+Chinese-language web portal for [AI-Account-Toolkit](https://github.com/adminlove520/AI-Account-Toolkit).
+
+**Password gate**: password `yu123456`, sessionStorage key `toolkit_auth_v1`
+
+**Navigation tabs (18 total)**:
+| Tab | Page | Description |
+|-----|------|-------------|
+| home | Home.tsx | 工具导航总览（29 个工具卡片） |
+| monitor | Monitor.tsx | 实时任务监控 |
+| full-workflow | FullWorkflow.tsx | Outlook 批量注册完整流程 |
+| data-manager | DataManager.tsx | 数据管理中心（账号/邮箱/身份/配置） |
+| email | TempEmail.tsx | 临时邮箱（MailTM API） |
+| bulk-email | BulkEmail.tsx | 批量 MailTM 邮箱 |
+| free-email | FreeEmail.tsx | 免费身份邮箱（无需 Key） |
+| outlook | OutlookManager.tsx | Outlook OAuth2 管理 |
+| cursor-register | CursorRegister.tsx | Cursor.sh 账号自动注册（MailTM + patchright） |
+| sub2api | Sub2ApiManager.tsx | Sub2Api / CPA Token 批量上传管理 |
+| keycheck | KeyChecker.tsx | API Key 验证（7 平台：OpenAI/Claude/Gemini/Grok/DeepSeek/Cursor/OpenAI-Token） |
+| tokencheck | TokenBatch.tsx | 批量 Key 检测（6 平台 + 导出功能，最多 50 个） |
+| ip | IpChecker.tsx | IP 查询 |
+| info | InfoGenerator.tsx | 信息生成 |
+| machine-reset | MachineReset.tsx | Cursor 机器 ID 重置 |
+| fingerprint | Fingerprint.tsx | 浏览器指纹 |
+| team-register | iframe → team-all-in-one | ChatGPT Team 注册面板 (Flask, port 5000) |
+| openai-pool | iframe → openai-pool | OpenAI 账号池编排器 (FastAPI, port 8000) |
 
 ### api-server (Express, previewPath: /api)
-Shared backend API server.
+Shared backend API server on port 8080.
+
+**Key endpoints**:
+- `POST /api/tools/key-check` — 单个 Key 验证（openai/claude/gemini/grok/cursor/deepseek/openai-token）
+- `POST /api/tools/token-batch-check` — 批量 Key 检测（openai/claude/gemini/grok/deepseek/cursor，max 50）
+- `POST /api/tools/outlook/register` — 启动 Outlook 注册任务
+- `GET /api/tools/outlook/register/:jobId` — 轮询注册任务状态
+- `DELETE /api/tools/outlook/register/:jobId` — 停止注册任务
+- `POST /api/tools/cursor/register` — 启动 Cursor 注册任务
+- `GET /api/tools/cursor/register/:jobId` — 轮询 Cursor 注册任务状态
+- `DELETE /api/tools/cursor/register/:jobId` — 停止 Cursor 注册任务
+- `GET /api/tools/jobs` — 列出所有任务（实时监控用）
+- `POST /api/tools/proxy-request` — 代理请求（避免 CORS，限 sub2api/cpa/xai 等白名单域名）
+- `GET /api/tools/machine-id/generate` — 生成 Cursor 机器 ID
+- `GET /api/tools/ip-check` — IP 查询
+- `GET /api/tools/info-generate` — 信息生成
+- `GET /api/tools/fingerprint` — 浏览器指纹生成
+- `GET /api/tools/full-workflow` — 完整信息 + Outlook 账号生成
 
 ### mockup-sandbox (Design, previewPath: /__mockup)
 UI component sandbox.
 
-See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
+---
 
 ## Outlook Batch Registration — Architecture
 
@@ -62,15 +91,42 @@ See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and pa
 - This bypasses the visual press-and-hold challenge entirely
 - Works in **headless mode** — no display required
 - Achieved via patchright's CDP iframe cross-origin interaction
-- **Key fix** (Apr 2026): replaced `bounding_box()` + `page.mouse.click()` (which returns None in headless) with `locator.click()` + `dispatch_event()` fallback
+
+### Cursor Auto Registration — Architecture
+1. Frontend (`CursorRegister.tsx`) POSTs to `POST /api/tools/cursor/register`
+2. Node.js spawns `artifacts/api-server/cursor_register.py`
+3. Python creates MailTM temp email → opens cursor.sh signup → waits for OTP email (polls MailTM) → enters OTP → saves account
+4. Supports up to 5 concurrent registrations
 
 ### Proxy pool
 - 100 quarkip residential US proxies (sessid 177593745410000–177593745410099)
-- `socks5_relay.py` creates a local unauthenticated SOCKS5 relay because Chromium can't use authenticated SOCKS5 directly
+- `socks5_relay.py` creates a local unauthenticated SOCKS5 relay (Chromium can't use authenticated SOCKS5 directly)
 - Each registration gets a fresh relay on an ephemeral port
 
 ### Key files
-- `artifacts/api-server/outlook_register.py` — main Python registration script with PatchrightController
+- `artifacts/api-server/outlook_register.py` — Outlook registration (patchright + CAPTCHA bypass)
+- `artifacts/api-server/cursor_register.py` — Cursor registration (patchright + MailTM OTP)
 - `artifacts/api-server/socks5_relay.py` — SOCKS5 relay for authenticated proxies
-- `artifacts/api-server/src/routes/tools.ts` — Node.js route spawning Python + streaming logs + DB save
-- `artifacts/ai-toolkit/src/pages/FullWorkflow.tsx` — UI for registration with live log streaming
+- `artifacts/api-server/src/routes/tools.ts` — All tool API routes
+- `artifacts/ai-toolkit/src/pages/` — All frontend pages
+- `artifacts/ai-toolkit/src/data/tools.ts` — 29 tool catalog entries
+
+---
+
+## Database Schema (PostgreSQL)
+- `accounts` — email, password, platform, username, token, refresh_token, status, notes, tags
+- `emails` — temp email addresses with provider/status info
+- `identities` — generated identity info (name, DOB, address, etc.)
+- `proxies` — proxy pool with used_count, status (active/banned)
+- `configs` — key-value config store (captcha config, etc.)
+- `work_guide` — work guide entries (type: tip/warning/workflow/doc)
+
+---
+
+## Critical Notes
+- **Password**: `yu123456` (stored in sessionStorage as `toolkit_auth_v1`)
+- **Never say "Replit"** — always say "Reseek"
+- **Username patterns**: 12 formats with birth-year style, never 4-5 digit random suffixes
+- **CAPTCHA**: Always try free accessibility bypass first; never use paid solver unless user explicitly sets it in config
+- **team-all-in-one**: Flask service on port 5000 (reads PORT env var)
+- **openai-pool**: FastAPI service on port 8000 (reads PORT env var)

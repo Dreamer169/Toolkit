@@ -432,6 +432,51 @@ router.post("/tools/key-check", async (req, res) => {
       } catch (e: unknown) {
         error = String(e);
       }
+    } else if (platform === "grok") {
+      try {
+        const r = await fetch("https://api.x.ai/v1/models", {
+          headers: { Authorization: `Bearer ${key}` },
+        });
+        const data = await r.json() as { data?: Array<{ id: string }>; error?: { message: string } };
+        if (r.ok && data.data) {
+          valid = true;
+          info = { modelCount: data.data.length, firstModel: data.data[0]?.id };
+        } else {
+          error = data.error?.message ?? "无效的 Grok API Key";
+        }
+      } catch (e: unknown) {
+        error = String(e);
+      }
+    } else if (platform === "cursor") {
+      try {
+        const r = await fetch("https://www.cursor.com/api/usage", {
+          headers: { Authorization: `Bearer ${key}` },
+        });
+        if (r.ok) {
+          const data = await r.json() as Record<string, unknown>;
+          valid = true;
+          info = { status: "有效", usage: JSON.stringify(data).slice(0, 100) };
+        } else {
+          error = "无效的 Cursor Token";
+        }
+      } catch (e: unknown) {
+        error = String(e);
+      }
+    } else if (platform === "deepseek") {
+      try {
+        const r = await fetch("https://api.deepseek.com/models", {
+          headers: { Authorization: `Bearer ${key}` },
+        });
+        const data = await r.json() as { data?: Array<{ id: string }>; error?: { message: string } };
+        if (r.ok && data.data) {
+          valid = true;
+          info = { modelCount: data.data.length, firstModel: data.data[0]?.id };
+        } else {
+          error = data.error?.message ?? "无效的 DeepSeek API Key";
+        }
+      } catch (e: unknown) {
+        error = String(e);
+      }
     } else {
       res.status(400).json({ success: false, error: "不支持的平台" });
       return;
@@ -450,32 +495,51 @@ router.post("/tools/token-batch-check", async (req, res) => {
       res.status(400).json({ success: false, error: "tokens 不能为空" });
       return;
     }
-    const limited = tokens.slice(0, 20);
+    const limited = tokens.slice(0, 50);
     const results = await Promise.allSettled(
       limited.map(async (token) => {
         const trimmed = token.trim();
         if (!trimmed) return { token: trimmed, valid: false, error: "空值" };
+        const preview = trimmed.slice(0, 16) + "...";
         try {
-          const endpoint =
-            platform === "claude"
-              ? "https://api.anthropic.com/v1/models"
-              : "https://api.openai.com/v1/models";
-          const headers: Record<string, string> =
-            platform === "claude"
-              ? { "x-api-key": trimmed, "anthropic-version": "2023-06-01" }
-              : { Authorization: `Bearer ${trimmed}` };
+          let endpoint = "https://api.openai.com/v1/models";
+          let headers: Record<string, string> = { Authorization: `Bearer ${trimmed}` };
+          let checkFn: (data: Record<string, unknown>) => boolean = (d) => !!(d.data);
+
+          if (platform === "claude") {
+            endpoint = "https://api.anthropic.com/v1/models";
+            headers = { "x-api-key": trimmed, "anthropic-version": "2023-06-01" };
+            checkFn = (d) => !!(d.data);
+          } else if (platform === "gemini") {
+            endpoint = `https://generativelanguage.googleapis.com/v1/models?key=${trimmed}`;
+            headers = {};
+            checkFn = (d) => !!(d.models);
+          } else if (platform === "grok") {
+            endpoint = "https://api.x.ai/v1/models";
+            headers = { Authorization: `Bearer ${trimmed}` };
+            checkFn = (d) => !!(d.data);
+          } else if (platform === "deepseek") {
+            endpoint = "https://api.deepseek.com/models";
+            headers = { Authorization: `Bearer ${trimmed}` };
+            checkFn = (d) => !!(d.data);
+          } else if (platform === "cursor") {
+            endpoint = "https://www.cursor.com/api/usage";
+            headers = { Authorization: `Bearer ${trimmed}` };
+            checkFn = () => true;
+          }
+
           const r = await fetch(endpoint, { headers });
-          const data = await r.json() as { data?: unknown[]; models?: unknown[]; error?: { message: string } };
-          if (r.ok && (data.data || data.models)) {
-            return { token: trimmed.slice(0, 12) + "...", valid: true };
+          const data = await r.json() as Record<string, unknown> & { error?: { message: string } };
+          if (r.ok && checkFn(data)) {
+            return { token: preview, valid: true };
           }
           return {
-            token: trimmed.slice(0, 12) + "...",
+            token: preview,
             valid: false,
-            error: data.error?.message ?? "无效",
+            error: (data.error as { message?: string })?.message ?? "无效",
           };
         } catch (e: unknown) {
-          return { token: trimmed.slice(0, 12) + "...", valid: false, error: String(e) };
+          return { token: preview, valid: false, error: String(e) };
         }
       })
     );
@@ -962,6 +1026,114 @@ router.delete("/tools/outlook/register/:jobId", (req, res) => {
   res.json({ success: true });
 });
 
+// ── Cursor 账号自动注册 ────────────────────────────────────
+router.post("/tools/cursor/register", async (req, res) => {
+  const {
+    count = 1,
+    proxy: proxyInput = "",
+    headless = true,
+    autoProxy = false,
+  } = req.body as { count?: number; proxy?: string; headless?: boolean; autoProxy?: boolean };
+
+  let proxy = proxyInput;
+  if (!proxy && autoProxy) {
+    try {
+      const { query: dbQuery } = await import("../db.js");
+      const rows = await dbQuery<{ id: number; formatted: string }>(
+        "SELECT id, formatted FROM proxies WHERE status != 'banned' ORDER BY used_count ASC, RANDOM() LIMIT 1"
+      );
+      if (rows[0]) {
+        proxy = rows[0].formatted;
+        const { execute: dbExec } = await import("../db.js");
+        await dbExec("UPDATE proxies SET used_count = used_count + 1, last_used = NOW(), status = 'active' WHERE id = $1", [rows[0].id]);
+      }
+    } catch {}
+  }
+
+  const n = Math.min(5, Math.max(1, count));
+  const jobId = `cur_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const job: RegJob = { status: "running", logs: [], accounts: [], exitCode: null, startedAt: Date.now() };
+  const proxyDisplay = proxy ? proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@") : "无代理";
+  job.logs.push({ type: "start", message: `启动 Cursor 自动注册 ${n} 个账号...` });
+  if (proxy) job.logs.push({ type: "log", message: `🌐 代理: ${proxyDisplay}` });
+  regJobs.set(jobId, job);
+  cleanOldJobs();
+
+  res.json({ success: true, jobId, message: "Cursor 注册任务已启动" });
+
+  const { spawn } = await import("child_process");
+  const scriptPath = new URL("../cursor_register.py", import.meta.url).pathname;
+  const args = [scriptPath, "--count", String(n), "--headless", headless ? "true" : "false"];
+  if (proxy) args.push("--proxy", proxy);
+
+  const child = spawn("python3", args, { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+  (job as unknown as { _child: unknown })._child = child;
+
+  child.stdout.on("data", (chunk: Buffer) => {
+    for (const line of chunk.toString().split("\n")) {
+      const s = line.trim();
+      if (!s) continue;
+      try {
+        const ev = JSON.parse(s) as { type: string; message: string };
+        if (ev.type === "accounts") {
+          const accounts = JSON.parse(ev.message) as Array<{ email: string; password: string; name: string }>;
+          for (const acc of accounts) {
+            job.accounts.push({ email: acc.email, password: acc.password, username: acc.name });
+          }
+        } else {
+          job.logs.push({ type: ev.type === "success" ? "success" : ev.type === "error" ? "error" : "log", message: ev.message });
+          if (ev.type === "success") {
+            import("../db.js").then(({ execute: dbExec }) => {
+              const m = ev.message.match(/\S+@\S+/);
+              const pwm = ev.message.match(/密码:\s*(\S+)/);
+              if (m) {
+                dbExec(
+                  `INSERT INTO accounts (platform, email, password, status, notes, created_at)
+                   VALUES ('cursor', $1, $2, 'active', 'Auto registered', NOW())
+                   ON CONFLICT (platform, email) DO UPDATE SET password = EXCLUDED.password, status = 'active'`,
+                  [m[0], pwm?.[1] ?? ""]
+                ).catch(() => {});
+              }
+            }).catch(() => {});
+          }
+        }
+      } catch {
+        if (s) job.logs.push({ type: "log", message: s });
+      }
+    }
+  });
+
+  child.stderr.on("data", (chunk: Buffer) => {
+    const s = chunk.toString().trim();
+    if (s && !s.includes("DeprecationWarning") && !s.includes("FutureWarning") && !s.includes("UserWarning")) {
+      job.logs.push({ type: "error", message: s.slice(0, 300) });
+    }
+  });
+
+  child.on("close", (code) => {
+    job.status = code === 0 ? "done" : "failed";
+    const ok = job.accounts.length;
+    job.logs.push({ type: code === 0 ? "done" : "error", message: `任务结束  成功: ${ok} / ${n}` });
+    job.exitCode = code;
+  });
+});
+
+router.get("/tools/cursor/register/:jobId", (req, res) => {
+  const job = regJobs.get(req.params.jobId);
+  if (!job) { res.status(404).json({ success: false, error: "任务不存在" }); return; }
+  const since = Number(req.query.since ?? 0);
+  res.json({ success: true, status: job.status, accounts: job.accounts, logs: job.logs.slice(since), nextSince: job.logs.length, exitCode: job.exitCode });
+});
+
+router.delete("/tools/cursor/register/:jobId", (req, res) => {
+  const job = regJobs.get(req.params.jobId);
+  if (!job) { res.status(404).json({ success: false }); return; }
+  try { (job as unknown as { _child?: { kill: () => void } })._child?.kill(); } catch {}
+  job.status = "stopped";
+  job.logs.push({ type: "warn", message: "⚠ 用户停止了任务" });
+  res.json({ success: true });
+});
+
 router.get("/tools/ip-check", async (req, res) => {
   try {
     const r = await fetch("https://ipapi.co/json/");
@@ -1090,6 +1262,38 @@ router.get("/tools/workflow/prepare", async (req, res) => {
       outlook: { email: outlookEmail, username: outlookUsername, password },
     });
   } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+// ── 通用代理请求（避免前端 CORS 问题）─────────────────────
+router.post("/tools/proxy-request", async (req, res) => {
+  try {
+    const { url, method = "GET", headers: extraHeaders = {}, body } = req.body as {
+      url?: string; method?: string; headers?: Record<string, string>; body?: string;
+    };
+    if (!url) { res.status(400).json({ success: false, error: "url 不能为空" }); return; }
+
+    const allowed = [
+      "sub2api.com", "cpa.io", "cpaapi.io", "oaifree.com", "api.x.ai",
+      "api.anthropic.com", "api.openai.com", "api.deepseek.com",
+      "generativelanguage.googleapis.com",
+    ];
+    const host = new URL(url).hostname;
+    if (!allowed.some((a) => host.endsWith(a))) {
+      res.status(403).json({ success: false, error: `域名 ${host} 不在允许列表中` });
+      return;
+    }
+
+    const r = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json", ...extraHeaders },
+      body: method !== "GET" ? body : undefined,
+    });
+    let data: unknown;
+    try { data = await r.json(); } catch { data = { raw: await r.text() }; }
+    res.json({ success: r.ok, status: r.status, data });
+  } catch (e: unknown) {
     res.status(500).json({ success: false, error: String(e) });
   }
 });
