@@ -214,6 +214,78 @@ router.post("/data/configs/batch", async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
 });
 
+// ─── 代理池 CRUD ─────────────────────────────────────────
+router.get("/data/proxies", async (req, res) => {
+  try {
+    const rows = await query("SELECT id, formatted, host, port, status, used_count, last_used, created_at FROM proxies ORDER BY used_count ASC, id ASC LIMIT 200");
+    res.json({ success: true, data: rows, total: rows.length });
+  } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
+// 从代理池取一个最少使用的代理（供注册时自动选取）
+router.get("/data/proxies/pick", async (req, res) => {
+  try {
+    const row = await queryOne<{ id: number; formatted: string }>(
+      "SELECT id, formatted FROM proxies WHERE status != 'banned' ORDER BY used_count ASC, RANDOM() LIMIT 1"
+    );
+    if (!row) { res.json({ success: false, error: "代理池为空" }); return; }
+    await execute(
+      "UPDATE proxies SET used_count = used_count + 1, last_used = NOW(), status = 'active' WHERE id = $1",
+      [row.id]
+    );
+    res.json({ success: true, proxy: row.formatted, id: row.id });
+  } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
+// 标记代理失效
+router.put("/data/proxies/:id/ban", async (req, res) => {
+  try {
+    await execute("UPDATE proxies SET status='banned' WHERE id=$1", [req.params.id]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
+// 重置所有代理状态
+router.post("/data/proxies/reset", async (req, res) => {
+  try {
+    await execute("UPDATE proxies SET status='idle', used_count=0, last_used=NULL");
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
+// 批量导入代理（格式 socks5://host:port:user:pass 或 socks5://user:pass@host:port，每行一个）
+router.post("/data/proxies/import", async (req, res) => {
+  try {
+    const { text } = req.body as { text: string };
+    const lines = text.split("\n").map((l: string) => l.trim()).filter(Boolean);
+    let inserted = 0;
+    for (const raw of lines) {
+      let formatted = raw;
+      let host = "", port = 0, user = "", pass = "";
+      // 检测格式 socks5://host:port:user:pass
+      const noProto = raw.replace(/^socks5:\/\/|^http:\/\//, "");
+      const parts = noProto.split(":");
+      if (parts.length === 4 && !noProto.includes("@")) {
+        [host, , user, pass] = parts; port = parseInt(parts[1]);
+        formatted = `socks5://${user}:${pass}@${host}:${port}`;
+      } else if (raw.includes("@")) {
+        // socks5://user:pass@host:port
+        const m = raw.match(/socks5:\/\/([^:]+):([^@]+)@([^:]+):(\d+)/);
+        if (m) { [, user, pass, host] = m; port = parseInt(m[4]); formatted = raw; }
+      }
+      if (!host) continue;
+      try {
+        await execute(
+          `INSERT INTO proxies (raw, formatted, host, port, username, password) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (formatted) DO NOTHING`,
+          [raw, formatted, host, port, user, pass]
+        );
+        inserted++;
+      } catch {}
+    }
+    res.json({ success: true, inserted, total: lines.length });
+  } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
 // ─── 统计 ───────────────────────────────────────────────
 router.get("/data/stats", async (req, res) => {
   try {

@@ -734,16 +734,35 @@ function cleanOldJobs() {
 router.post("/tools/outlook/register", async (req, res) => {
   const {
     count    = 1,
-    proxy    = "",
+    proxy: proxyInput = "",
     headless = true,
     delay    = 5,
     engine   = "patchright",
     wait     = 11,
     retries  = 2,
+    autoProxy = false,
   } = req.body as {
     count?: number; proxy?: string; headless?: boolean; delay?: number;
-    engine?: string; wait?: number; retries?: number;
+    engine?: string; wait?: number; retries?: number; autoProxy?: boolean;
   };
+
+  // 如果没有提供代理，且 autoProxy=true，则从代理池自动选取
+  let proxy = proxyInput;
+  let autoProxyId: number | null = null;
+  if (!proxy && autoProxy) {
+    try {
+      const { query: dbQuery } = await import("../db.js");
+      const rows = await dbQuery<{ id: number; formatted: string }>(
+        "SELECT id, formatted FROM proxies WHERE status != 'banned' ORDER BY used_count ASC, RANDOM() LIMIT 1"
+      );
+      if (rows[0]) {
+        proxy = rows[0].formatted;
+        autoProxyId = rows[0].id;
+        const { execute: dbExec } = await import("../db.js");
+        await dbExec("UPDATE proxies SET used_count = used_count + 1, last_used = NOW(), status = 'active' WHERE id = $1", [autoProxyId]);
+      }
+    } catch {}
+  }
 
   const n   = Math.min(10, Math.max(1, count));
   const eng = ["patchright", "playwright"].includes(engine) ? engine : "patchright";
@@ -756,7 +775,9 @@ router.post("/tools/outlook/register", async (req, res) => {
     exitCode: null,
     startedAt: Date.now(),
   };
-  job.logs.push({ type: "start", message: `启动 ${eng} 注册 ${n} 个 Outlook 账号 (bot_protection_wait=${wait}s)...` });
+  const proxyDisplay = proxy ? proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@") : "无代理";
+  job.logs.push({ type: "start", message: `启动 ${eng} 注册 ${n} 个 Outlook 账号 (bot_protection_wait=${wait}s)${autoProxyId ? " [代理池自动选取]" : ""}...` });
+  if (proxy) job.logs.push({ type: "log", message: `🌐 代理: ${proxyDisplay}` });
   regJobs.set(jobId, job);
   cleanOldJobs();
 

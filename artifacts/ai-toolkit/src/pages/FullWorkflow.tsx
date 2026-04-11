@@ -52,6 +52,8 @@ export default function FullWorkflow() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [data, setData] = useState<PrepareData | null>(null);
   const [proxy, setProxy] = useState("");
+  const [autoProxy, setAutoProxy] = useState(false);
+  const [poolCount, setPoolCount] = useState<number | null>(null);
   const [engine, setEngine] = useState("patchright");
   const [headless, setHeadless] = useState(true);
   const [wait, setWait] = useState(11);
@@ -69,6 +71,18 @@ export default function FullWorkflow() {
   }, [logs]);
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
+  // 加载代理池数量
+  useEffect(() => {
+    fetch(`${API}/data/proxies`).then(r => r.json()).then(d => {
+      if (d.success) setPoolCount(d.total);
+    }).catch(() => {});
+  }, []);
+
+  async function pickProxyFromPool() {
+    const r = await fetch(`${API}/data/proxies/pick`).then(r => r.json()).catch(() => ({}));
+    if (r.success && r.proxy) { setProxy(r.proxy); setAutoProxy(false); }
+  }
 
   async function prepare() {
     setPhase("preparing");
@@ -102,6 +116,7 @@ export default function FullWorkflow() {
         body: JSON.stringify({
           count: 1, proxy, engine, headless: headless ? "true" : "false",
           wait, retries: 2, delay: 0,
+          autoProxy: !proxy && (poolCount ?? 0) > 0,
         }),
       });
       const d = await r.json();
@@ -318,8 +333,19 @@ export default function FullWorkflow() {
       {/* 启动注册按钮 */}
       {phase === "ready" && (
         <div className="space-y-3">
-          {/* 代理警告 */}
-          {!proxy && (
+          {/* 代理状态提示 */}
+          {!proxy && poolCount !== null && poolCount > 0 ? (
+            <div className="bg-emerald-900/20 border border-emerald-700/40 rounded-lg px-4 py-3 flex items-center gap-3">
+              <span className="text-emerald-400 text-lg flex-shrink-0">🌐</span>
+              <div className="flex-1 text-sm">
+                <p className="text-emerald-300 font-medium">代理池已就绪：{poolCount} 个住宅代理可用</p>
+                <p className="text-emerald-600 text-xs mt-0.5">启动注册时将自动从池中选取一个，每账号使用独立 session IP</p>
+              </div>
+              <button onClick={pickProxyFromPool} className="px-3 py-1.5 bg-emerald-800 hover:bg-emerald-700 rounded text-xs text-emerald-300 whitespace-nowrap">
+                手动选取查看
+              </button>
+            </div>
+          ) : !proxy ? (
             <div className="bg-amber-900/30 border border-amber-700/50 rounded-lg px-4 py-3 flex items-start gap-3">
               <span className="text-amber-400 text-lg flex-shrink-0">⚠️</span>
               <div className="text-sm">
@@ -327,10 +353,14 @@ export default function FullWorkflow() {
                 <p className="text-amber-500 text-xs mt-0.5">微软对数据中心 IP 强制验证。填写住宅代理后再点「启动注册」，或直接点下方「仅保存凭据」跳过注册步骤。</p>
               </div>
             </div>
+          ) : (
+            <div className="bg-blue-900/20 border border-blue-700/40 rounded-lg px-4 py-2 flex items-center gap-2 text-sm text-blue-300">
+              <span>🌐</span> 使用代理: <span className="font-mono text-xs text-blue-400">{proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@")}</span>
+            </div>
           )}
           <div className="flex gap-3">
-            <button onClick={startRegistration} className={`flex-1 py-3 rounded-lg text-white font-semibold transition-colors ${proxy ? "bg-blue-700 hover:bg-blue-600" : "bg-blue-900/60 hover:bg-blue-800/60 border border-blue-700/50"}`}>
-              🚀 启动 Outlook 自动注册{!proxy ? "（无代理）" : ""}
+            <button onClick={startRegistration} className={`flex-1 py-3 rounded-lg text-white font-semibold transition-colors ${(proxy || (poolCount ?? 0) > 0) ? "bg-blue-700 hover:bg-blue-600" : "bg-blue-900/60 hover:bg-blue-800/60 border border-blue-700/50"}`}>
+              🚀 启动 Outlook 自动注册{!proxy && (poolCount ?? 0) > 0 ? "（代理池自动选取）" : !proxy ? "（无代理）" : ""}
             </button>
             <button onClick={prepare} className="px-4 py-3 bg-[#21262d] border border-[#30363d] rounded-lg text-gray-400 hover:text-white text-sm">
               重新生成
