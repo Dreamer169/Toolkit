@@ -1015,6 +1015,7 @@ router.post("/tools/outlook/batch-oauth/start", async (req, res) => {
       accounts: sessionList.map(s => ({
         accountId: s.accountId,
         email: s.email,
+        deviceCode: s.deviceCode,  // client-side polling uses this directly
         userCode: s.userCode,
         verificationUri: s.verificationUri,
         status: s.status,

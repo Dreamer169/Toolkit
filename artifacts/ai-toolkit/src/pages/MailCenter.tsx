@@ -45,11 +45,11 @@ interface BatchOAuthAccount {
   email: string;
   userCode: string;
   verificationUri: string;
+  deviceCode: string;   // stored client-side for direct polling — survives server restarts
   status: "pending" | "done" | "expired" | "error";
   errorMsg?: string;
 }
 interface BatchOAuthState {
-  sessionId: string;
   accounts: BatchOAuthAccount[];
   open: boolean;
 }
@@ -275,33 +275,92 @@ export default function MailCenter() {
   }, []);
 
   // ── 批量设备码 OAuth 授权 ─────────────────────────────────────────────────
+  // 设计：deviceCode 存在 React state 中，直接轮询 /device-poll（已有接口），
+  // 成功后调 /save-token（已有接口）。不依赖服务端 session，服务器重启不影响。
+  const CLIENT_ID_BATCH = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
+
   const startBatchOAuth = async (ids?: number[]) => {
     setBatchOAuthBusy(true);
+    if (batchPollRef.current) { clearInterval(batchPollRef.current); batchPollRef.current = null; }
+
     const d = await fetch(`${API}/tools/outlook/batch-oauth/start`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(ids?.length ? { accountIds: ids } : {}),
     }).then(r => r.json()).catch(() => ({ success: false, error: "网络错误" }));
     setBatchOAuthBusy(false);
+
     if (!d.success) { alert(d.error ?? "发起批量授权失败"); return; }
-    setBatchOAuth({ sessionId: d.sessionId, accounts: d.accounts ?? [], open: true });
-    // 开始轮询
-    if (batchPollRef.current) clearInterval(batchPollRef.current);
+
+    // 把 deviceCode 也存在前端 state，不依赖服务端 session
+    const accs: BatchOAuthAccount[] = (d.accounts ?? []).map((a: BatchOAuthAccount & { deviceCode?: string }) => ({
+      accountId: a.accountId,
+      email: a.email,
+      userCode: a.userCode,
+      verificationUri: a.verificationUri ?? "https://microsoft.com/devicelogin",
+      deviceCode: a.deviceCode ?? "",
+      status: (a.status === "error" ? "error" : "pending") as BatchOAuthAccount["status"],
+      errorMsg: a.errorMsg,
+    }));
+    setBatchOAuth({ accounts: accs, open: true });
+
+    // 直接轮询每个账号的 device-poll，不经过服务端 session
     batchPollRef.current = setInterval(async () => {
-      const p = await fetch(`${API}/tools/outlook/batch-oauth/poll`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId: d.sessionId }),
-      }).then(r => r.json()).catch(() => null);
-      if (!p?.success) return;
-      setBatchOAuth(prev => prev ? { ...prev, accounts: p.accounts ?? prev.accounts } : prev);
-      if (p.allFinished) {
-        clearInterval(batchPollRef.current!); batchPollRef.current = null;
-        await loadAccounts();
-      } else if (p.done > 0) {
-        // 有账号刚完成，顺便刷新账号列表
-        await loadAccounts();
-      }
+      setBatchOAuth(prev => {
+        if (!prev) return prev;
+        const stillPending = prev.accounts.filter(a => a.status === "pending");
+        if (stillPending.length === 0) {
+          clearInterval(batchPollRef.current!); batchPollRef.current = null;
+        }
+        return prev;
+      });
+
+      // 并发轮询所有 pending 账号
+      const snapshot = await new Promise<BatchOAuthAccount[]>(resolve => {
+        setBatchOAuth(prev => { resolve(prev?.accounts ?? []); return prev; });
+      });
+      const pending = snapshot.filter(a => a.status === "pending" && a.deviceCode);
+
+      await Promise.allSettled(pending.map(async acc => {
+        try {
+          const p = await fetch(`${API}/tools/outlook/device-poll`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ deviceCode: acc.deviceCode, clientId: CLIENT_ID_BATCH }),
+          }).then(r => r.json()).catch(() => null);
+          if (!p) return;
+
+          if (p.success && p.accessToken) {
+            // 授权成功：存 token 到数据库
+            await fetch(`${API}/tools/outlook/save-token`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ email: acc.email, token: p.accessToken, refreshToken: p.refreshToken ?? "" }),
+            });
+            setBatchOAuth(prev => {
+              if (!prev) return prev;
+              const updated = prev.accounts.map(a =>
+                a.accountId === acc.accountId ? { ...a, status: "done" as const } : a
+              );
+              return { ...prev, accounts: updated };
+            });
+            loadAccounts();
+          } else if (p.error && p.error !== "authorization_pending" && p.error !== "slow_down") {
+            const errMsg = p.errorDescription ?? p.error ?? "授权失败";
+            const isExpired = /expired|code_expired|expired_token/i.test(p.error ?? "");
+            setBatchOAuth(prev => {
+              if (!prev) return prev;
+              const updated = prev.accounts.map(a =>
+                a.accountId === acc.accountId
+                  ? { ...a, status: (isExpired ? "expired" : "error") as const, errorMsg: errMsg }
+                  : a
+              );
+              return { ...prev, accounts: updated };
+            });
+          }
+          // authorization_pending / slow_down → continue waiting
+        } catch { /* 网络错误，下次继续 */ }
+      }));
     }, 4000);
   };
 
