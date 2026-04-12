@@ -314,23 +314,43 @@ export default function MailCenter() {
             const labelCls = isOAuth ? "text-emerald-500" : isImap ? "text-blue-400" : "text-amber-500";
             const vr = verifyStatus(acc.id);
             const vb = vr ? verifyBadge(vr.status) : null;
+            const pwKey = `pw-${acc.id}`;
+            const pwCopied = copied === pwKey;
             return (
-              <button key={acc.id} onClick={() => selectAccount(acc)}
-                className={`w-full text-left px-3 py-2.5 border-b border-[#161b22] transition-colors ${
-                  active ? "bg-blue-600/15 border-l-2 border-l-blue-500" : "hover:bg-[#161b22] border-l-2 border-l-transparent"
-                } ${noAccess ? "opacity-70" : ""}`}>
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dot}`} />
-                  <span className="text-xs font-mono truncate text-gray-200">{acc.email}</span>
-                </div>
-                <div className="flex items-center gap-2 mt-0.5 ml-3">
-                  <span className={`text-[10px] font-medium ${labelCls}`}>{label}</span>
-                  {vb && <span className={`text-[10px] ${vb.cls}`}>· {vb.label}</span>}
-                  <span className="text-[10px] text-gray-600 ml-auto">
-                    {new Date(acc.created_at).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" })}
-                  </span>
-                </div>
-              </button>
+              <div key={acc.id} className={`border-b border-[#161b22] ${active ? "bg-blue-600/15" : ""} ${noAccess ? "opacity-70" : ""}`}>
+                <button onClick={() => selectAccount(acc)}
+                  className={`w-full text-left px-3 pt-2.5 pb-1.5 transition-colors border-l-2 ${
+                    active ? "border-l-blue-500" : "hover:bg-[#161b22] border-l-transparent"
+                  }`}>
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dot}`} />
+                    <span className="text-xs font-mono truncate text-gray-200">{acc.email}</span>
+                  </div>
+                  <div className="flex items-center gap-2 mt-0.5 ml-3">
+                    <span className={`text-[10px] font-medium ${labelCls}`}>{label}</span>
+                    {vb && <span className={`text-[10px] ${vb.cls}`}>· {vb.label}</span>}
+                    <span className="text-[10px] text-gray-600 ml-auto">
+                      {new Date(acc.created_at).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" })}
+                    </span>
+                  </div>
+                </button>
+                {acc.password && (
+                  <button
+                    onClick={e => {
+                      e.stopPropagation();
+                      navigator.clipboard.writeText(acc.password);
+                      setCopied(pwKey);
+                      setTimeout(() => setCopied(c => c === pwKey ? "" : c), 1500);
+                    }}
+                    className="w-full text-left px-3 pb-2 flex items-center gap-1.5 group/pw"
+                  >
+                    <span className="text-[10px] text-gray-600">🔑</span>
+                    <span className={`text-[10px] font-mono truncate transition-colors ${pwCopied ? "text-emerald-400" : "text-gray-500 group-hover/pw:text-gray-300"}`}>
+                      {pwCopied ? "已复制 ✓" : acc.password}
+                    </span>
+                  </button>
+                )}
+              </div>
             );
           })}
         </div>
@@ -454,7 +474,20 @@ export default function MailCenter() {
 
           {selAccount && !needsAuth && error && (
             <div className="p-3 space-y-2">
-              <p className="text-xs text-red-400">{error}</p>
+              {/BasicAuthBlocked|LOGIN failed|基础认证|basic auth/i.test(error) ? (
+                <div className="bg-amber-900/20 border border-amber-700/40 rounded-lg p-3 space-y-2">
+                  <p className="text-xs text-amber-400 font-medium">⚠ 微软已封锁此账号的 IMAP 基础认证</p>
+                  <p className="text-[11px] text-gray-400 leading-5">
+                    自 2023 年起，微软对 Outlook.com 个人账号强制要求现代身份验证。<br/>
+                    解决方案：<br/>
+                    1. 登录 <span className="text-blue-400">outlook.live.com</span><br/>
+                    2. 设置 → 邮件 → 同步邮件 → 将「允许使用 IMAP 的设备和应用」设为开<br/>
+                    3. 或使用「获取授权」完成 OAuth 登录后即可通过 Graph API 读取邮件
+                  </p>
+                </div>
+              ) : (
+                <p className="text-xs text-red-400">{error}</p>
+              )}
             </div>
           )}
 

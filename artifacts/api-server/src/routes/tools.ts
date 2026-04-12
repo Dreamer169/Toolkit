@@ -1605,7 +1605,7 @@ function ropcStatus(err?: string, desc?: string): string {
 // IMAP 登录测试（check_only=true，仅 login/logout，不拉邮件）
 async function imapCheckLogin(email: string, password: string): Promise<{ ok: boolean; error?: string }> {
   const { spawn } = await import("child_process");
-  const scriptPath = new URL("../../outlook_imap.py", import.meta.url).pathname;
+  const scriptPath = new URL("../outlook_imap.py", import.meta.url).pathname;
   return new Promise((resolve) => {
     const params = JSON.stringify({ email, password, limit: 1, folder: "INBOX", search: "", check_only: true });
     const child = spawn("python3", [scriptPath, params], { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
@@ -1645,11 +1645,12 @@ router.post("/tools/outlook/verify-accounts", async (req, res) => {
       } else {
         const err = chk.error ?? "";
         let status = "error";
-        if (/AUTHENTICATIONFAILED|认证失败/i.test(err)) status = "wrong_password";
-        else if (/禁用基础密码|basic auth/i.test(err))   status = "imap_disabled";
-        else if (/refused|拒绝/i.test(err))               status = "connection_error";
+        if (/BasicAuthBlocked/i.test(err))                          status = "imap_disabled";
+        else if (/AUTHENTICATIONFAILED|LOGIN failed|认证失败/i.test(err)) status = "wrong_password";
+        else if (/禁用基础密码|basic auth blocked/i.test(err))      status = "imap_disabled";
+        else if (/refused|拒绝|timed out|IMAP 超时/i.test(err))    status = "connection_error";
         await dbE("UPDATE accounts SET status=$1, updated_at=NOW() WHERE id=$2", [status, acc.id]);
-        results.push({ id: acc.id, email: acc.email, status, error: err.slice(0, 120) });
+        results.push({ id: acc.id, email: acc.email, status, error: err.slice(0, 160) });
       }
     }
     const valid    = results.filter(r => r.status === "valid").length;
@@ -1774,7 +1775,7 @@ async function fetchViaImap(
   email: string, password: string, folder: string, limit: number, search: string
 ): Promise<{ success: boolean; messages?: unknown[]; error?: string; via?: string }> {
   const { spawn } = await import("child_process");
-  const scriptPath = new URL("../../outlook_imap.py", import.meta.url).pathname;
+  const scriptPath = new URL("../outlook_imap.py", import.meta.url).pathname;
 
   // 文件夹名称映射
   const folderMap: Record<string, string> = {
