@@ -3,3 +3,14 @@
 
 # No need to store the pnpm store twice.
 .local
+
+# uv package cache - not needed in production (packages already installed in .pythonlibs)
+# Excluding this saves ~4+ GB of stale package caches from the deployment image
+.cache/uv
+
+# Git history - not needed in production
+.git
+
+# Development-only files
+attached_assets
+使用说明.txt

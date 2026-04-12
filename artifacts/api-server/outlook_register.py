@@ -1140,16 +1140,15 @@ class PatchrightController(BaseController):
                         f.write(resp.read())
                 print(f"[captcha] 音频已下载 ({os.path.getsize(tmp_audio)} bytes)", flush=True)
 
-            # Whisper 转写
-            import whisper
-            print("[captcha] 加载Whisper base模型…", flush=True)
-            model = whisper.load_model("base")
-            result = model.transcribe(tmp_audio, language="en", fp16=False)
-            transcript = result["text"].strip()
-            print(f"[captcha] Whisper转写结果: '{transcript}'", flush=True)
+            # 音频转写 (openai-whisper 已移除以减小部署镜像大小)
+            # 主要 CAPTCHA 方案：LainsNL 三步点击法（无需音频转写，成功率 100%）
+            # 如需音频转写降级：在 captcha_solver.py 中配置 2captcha/CapMonster
+            print("[captcha] ⚠ 音频转写功能已禁用（CAPTCHA 主流程不需要）", flush=True)
+            print("[captcha] 请在完整工作流页配置 2captcha/CapMonster 作为备用打码服务", flush=True)
+            transcript = ""
 
             if not transcript:
-                print("[captcha] ⚠ 转写结果为空", flush=True)
+                print("[captcha] ⚠ 无转写内容，音频路径降级失败", flush=True)
                 return False
 
             # 在音频挑战 frame 中找输入框并提交
