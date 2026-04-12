@@ -708,7 +708,7 @@ export default function MailCenter() {
                 selMsg.bodyType === "html" ? (
                   <iframe
                     srcDoc={selMsg.body}
-                    sandbox="allow-same-origin"
+                    sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
                     className="w-full rounded border border-[#21262d] bg-white"
                     style={{ minHeight: "400px", height: "100%" }}
                     title="邮件内容"
