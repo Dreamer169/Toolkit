@@ -1133,7 +1133,7 @@ router.post("/tools/outlook/register", async (req, res) => {
           }
           // 2. 立即 ROPC 换 token（注册后账号刚建，一般无 MFA）
           try {
-            const tr = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+            const tr = await fetch("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", {
               method: "POST",
               headers: { "Content-Type": "application/x-www-form-urlencoded" },
               body: new URLSearchParams({
@@ -1619,7 +1619,7 @@ router.post("/tools/outlook/verify-accounts", async (req, res) => {
         continue;
       }
       try {
-        const tr = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+        const tr = await fetch("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({
@@ -1675,7 +1675,7 @@ router.post("/tools/outlook/auto-auth", async (req, res) => {
     }
 
     // ROPC token 请求
-    const tokenRes = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+    const tokenRes = await fetch("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -1725,7 +1725,7 @@ router.post("/tools/outlook/auto-auth-all", async (req, res) => {
     const results: Array<{ id: number; email: string; ok: boolean; error?: string }> = [];
     for (const acc of rows) {
       try {
-        const tokenRes = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+        const tokenRes = await fetch("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({
@@ -1782,7 +1782,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
 
     // 有 refresh_token → 刷新
     if (acc.refresh_token) {
-      const r = await fetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
+      const r = await fetch(`https://login.microsoftonline.com/consumers/oauth2/v2.0/token`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
