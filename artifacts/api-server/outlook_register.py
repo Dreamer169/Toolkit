@@ -1762,9 +1762,18 @@ def main():
                 cur_proxy = ""
                 print(f"\n[{i+1}/{args.count}] 开始注册… ⚠ CF池无可用IP，无代理模式", flush=True)
         elif proxy_list:
-            cur_proxy = proxy_list[i % len(proxy_list)]
+            # 严格 1IP1账号：每个账号独占一个代理节点，不允许复用
+            if i >= len(proxy_list):
+                print(
+                    f"\n⚠ 代理不足：共 {len(proxy_list)} 个代理，但需要注册 {args.count} 个账号。"
+                    f"\n  已完成 {i} 个，剩余 {args.count - i} 个因无可用独立IP而跳过。"
+                    f"\n  请补充更多代理后重试（规则：1IP ↔ 1账号，禁止复用）。",
+                    flush=True,
+                )
+                break
+            cur_proxy = proxy_list[i]
             if len(proxy_list) > 1:
-                print(f"\n[{i+1}/{args.count}] 开始注册… 节点 [{(i % len(proxy_list))+1}/{len(proxy_list)}]: {cur_proxy[:40]}...")
+                print(f"\n[{i+1}/{args.count}] 开始注册… 节点 [{i+1}/{len(proxy_list)}]: {cur_proxy[:40]}...")
             else:
                 print(f"\n[{i+1}/{args.count}] 开始注册...")
         else:

@@ -1113,10 +1113,13 @@ router.post("/tools/outlook/register", async (req, res) => {
 
     const okCount = job.accounts.length;
 
-    // ── 持久化到数据库 ──────────────────────────────────────────────────────
+    // ── 持久化到数据库 + 立即 ROPC 自动授权 ────────────────────────────────
     if (okCount > 0) {
       (async () => {
+        const ROPC_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
+        const ROPC_SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access";
         for (const acc of job.accounts) {
+          // 1. 保存账号
           try {
             await execute(
               `INSERT INTO accounts (platform, email, password, status)
@@ -1126,9 +1129,36 @@ router.post("/tools/outlook/register", async (req, res) => {
             );
           } catch (dbErr) {
             job.logs.push({ type: "warn", message: `⚠ DB 保存失败(${acc.email}): ${dbErr}` });
+            continue;
+          }
+          // 2. 立即 ROPC 换 token（注册后账号刚建，一般无 MFA）
+          try {
+            const tr = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({
+                grant_type: "password",
+                client_id: ROPC_CLIENT_ID,
+                username: acc.email,
+                password: acc.password,
+                scope: ROPC_SCOPE,
+              }).toString(),
+            });
+            const td = await tr.json() as { access_token?: string; refresh_token?: string; error?: string; error_description?: string };
+            if (td.access_token) {
+              await execute(
+                "UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE email=$3 AND platform='outlook'",
+                [td.access_token, td.refresh_token ?? null, acc.email],
+              );
+              job.logs.push({ type: "success", message: `🔑 ${acc.email} 已自动授权 ✅` });
+            } else {
+              job.logs.push({ type: "warn", message: `⚠ ${acc.email} 自动授权失败: ${(td.error_description ?? td.error ?? "未知").slice(0, 80)}` });
+            }
+          } catch (authErr) {
+            job.logs.push({ type: "warn", message: `⚠ ${acc.email} 自动授权异常: ${authErr}` });
           }
         }
-        job.logs.push({ type: "log", message: `📦 已保存 ${okCount} 个账号到数据库` });
+        job.logs.push({ type: "log", message: `📦 已保存并尝试授权 ${okCount} 个账号` });
       })();
     }
 
@@ -1548,6 +1578,79 @@ router.post("/tools/outlook/save-token", async (req, res) => {
       [token || null, refreshToken || null, email]
     );
     res.json({ success: true });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+// ── 批量验证微软账号有效性（ROPC 错误码诊断）────────────────────────────────
+// 错误码参考: https://learn.microsoft.com/en-us/azure/active-directory/develop/reference-aadsts-error-codes
+const ROPC_CID  = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
+const ROPC_SCO  = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read offline_access";
+
+function ropcStatus(err?: string, desc?: string): string {
+  if (!err) return "valid";
+  if (err === "invalid_grant") {
+    if (desc?.includes("AADSTS50034")) return "not_exist";
+    if (desc?.includes("AADSTS50126")) return "wrong_password";
+    if (desc?.includes("AADSTS50076") || desc?.includes("AADSTS50079")) return "need_mfa";
+    if (desc?.includes("AADSTS53003"))  return "blocked_ca";
+    if (desc?.includes("AADSTS90072")) return "wrong_tenant";
+    return `invalid_grant`;
+  }
+  if (err === "authorization_pending") return "pending";
+  return err;
+}
+
+router.post("/tools/outlook/verify-accounts", async (req, res) => {
+  const { ids } = req.body as { ids?: number[] };
+  try {
+    const { query: dbQ, execute: dbE } = await import("../db.js");
+    const rows = await dbQ<{ id: number; email: string; password: string | null }>(
+      ids?.length
+        ? `SELECT id, email, password FROM accounts WHERE platform='outlook' AND id = ANY($1::int[])`
+        : `SELECT id, email, password FROM accounts WHERE platform='outlook'`,
+      ids?.length ? [ids] : []
+    );
+    const results: Array<{ id: number; email: string; status: string; accessToken?: string; error?: string }> = [];
+    for (const acc of rows) {
+      if (!acc.password) {
+        results.push({ id: acc.id, email: acc.email, status: "no_password", error: "数据库无密码" });
+        continue;
+      }
+      try {
+        const tr = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            grant_type: "password", client_id: ROPC_CID,
+            username: acc.email, password: acc.password, scope: ROPC_SCO,
+          }).toString(),
+        });
+        const td = await tr.json() as { access_token?: string; refresh_token?: string; error?: string; error_description?: string };
+        const st = ropcStatus(td.error, td.error_description);
+        if (td.access_token) {
+          // 顺手刷新 token
+          await dbE(
+            "UPDATE accounts SET token=$1, refresh_token=$2, status='active', updated_at=NOW() WHERE id=$3",
+            [td.access_token, td.refresh_token ?? null, acc.id]
+          );
+          results.push({ id: acc.id, email: acc.email, status: "valid", accessToken: "✓" });
+        } else {
+          // 更新 status 字段
+          const dbStatus = st === "not_exist" ? "invalid" : st === "wrong_password" ? "password_err" : "active";
+          await dbE("UPDATE accounts SET status=$1, updated_at=NOW() WHERE id=$2", [dbStatus, acc.id]);
+          results.push({ id: acc.id, email: acc.email, status: st, error: (td.error_description ?? "").slice(0, 100) });
+        }
+      } catch (e) {
+        results.push({ id: acc.id, email: acc.email, status: "error", error: String(e) });
+      }
+    }
+    const valid   = results.filter(r => r.status === "valid").length;
+    const invalid = results.filter(r => r.status === "not_exist").length;
+    const mfa     = results.filter(r => r.status === "need_mfa").length;
+    const pwErr   = results.filter(r => r.status === "wrong_password").length;
+    res.json({ success: true, results, total: rows.length, valid, invalid, mfa, pwErr });
   } catch (e: unknown) {
     res.status(500).json({ success: false, error: String(e) });
   }

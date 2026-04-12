@@ -18,6 +18,12 @@ interface Account {
   status: string;
   created_at: string;
 }
+interface VerifyResult {
+  id: number;
+  email: string;
+  status: string; // valid | not_exist | wrong_password | need_mfa | blocked_ca | error | no_password
+  error?: string;
+}
 interface MailMsg {
   id: string;
   subject: string;
@@ -68,7 +74,9 @@ export default function MailCenter() {
   const [polling, setPolling]           = useState(false);
   const [copied, setCopied]             = useState("");
   const [batchResults, setBatchResults] = useState<{ email: string; ok: boolean; error?: string }[]>([]);
-  const pollRef                         = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [verifyResults, setVerifyResults] = useState<VerifyResult[]>([]);
+  const [verifying, setVerifying]         = useState(false);
+  const pollRef                           = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadAccounts = useCallback(async () => {
     const d = await fetch(`${API}/tools/outlook/accounts`).then(r => r.json()).catch(() => ({}));
@@ -156,6 +164,57 @@ export default function MailCenter() {
     }
   };
 
+  // ── 批量验证账号 ────────────────────────────────────────────────────
+  const verifyAll = async () => {
+    setVerifying(true); setVerifyResults([]);
+    const d = await fetch(`${API}/tools/outlook/verify-accounts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    }).then(r => r.json()).catch(() => ({ success: false }));
+    setVerifying(false);
+    if (d.success) {
+      setVerifyResults(d.results ?? []);
+      await loadAccounts();
+    }
+  };
+
+  const verifySingle = async (acc: Account) => {
+    setVerifying(true);
+    const d = await fetch(`${API}/tools/outlook/verify-accounts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: [acc.id] }),
+    }).then(r => r.json()).catch(() => ({ success: false }));
+    setVerifying(false);
+    if (d.success && d.results?.length) {
+      setVerifyResults(prev => {
+        const next = prev.filter(v => v.id !== acc.id);
+        return [...next, ...d.results];
+      });
+      await loadAccounts();
+      if (d.results[0]?.status === "valid") {
+        const updated = { ...acc, token: "ok" };
+        setSelAccount(updated);
+        fetchMessages(updated, folder, search);
+      }
+    }
+  };
+
+  const verifyStatus = (id: number) => verifyResults.find(v => v.id === id);
+  const verifyBadge = (st: string) => {
+    const map: Record<string, { label: string; cls: string }> = {
+      valid:          { label: "有效",   cls: "text-emerald-400" },
+      not_exist:      { label: "不存在", cls: "text-red-400" },
+      wrong_password: { label: "密码错", cls: "text-red-400" },
+      need_mfa:       { label: "需MFA",  cls: "text-amber-400" },
+      blocked_ca:     { label: "已封",   cls: "text-red-500" },
+      error:          { label: "错误",   cls: "text-gray-500" },
+      no_password:    { label: "无密码", cls: "text-gray-500" },
+    };
+    return map[st] ?? { label: st, cls: "text-gray-500" };
+  };
+
   // ── 设备码手动授权（ROPC 失败时备用）────────────────────────────────────
   const startDevice = async (acc: Account) => {
     setAuthBusy(acc.id); setAuthError("");
@@ -210,17 +269,26 @@ export default function MailCenter() {
             <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Outlook 账号</span>
             <span className="text-xs text-gray-600">{accounts.length} 个</span>
           </div>
-          {unAuthCount > 0 && (
+          <div className="flex gap-1.5">
+            {unAuthCount > 0 && (
+              <button
+                onClick={autoAuthAll}
+                disabled={authBusy === "all" || verifying}
+                className="flex-1 py-1.5 bg-emerald-600/80 hover:bg-emerald-600 disabled:opacity-50 rounded text-xs text-white font-medium transition-colors"
+              >
+                {authBusy === "all" ? "授权中…" : `⚡ 一键授权 (${unAuthCount})`}
+              </button>
+            )}
             <button
-              onClick={autoAuthAll}
-              disabled={authBusy === "all"}
-              className="w-full py-1.5 bg-emerald-600/80 hover:bg-emerald-600 disabled:opacity-50 rounded text-xs text-white font-medium transition-colors"
+              onClick={verifyAll}
+              disabled={verifying || accounts.length === 0}
+              className="flex-1 py-1.5 bg-blue-600/60 hover:bg-blue-600/80 disabled:opacity-50 rounded text-xs text-white font-medium transition-colors"
             >
-              {authBusy === "all" ? "授权中…" : `⚡ 一键授权全部 (${unAuthCount})`}
+              {verifying ? "验证中…" : "🔍 批量验证"}
             </button>
-          )}
+          </div>
           {batchResults.length > 0 && (
-            <div className="space-y-0.5 max-h-28 overflow-y-auto">
+            <div className="space-y-0.5 max-h-24 overflow-y-auto">
               {batchResults.map((r, i) => (
                 <div key={i} className={`text-[10px] truncate px-1 py-0.5 rounded ${r.ok ? "text-emerald-400" : "text-red-400"}`}>
                   {r.ok ? "✓" : "✗"} {r.email}{!r.ok && r.error ? `: ${r.error.slice(0, 40)}` : ""}
@@ -237,6 +305,8 @@ export default function MailCenter() {
           {accounts.map((acc) => {
             const active = selAccount?.id === acc.id;
             const ok     = authorized(acc);
+            const vr     = verifyStatus(acc.id);
+            const vb     = vr ? verifyBadge(vr.status) : null;
             return (
               <button key={acc.id} onClick={() => selectAccount(acc)}
                 className={`w-full text-left px-3 py-2.5 border-b border-[#161b22] transition-colors ${
@@ -250,6 +320,9 @@ export default function MailCenter() {
                   <span className={`text-[10px] ${ok ? "text-emerald-500" : "text-amber-500"}`}>
                     {ok ? "已授权" : "未授权"}
                   </span>
+                  {vb && (
+                    <span className={`text-[10px] font-medium ${vb.cls}`}>· {vb.label}</span>
+                  )}
                   <span className="text-[10px] text-gray-600 ml-auto">
                     {new Date(acc.created_at).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" })}
                   </span>
@@ -307,14 +380,35 @@ export default function MailCenter() {
                 <>
                   <p className="text-xs text-amber-400">该账号尚未授权，无法读取邮件。</p>
 
-                  {/* 主按钮：ROPC 一键授权 */}
-                  <button
-                    onClick={() => autoAuth(selAccount)}
-                    disabled={authBusy === selAccount.id}
-                    className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 rounded text-xs text-white font-semibold transition-colors"
-                  >
-                    {authBusy === selAccount.id ? "授权中，请稍候…" : "⚡ 一键自动授权"}
-                  </button>
+                  <div className="flex gap-1.5">
+                    {/* 主按钮：ROPC 一键授权 */}
+                    <button
+                      onClick={() => autoAuth(selAccount)}
+                      disabled={authBusy === selAccount.id || verifying}
+                      className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 rounded text-xs text-white font-semibold transition-colors"
+                    >
+                      {authBusy === selAccount.id ? "授权中…" : "⚡ 一键授权"}
+                    </button>
+                    {/* 验证按钮 */}
+                    <button
+                      onClick={() => verifySingle(selAccount)}
+                      disabled={verifying || authBusy === selAccount.id}
+                      className="px-3 py-2 bg-blue-600/60 hover:bg-blue-600/80 disabled:opacity-50 rounded text-xs text-white transition-colors"
+                    >
+                      {verifying ? "…" : "🔍 验证"}
+                    </button>
+                  </div>
+
+                  {/* 验证结果 */}
+                  {verifyStatus(selAccount.id) && (() => {
+                    const vr = verifyStatus(selAccount.id)!;
+                    const vb = verifyBadge(vr.status);
+                    return (
+                      <div className={`text-[11px] px-2 py-1 rounded bg-[#161b22] border border-[#30363d] ${vb.cls}`}>
+                        验证结果：{vb.label}{vr.error ? ` — ${vr.error.slice(0, 60)}` : ""}
+                      </div>
+                    );
+                  })()}
 
                   {/* 展开手动设备码授权 */}
                   {!showDevice && (
