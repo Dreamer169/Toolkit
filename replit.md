@@ -85,12 +85,18 @@ UI component sandbox.
 4. Node.js polls Python's stdout for JSON log lines and streams them to the frontend every 2s
 5. On completion, Node.js saves successful accounts to PostgreSQL `accounts` table
 
-### CAPTCHA bypass (FREE, no paid service needed)
-- Microsoft FunCaptcha shows an **accessibility icon** (wheelchair ♿) during registration
-- We click it via `locator.click(force=True)` then `dispatch_event("click")` as fallback
-- This bypasses the visual press-and-hold challenge entirely
-- Works in **headless mode** — no display required
-- Achieved via patchright's CDP iframe cross-origin interaction
+### CAPTCHA bypass (FREE, no paid service needed) — PROVEN 3/3 success rate
+Three-click flow verified working (LainsNL/hrhcode method):
+1. **First click**: `[aria-label="可访问性挑战"]` button OUTSIDE FunCaptcha (bot protection gate) — opens image puzzle
+2. **Second click**: Inside `frame_locator('iframe[title="验证质询"]')` → `frame_locator('iframe[style*="display: block"]')` → `[aria-label="可访问性挑战"]` — switches from image puzzle to audio/hold mode
+3. **Third click (KEY)**: `[aria-label="再次按下"]` — this is the "press again" button that actually triggers and passes the challenge
+
+Critical implementation details:
+- Use `frame_locator` API (NOT `page.frames[]`) — automatically handles cross-iframe coordinate offsets
+- `iframe[style*="display: block"]` targets the VISIBLE nested iframe (ignores `display:none` ones)
+- `bounding_box()` on frame_locator returns correct PAGE coordinates → use `page.mouse.click(x, y)`
+- Success detected by: presence of "取消" button OR redirect to `account.live.com/interrupt`
+- Works in **headless mode** — no display required, ~75s per account
 
 ### Cursor Auto Registration — Architecture
 1. Frontend (`CursorRegister.tsx`) POSTs to `POST /api/tools/cursor/register`

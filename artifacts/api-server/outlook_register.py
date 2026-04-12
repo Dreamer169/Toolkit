@@ -822,6 +822,152 @@ class PatchrightController(BaseController):
             print("[captcha] ✅ 无障碍按钮点击成功", flush=True)
             page.wait_for_timeout(2000)
 
+            # ── 第二次点击：图像拼图加载后，点击其中的轮椅/音频按钮 ─────────
+            # FunCaptcha 图像拼图加载后，左下角有音频(轮椅)图标需再次点击
+            # 注意：必须用 Playwright loc.bounding_box() 获取 PAGE 绝对坐标
+            #       frame.evaluate(getBoundingClientRect) 返回的是 frame 内部坐标，不能直接给 page.mouse.click()
+            print("[captcha] 等待图像拼图加载(3s)，寻找音频/轮椅按钮…", flush=True)
+            page.wait_for_timeout(3000)
+            _second_click_done = False
+            # 先检查 frame 数量是否增加（说明拼图已加载）
+            _fr_count_now = len(page.frames)
+            print(f"[captcha] 当前 frame 数: {_fr_count_now}", flush=True)
+
+            # 搜索 hsprotect.net frame 中的音频切换按钮
+            # 关键：首次点击后 about:blank frames 需要约 10s 才转换为 hsprotect.net
+            # 所以先轮询等待转换完成（每秒检查一次，最多等 12 秒）
+            # 关键修正：frame.url 不反映 JS 动态写入的 iframe.src（about:blank→hsprotect.net）
+            # 必须在每个 frame 内部执行 window.location.href 来获取真实 URL
+            print("[captcha] 轮询等待 hsprotect.net frames 加载（最多22s，用内部href检测）…", flush=True)
+            _poll_start = time.time()
+            _hsp_with_len = []
+            while time.time() - _poll_start < 22:
+                _all_f = page.frames
+                _tmp_hsp = []
+                for _fi, _fr in enumerate(_all_f):
+                    try:
+                        _real_info = _fr.evaluate("""
+                            () => ({
+                                href: window.location.href,
+                                bodyLen: document.body ? document.body.innerHTML.length : 0
+                            })
+                        """)
+                        _real_url = _real_info.get('href', '')
+                        _blen = _real_info.get('bodyLen', 0)
+                        if 'hsprotect.net' in _real_url and _blen > 3000:
+                            _tmp_hsp.append((_blen, _fi, _fr))
+                    except Exception:
+                        pass
+                if len(_tmp_hsp) >= 1:  # 只要找到一个 bodyLen>3000 的 hsprotect frame 就够了
+                    _hsp_with_len = _tmp_hsp
+                    print(f"[captcha] ✅ 找到 {len(_hsp_with_len)} 个 hsprotect frames (bodyLen>3000, 等待{time.time()-_poll_start:.1f}s)", flush=True)
+                    break
+                page.wait_for_timeout(1000)
+
+            if not _hsp_with_len:
+                print(f"[captcha] ⚠ 22s内未找到 hsprotect frames (bodyLen>3000)，跳过第二次点击", flush=True)
+            else:
+                _hsp_with_len.sort(reverse=True)  # 最大 body 排前面
+                for _blen, _fi, _sfr in _hsp_with_len:
+                    print(f"[captcha]   候选 hsp frame[{_fi}] bodyLen={_blen}", flush=True)
+
+            # ── 第二次点击：LainsNL/hrhcode 验证方法 ────────────────────────────
+            # 参考: github.com/LainsNL/OutlookRegister, github.com/hrhcode/outlook-batch-manager
+            # 方法：frame_locator 链式定位 + 点击 [aria-label="再次按下"]
+            # ─────────────────────────────────────────────────────────────────
+
+            # frame_locator 自动处理 iframe 坐标偏移，比 page.frames[] 更可靠
+            import random as _rnd
+            _TITLE_SELS = ['iframe[title="验证质询"]', 'iframe[title*="challenge"]',
+                           'iframe[title*="Challenge"]', 'iframe[title*="Captcha"]',
+                           'iframe[title*="captcha"]']
+            _BLOCK_SELS = ['iframe[style*="display: block"]', 'iframe[style*="display:block"]',
+                           'iframe:not([style*="display: none"])']
+
+            _frame1 = None
+            _frame2 = None
+            _a11y_btn = None
+
+            # 尝试所有 title 选择器找 frame1
+            for _tsel in _TITLE_SELS:
+                try:
+                    _f1_try = page.frame_locator(_tsel)
+                    # 验证 frame1 存在（尝试找子元素）
+                    _f1_count = page.locator(_tsel).count()
+                    if _f1_count > 0:
+                        print(f"[captcha] ✅ frame_locator frame1: {_tsel} (count={_f1_count})", flush=True)
+                        _frame1 = _f1_try
+                        break
+                    else:
+                        print(f"[captcha]   frame1 {_tsel}: count=0", flush=True)
+                except Exception as _e1:
+                    print(f"[captcha]   frame1 {_tsel}: {_e1}", flush=True)
+
+            if _frame1 is None:
+                print("[captcha] ⚠ 未找到 验证质询 frame，使用全页面直接查找", flush=True)
+                _frame1 = page  # 回退到页面直接搜索
+
+            # 尝试所有 block 选择器找 frame2（visible iframe）
+            for _bsel in _BLOCK_SELS:
+                try:
+                    _f2_try = _frame1.frame_locator(_bsel)
+                    # 验证 frame2 可见
+                    _a11y_try = _f2_try.locator('[aria-label="可访问性挑战"]')
+                    _cnt = _a11y_try.count()
+                    if _cnt > 0:
+                        print(f"[captcha] ✅ frame_locator frame2: {_bsel} (可访问性挑战 count={_cnt})", flush=True)
+                        _frame2 = _f2_try
+                        _a11y_btn = _a11y_try
+                        break
+                    else:
+                        print(f"[captcha]   frame2 {_bsel}: 可访问性挑战 count=0", flush=True)
+                except Exception as _e2:
+                    print(f"[captcha]   frame2 {_bsel}: {_e2}", flush=True)
+
+            if _a11y_btn is None:
+                # 最后回退：直接在页面中找
+                print("[captcha] ⚠ 回退：直接在页面中找 [aria-label='可访问性挑战']", flush=True)
+                _a11y_btn = page.locator('[aria-label="可访问性挑战"]')
+
+            # ── 点击 [aria-label="可访问性挑战"]（轮椅图标，进入音频/按压模式）──
+            try:
+                _box1 = _a11y_btn.first.bounding_box(timeout=8000)
+                if _box1 and _box1['width'] > 0 and 0 < _box1['y'] < 720:
+                    _cx1 = _box1['x'] + _box1['width'] / 2 + _rnd.randint(-5, 5)
+                    _cy1 = _box1['y'] + _box1['height'] / 2 + _rnd.randint(-5, 5)
+                    print(f"[captcha] 🖱 点击 可访问性挑战: PAGE=({_cx1:.0f},{_cy1:.0f})", flush=True)
+                    page.mouse.click(_cx1, _cy1)
+                    _second_click_done = True
+                    print("[captcha] ✅ 可访问性挑战已点击（第二次）", flush=True)
+                else:
+                    print(f"[captcha]   可访问性挑战 bounding_box 无效: {_box1}", flush=True)
+            except Exception as _e3:
+                print(f"[captcha]   可访问性挑战 点击异常: {_e3}", flush=True)
+
+            # ── 等待 [aria-label="再次按下"] 出现（LainsNL/hrhcode 关键步骤）──
+            # 这是点击轮椅后出现的"按压/再次按下"按钮，触发真正的挑战
+            if _second_click_done:
+                page.wait_for_timeout(1500)  # 等待模式切换
+                try:
+                    _press_again = None
+                    if _frame2 is not None:
+                        _press_again = _frame2.locator('[aria-label="再次按下"]')
+                    if _press_again is None or _press_again.count() == 0:
+                        _press_again = page.locator('[aria-label="再次按下"]')
+                    _box2 = _press_again.first.bounding_box(timeout=8000)
+                    if _box2 and _box2['width'] > 0:
+                        _cx2 = _box2['x'] + _box2['width'] / 2 + _rnd.randint(-10, 10)
+                        _cy2 = _box2['y'] + _box2['height'] / 2 + _rnd.randint(-5, 5)
+                        print(f"[captcha] 🖱 点击 再次按下: PAGE=({_cx2:.0f},{_cy2:.0f})", flush=True)
+                        page.mouse.click(_cx2, _cy2)
+                        print("[captcha] ✅ 再次按下已点击！（LainsNL 关键步骤）", flush=True)
+                    else:
+                        print(f"[captcha]   再次按下 bounding_box 无效: {_box2}", flush=True)
+                except Exception as _e4:
+                    print(f"[captcha]   再次按下 异常: {_e4}", flush=True)
+
+            if not _second_click_done:
+                print("[captcha] ⚠ 可访问性挑战按钮未找到，跳过", flush=True)
             # ── 点击后等待音频挑战界面加载（8s）────────────────────────────
             page.wait_for_timeout(8000)
 
@@ -1432,13 +1578,22 @@ def main():
     results = []
     for i in range(args.count):
         # 代理选择：CF池模式 > 轮换列表 > 无
+        xray_relay_inst = None
         if use_cf_pool:
             job_id = f"reg_{i}_{int(time.time())}"
             ip_info = _cf_pool.acquire_ip(job_id, auto_refresh=True,
                                           log_cb=lambda m: print(f"   {m}", flush=True))
             if ip_info:
-                cur_proxy = ip_info['proxy']
-                print(f"\n[{i+1}/{args.count}] 开始注册… CF节点: {ip_info['ip']} 延迟{ip_info['latency']}ms", flush=True)
+                # 启动 xray 中继：CF IP → VLESS/WS/TLS → jimhacker Worker → 目标
+                from xray_relay import XrayRelay as _XrayRelay
+                xray_relay_inst = _XrayRelay(ip_info['ip'])
+                if xray_relay_inst.start(timeout=8.0):
+                    cur_proxy = xray_relay_inst.socks5_url
+                    print(f"\n[{i+1}/{args.count}] 开始注册… CF节点: {ip_info['ip']} 延迟{ip_info['latency']}ms → SOCKS5:{xray_relay_inst.socks_port}", flush=True)
+                else:
+                    xray_relay_inst = None
+                    cur_proxy = ""
+                    print(f"\n[{i+1}/{args.count}] 开始注册… ⚠ xray 启动超时，无代理模式", flush=True)
             else:
                 cur_proxy = ""
                 print(f"\n[{i+1}/{args.count}] 开始注册… ⚠ CF池无可用IP，无代理模式", flush=True)
@@ -1460,6 +1615,11 @@ def main():
         )
         r = register_one(ctrl, args.engine, headless)
         results.append(r)
+
+        # 注册完成后清理 xray 实例
+        if xray_relay_inst:
+            xray_relay_inst.stop()
+            xray_relay_inst = None
 
         status = "✅ 注册成功" if r["success"] else f"❌ {r['error']}"
         print(f"  {status}  |  {r['email']}  密码: {r['password']}  耗时: {r['elapsed']}")
