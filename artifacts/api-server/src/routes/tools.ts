@@ -1603,18 +1603,21 @@ function ropcStatus(err?: string, desc?: string): string {
 }
 
 // IMAP 登录测试（check_only=true，仅 login/logout，不拉邮件）
-async function imapCheckLogin(email: string, password: string): Promise<{ ok: boolean; error?: string }> {
+// 支持 access_token → XOAUTH2（imapclient）; 无 token → Basic Auth（imaplib）
+async function imapCheckLogin(email: string, password: string, accessToken?: string): Promise<{ ok: boolean; error?: string; via?: string }> {
   const { spawn } = await import("child_process");
   const scriptPath = new URL("../outlook_imap.py", import.meta.url).pathname;
   return new Promise((resolve) => {
-    const params = JSON.stringify({ email, password, limit: 1, folder: "INBOX", search: "", check_only: true });
+    const paramObj: Record<string, unknown> = { email, password, limit: 1, folder: "INBOX", search: "", check_only: true };
+    if (accessToken) paramObj["access_token"] = accessToken;
+    const params = JSON.stringify(paramObj);
     const child = spawn("python3", [scriptPath, params], { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
     let out = "";
     child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
     child.on("close", () => {
       try {
-        const r = JSON.parse(out.trim()) as { success: boolean; error?: string };
-        resolve(r.success ? { ok: true } : { ok: false, error: r.error });
+        const r = JSON.parse(out.trim()) as { success: boolean; error?: string; via?: string };
+        resolve(r.success ? { ok: true, via: r.via } : { ok: false, error: r.error, via: r.via });
       } catch { resolve({ ok: false, error: `解析失败: ${out.slice(0, 100)}` }); }
     });
     child.on("error", (e) => resolve({ ok: false, error: e.message }));
@@ -1626,22 +1629,57 @@ router.post("/tools/outlook/verify-accounts", async (req, res) => {
   const { ids } = req.body as { ids?: number[] };
   try {
     const { query: dbQ, execute: dbE } = await import("../db.js");
-    const rows = await dbQ<{ id: number; email: string; password: string | null }>(
+    const rows = await dbQ<{ id: number; email: string; password: string | null; token: string | null; refresh_token: string | null }>(
       ids?.length
-        ? `SELECT id, email, password FROM accounts WHERE platform='outlook' AND id = ANY($1::int[])`
-        : `SELECT id, email, password FROM accounts WHERE platform='outlook'`,
+        ? `SELECT id, email, password, token, refresh_token FROM accounts WHERE platform='outlook' AND id = ANY($1::int[])`
+        : `SELECT id, email, password, token, refresh_token FROM accounts WHERE platform='outlook'`,
       ids?.length ? [ids] : []
     );
-    const results: Array<{ id: number; email: string; status: string; error?: string }> = [];
+    const results: Array<{ id: number; email: string; status: string; via?: string; error?: string }> = [];
     for (const acc of rows) {
+      let accessToken = acc.token ?? "";
+
+      // 1. 有 refresh_token → 先刷新获得 access_token
+      if (acc.refresh_token && !accessToken) {
+        try {
+          const r = await fetch(`https://login.microsoftonline.com/consumers/oauth2/v2.0/token`, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              grant_type: "refresh_token",
+              client_id: DEFAULT_CLIENT_ID,
+              refresh_token: acc.refresh_token,
+              scope: "https://outlook.office.com/IMAP.AccessAsUser.All offline_access",
+            }).toString(),
+          });
+          const td = await r.json() as { access_token?: string; refresh_token?: string };
+          if (td.access_token) {
+            accessToken = td.access_token;
+            await dbE("UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
+              [accessToken, td.refresh_token ?? acc.refresh_token, acc.id]);
+          }
+        } catch { /* ignore, try next method */ }
+      }
+
+      // 2. 有 accessToken → XOAUTH2 IMAP 验证
+      if (accessToken) {
+        const chk = await imapCheckLogin(acc.email, acc.password ?? "", accessToken);
+        if (chk.ok) {
+          await dbE("UPDATE accounts SET status='active', updated_at=NOW() WHERE id=$1", [acc.id]);
+          results.push({ id: acc.id, email: acc.email, status: "valid", via: "xoauth2" });
+          continue;
+        }
+      }
+
+      // 3. 无 token → Basic Auth
       if (!acc.password) {
-        results.push({ id: acc.id, email: acc.email, status: "no_password", error: "数据库无密码" });
+        results.push({ id: acc.id, email: acc.email, status: "no_password", error: "数据库无密码且无 OAuth token" });
         continue;
       }
       const chk = await imapCheckLogin(acc.email, acc.password);
       if (chk.ok) {
         await dbE("UPDATE accounts SET status='active', updated_at=NOW() WHERE id=$1", [acc.id]);
-        results.push({ id: acc.id, email: acc.email, status: "valid" });
+        results.push({ id: acc.id, email: acc.email, status: "valid", via: "basic_auth" });
       } else {
         const err = chk.error ?? "";
         let status = "error";
@@ -1771,8 +1809,10 @@ router.post("/tools/outlook/auto-auth-all", async (req, res) => {
 const DEFAULT_CLIENT_ID = "d3590ed6-52b3-4102-aeff-aad2292ab01c";
 
 // ── IMAP 辅助：spawn python3 outlook_imap.py ─────────────────────────────
+// 优先 XOAUTH2（access_token）→ Basic Auth 备用
 async function fetchViaImap(
-  email: string, password: string, folder: string, limit: number, search: string
+  email: string, password: string, folder: string, limit: number, search: string,
+  accessToken?: string
 ): Promise<{ success: boolean; messages?: unknown[]; error?: string; via?: string }> {
   const { spawn } = await import("child_process");
   const scriptPath = new URL("../outlook_imap.py", import.meta.url).pathname;
@@ -1785,7 +1825,11 @@ async function fetchViaImap(
   const imapFolder = folderMap[folder] ?? "INBOX";
 
   return new Promise((resolve) => {
-    const params = JSON.stringify({ email, password, limit, folder: imapFolder, search: search || "" });
+    const paramObj: Record<string, unknown> = {
+      email, password, limit, folder: imapFolder, search: search || ""
+    };
+    if (accessToken) paramObj["access_token"] = accessToken;
+    const params = JSON.stringify(paramObj);
     const child = spawn("python3", [scriptPath, params], { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
     let out = "";
     child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
@@ -1900,7 +1944,17 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
       // Graph API 失败（token 过期等）→ 降级 IMAP
     }
 
-    // ── IMAP 路径：无 token 或 token 已失效，用密码直接读 ──────────────────
+    // ── IMAP 路径（降级）──────────────────────────────────────────────────
+    // 优先：XOAUTH2 IMAP（如有 token，与 hrhcode 相同方式）
+    // 备用：Basic Auth IMAP（密码，微软已对个人账号封锁）
+    if (accessToken) {
+      // Graph API 失败但 token 有效 → 尝试 XOAUTH2 IMAP
+      const xoauthResult = await fetchViaImap(acc.email, acc.password ?? "", mailFolder, limit, search ?? "", accessToken);
+      if (xoauthResult.success) {
+        res.json({ success: true, messages: xoauthResult.messages, count: (xoauthResult.messages as unknown[]).length, email: acc.email, via: "imap_xoauth2" });
+        return;
+      }
+    }
     if (!acc.password) {
       res.json({ success: false, error: "账号无密码且无 OAuth token，无法读取邮件", needsAuth: true });
       return;
