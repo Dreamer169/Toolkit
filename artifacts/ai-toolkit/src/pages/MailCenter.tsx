@@ -256,8 +256,13 @@ export default function MailCenter() {
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
-  const authorized = (acc: Account) => !!(acc.token || acc.refresh_token);
-  const unAuthCount = accounts.filter(a => !authorized(a)).length;
+  // 有 OAuth token → Graph API（最快）
+  const hasOAuth  = (acc: Account) => !!(acc.token || acc.refresh_token);
+  // 有密码但无 token → IMAP 直连（自动，无需额外授权）
+  const hasImap   = (acc: Account) => !hasOAuth(acc) && !!acc.password;
+  // 既无 token 也无密码 → 需要手动授权
+  const authorized = (acc: Account) => hasOAuth(acc) || hasImap(acc);
+  const unAuthCount = accounts.filter(a => hasOAuth(a) === false && hasImap(a) === false).length;
 
   return (
     <div className="flex h-[calc(100vh-56px)] overflow-hidden text-sm text-gray-200">
@@ -304,25 +309,26 @@ export default function MailCenter() {
           )}
           {accounts.map((acc) => {
             const active = selAccount?.id === acc.id;
-            const ok     = authorized(acc);
-            const vr     = verifyStatus(acc.id);
-            const vb     = vr ? verifyBadge(vr.status) : null;
+            const isOAuth  = hasOAuth(acc);
+            const isImap   = hasImap(acc);
+            const noAccess = !isOAuth && !isImap;
+            const dot = isOAuth ? "bg-emerald-400" : isImap ? "bg-blue-400" : "bg-amber-400";
+            const label = isOAuth ? "OAuth" : isImap ? "IMAP" : "需授权";
+            const labelCls = isOAuth ? "text-emerald-500" : isImap ? "text-blue-400" : "text-amber-500";
+            const vr = verifyStatus(acc.id);
+            const vb = vr ? verifyBadge(vr.status) : null;
             return (
               <button key={acc.id} onClick={() => selectAccount(acc)}
                 className={`w-full text-left px-3 py-2.5 border-b border-[#161b22] transition-colors ${
                   active ? "bg-blue-600/15 border-l-2 border-l-blue-500" : "hover:bg-[#161b22] border-l-2 border-l-transparent"
-                }`}>
+                } ${noAccess ? "opacity-70" : ""}`}>
                 <div className="flex items-center gap-1.5 min-w-0">
-                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${ok ? "bg-emerald-400" : "bg-amber-400"}`} />
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dot}`} />
                   <span className="text-xs font-mono truncate text-gray-200">{acc.email}</span>
                 </div>
                 <div className="flex items-center gap-2 mt-0.5 ml-3">
-                  <span className={`text-[10px] ${ok ? "text-emerald-500" : "text-amber-500"}`}>
-                    {ok ? "已授权" : "未授权"}
-                  </span>
-                  {vb && (
-                    <span className={`text-[10px] font-medium ${vb.cls}`}>· {vb.label}</span>
-                  )}
+                  <span className={`text-[10px] font-medium ${labelCls}`}>{label}</span>
+                  {vb && <span className={`text-[10px] ${vb.cls}`}>· {vb.label}</span>}
                   <span className="text-[10px] text-gray-600 ml-auto">
                     {new Date(acc.created_at).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" })}
                   </span>

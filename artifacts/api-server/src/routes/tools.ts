@@ -1764,6 +1764,59 @@ router.post("/tools/outlook/auto-auth-all", async (req, res) => {
 // 供邮件中心使用，前端只传账号ID，token管理完全在后端
 const DEFAULT_CLIENT_ID = "d3590ed6-52b3-4102-aeff-aad2292ab01c";
 
+// ── IMAP 辅助：spawn python3 outlook_imap.py ─────────────────────────────
+async function fetchViaImap(
+  email: string, password: string, folder: string, limit: number, search: string
+): Promise<{ success: boolean; messages?: unknown[]; error?: string; via?: string }> {
+  const { spawn } = await import("child_process");
+  const scriptPath = new URL("../../outlook_imap.py", import.meta.url).pathname;
+
+  // 文件夹名称映射
+  const folderMap: Record<string, string> = {
+    inbox: "INBOX", sentItems: "Sent", junkemail: "Junk",
+    drafts: "Drafts", deleteditems: "Deleted Items",
+  };
+  const imapFolder = folderMap[folder] ?? "INBOX";
+
+  return new Promise((resolve) => {
+    const params = JSON.stringify({ email, password, limit, folder: imapFolder, search: search || "" });
+    const child = spawn("python3", [scriptPath, params], { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+    let out = "";
+    child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
+    child.on("close", () => {
+      try {
+        const raw = JSON.parse(out.trim()) as {
+          success: boolean;
+          messages?: Array<{
+            subject: string; from: string; date: string;
+            preview: string; urls: string[]; verify_urls: string[];
+            is_read: boolean; body_html?: string; body_plain?: string;
+          }>;
+          error?: string;
+        };
+        if (!raw.success) { resolve({ success: false, error: raw.error ?? "IMAP 失败" }); return; }
+        const messages = (raw.messages ?? []).map((m, i) => ({
+          id: `imap-${i}-${Date.now()}`,
+          subject: m.subject || "(无主题)",
+          from: m.from?.replace(/^.*<(.+)>.*$/, "$1") ?? m.from ?? "",
+          fromName: m.from?.replace(/^(.*?)\s*<.+>$/, "$1").trim() ?? "",
+          receivedAt: m.date ? new Date(m.date).toISOString() : new Date().toISOString(),
+          preview: m.preview,
+          body: m.body_html || m.body_plain || m.preview,
+          bodyType: m.body_html ? "html" : "text",
+          isRead: m.is_read,
+          verifyUrls: m.verify_urls,
+        }));
+        resolve({ success: true, messages, via: "imap" });
+      } catch {
+        resolve({ success: false, error: `IMAP 解析失败: ${out.slice(0, 200)}` });
+      }
+    });
+    child.on("error", (e) => resolve({ success: false, error: `IMAP 进程启动失败: ${e.message}` }));
+    setTimeout(() => { child.kill(); resolve({ success: false, error: "IMAP 超时（30s）" }); }, 30000);
+  });
+}
+
 router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
   const { accountId, folder, top, search } = req.body as {
     accountId?: number; folder?: string; top?: number; search?: string;
@@ -1773,14 +1826,18 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
   try {
     const { query, execute } = await import("../db.js");
     const rows = await query<{
-      id: number; email: string; token: string | null; refresh_token: string | null;
-    }>("SELECT id, email, token, refresh_token FROM accounts WHERE id=$1 AND platform='outlook'", [accountId]);
+      id: number; email: string; password: string | null;
+      token: string | null; refresh_token: string | null;
+    }>("SELECT id, email, password, token, refresh_token FROM accounts WHERE id=$1 AND platform='outlook'", [accountId]);
     const acc = rows[0];
     if (!acc) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
 
+    const mailFolder = folder || "inbox";
+    const limit = Math.min(50, Math.max(1, top ?? 30));
+
     let accessToken = acc.token ?? "";
 
-    // 有 refresh_token → 刷新
+    // 有 refresh_token → 先刷新
     if (acc.refresh_token) {
       const r = await fetch(`https://login.microsoftonline.com/consumers/oauth2/v2.0/token`, {
         method: "POST",
@@ -1795,56 +1852,59 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
       const td = await r.json() as { access_token?: string; refresh_token?: string; error_description?: string; error?: string };
       if (td.access_token) {
         accessToken = td.access_token;
-        // 保存新 token（refresh_token 可能轮换）
         await execute(
           "UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
           [accessToken, td.refresh_token ?? acc.refresh_token, accountId]
         );
       } else {
-        res.json({ success: false, error: `token 刷新失败: ${td.error_description ?? td.error ?? "未知错误"}`, needsAuth: true });
-        return;
+        // refresh 失败 → 降级到 IMAP
+        accessToken = "";
       }
     }
 
-    if (!accessToken) {
-      res.json({ success: false, error: "账号未授权，请先完成 OAuth 登录", needsAuth: true });
-      return;
+    // 有 accessToken → Graph API
+    if (accessToken) {
+      let url = `https://graph.microsoft.com/v1.0/me/mailFolders/${mailFolder}/messages?$top=${limit}&$select=id,subject,from,receivedDateTime,bodyPreview,isRead,body&$orderby=receivedDateTime desc`;
+      if (search) url += `&$search="${encodeURIComponent(search)}"`;
+      const mr = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+      const md = await mr.json() as {
+        value?: Array<{
+          id: string; subject: string;
+          from: { emailAddress: { name: string; address: string } };
+          receivedDateTime: string; bodyPreview: string; isRead: boolean;
+          body?: { content: string; contentType: string };
+        }>;
+        error?: { message: string; code: string };
+      };
+      if (mr.ok) {
+        const messages = (md.value ?? []).map((m) => ({
+          id: m.id,
+          subject: m.subject || "(无主题)",
+          from: m.from?.emailAddress?.address ?? "",
+          fromName: m.from?.emailAddress?.name ?? "",
+          receivedAt: m.receivedDateTime,
+          preview: m.bodyPreview,
+          body: m.body?.content ?? "",
+          bodyType: m.body?.contentType ?? "text",
+          isRead: m.isRead,
+        }));
+        res.json({ success: true, messages, count: messages.length, email: acc.email, via: "graph" });
+        return;
+      }
+      // Graph API 失败（token 过期等）→ 降级 IMAP
     }
 
-    const mailFolder = folder || "inbox";
-    const limit = Math.min(50, Math.max(1, top ?? 30));
-    let url = `https://graph.microsoft.com/v1.0/me/mailFolders/${mailFolder}/messages?$top=${limit}&$select=id,subject,from,receivedDateTime,bodyPreview,isRead,body&$orderby=receivedDateTime desc`;
-    if (search) url += `&$search="${encodeURIComponent(search)}"`;
-
-    const mr = await fetch(url, {
-      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-    });
-    const md = await mr.json() as {
-      value?: Array<{
-        id: string; subject: string;
-        from: { emailAddress: { name: string; address: string } };
-        receivedDateTime: string; bodyPreview: string; isRead: boolean;
-        body?: { content: string; contentType: string };
-      }>;
-      error?: { message: string; code: string };
-    };
-    if (!mr.ok) {
-      const needsAuth = md.error?.code === "InvalidAuthenticationToken" || md.error?.code === "401";
-      res.json({ success: false, error: md.error?.message ?? "获取邮件失败", needsAuth });
+    // ── IMAP 路径：无 token 或 token 已失效，用密码直接读 ──────────────────
+    if (!acc.password) {
+      res.json({ success: false, error: "账号无密码且无 OAuth token，无法读取邮件", needsAuth: true });
       return;
     }
-    const messages = (md.value ?? []).map((m) => ({
-      id: m.id,
-      subject: m.subject || "(无主题)",
-      from: m.from?.emailAddress?.address ?? "",
-      fromName: m.from?.emailAddress?.name ?? "",
-      receivedAt: m.receivedDateTime,
-      preview: m.bodyPreview,
-      body: m.body?.content ?? "",
-      bodyType: m.body?.contentType ?? "text",
-      isRead: m.isRead,
-    }));
-    res.json({ success: true, messages, count: messages.length, email: acc.email });
+    const imapResult = await fetchViaImap(acc.email, acc.password, mailFolder, limit, search ?? "");
+    if (imapResult.success) {
+      res.json({ success: true, messages: imapResult.messages, count: (imapResult.messages as unknown[]).length, email: acc.email, via: "imap" });
+    } else {
+      res.json({ success: false, error: imapResult.error ?? "IMAP 失败", via: "imap" });
+    }
   } catch (e: unknown) {
     res.status(500).json({ success: false, error: String(e) });
   }
