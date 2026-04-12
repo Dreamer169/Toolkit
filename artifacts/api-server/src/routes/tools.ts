@@ -1500,5 +1500,58 @@ router.post("/tools/cf-pool/refresh", async (req, res) => {
   }
 });
 
+// ── Outlook IMAP 收件箱（密码方式，无需 OAuth token）──────────────────────
+router.post("/tools/outlook/imap-inbox", async (req, res) => {
+  const { email, password, limit } = req.body as { email?: string; password?: string; limit?: number };
+  if (!email || !password) {
+    res.status(400).json({ success: false, error: "email 和 password 不能为空" });
+    return;
+  }
+  try {
+    const { execFileSync } = await import("child_process");
+    const scriptPath = new URL("../outlook_imap.py", import.meta.url).pathname;
+    const arg = JSON.stringify({ email, password, limit: limit ?? 25 });
+    const out = execFileSync("python3", [scriptPath, arg], { timeout: 30000, encoding: "utf8" });
+    const data = JSON.parse(out);
+    res.json(data);
+  } catch (e: unknown) {
+    const err = e as { stdout?: string; stderr?: string; message?: string };
+    if (err.stdout) {
+      try { res.json(JSON.parse(err.stdout)); return; } catch {}
+    }
+    res.status(500).json({ success: false, error: err.message ?? String(e) });
+  }
+});
+
+// ── Outlook 账号列表（邮箱库专用）──────────────────────────────────────────
+router.get("/tools/outlook/accounts", async (req, res) => {
+  try {
+    const { query } = await import("../db.js");
+    const rows = await query(
+      "SELECT id, email, password, token, refresh_token, status, notes, created_at FROM accounts WHERE platform='outlook' ORDER BY created_at DESC",
+      []
+    );
+    res.json({ success: true, accounts: rows });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+// ── 保存 Outlook refresh_token ─────────────────────────────────────────────
+router.post("/tools/outlook/save-token", async (req, res) => {
+  const { email, token, refreshToken } = req.body as { email?: string; token?: string; refreshToken?: string };
+  if (!email) { res.status(400).json({ success: false, error: "email 不能为空" }); return; }
+  try {
+    const { execute } = await import("../db.js");
+    await execute(
+      "UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE email=$3 AND platform='outlook'",
+      [token || null, refreshToken || null, email]
+    );
+    res.json({ success: true });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
 export default router;
 

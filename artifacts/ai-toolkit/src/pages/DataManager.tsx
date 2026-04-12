@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 
 const API = import.meta.env.BASE_URL.replace(/\/$/, "") + "/api";
 
@@ -387,8 +387,297 @@ function IdentitiesPanel() {
   );
 }
 
-// ─── Temp Emails ─────────────────────────────────────────────────────────────
+// ─── Outlook 邮箱库（OAuth + Graph API 收信）────────────────────────────────
+interface OutlookAccount {
+  id: number; email: string; password: string;
+  token?: string; refresh_token?: string; status: string; notes?: string; created_at: string;
+}
+interface GraphMsg {
+  id: string; subject: string; from: string; fromName: string;
+  receivedAt: string; preview: string; isRead: boolean;
+}
+
+interface OAuthState {
+  deviceCode: string; userCode: string; verificationUri: string;
+  expiresIn: number; interval: number;
+  polling: boolean; done: boolean; error: string;
+}
+
+function OutlookInboxSection() {
+  const [accounts, setAccounts] = useState<OutlookAccount[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [openId, setOpenId] = useState<number | null>(null);
+  const [inbox, setInbox] = useState<Record<number, GraphMsg[] | null>>({});
+  const [inboxErr, setInboxErr] = useState<Record<number, string>>({});
+  const [fetching, setFetching] = useState<Record<number, boolean>>({});
+  const [expandMsg, setExpandMsg] = useState<string | null>(null);
+  const [oauthState, setOauthState] = useState<Record<number, OAuthState>>({});
+  const [accessTokens, setAccessTokens] = useState<Record<number, string>>({});
+  const pollRefs = useRef<Record<number, ReturnType<typeof setInterval>>>({});
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const d = await fetch(`${API}/tools/outlook/accounts`).then(r => r.json()).catch(() => ({}));
+    setLoading(false);
+    if (d.success) setAccounts(d.accounts ?? []);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  // 刷新 token → accessToken
+  async function refreshToken(acc: OutlookAccount): Promise<string | null> {
+    if (!acc.refresh_token) return null;
+    const d = await fetch(`${API}/tools/outlook/refresh-token`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientId: "9e5f94bc-e8a4-4e73-b8be-63364c29d753", refreshToken: acc.refresh_token }),
+    }).then(r => r.json()).catch(() => ({}));
+    if (d.success && d.accessToken) {
+      // 保存新 refresh_token
+      await fetch(`${API}/tools/outlook/save-token`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: acc.email, token: d.accessToken, refreshToken: d.refreshToken }),
+      }).catch(() => {});
+      return d.accessToken;
+    }
+    return null;
+  }
+
+  // 用 Graph API 读收件箱
+  async function fetchInbox(acc: OutlookAccount, forceToken?: string) {
+    setFetching(f => ({ ...f, [acc.id]: true }));
+    setInboxErr(e => ({ ...e, [acc.id]: "" }));
+    setOpenId(acc.id);
+
+    let token = forceToken ?? accessTokens[acc.id];
+
+    // 尝试刷新
+    if (!token && acc.refresh_token) {
+      token = (await refreshToken(acc)) ?? "";
+      if (token) setAccessTokens(t => ({ ...t, [acc.id]: token! }));
+    }
+
+    if (!token) {
+      setInboxErr(e => ({ ...e, [acc.id]: "无 Token — 请先点「OAuth 授权」绑定账号" }));
+      setFetching(f => ({ ...f, [acc.id]: false }));
+      setInbox(b => ({ ...b, [acc.id]: null }));
+      return;
+    }
+
+    const d = await fetch(`${API}/tools/outlook/messages`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accessToken: token, folder: "inbox", top: 30 }),
+    }).then(r => r.json()).catch(e => ({ success: false, error: String(e) }));
+
+    setFetching(f => ({ ...f, [acc.id]: false }));
+    if (d.success) {
+      setInbox(b => ({ ...b, [acc.id]: d.messages ?? [] }));
+    } else {
+      setInboxErr(e => ({ ...e, [acc.id]: d.error ?? "获取邮件失败" }));
+      setInbox(b => ({ ...b, [acc.id]: null }));
+    }
+  }
+
+  // 启动设备码 OAuth 流程
+  async function startOAuth(acc: OutlookAccount) {
+    const d = await fetch(`${API}/tools/outlook/device-code`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientId: "9e5f94bc-e8a4-4e73-b8be-63364c29d753" }),
+    }).then(r => r.json()).catch(e => ({ success: false, error: String(e) }));
+
+    if (!d.success) {
+      setOauthState(s => ({ ...s, [acc.id]: { ...s[acc.id], error: d.error, polling: false, done: false, deviceCode: "", userCode: "", verificationUri: "", expiresIn: 0, interval: 5 } }));
+      return;
+    }
+    const st: OAuthState = {
+      deviceCode: d.deviceCode, userCode: d.userCode, verificationUri: d.verificationUri,
+      expiresIn: d.expiresIn, interval: d.interval, polling: true, done: false, error: "",
+    };
+    setOauthState(s => ({ ...s, [acc.id]: st }));
+
+    // 开始轮询
+    if (pollRefs.current[acc.id]) clearInterval(pollRefs.current[acc.id]);
+    pollRefs.current[acc.id] = setInterval(async () => {
+      const p = await fetch(`${API}/tools/outlook/device-poll`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deviceCode: d.deviceCode, clientId: "9e5f94bc-e8a4-4e73-b8be-63364c29d753" }),
+      }).then(r => r.json()).catch(() => ({ success: false, pending: true }));
+
+      if (p.pending) return; // 继续等待
+
+      clearInterval(pollRefs.current[acc.id]);
+
+      if (p.success && p.accessToken) {
+        // 保存 token
+        await fetch(`${API}/tools/outlook/save-token`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: acc.email, token: p.accessToken, refreshToken: p.refreshToken }),
+        }).catch(() => {});
+        setAccessTokens(t => ({ ...t, [acc.id]: p.accessToken }));
+        setOauthState(s => ({ ...s, [acc.id]: { ...s[acc.id], done: true, polling: false } }));
+        // 授权成功后刷新账号列表（更新 token 字段）
+        load();
+        // 立即读邮件
+        await fetchInbox(acc, p.accessToken);
+      } else {
+        setOauthState(s => ({ ...s, [acc.id]: { ...s[acc.id], error: p.error ?? "授权失败", polling: false } }));
+      }
+    }, (d.interval ?? 5) * 1000);
+  }
+
+  function cancelOAuth(id: number) {
+    if (pollRefs.current[id]) clearInterval(pollRefs.current[id]);
+    setOauthState(s => ({ ...s, [id]: { ...s[id], polling: false } }));
+  }
+
+  if (loading) return <div className="text-sm text-gray-500 py-4 text-center animate-pulse">加载 Outlook 账号…</div>;
+  if (accounts.length === 0) return (
+    <div className="text-sm text-gray-600 py-4 text-center">
+      暂无 Outlook 长期邮箱 — 请先在「注册任务」中批量注册
+    </div>
+  );
+
+  return (
+    <div className="space-y-2">
+      {accounts.map(acc => {
+        const msgs = inbox[acc.id];
+        const err = inboxErr[acc.id];
+        const isOpen = openId === acc.id;
+        const isFetching = fetching[acc.id];
+        const oauth = oauthState[acc.id];
+        const hasToken = !!(acc.token || acc.refresh_token || accessTokens[acc.id]);
+
+        return (
+          <div key={acc.id} className="border border-[#30363d] rounded-lg overflow-hidden">
+            {/* 账号行 */}
+            <div className="flex flex-wrap items-center gap-2 px-3 py-2 bg-[#161b22]">
+              <span className="text-blue-400 font-mono text-xs flex-1 min-w-0 truncate">{acc.email}</span>
+              <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${acc.status === "active" ? "bg-emerald-900/40 text-emerald-400" : "bg-gray-800 text-gray-500"}`}>
+                {acc.status === "active" ? "有效" : "失效"}
+              </span>
+              {hasToken && (
+                <span className="text-xs text-emerald-500 shrink-0">✅ 已授权</span>
+              )}
+              {/* 收件按钮 */}
+              {hasToken ? (
+                <button onClick={() => isOpen && msgs !== undefined ? setOpenId(null) : fetchInbox(acc)}
+                  disabled={isFetching}
+                  className="px-3 py-1 bg-blue-800/50 hover:bg-blue-700/60 border border-blue-600/30 rounded text-xs text-blue-300 disabled:opacity-50 whitespace-nowrap">
+                  {isFetching ? "收取中…" : isOpen ? "▲ 收起" : "📬 查收邮件"}
+                </button>
+              ) : (
+                <button onClick={() => startOAuth(acc)}
+                  disabled={oauth?.polling}
+                  className="px-3 py-1 bg-orange-800/50 hover:bg-orange-700/60 border border-orange-600/30 rounded text-xs text-orange-300 disabled:opacity-50 whitespace-nowrap">
+                  {oauth?.polling ? "等待授权…" : "🔑 OAuth 授权"}
+                </button>
+              )}
+            </div>
+
+            {/* OAuth 授权引导 */}
+            {oauth && !oauth.done && (
+              <div className="px-4 py-3 bg-orange-950/20 border-t border-orange-800/20 space-y-2">
+                {oauth.error ? (
+                  <p className="text-xs text-red-400">{oauth.error}</p>
+                ) : oauth.polling ? (
+                  <>
+                    <p className="text-xs text-orange-300 font-semibold">第一步：打开以下链接授权</p>
+                    <a href={oauth.verificationUri} target="_blank" rel="noopener noreferrer"
+                      className="block text-sm font-bold text-blue-400 hover:text-blue-300">
+                      👉 {oauth.verificationUri}
+                    </a>
+                    <div className="flex items-center gap-3">
+                      <div className="bg-[#0d1117] border border-orange-600/40 rounded px-4 py-2">
+                        <span className="text-orange-300 font-mono text-xl font-bold tracking-widest">{oauth.userCode}</span>
+                      </div>
+                      <div className="text-xs text-gray-400">
+                        <p>第二步：输入上方代码</p>
+                        <p>第三步：登录 <strong className="text-white">{acc.email}</strong></p>
+                        <p className="text-gray-600 mt-1">⏳ 正在等待授权，代码 {Math.floor(oauth.expiresIn / 60)} 分钟内有效</p>
+                      </div>
+                    </div>
+                    <button onClick={() => cancelOAuth(acc.id)} className="text-xs text-gray-600 hover:text-gray-400">取消</button>
+                  </>
+                ) : null}
+              </div>
+            )}
+
+            {/* 收件箱展开区 */}
+            {isOpen && (
+              <div className="bg-[#0d1117] border-t border-[#21262d]">
+                {err && (
+                  <div className="px-4 py-3 text-xs text-red-300 bg-red-950/30 whitespace-pre-line">
+                    <span className="font-bold text-red-400">错误：</span>{err}
+                  </div>
+                )}
+                {msgs !== null && msgs !== undefined && msgs.length === 0 && (
+                  <div className="text-xs text-gray-500 px-4 py-4 text-center">收件箱为空</div>
+                )}
+                {msgs && msgs.length > 0 && (
+                  <div className="divide-y divide-[#21262d]">
+                    {msgs.map((m, i) => {
+                      const key = `${acc.id}-${i}`;
+                      const isExpanded = expandMsg === key;
+                      const urls = extractVerifyUrls(m.preview);
+                      return (
+                        <div key={m.id ?? i} className={`px-4 py-3 hover:bg-[#161b22] transition-colors ${isExpanded ? "bg-[#161b22]" : ""}`}>
+                          <div className="flex items-start justify-between gap-2 cursor-pointer" onClick={() => setExpandMsg(isExpanded ? null : key)}>
+                            <div className="flex-1 min-w-0">
+                              <div className={`text-xs font-semibold truncate ${m.isRead ? "text-gray-400" : "text-white"}`}>{m.subject || "(无主题)"}</div>
+                              <div className="text-xs text-gray-500 mt-0.5 truncate">来自: {m.fromName || m.from} · {new Date(m.receivedAt).toLocaleString("zh-CN")}</div>
+                            </div>
+                            <div className="flex items-center gap-2 shrink-0">
+                              {urls.length > 0 && (
+                                <span className="text-xs bg-orange-900/50 text-orange-300 border border-orange-600/30 px-2 py-0.5 rounded-full font-bold">
+                                  🔗 {urls.length} 链接
+                                </span>
+                              )}
+                              <span className="text-gray-600 text-xs">{isExpanded ? "▲" : "▼"}</span>
+                            </div>
+                          </div>
+                          {isExpanded && (
+                            <div className="mt-3 space-y-2">
+                              {m.preview && (
+                                <p className="text-xs text-gray-400 bg-[#0d1117] rounded p-2 whitespace-pre-wrap leading-5 max-h-40 overflow-y-auto">{m.preview}</p>
+                              )}
+                              {urls.length > 0 && (
+                                <div className="space-y-1">
+                                  <p className="text-xs font-semibold text-orange-400">验证 / 激活链接：</p>
+                                  {urls.map((u, j) => (
+                                    <a key={j} href={u} target="_blank" rel="noopener noreferrer"
+                                      className="block text-xs text-blue-400 hover:text-blue-300 font-mono bg-blue-950/20 border border-blue-800/30 rounded px-2 py-1.5 break-all">
+                                      🔗 {u}
+                                    </a>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function extractVerifyUrls(preview: string): string[] {
+  const matches = preview.match(/https?:\/\/[^\s"<>\]\)\']+/g) ?? [];
+  const cleaned = matches.map(u => u.replace(/[.,;:]+$/, ""));
+  return cleaned.filter(u =>
+    ["verify", "confirm", "activate", "click", "token", "reset", "auth",
+     "email", "account", "signup", "link", "validate"].some(k => u.toLowerCase().includes(k))
+  ).slice(0, 5);
+}
+
+// ─── 邮箱库（长期 + 临时）────────────────────────────────────────────────────
 function EmailsPanel() {
+  const [tab, setTab] = useState<"outlook" | "temp">("outlook");
   const [emails, setEmails] = useState<TempEmail[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({ address:"", password:"", provider:"mailtm", token:"", notes:"" });
@@ -425,73 +714,102 @@ function EmailsPanel() {
 
   return (
     <div className="space-y-4">
-      <div className="flex gap-2">
-        <div className="flex-1" />
-        <button onClick={exportEmails} className="px-3 py-1.5 bg-[#21262d] border border-[#30363d] rounded text-xs text-gray-300 hover:bg-[#30363d]">导出 TXT</button>
-        <button onClick={() => setShowAdd(true)} className="px-3 py-1.5 bg-emerald-700 rounded text-xs text-white hover:bg-emerald-600">+ 添加邮箱</button>
+      {/* 子标签：长期 / 临时 */}
+      <div className="flex gap-1 border-b border-[#30363d]">
+        {([
+          { key: "outlook", label: "📧 长期邮箱（Outlook）" },
+          { key: "temp",    label: "⏳ 临时邮箱（MailTM 等）" },
+        ] as const).map(({ key, label }) => (
+          <button key={key} onClick={() => setTab(key)}
+            className={`px-4 py-2 text-sm border-b-2 transition-colors whitespace-nowrap ${tab === key ? "border-blue-500 text-white" : "border-transparent text-gray-500 hover:text-gray-300"}`}>
+            {label}
+          </button>
+        ))}
       </div>
 
-      {msg && <p className={`text-sm px-3 py-2 rounded ${msg.startsWith("✅") ? "bg-emerald-900/40 text-emerald-300" : msg.startsWith("⚠") ? "bg-yellow-900/30 text-yellow-300" : "bg-red-900/40 text-red-300"}`}>{msg}</p>}
-
-      {showAdd && (
-        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4 space-y-3">
-          <h3 className="text-sm font-semibold text-white">添加临时邮箱</h3>
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="text-xs text-gray-400">邮箱地址</label>
-              <input value={form.address} onChange={e => setForm(f=>({...f,address:e.target.value}))} className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white mt-1" />
-            </div>
-            <div>
-              <label className="text-xs text-gray-400">密码</label>
-              <input value={form.password} onChange={e => setForm(f=>({...f,password:e.target.value}))} className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white mt-1" />
-            </div>
-            <div>
-              <label className="text-xs text-gray-400">服务商</label>
-              <select value={form.provider} onChange={e => setForm(f=>({...f,provider:e.target.value}))} className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white mt-1">
-                <option value="mailtm">mail.tm</option>
-                <option value="guerrilla">Guerrilla Mail</option>
-                <option value="temp-mail">Temp-Mail</option>
-                <option value="other">其他</option>
-              </select>
-            </div>
-            <div>
-              <label className="text-xs text-gray-400">备注</label>
-              <input value={form.notes} onChange={e => setForm(f=>({...f,notes:e.target.value}))} className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white mt-1" />
-            </div>
-            <div className="col-span-2">
-              <label className="text-xs text-gray-400">Token（可选）</label>
-              <input value={form.token} onChange={e => setForm(f=>({...f,token:e.target.value}))} className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white font-mono mt-1" />
-            </div>
+      {/* ── Outlook 长期邮箱 ── */}
+      {tab === "outlook" && (
+        <div className="space-y-3">
+          <div className="text-xs text-gray-500 bg-[#161b22] border border-[#30363d] rounded-lg px-3 py-2">
+            点击「查收邮件」通过 IMAP 协议读取收件箱，自动提取验证/激活链接。
+            <span className="text-yellow-500"> 若提示认证失败，请登录 outlook.com → 设置 → 邮件 → 同步邮件 → 开启 IMAP。</span>
           </div>
-          <div className="flex gap-2 justify-end">
-            <button onClick={() => setShowAdd(false)} className="px-3 py-1.5 text-xs text-gray-400 hover:text-white">取消</button>
-            <button onClick={addEmail} disabled={busy} className="px-4 py-1.5 bg-emerald-700 rounded text-xs text-white hover:bg-emerald-600 disabled:opacity-50">保存</button>
-          </div>
+          <OutlookInboxSection />
         </div>
       )}
 
-      <div className="bg-[#161b22] border border-[#30363d] rounded-lg overflow-hidden">
-        <div className="grid grid-cols-[1fr_80px_1fr_80px_60px] gap-2 px-3 py-2 bg-[#21262d] text-xs text-gray-500 font-medium">
-          <span>邮箱地址</span><span>服务商</span><span>密码</span><span>状态</span><span></span>
-        </div>
-        {emails.length === 0 && <p className="text-center text-gray-600 text-sm py-8">暂无邮箱记录</p>}
-        {emails.map(e => (
-          <div key={e.id} className="grid grid-cols-[1fr_80px_1fr_80px_60px] gap-2 px-3 py-2 border-t border-[#21262d] text-xs hover:bg-[#21262d]/50 group items-center">
-            <div className="flex items-center gap-2">
-              <span className="text-white font-mono">{e.address}</span>
-              {e.token && <button onClick={() => setShowToken(showToken === e.id ? null : e.id)} className="text-gray-600 hover:text-gray-400 text-xs">Token</button>}
-            </div>
-            <span className="text-gray-400">{e.provider}</span>
-            <span className="text-gray-400 font-mono">{e.password}</span>
-            <span className={`px-2 py-0.5 rounded-full w-fit ${e.status === "active" ? "bg-emerald-900/40 text-emerald-400" : "bg-gray-800 text-gray-500"}`}>{e.status === "active" ? "有效" : "失效"}</span>
-            <button onClick={() => deleteEmail(e.id)} className="text-red-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs">删除</button>
-            {showToken === e.id && e.token && (
-              <div className="col-span-5 bg-[#0d1117] rounded p-2 font-mono text-xs text-gray-400 break-all">{e.token}</div>
-            )}
+      {/* ── 临时邮箱 ── */}
+      {tab === "temp" && (
+        <div className="space-y-4">
+          <div className="flex gap-2">
+            <div className="flex-1" />
+            <button onClick={exportEmails} className="px-3 py-1.5 bg-[#21262d] border border-[#30363d] rounded text-xs text-gray-300 hover:bg-[#30363d]">导出 TXT</button>
+            <button onClick={() => setShowAdd(true)} className="px-3 py-1.5 bg-emerald-700 rounded text-xs text-white hover:bg-emerald-600">+ 添加邮箱</button>
           </div>
-        ))}
-      </div>
-      <p className="text-xs text-gray-600 text-right">共 {emails.length} 条</p>
+
+          {msg && <p className={`text-sm px-3 py-2 rounded ${msg.startsWith("✅") ? "bg-emerald-900/40 text-emerald-300" : msg.startsWith("⚠") ? "bg-yellow-900/30 text-yellow-300" : "bg-red-900/40 text-red-300"}`}>{msg}</p>}
+
+          {showAdd && (
+            <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4 space-y-3">
+              <h3 className="text-sm font-semibold text-white">添加临时邮箱</h3>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs text-gray-400">邮箱地址</label>
+                  <input value={form.address} onChange={e => setForm(f=>({...f,address:e.target.value}))} className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white mt-1" />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-400">密码</label>
+                  <input value={form.password} onChange={e => setForm(f=>({...f,password:e.target.value}))} className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white mt-1" />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-400">服务商</label>
+                  <select value={form.provider} onChange={e => setForm(f=>({...f,provider:e.target.value}))} className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white mt-1">
+                    <option value="mailtm">mail.tm</option>
+                    <option value="guerrilla">Guerrilla Mail</option>
+                    <option value="temp-mail">Temp-Mail</option>
+                    <option value="other">其他</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-gray-400">备注</label>
+                  <input value={form.notes} onChange={e => setForm(f=>({...f,notes:e.target.value}))} className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white mt-1" />
+                </div>
+                <div className="col-span-2">
+                  <label className="text-xs text-gray-400">Token（可选）</label>
+                  <input value={form.token} onChange={e => setForm(f=>({...f,token:e.target.value}))} className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white font-mono mt-1" />
+                </div>
+              </div>
+              <div className="flex gap-2 justify-end">
+                <button onClick={() => setShowAdd(false)} className="px-3 py-1.5 text-xs text-gray-400 hover:text-white">取消</button>
+                <button onClick={addEmail} disabled={busy} className="px-4 py-1.5 bg-emerald-700 rounded text-xs text-white hover:bg-emerald-600 disabled:opacity-50">保存</button>
+              </div>
+            </div>
+          )}
+
+          <div className="bg-[#161b22] border border-[#30363d] rounded-lg overflow-hidden">
+            <div className="grid grid-cols-[1fr_80px_1fr_80px_60px] gap-2 px-3 py-2 bg-[#21262d] text-xs text-gray-500 font-medium">
+              <span>邮箱地址</span><span>服务商</span><span>密码</span><span>状态</span><span></span>
+            </div>
+            {emails.length === 0 && <p className="text-center text-gray-600 text-sm py-8">暂无邮箱记录</p>}
+            {emails.map(e => (
+              <div key={e.id} className="grid grid-cols-[1fr_80px_1fr_80px_60px] gap-2 px-3 py-2 border-t border-[#21262d] text-xs hover:bg-[#21262d]/50 group items-center">
+                <div className="flex items-center gap-2">
+                  <span className="text-white font-mono">{e.address}</span>
+                  {e.token && <button onClick={() => setShowToken(showToken === e.id ? null : e.id)} className="text-gray-600 hover:text-gray-400 text-xs">Token</button>}
+                </div>
+                <span className="text-gray-400">{e.provider}</span>
+                <span className="text-gray-400 font-mono">{e.password}</span>
+                <span className={`px-2 py-0.5 rounded-full w-fit ${e.status === "active" ? "bg-emerald-900/40 text-emerald-400" : "bg-gray-800 text-gray-500"}`}>{e.status === "active" ? "有效" : "失效"}</span>
+                <button onClick={() => deleteEmail(e.id)} className="text-red-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs">删除</button>
+                {showToken === e.id && e.token && (
+                  <div className="col-span-5 bg-[#0d1117] rounded p-2 font-mono text-xs text-gray-400 break-all">{e.token}</div>
+                )}
+              </div>
+            ))}
+          </div>
+          <p className="text-xs text-gray-600 text-right">共 {emails.length} 条</p>
+        </div>
+      )}
     </div>
   );
 }
