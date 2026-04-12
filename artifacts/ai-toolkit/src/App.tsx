@@ -111,10 +111,11 @@ import FullWorkflow from "@/pages/FullWorkflow";
 import Monitor from "@/pages/Monitor";
 import CursorRegister from "@/pages/CursorRegister";
 import Sub2ApiManager from "@/pages/Sub2ApiManager";
+import MailCenter from "@/pages/MailCenter";
 
 const queryClient = new QueryClient();
 
-type Tab = "home" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "machine-reset" | "fingerprint" | "outlook" | "cursor-register" | "sub2api" | "team-register" | "openai-pool" | "data-manager" | "full-workflow" | "monitor";
+type Tab = "home" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "machine-reset" | "fingerprint" | "outlook" | "mail-center" | "cursor-register" | "sub2api" | "team-register" | "openai-pool" | "data-manager" | "full-workflow" | "monitor";
 
 const tabs: { id: Tab; label: string; icon: string; badge?: string }[] = [
   { id: "home",            label: "工具导航",        icon: "🗂️" },
@@ -124,6 +125,7 @@ const tabs: { id: Tab; label: string; icon: string; badge?: string }[] = [
   { id: "email",           label: "临时邮箱",        icon: "📬", badge: "真实可用" },
   { id: "bulk-email",      label: "批量邮箱",        icon: "📮", badge: "MailTM" },
   { id: "free-email",      label: "免费身份邮箱",     icon: "🆓", badge: "无需Key" },
+  { id: "mail-center",     label: "邮件中心",         icon: "✉️",  badge: "三列布局" },
   { id: "outlook",         label: "Outlook 工作流",  icon: "📧", badge: "OAuth2" },
   { id: "cursor-register", label: "Cursor 自动注册",  icon: "🖱️", badge: "自动化" },
   { id: "sub2api",         label: "Token 转发管理",   icon: "🚀", badge: "Sub2Api" },
@@ -215,6 +217,7 @@ function App() {
             {tab === "info" && <InfoGenerator />}
             {tab === "machine-reset" && <MachineReset />}
             {tab === "fingerprint" && <Fingerprint />}
+            {tab === "mail-center" && <MailCenter />}
             {tab === "outlook" && <OutlookManager />}
             {tab === "cursor-register" && <CursorRegister />}
             {tab === "sub2api" && <Sub2ApiManager />}

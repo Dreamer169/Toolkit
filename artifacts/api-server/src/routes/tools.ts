@@ -1553,5 +1553,95 @@ router.post("/tools/outlook/save-token", async (req, res) => {
   }
 });
 
+// ── 按账号ID拉取邮件（自动刷新token）──────────────────────────────────────
+// 供邮件中心使用，前端只传账号ID，token管理完全在后端
+const DEFAULT_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
+
+router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
+  const { accountId, folder, top, search } = req.body as {
+    accountId?: number; folder?: string; top?: number; search?: string;
+  };
+  if (!accountId) { res.status(400).json({ success: false, error: "accountId 不能为空" }); return; }
+
+  try {
+    const { query, execute } = await import("../db.js");
+    const rows = await query<{
+      id: number; email: string; token: string | null; refresh_token: string | null;
+    }>("SELECT id, email, token, refresh_token FROM accounts WHERE id=$1 AND platform='outlook'", [accountId]);
+    const acc = rows[0];
+    if (!acc) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
+
+    let accessToken = acc.token ?? "";
+
+    // 有 refresh_token → 刷新
+    if (acc.refresh_token) {
+      const r = await fetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: DEFAULT_CLIENT_ID,
+          refresh_token: acc.refresh_token,
+          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access",
+        }).toString(),
+      });
+      const td = await r.json() as { access_token?: string; refresh_token?: string; error_description?: string; error?: string };
+      if (td.access_token) {
+        accessToken = td.access_token;
+        // 保存新 token（refresh_token 可能轮换）
+        await execute(
+          "UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
+          [accessToken, td.refresh_token ?? acc.refresh_token, accountId]
+        );
+      } else {
+        res.json({ success: false, error: `token 刷新失败: ${td.error_description ?? td.error ?? "未知错误"}`, needsAuth: true });
+        return;
+      }
+    }
+
+    if (!accessToken) {
+      res.json({ success: false, error: "账号未授权，请先完成 OAuth 登录", needsAuth: true });
+      return;
+    }
+
+    const mailFolder = folder || "inbox";
+    const limit = Math.min(50, Math.max(1, top ?? 30));
+    let url = `https://graph.microsoft.com/v1.0/me/mailFolders/${mailFolder}/messages?$top=${limit}&$select=id,subject,from,receivedDateTime,bodyPreview,isRead,body&$orderby=receivedDateTime desc`;
+    if (search) url += `&$search="${encodeURIComponent(search)}"`;
+
+    const mr = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    });
+    const md = await mr.json() as {
+      value?: Array<{
+        id: string; subject: string;
+        from: { emailAddress: { name: string; address: string } };
+        receivedDateTime: string; bodyPreview: string; isRead: boolean;
+        body?: { content: string; contentType: string };
+      }>;
+      error?: { message: string; code: string };
+    };
+    if (!mr.ok) {
+      const needsAuth = md.error?.code === "InvalidAuthenticationToken" || md.error?.code === "401";
+      res.json({ success: false, error: md.error?.message ?? "获取邮件失败", needsAuth });
+      return;
+    }
+    const messages = (md.value ?? []).map((m) => ({
+      id: m.id,
+      subject: m.subject || "(无主题)",
+      from: m.from?.emailAddress?.address ?? "",
+      fromName: m.from?.emailAddress?.name ?? "",
+      receivedAt: m.receivedDateTime,
+      preview: m.bodyPreview,
+      body: m.body?.content ?? "",
+      bodyType: m.body?.contentType ?? "text",
+      isRead: m.isRead,
+    }));
+    res.json({ success: true, messages, count: messages.length, email: acc.email });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
 export default router;
 
