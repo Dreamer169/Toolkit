@@ -1116,7 +1116,7 @@ router.post("/tools/outlook/register", async (req, res) => {
     // ── 持久化到数据库 + 立即 ROPC 自动授权 ────────────────────────────────
     if (okCount > 0) {
       (async () => {
-        const ROPC_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
+        const ROPC_CLIENT_ID = "d3590ed6-52b3-4102-aeff-aad2292ab01c";
         const ROPC_SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access";
         for (const acc of job.accounts) {
           // 1. 保存账号
@@ -1585,7 +1585,7 @@ router.post("/tools/outlook/save-token", async (req, res) => {
 
 // ── 批量验证微软账号有效性（ROPC 错误码诊断）────────────────────────────────
 // 错误码参考: https://learn.microsoft.com/en-us/azure/active-directory/develop/reference-aadsts-error-codes
-const ROPC_CID  = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
+const ROPC_CID  = "d3590ed6-52b3-4102-aeff-aad2292ab01c";
 const ROPC_SCO  = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read offline_access";
 
 function ropcStatus(err?: string, desc?: string): string {
@@ -1680,7 +1680,7 @@ router.post("/tools/outlook/auto-auth", async (req, res) => {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         grant_type: "password",
-        client_id: "9e5f94bc-e8a4-4e73-b8be-63364c29d753",
+        client_id: "d3590ed6-52b3-4102-aeff-aad2292ab01c",
         username: acc.email,
         password: acc.password,
         scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access",
@@ -1730,7 +1730,7 @@ router.post("/tools/outlook/auto-auth-all", async (req, res) => {
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({
             grant_type: "password",
-            client_id: "9e5f94bc-e8a4-4e73-b8be-63364c29d753",
+            client_id: "d3590ed6-52b3-4102-aeff-aad2292ab01c",
             username: acc.email,
             password: acc.password!,
             scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access",
@@ -1762,7 +1762,7 @@ router.post("/tools/outlook/auto-auth-all", async (req, res) => {
 
 // ── 按账号ID拉取邮件（自动刷新token）──────────────────────────────────────
 // 供邮件中心使用，前端只传账号ID，token管理完全在后端
-const DEFAULT_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
+const DEFAULT_CLIENT_ID = "d3590ed6-52b3-4102-aeff-aad2292ab01c";
 
 router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
   const { accountId, folder, top, search } = req.body as {
