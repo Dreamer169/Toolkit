@@ -944,27 +944,86 @@ class PatchrightController(BaseController):
             except Exception as _e3:
                 print(f"[captcha]   可访问性挑战 点击异常: {_e3}", flush=True)
 
-            # ── 等待 [aria-label="再次按下"] 出现（LainsNL/hrhcode 关键步骤）──
-            # 这是点击轮椅后出现的"按压/再次按下"按钮，触发真正的挑战
+            # ── 等待 [aria-label="再次按下"] 或 PerimeterX 等效按钮 ──────────
             if _second_click_done:
-                page.wait_for_timeout(1500)  # 等待模式切换
+                page.wait_for_timeout(2000)  # 等待模式切换
+                _press_clicked = False
+
+                # 方法A：Arkose "再次按下"（frame2 + page 全局）
                 try:
                     _press_again = None
                     if _frame2 is not None:
                         _press_again = _frame2.locator('[aria-label="再次按下"]')
                     if _press_again is None or _press_again.count() == 0:
                         _press_again = page.locator('[aria-label="再次按下"]')
-                    _box2 = _press_again.first.bounding_box(timeout=8000)
+                    _box2 = _press_again.first.bounding_box(timeout=5000)
                     if _box2 and _box2['width'] > 0:
                         _cx2 = _box2['x'] + _box2['width'] / 2 + _rnd.randint(-10, 10)
                         _cy2 = _box2['y'] + _box2['height'] / 2 + _rnd.randint(-5, 5)
                         print(f"[captcha] 🖱 点击 再次按下: PAGE=({_cx2:.0f},{_cy2:.0f})", flush=True)
                         page.mouse.click(_cx2, _cy2)
-                        print("[captcha] ✅ 再次按下已点击！（LainsNL 关键步骤）", flush=True)
+                        print("[captcha] ✅ 再次按下已点击！（Arkose）", flush=True)
+                        _press_clicked = True
                     else:
                         print(f"[captcha]   再次按下 bounding_box 无效: {_box2}", flush=True)
                 except Exception as _e4:
-                    print(f"[captcha]   再次按下 异常: {_e4}", flush=True)
+                    print(f"[captcha]   再次按下 异常（Arkose）: {_e4}", flush=True)
+
+                # 方法B：PerimeterX（hsprotect.net frames）音频/无障碍按钮
+                if not _press_clicked:
+                    print("[captcha] 尝试 PerimeterX frame 音频按钮…", flush=True)
+                    page.wait_for_timeout(2000)
+                    for _hfr in page.frames:
+                        if "hsprotect.net" not in _hfr.url:
+                            continue
+                        try:
+                            _hinfo = _hfr.evaluate("""() => {
+                                const candidates = [
+                                    ...document.querySelectorAll('a[role="button"]'),
+                                    ...document.querySelectorAll('[tabindex="0"][id]'),
+                                    ...document.querySelectorAll('button'),
+                                    ...document.querySelectorAll('a[href*="audio"],a[href*=".mp3"],a[href*=".wav"]'),
+                                ];
+                                if (!candidates.length) return null;
+                                const el = candidates[0];
+                                return {
+                                    tag: el.tagName,
+                                    id: el.id || '',
+                                    href: el.href || el.getAttribute('href') || '',
+                                    label: el.getAttribute('aria-label') || '',
+                                    cls: el.className || '',
+                                    text: (el.textContent||'').trim().substring(0, 60),
+                                    bodyLen: document.body.innerHTML.length,
+                                };
+                            }""")
+                            if not _hinfo:
+                                continue
+                            print(f"[captcha] PX frame 按钮: tag={_hinfo.get('tag')} id={_hinfo.get('id')} label={_hinfo.get('label')[:50]} href={_hinfo.get('href')[:60]} bodyLen={_hinfo.get('bodyLen')}", flush=True)
+                            # 优先用 ID 定位点击
+                            _hid = _hinfo.get('id')
+                            _hhref = _hinfo.get('href', '')
+                            if _hid:
+                                _hloc = _hfr.locator(f'#{_hid}')
+                                try:
+                                    _hloc.first.click(force=True, timeout=4000)
+                                    print(f"[captcha] ✅ PX frame #{_hid} 已点击", flush=True)
+                                    _press_clicked = True
+                                except Exception:
+                                    try:
+                                        _hfr.evaluate(f"document.getElementById('{_hid}') && document.getElementById('{_hid}').click()")
+                                        print(f"[captcha] ✅ PX frame #{_hid} JS click", flush=True)
+                                        _press_clicked = True
+                                    except Exception:
+                                        pass
+                            elif _hhref and any(k in _hhref for k in ['.mp3', '.wav', 'audio', 'sound']):
+                                # href 直接是音频URL
+                                print(f"[captcha] PX 音频 href: {_hhref[:80]}", flush=True)
+                                _press_clicked = True  # 音频URL已知，直接走音频解题
+                            if _press_clicked:
+                                page.wait_for_timeout(4000)  # 等音频加载
+                                break
+                        except Exception as _hpe:
+                            print(f"[captcha]   PX frame 异常: {_hpe}", flush=True)
 
             if not _second_click_done:
                 print("[captcha] ⚠ 可访问性挑战按钮未找到，跳过", flush=True)
@@ -1076,32 +1135,75 @@ class PatchrightController(BaseController):
         audio_url = None
         audio_frame = None
         input_frame = None
+        play_btn_frames = []  # frames where we found a play button (but no src yet)
 
-        for fr in all_frames:
-            try:
-                info = fr.evaluate("""
-                    () => {
-                        const audio = document.querySelector('audio[src], audio source, [class*="audio"] audio');
-                        const input = document.querySelector('input[type="text"], input[type="tel"], input[placeholder]');
-                        const playBtn = document.querySelector('[class*="play"], button[aria-label*="play"], button[aria-label*="Play"]');
-                        return {
-                            audioSrc: audio ? (audio.src || (audio.querySelector('source') ? audio.querySelector('source').src : '')) : '',
-                            hasInput: !!input,
-                            inputPlaceholder: input ? input.placeholder : '',
-                            hasPlayBtn: !!playBtn,
-                            url: window.location.href
-                        };
-                    }
-                """)
-                print(f"[captcha] frame {fr.url[:50]}: audioSrc={info.get('audioSrc','')[:60]} hasInput={info.get('hasInput')}", flush=True)
+        def _scan_frames_for_audio(frames):
+            nonlocal audio_url, audio_frame, input_frame
+            for fr in frames:
+                try:
+                    info = fr.evaluate("""
+                        () => {
+                            // 音频元素（src 直接可读）
+                            const audio = document.querySelector('audio[src], audio source, [class*="audio"] audio');
+                            // PX 下载链接（href=音频文件）
+                            const aLinks = Array.from(document.querySelectorAll('a[href]')).filter(a =>
+                                a.href && (a.href.includes('.mp3') || a.href.includes('.wav') ||
+                                           a.href.includes('.ogg') || a.href.includes('audio') ||
+                                           a.href.includes('sound') || a.href.includes('speak')));
+                            // 输入框
+                            const input = document.querySelector('input[type="text"], input[type="tel"], input[placeholder], textarea');
+                            // 播放按钮（可能需要点击触发音频）
+                            const playBtn = document.querySelector(
+                                '[class*="play"],[aria-label*="play"],[aria-label*="Play"],' +
+                                'a[role="button"],button[class*="audio"],button[class*="sound"],' +
+                                '[data-cy*="audio"],[id*="audio"],[id*="sound"]');
+                            const audioSrc = audio
+                                ? (audio.src || (audio.querySelector && audio.querySelector('source')
+                                     ? audio.querySelector('source').src : ''))
+                                : (aLinks.length ? aLinks[0].href : '');
+                            return {
+                                audioSrc: audioSrc,
+                                hasInput: !!input,
+                                inputPlaceholder: input ? input.placeholder : '',
+                                hasPlayBtn: !!playBtn,
+                                playBtnId: playBtn ? (playBtn.id || '') : '',
+                                url: window.location.href
+                            };
+                        }
+                    """)
+                    print(f"[captcha] frame {fr.url[:50]}: audioSrc={info.get('audioSrc','')[:60]} hasInput={info.get('hasInput')} hasPlayBtn={info.get('hasPlayBtn')}", flush=True)
 
-                if info.get('audioSrc') and not audio_url:
-                    audio_url = info['audioSrc']
-                    audio_frame = fr
-                if info.get('hasInput'):
-                    input_frame = fr
-            except Exception:
-                pass
+                    if info.get('audioSrc') and not audio_url:
+                        audio_url = info['audioSrc']
+                        audio_frame = fr
+                    if info.get('hasInput'):
+                        input_frame = fr
+                    if info.get('hasPlayBtn') and not audio_url:
+                        play_btn_frames.append((fr, info.get('playBtnId', '')))
+                except Exception:
+                    pass
+
+        _scan_frames_for_audio(all_frames)
+
+        # 若未找到音频但找到了播放按钮 → 点击后重试
+        if not audio_url and play_btn_frames:
+            print(f"[captcha] 找到 {len(play_btn_frames)} 个播放按钮，点击触发音频加载…", flush=True)
+            for _pf, _pid in play_btn_frames[:3]:
+                try:
+                    if _pid:
+                        _pf.locator(f'#{_pid}').first.click(force=True, timeout=3000)
+                    else:
+                        _pf.locator('a[role="button"],button').first.click(force=True, timeout=3000)
+                    print(f"[captcha] 播放按钮已点击 (frame: {_pf.url[:40]})", flush=True)
+                except Exception as _pbe:
+                    try:
+                        _pf.evaluate("(document.querySelector('a[role=\"button\"],button') || {}).click && document.querySelector('a[role=\"button\"],button').click()")
+                    except Exception:
+                        pass
+            page.wait_for_timeout(5000)  # 等音频加载
+            print("[captcha] 点击播放按钮后重新扫描…", flush=True)
+            audio_url = None; audio_frame = None; input_frame = None
+            _scan_frames_for_audio(page.frames)
 
         if not audio_url:
             print("[captcha] ⚠ 未找到音频元素", flush=True)
