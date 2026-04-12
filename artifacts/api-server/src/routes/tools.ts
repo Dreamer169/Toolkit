@@ -87,6 +87,10 @@ function newMachineId() {
 function newUUID() { return randomUUID(); }
 function newSqmId() { return `{${randomUUID().toUpperCase()}}`; }
 
+// ── Outlook OAuth Client IDs ───────────────────────────────────────────────
+// 所有 token 由此 client_id 生成（Thunderbird），刷新时也必须用同一个
+const OAUTH_CLIENT_ID   = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
+
 // ── 人名邮箱用户名生成 ─────────────────────────────────────
 router.get("/tools/email/gen-username", (req, res) => {
   const count = Math.min(50, Math.max(1, Number(req.query.count) || 10));
@@ -1817,41 +1821,60 @@ router.post("/tools/outlook/verify-accounts", async (req, res) => {
     );
     const results: Array<{ id: number; email: string; status: string; via?: string; error?: string }> = [];
     for (const acc of rows) {
-      let accessToken = acc.token ?? "";
+      let accessToken = "";   // 不直接使用可能过期的 DB token
 
-      // 1. 有 refresh_token → 先刷新获得 access_token
-      if (acc.refresh_token && !accessToken) {
-        try {
-          const r = await fetch(`https://login.microsoftonline.com/consumers/oauth2/v2.0/token`, {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: new URLSearchParams({
-              grant_type: "refresh_token",
-              client_id: DEFAULT_CLIENT_ID,
-              refresh_token: acc.refresh_token,
-              scope: "https://outlook.office.com/IMAP.AccessAsUser.All offline_access",
-            }).toString(),
-          });
-          const td = await r.json() as { access_token?: string; refresh_token?: string };
-          if (td.access_token) {
-            accessToken = td.access_token;
-            await dbE("UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
-              [accessToken, td.refresh_token ?? acc.refresh_token, acc.id]);
-          }
-        } catch { /* ignore, try next method */ }
+      // 1. 有 refresh_token → 先用 /common/ 刷新（优先级最高）
+      let refreshError = "";
+      if (acc.refresh_token) {
+        const r = await fetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            grant_type: "refresh_token",
+            client_id: OAUTH_CLIENT_ID,
+            refresh_token: acc.refresh_token,
+            scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read offline_access",
+          }).toString(),
+        });
+        const td = await r.json() as { access_token?: string; refresh_token?: string; error?: string; error_description?: string };
+        if (td.access_token) {
+          accessToken = td.access_token;
+          await dbE("UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
+            [accessToken, td.refresh_token ?? acc.refresh_token, acc.id]);
+        } else {
+          refreshError = td.error_description ?? td.error ?? "刷新失败(未知)";
+        }
+      } else {
+        // 无 refresh_token → 退而使用 DB 里存的 token（可能过期，姑且一试）
+        accessToken = acc.token ?? "";
       }
 
-      // 2. 有 accessToken → XOAUTH2 IMAP 验证
+      // 2. 有 accessToken → Graph API 验证（/me 轻量接口）
+      //    不走 IMAP，避免 BasicAuthBlocked 误报
       if (accessToken) {
-        const chk = await imapCheckLogin(acc.email, acc.password ?? "", accessToken);
-        if (chk.ok) {
+        const gr = await fetch("https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName", {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        if (gr.ok) {
           await dbE("UPDATE accounts SET status='active', updated_at=NOW() WHERE id=$1", [acc.id]);
-          results.push({ id: acc.id, email: acc.email, status: "valid", via: "xoauth2" });
+          results.push({ id: acc.id, email: acc.email, status: "valid", via: "graph" });
           continue;
         }
+        // Graph 失败（token 无效）→ 报错，不回落 Basic Auth
+        const ge = await gr.json() as { error?: { message?: string } };
+        await dbE("UPDATE accounts SET status='error', updated_at=NOW() WHERE id=$1", [acc.id]);
+        results.push({ id: acc.id, email: acc.email, status: "error", error: `Graph API 验证失败: ${ge?.error?.message ?? gr.status}` });
+        continue;
       }
 
-      // 3. 无 token → Basic Auth
+      // 3. 有 refresh_token 但刷新失败 → 直接报错，不走 Basic Auth
+      if (acc.refresh_token && refreshError) {
+        await dbE("UPDATE accounts SET status='error', updated_at=NOW() WHERE id=$1", [acc.id]);
+        results.push({ id: acc.id, email: acc.email, status: "error", error: `OAuth token 刷新失败: ${refreshError.slice(0, 120)}` });
+        continue;
+      }
+
+      // 4. 无 refresh_token 且无 token → Basic Auth（仅无 OAuth 账号走此路径）
       if (!acc.password) {
         results.push({ id: acc.id, email: acc.email, status: "no_password", error: "数据库无密码且无 OAuth token" });
         continue;
@@ -2067,14 +2090,14 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
 
     let accessToken = acc.token ?? "";
 
-    // 有 refresh_token → 先刷新
+    // 有 refresh_token → 先用 /common/ 刷新（不直接信任 DB 里可能过期的 token）
     if (acc.refresh_token) {
-      const r = await fetch(`https://login.microsoftonline.com/consumers/oauth2/v2.0/token`, {
+      const r = await fetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
           grant_type: "refresh_token",
-          client_id: DEFAULT_CLIENT_ID,
+          client_id: OAUTH_CLIENT_ID,
           refresh_token: acc.refresh_token,
           scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access",
         }).toString(),
@@ -2087,8 +2110,8 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
           [accessToken, td.refresh_token ?? acc.refresh_token, accountId]
         );
       } else {
-        // refresh 失败 → 降级到 IMAP
-        accessToken = "";
+        // refresh 失败 → 降级到 IMAP（保留 DB token 尝试）
+        accessToken = acc.token ?? "";
       }
     }
 
