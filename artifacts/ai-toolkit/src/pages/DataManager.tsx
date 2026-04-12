@@ -98,8 +98,6 @@ function AccountsPanel() {
   const [form, setForm] = useState({ platform: "outlook", email: "", password: "", username: "", token: "", status: "active", notes: "" });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
-  const [verifying, setVerifying] = useState(false);
-  const [verifyResults, setVerifyResults] = useState<Record<string, boolean | null>>({}); // email → exists?
 
   const load = useCallback(async () => {
     const q = new URLSearchParams();
@@ -142,32 +140,6 @@ function AccountsPanel() {
     window.open(`${API}/data/accounts/export?${q}`);
   }
 
-  async function verifyOutlookAccounts() {
-    const outlookAccs = accounts.filter(a => a.platform === "outlook");
-    if (!outlookAccs.length) { setMsg("⚠ 没有 Outlook 账号可验证"); return; }
-    setVerifying(true); setMsg("");
-    const emails = outlookAccs.map(a => a.email);
-    try {
-      const d = await fetch(`${API}/tools/outlook/check-accounts-batch`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ emails }),
-      }).then(r => r.json()).catch(() => ({}));
-      if (d.success) {
-        const map: Record<string, boolean | null> = {};
-        for (const r of d.results as Array<{ email: string; exists: boolean }>) {
-          map[r.email] = r.exists;
-        }
-        setVerifyResults(map);
-        const valid = d.results.filter((r: { exists: boolean }) => r.exists).length;
-        const total = d.results.length;
-        setMsg(valid === 0
-          ? `❌ 验证完成：${total} 个账号均不存在于微软（注册未成功，需重新注册）`
-          : `✅ 验证完成：${valid}/${total} 个账号真实有效`
-        );
-      }
-    } catch (e) { setMsg("❌ 验证失败: " + String(e)); }
-    setVerifying(false);
-  }
 
   return (
     <div className="space-y-4">
@@ -186,9 +158,6 @@ function AccountsPanel() {
         <input value={filter.search} onChange={e => setFilter(f => ({...f,search:e.target.value}))} placeholder="搜索 email/备注…" className="bg-[#161b22] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white placeholder-gray-600 flex-1 min-w-32" />
         <div className="flex gap-1 ml-auto flex-wrap">
           <button onClick={load} title="刷新数据" className="px-3 py-1.5 bg-[#21262d] border border-[#30363d] rounded text-xs text-gray-300 hover:bg-[#30363d] hover:text-white">🔄 刷新</button>
-          <button onClick={verifyOutlookAccounts} disabled={verifying} title="检查 Outlook 账号是否真实存在于微软服务器" className="px-3 py-1.5 bg-[#21262d] border border-orange-500/30 rounded text-xs text-orange-400 hover:bg-orange-500/10 disabled:opacity-50">
-            {verifying ? "验证中…" : "🔍 验证账号"}
-          </button>
           <button onClick={() => exportAccounts("txt")} className="px-3 py-1.5 bg-[#21262d] border border-[#30363d] rounded text-xs text-gray-300 hover:bg-[#30363d]">导出 TXT</button>
           <button onClick={() => exportAccounts("csv")} className="px-3 py-1.5 bg-[#21262d] border border-[#30363d] rounded text-xs text-gray-300 hover:bg-[#30363d]">导出 CSV</button>
           <button onClick={() => exportAccounts("json")} className="px-3 py-1.5 bg-[#21262d] border border-[#30363d] rounded text-xs text-gray-300 hover:bg-[#30363d]">导出 JSON</button>
@@ -261,32 +230,22 @@ function AccountsPanel() {
 
       {/* 账号列表 */}
       <div className="bg-[#161b22] border border-[#30363d] rounded-lg overflow-hidden">
-        <div className="grid grid-cols-[70px_1fr_1fr_80px_60px_80px_44px] gap-2 px-3 py-2 bg-[#21262d] text-xs text-gray-500 font-medium">
-          <span>平台</span><span>邮箱</span><span>密码/备注</span><span>状态</span><span>创建</span><span>微软验证</span><span></span>
+        <div className="grid grid-cols-[70px_1fr_1fr_80px_60px_44px] gap-2 px-3 py-2 bg-[#21262d] text-xs text-gray-500 font-medium">
+          <span>平台</span><span>邮箱</span><span>密码/备注</span><span>状态</span><span>创建</span><span></span>
         </div>
         {accounts.length === 0 && (
           <p className="text-center text-gray-600 text-sm py-8">暂无账号，点击「添加账号」或「批量导入」</p>
         )}
-        {accounts.map(a => {
-          const vr = verifyResults[a.email];
-          return (
-            <div key={a.id} className="grid grid-cols-[70px_1fr_1fr_80px_60px_80px_44px] gap-2 px-3 py-2 border-t border-[#21262d] text-xs hover:bg-[#21262d]/50 group items-center">
-              <span className={`font-medium ${PLATFORM_COLORS[a.platform] ?? "text-gray-400"}`}>{a.platform}</span>
-              <span className="text-white font-mono truncate">{a.email}</span>
-              <span className="text-gray-400 font-mono truncate">{a.notes || a.password}</span>
-              <span className={`px-2 py-0.5 rounded-full text-center w-fit ${a.status === "active" ? "bg-emerald-900/40 text-emerald-400" : a.status === "banned" ? "bg-red-900/40 text-red-400" : "bg-gray-800 text-gray-500"}`}>{a.status === "active" ? "有效" : a.status === "banned" ? "封禁" : "失效"}</span>
-              <span className="text-gray-600">{formatDate(a.created_at).split(" ")[0]}</span>
-              <span className="text-center">
-                {a.platform === "outlook" ? (
-                  vr === undefined ? <span className="text-gray-600">—</span> :
-                  vr === true ? <span className="text-emerald-400 font-bold">✅ 真实</span> :
-                  <span className="text-red-400 font-bold">❌ 不存在</span>
-                ) : <span className="text-gray-700">—</span>}
-              </span>
-              <button onClick={() => deleteAccount(a.id)} className="text-red-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs">删除</button>
-            </div>
-          );
-        })}
+        {accounts.map(a => (
+          <div key={a.id} className="grid grid-cols-[70px_1fr_1fr_80px_60px_44px] gap-2 px-3 py-2 border-t border-[#21262d] text-xs hover:bg-[#21262d]/50 group items-center">
+            <span className={`font-medium ${PLATFORM_COLORS[a.platform] ?? "text-gray-400"}`}>{a.platform}</span>
+            <span className="text-white font-mono truncate">{a.email}</span>
+            <span className="text-gray-400 font-mono truncate">{a.notes || a.password}</span>
+            <span className={`px-2 py-0.5 rounded-full text-center w-fit ${a.status === "active" ? "bg-emerald-900/40 text-emerald-400" : a.status === "banned" ? "bg-red-900/40 text-red-400" : "bg-gray-800 text-gray-500"}`}>{a.status === "active" ? "有效" : a.status === "banned" ? "封禁" : "失效"}</span>
+            <span className="text-gray-600">{formatDate(a.created_at).split(" ")[0]}</span>
+            <button onClick={() => deleteAccount(a.id)} className="text-red-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs">删除</button>
+          </div>
+        ))}
       </div>
       <p className="text-xs text-gray-600 text-right">共 {accounts.length} 条</p>
     </div>
@@ -422,6 +381,13 @@ function OutlookInboxSection() {
     if (d.success) setAccounts(d.accounts ?? []);
   }, []);
 
+  async function deleteAccount(id: number) {
+    if (!confirm("确认从邮箱库删除该 Outlook 账号？")) return;
+    await fetch(`${API}/data/accounts/${id}`, { method: "DELETE" }).catch(() => {});
+    setOpenId(prev => prev === id ? null : prev);
+    load();
+  }
+
   useEffect(() => { load(); }, [load]);
 
   // 刷新 token → accessToken
@@ -549,7 +515,7 @@ function OutlookInboxSection() {
         return (
           <div key={acc.id} className="border border-[#30363d] rounded-lg overflow-hidden">
             {/* 账号行 */}
-            <div className="flex flex-wrap items-center gap-2 px-3 py-2 bg-[#161b22]">
+            <div className="flex flex-wrap items-center gap-2 px-3 py-2 bg-[#161b22] group">
               <span className="text-blue-400 font-mono text-xs flex-1 min-w-0 truncate">{acc.email}</span>
               <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${acc.status === "active" ? "bg-emerald-900/40 text-emerald-400" : "bg-gray-800 text-gray-500"}`}>
                 {acc.status === "active" ? "有效" : "失效"}
@@ -571,6 +537,10 @@ function OutlookInboxSection() {
                   {oauth?.polling ? "等待授权…" : "🔑 OAuth 授权"}
                 </button>
               )}
+              <button onClick={() => deleteAccount(acc.id)}
+                className="text-red-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs shrink-0">
+                删除
+              </button>
             </div>
 
             {/* OAuth 授权引导 */}
