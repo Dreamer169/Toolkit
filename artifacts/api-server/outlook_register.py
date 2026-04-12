@@ -969,61 +969,89 @@ class PatchrightController(BaseController):
                 except Exception as _e4:
                     print(f"[captcha]   再次按下 异常（Arkose）: {_e4}", flush=True)
 
-                # 方法B：PerimeterX（hsprotect.net frames）音频/无障碍按钮
+                # 方法B：逐 frame 搜索（针对10-frame重型挑战中的跨域button）
+                # page.locator() 无法穿透跨域iframe边界，必须对每个frame单独调用locator()
                 if not _press_clicked:
-                    print("[captcha] 尝试 PerimeterX frame 音频按钮…", flush=True)
+                    print("[captcha] 方法B：逐frame扫描跨域按钮（10-frame重型挑战兜底）…", flush=True)
                     page.wait_for_timeout(2000)
+
+                    # 第一轮：精确找 [aria-label="再次按下"] —— 10-frame变体中在frame[9]
                     for _hfr in page.frames:
-                        if "hsprotect.net" not in _hfr.url:
-                            continue
                         try:
-                            _hinfo = _hfr.evaluate("""() => {
-                                const candidates = [
-                                    ...document.querySelectorAll('a[role="button"]'),
-                                    ...document.querySelectorAll('[tabindex="0"][id]'),
-                                    ...document.querySelectorAll('button'),
-                                    ...document.querySelectorAll('a[href*="audio"],a[href*=".mp3"],a[href*=".wav"]'),
-                                ];
-                                if (!candidates.length) return null;
-                                const el = candidates[0];
-                                return {
-                                    tag: el.tagName,
-                                    id: el.id || '',
-                                    href: el.href || el.getAttribute('href') || '',
-                                    label: el.getAttribute('aria-label') || '',
-                                    cls: el.className || '',
-                                    text: (el.textContent||'').trim().substring(0, 60),
-                                    bodyLen: document.body.innerHTML.length,
-                                };
-                            }""")
-                            if not _hinfo:
-                                continue
-                            print(f"[captcha] PX frame 按钮: tag={_hinfo.get('tag')} id={_hinfo.get('id')} label={_hinfo.get('label')[:50]} href={_hinfo.get('href')[:60]} bodyLen={_hinfo.get('bodyLen')}", flush=True)
-                            # 优先用 ID 定位点击
-                            _hid = _hinfo.get('id')
-                            _hhref = _hinfo.get('href', '')
-                            if _hid:
-                                _hloc = _hfr.locator(f'#{_hid}')
-                                try:
-                                    _hloc.first.click(force=True, timeout=4000)
-                                    print(f"[captcha] ✅ PX frame #{_hid} 已点击", flush=True)
-                                    _press_clicked = True
-                                except Exception:
-                                    try:
-                                        _hfr.evaluate(f"document.getElementById('{_hid}') && document.getElementById('{_hid}').click()")
-                                        print(f"[captcha] ✅ PX frame #{_hid} JS click", flush=True)
-                                        _press_clicked = True
-                                    except Exception:
-                                        pass
-                            elif _hhref and any(k in _hhref for k in ['.mp3', '.wav', 'audio', 'sound']):
-                                # href 直接是音频URL
-                                print(f"[captcha] PX 音频 href: {_hhref[:80]}", flush=True)
-                                _press_clicked = True  # 音频URL已知，直接走音频解题
-                            if _press_clicked:
-                                page.wait_for_timeout(4000)  # 等音频加载
+                            _pa_loc = _hfr.locator('[aria-label="再次按下"]')
+                            if _pa_loc.count() > 0:
+                                _pa_box = _pa_loc.first.bounding_box(timeout=2000)
+                                if _pa_box and _pa_box.get('width', 0) > 0:
+                                    _cx = _pa_box['x'] + _pa_box['width'] / 2
+                                    _cy = _pa_box['y'] + _pa_box['height'] / 2
+                                    page.mouse.click(_cx, _cy)
+                                else:
+                                    _pa_loc.first.click(force=True, timeout=3000)
+                                print(f"[captcha] ✅ 方法B 再次按下 in frame {_hfr.url[:40]}", flush=True)
+                                _press_clicked = True
+                                page.wait_for_timeout(3000)
                                 break
-                        except Exception as _hpe:
-                            print(f"[captcha]   PX frame 异常: {_hpe}", flush=True)
+                        except Exception:
+                            pass
+
+                    # 第二轮（若仍未找到）：用JS从每个hsprotect.net frame里挖通用按钮
+                    if not _press_clicked:
+                        for _hfr in page.frames:
+                            if "hsprotect.net" not in _hfr.url:
+                                continue
+                            try:
+                                _hinfo = _hfr.evaluate("""() => {
+                                    // 优先找带aria-label的交互按钮（PX音频/无障碍）
+                                    const PRESS_LABELS = ['再次按下','Press','Hold','Audio','Sound','Listen',
+                                                          '음성','Accessibility','accessible'];
+                                    let el = null;
+                                    // 按aria-label精确匹配
+                                    for (const lbl of PRESS_LABELS) {
+                                        el = document.querySelector(`[aria-label*="${lbl}"]`);
+                                        if (el) break;
+                                    }
+                                    // 兜底：role=button 或 tabindex=0 的有ID元素
+                                    if (!el) {
+                                        el = document.querySelector('a[role="button"]') ||
+                                             document.querySelector('[tabindex="0"][id]') ||
+                                             document.querySelector('button');
+                                    }
+                                    if (!el) return null;
+                                    return {
+                                        tag: el.tagName,
+                                        id: el.id || '',
+                                        href: el.href || el.getAttribute('href') || '',
+                                        label: el.getAttribute('aria-label') || '',
+                                        text: (el.textContent||'').trim().substring(0, 60),
+                                        bodyLen: document.body.innerHTML.length,
+                                    };
+                                }""")
+                                if not _hinfo:
+                                    continue
+                                print(f"[captcha] 方法B PX frame: tag={_hinfo.get('tag')} id={_hinfo.get('id')} label='{_hinfo.get('label')[:60]}' href={_hinfo.get('href')[:50]} bodyLen={_hinfo.get('bodyLen')}", flush=True)
+                                _hid   = _hinfo.get('id', '')
+                                _hhref = _hinfo.get('href', '')
+                                _clicked_this = False
+                                if _hid:
+                                    try:
+                                        _hfr.locator(f'#{_hid}').first.click(force=True, timeout=3000)
+                                        _clicked_this = True
+                                    except Exception:
+                                        try:
+                                            _hfr.evaluate(f"(document.getElementById('{_hid}')||{{}}).click && document.getElementById('{_hid}').click()")
+                                            _clicked_this = True
+                                        except Exception:
+                                            pass
+                                elif _hhref and any(k in _hhref for k in ['.mp3', '.wav', 'audio', 'sound']):
+                                    print(f"[captcha] 方法B 直接音频href: {_hhref[:80]}", flush=True)
+                                    _clicked_this = True
+                                if _clicked_this:
+                                    print(f"[captcha] ✅ 方法B frame按钮已点击", flush=True)
+                                    _press_clicked = True
+                                    page.wait_for_timeout(4000)
+                                    break
+                            except Exception as _hpe:
+                                print(f"[captcha]   方法B frame异常: {_hpe}", flush=True)
 
             if not _second_click_done:
                 print("[captcha] ⚠ 可访问性挑战按钮未找到，跳过", flush=True)
