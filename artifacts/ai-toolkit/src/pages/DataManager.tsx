@@ -35,6 +35,7 @@ const PLATFORM_COLORS: Record<string, string> = {
   codex: "text-orange-400", other: "text-gray-400",
 };
 const PLATFORMS: Platform[] = ["outlook","chatgpt","claude","gemini","cursor","grok","codex","other"];
+const AI_PLATFORMS: Platform[] = ["chatgpt","claude","gemini","cursor","grok","codex","other"];
 
 function formatDate(s: string) {
   return new Date(s).toLocaleString("zh-CN", { year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" });
@@ -93,15 +94,16 @@ function AccountsPanel() {
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState("");
-  const [importPlatform, setImportPlatform] = useState<Platform>("outlook");
+  const [importPlatform, setImportPlatform] = useState<Platform>("chatgpt");
   const [importDelimiter, setImportDelimiter] = useState("----");
-  const [form, setForm] = useState({ platform: "outlook", email: "", password: "", username: "", token: "", status: "active", notes: "" });
+  const [form, setForm] = useState({ platform: "chatgpt", email: "", password: "", username: "", token: "", status: "active", notes: "" });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
 
   const load = useCallback(async () => {
     const q = new URLSearchParams();
     if (filter.platform) q.set("platform", filter.platform);
+    else q.set("exclude_platform", "outlook");
     if (filter.status)   q.set("status",   filter.status);
     if (filter.search)   q.set("search",   filter.search);
     const d = await fetch(`${API}/data/accounts?${q}`).then(r => r.json()).catch(() => ({}));
@@ -147,7 +149,7 @@ function AccountsPanel() {
       <div className="flex flex-wrap gap-2 items-center">
         <select value={filter.platform} onChange={e => setFilter(f => ({...f,platform:e.target.value}))} className="bg-[#161b22] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white">
           <option value="">全部平台</option>
-          {PLATFORMS.map(p => <option key={p} value={p}>{p}</option>)}
+          {AI_PLATFORMS.map(p => <option key={p} value={p}>{p}</option>)}
         </select>
         <select value={filter.status} onChange={e => setFilter(f => ({...f,status:e.target.value}))} className="bg-[#161b22] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white">
           <option value="">全部状态</option>
@@ -176,7 +178,7 @@ function AccountsPanel() {
             <div>
               <label className="text-xs text-gray-400">平台</label>
               <select value={form.platform} onChange={e => setForm(f=>({...f,platform:e.target.value}))} className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white mt-1">
-                {PLATFORMS.map(p => <option key={p} value={p}>{p}</option>)}
+                {AI_PLATFORMS.map(p => <option key={p} value={p}>{p}</option>)}
               </select>
             </div>
             <div>

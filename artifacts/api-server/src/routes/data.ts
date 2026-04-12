@@ -6,10 +6,11 @@ const router = Router();
 // ─── 账号 CRUD ────────────────────────────────────────────
 router.get("/data/accounts", async (req, res) => {
   try {
-    const { platform, status, search } = req.query as Record<string, string>;
+    const { platform, status, search, exclude_platform } = req.query as Record<string, string>;
     let sql = "SELECT * FROM accounts WHERE 1=1";
     const params: unknown[] = [];
     if (platform) { params.push(platform); sql += ` AND platform=$${params.length}`; }
+    if (exclude_platform) { params.push(exclude_platform); sql += ` AND platform!=$${params.length}`; }
     if (status)   { params.push(status);   sql += ` AND status=$${params.length}`; }
     if (search)   { params.push(`%${search}%`); sql += ` AND (email ILIKE $${params.length} OR username ILIKE $${params.length} OR notes ILIKE $${params.length})`; }
     sql += " ORDER BY created_at DESC LIMIT 500";
