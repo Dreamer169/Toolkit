@@ -44,6 +44,38 @@ export default function OutlookManager() {
   const pollRef2    = useRef<ReturnType<typeof setInterval>|null>(null);
   const sinceRef    = useRef(0);
 
+  // CF 代理池
+  type CfPoolStatus = { available: number; used_total: number; pool: {ip:string;latency:number}[] };
+  const [proxyMode,   setProxyMode]   = useState<"manual"|"cf">("manual");
+  const [cfPool,      setCfPool]      = useState<CfPoolStatus|null>(null);
+  const [cfPoolBusy,  setCfPoolBusy]  = useState(false);
+
+  const loadCfPoolStatus = async () => {
+    try {
+      const r = await fetch("/api/tools/cf-pool/status");
+      const d = await r.json() as CfPoolStatus & { success: boolean };
+      if (d.success) setCfPool(d);
+    } catch {}
+  };
+
+  const refreshCfPool = async () => {
+    setCfPoolBusy(true);
+    try {
+      const r = await fetch("/api/tools/cf-pool/refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ count: 60, target: 20, threads: 8, port: 443, maxLatency: 1000 }),
+      });
+      const d = await r.json() as { success: boolean; new_ips: number; total_available: number; pool: {ip:string;latency:number}[] };
+      if (d.success) {
+        setCfPool({ available: d.total_available, used_total: 0, pool: d.pool });
+      }
+    } catch {}
+    setCfPoolBusy(false);
+  };
+
+  useEffect(() => { if (proxyMode === "cf") loadCfPoolStatus(); }, [proxyMode]);
+
   useEffect(() => { logsEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [regLogs]);
 
   const stopPolling = () => {
@@ -94,8 +126,9 @@ export default function OutlookManager() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           count: regCount,
-          // 多代理支持：发 proxies 字段（换行或逗号分隔）
-          proxies: regProxy,
+          proxies: proxyMode === "manual" ? regProxy : "",
+          proxyMode: proxyMode === "cf" ? "cf" : "",
+          cfPort: 443,
           headless: regHeadless,
           delay: regDelay, engine: regEngine, wait: regWait, retries: regRetries,
         }),
@@ -451,27 +484,80 @@ export default function OutlookManager() {
               </div>
             </div>
 
-            {/* 代理节点池 */}
+            {/* 代理模式切换 */}
             <div>
-              <label className="text-[11px] text-gray-500 mb-1 flex items-center justify-between">
-                <span>
-                  代理节点池 <span className="text-red-400">（强烈建议住宅代理）</span>
-                </span>
-                <span className="text-blue-400 text-[10px]">
-                  支持多个节点（每行一个），每次注册自动轮换
-                </span>
-              </label>
-              <textarea
-                value={regProxy}
-                onChange={e => setRegProxy(e.target.value)}
-                disabled={regBusy}
-                rows={regProxy.split('\n').filter(Boolean).length > 1 ? Math.min(5, regProxy.split('\n').length + 1) : 2}
-                placeholder={`socks5://user:pass@pool-us.quarkip.io:7777\nsocks5://user:pass@pool-us2.quarkip.io:7777\nhttp://user:pass@node3.proxy.io:8080`}
-                className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-xs font-mono text-gray-300 focus:outline-none focus:border-blue-500 disabled:opacity-50 placeholder-gray-600 resize-none"
-              />
-              {regProxy.split('\n').filter(l => l.trim()).length > 1 && (
-                <div className="mt-1 text-[10px] text-blue-400">
-                  已输入 {regProxy.split('\n').filter(l => l.trim()).length} 个节点，将按顺序轮换
+              <label className="text-[11px] text-gray-500 mb-2 block">代理模式</label>
+              <div className="flex gap-2 mb-3">
+                <button
+                  onClick={() => setProxyMode("manual")} disabled={regBusy}
+                  className={`flex-1 py-1.5 text-xs rounded-lg border transition-all ${proxyMode === "manual" ? "bg-blue-500/20 border-blue-500/50 text-blue-300" : "bg-[#0d1117] border-[#30363d] text-gray-500 hover:text-gray-300"} disabled:opacity-50`}>
+                  🔗 手动输入代理
+                </button>
+                <button
+                  onClick={() => setProxyMode("cf")} disabled={regBusy}
+                  className={`flex-1 py-1.5 text-xs rounded-lg border transition-all ${proxyMode === "cf" ? "bg-orange-500/20 border-orange-500/50 text-orange-300" : "bg-[#0d1117] border-[#30363d] text-gray-500 hover:text-gray-300"} disabled:opacity-50`}>
+                  ☁️ CF IP 代理池
+                </button>
+              </div>
+
+              {proxyMode === "manual" && (
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[10px] text-gray-600">每行一个，每账号自动轮换节点</span>
+                  </div>
+                  <textarea
+                    value={regProxy}
+                    onChange={e => setRegProxy(e.target.value)}
+                    disabled={regBusy}
+                    rows={regProxy.split('\n').filter(Boolean).length > 1 ? Math.min(5, regProxy.split('\n').length + 1) : 2}
+                    placeholder={`socks5://user:pass@pool-us.quarkip.io:7777\nsocks5://user:pass@pool-us2.quarkip.io:7777`}
+                    className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-xs font-mono text-gray-300 focus:outline-none focus:border-blue-500 disabled:opacity-50 placeholder-gray-600 resize-none"
+                  />
+                  {regProxy.split('\n').filter(l => l.trim()).length > 1 && (
+                    <div className="mt-1 text-[10px] text-blue-400">
+                      已输入 {regProxy.split('\n').filter(l => l.trim()).length} 个节点，将按账号顺序轮换
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {proxyMode === "cf" && (
+                <div className="bg-[#0d1117] border border-orange-500/20 rounded-lg p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] text-orange-300 font-medium">☁️ CF IP 代理池</span>
+                    <div className="flex items-center gap-2">
+                      {cfPool && (
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full border ${cfPool.available > 0 ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" : "bg-red-500/10 border-red-500/30 text-red-400"}`}>
+                          {cfPool.available > 0 ? `✓ ${cfPool.available} 个可用` : "池空"}
+                        </span>
+                      )}
+                      <button onClick={refreshCfPool} disabled={cfPoolBusy}
+                        className="text-[10px] px-2 py-0.5 bg-orange-500/15 border border-orange-500/30 text-orange-400 rounded hover:bg-orange-500/25 transition-all disabled:opacity-50">
+                        {cfPoolBusy ? (
+                          <span className="flex items-center gap-1">
+                            <span className="w-2 h-2 border border-orange-400/40 border-t-orange-400 rounded-full animate-spin" />
+                            测速中…
+                          </span>
+                        ) : "🎲 生成 20 个 IP"}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="text-[10px] text-gray-500">
+                    每账号独占一个 CF IP + 独立指纹 + 独立机器ID，用后丢弃不重用
+                  </div>
+                  {cfPool && cfPool.pool.length > 0 && (
+                    <div className="mt-1 max-h-24 overflow-y-auto space-y-0.5">
+                      {cfPool.pool.slice(0, 8).map((item, i) => (
+                        <div key={i} className="flex items-center justify-between text-[10px] font-mono">
+                          <span className="text-gray-400">{item.ip}</span>
+                          <span className="text-emerald-400">{item.latency}ms</span>
+                        </div>
+                      ))}
+                      {cfPool.pool.length > 8 && (
+                        <div className="text-[10px] text-gray-600">… 共 {cfPool.pool.length} 个 IP</div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -489,7 +575,6 @@ export default function OutlookManager() {
                 <span>✓ 随机美国时区</span>
                 <span>✓ 插件列表伪装</span>
               </div>
-              <div className="mt-1 text-amber-400">⚠ 住宅代理 IP 质量是最关键因素，再好的指纹配合数据中心 IP 也会失败</div>
             </div>
 
             <div className="flex gap-3">

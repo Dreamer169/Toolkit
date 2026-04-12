@@ -1374,6 +1374,8 @@ def main():
     parser.add_argument("--output",          type=str,   default="",           help="输出文件")
     parser.add_argument("--captcha-service", type=str,   default="",           help="打码服务: 2captcha | capmonster")
     parser.add_argument("--captcha-key",     type=str,   default="",           help="打码服务 API Key")
+    parser.add_argument("--proxy-mode",      type=str,   default="",           help="cf = 从 CF IP 池自动分配代理")
+    parser.add_argument("--cf-port",         type=int,   default=443,          help="CF 代理端口（默认443）")
     args = parser.parse_args()
 
     headless = args.headless.lower() != "false"
@@ -1397,10 +1399,29 @@ def main():
     if not proxy_list and args.proxy:
         proxy_list = [args.proxy.strip()]
 
+    # CF 代理池模式
+    use_cf_pool = getattr(args, 'proxy_mode', '') == 'cf'
+    if use_cf_pool:
+        import sys as _sys, os as _os
+        _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+        import cf_ip_pool as _cf_pool
+        print(f"   CF代理池模式已启用 (port={args.cf_port})")
+        # 预加载一批 IP（若池为空）
+        _pool_status = _cf_pool.get_pool_status()
+        if _pool_status['available'] == 0:
+            print("   CF池为空，自动生成并测速…", flush=True)
+            _cf_pool.refresh_pool(
+                generate_count=60, target_valid=20, threads=8,
+                port=args.cf_port, max_latency=1000.0,
+                log_cb=lambda m: print(f"   {m}", flush=True)
+            )
+
     svc_hint = f"  打码服务={captcha_service}" if solver else ""
     print(f"\n🚀 Outlook 批量注册  引擎={args.engine}  headless={headless}  count={args.count}{svc_hint}")
     print(f"   bot_protection_wait={args.wait}s  max_captcha_retries={args.retries}")
-    if len(proxy_list) > 1:
+    if use_cf_pool:
+        print(f"   代理模式: CF IP 池（每账号独占一个 IP，用后丢弃）")
+    elif len(proxy_list) > 1:
         print(f"   代理轮换池: {len(proxy_list)} 个节点")
     elif proxy_list:
         import re as _re
@@ -1410,11 +1431,25 @@ def main():
 
     results = []
     for i in range(args.count):
-        # 轮换代理（每次注册用不同节点）
-        cur_proxy = proxy_list[i % len(proxy_list)] if proxy_list else ""
-        if len(proxy_list) > 1:
-            print(f"\n[{i+1}/{args.count}] 开始注册… 节点 [{(i % len(proxy_list))+1}/{len(proxy_list)}]: {cur_proxy[:40]}...")
+        # 代理选择：CF池模式 > 轮换列表 > 无
+        if use_cf_pool:
+            job_id = f"reg_{i}_{int(time.time())}"
+            ip_info = _cf_pool.acquire_ip(job_id, auto_refresh=True,
+                                          log_cb=lambda m: print(f"   {m}", flush=True))
+            if ip_info:
+                cur_proxy = ip_info['proxy']
+                print(f"\n[{i+1}/{args.count}] 开始注册… CF节点: {ip_info['ip']} 延迟{ip_info['latency']}ms", flush=True)
+            else:
+                cur_proxy = ""
+                print(f"\n[{i+1}/{args.count}] 开始注册… ⚠ CF池无可用IP，无代理模式", flush=True)
+        elif proxy_list:
+            cur_proxy = proxy_list[i % len(proxy_list)]
+            if len(proxy_list) > 1:
+                print(f"\n[{i+1}/{args.count}] 开始注册… 节点 [{(i % len(proxy_list))+1}/{len(proxy_list)}]: {cur_proxy[:40]}...")
+            else:
+                print(f"\n[{i+1}/{args.count}] 开始注册...")
         else:
+            cur_proxy = ""
             print(f"\n[{i+1}/{args.count}] 开始注册...")
 
         ctrl = CtrlCls(

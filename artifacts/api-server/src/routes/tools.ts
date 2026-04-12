@@ -948,9 +948,12 @@ router.post("/tools/outlook/register", async (req, res) => {
     wait     = 11,
     retries  = 2,
     autoProxy = false,
+    proxyMode = "",               // "cf" = 使用 CF IP 池
+    cfPort    = 443,
   } = req.body as {
     count?: number; proxy?: string; proxies?: string; headless?: boolean; delay?: number;
     engine?: string; wait?: number; retries?: number; autoProxy?: boolean;
+    proxyMode?: string; cfPort?: number;
   };
 
   // 解析多代理列表（支持换行或逗号分隔）
@@ -1032,6 +1035,10 @@ router.post("/tools/outlook/register", async (req, res) => {
   if (captchaService && captchaKey) {
     args.push("--captcha-service", captchaService, "--captcha-key", captchaKey);
     job.logs.push({ type: "log", message: `🔑 打码服务: ${captchaService}` });
+  }
+  if (proxyMode === "cf") {
+    args.push("--proxy-mode", "cf", "--cf-port", String(cfPort));
+    job.logs.push({ type: "log", message: `☁️ CF IP 池模式：每账号独占一个 CF 节点` });
   }
 
   const child = spawn("python3", args, { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
@@ -1453,4 +1460,45 @@ router.post("/tools/proxy-request", async (req, res) => {
   }
 });
 
+// ── CF IP 代理池 ──────────────────────────────────────────────
+const CF_POOL_SCRIPT = "/home/runner/workspace/artifacts/api-server/cf_pool_api.py";
+
+router.get("/tools/cf-pool/status", async (_req, res) => {
+  try {
+    const { spawnSync } = await import("child_process");
+    const r = spawnSync("python3", [CF_POOL_SCRIPT, "status"], {
+      timeout: 10000, encoding: "utf8",
+      env: { ...process.env, PYTHONUNBUFFERED: "1" },
+    });
+    if (r.stderr) console.error("[cf-pool]", r.stderr.slice(0, 200));
+    const data = r.stdout ? JSON.parse(r.stdout) : {};
+    res.json({ success: true, ...data });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+router.post("/tools/cf-pool/refresh", async (req, res) => {
+  try {
+    const { count = 60, target = 20, threads = 5, port = 443, maxLatency = 800 } = req.body as {
+      count?: number; target?: number; threads?: number; port?: number; maxLatency?: number;
+    };
+    const { spawnSync } = await import("child_process");
+    const r = spawnSync("python3", [
+      CF_POOL_SCRIPT, "refresh",
+      "--count", String(count),
+      "--target", String(target),
+      "--threads", String(threads),
+      "--port", String(port),
+      "--max-latency", String(maxLatency),
+    ], { timeout: 45000, encoding: "utf8", env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+    if (r.stderr) console.error("[cf-pool refresh]", r.stderr.slice(0, 400));
+    const data = r.stdout ? JSON.parse(r.stdout) : {};
+    res.json({ success: true, ...data });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
 export default router;
+
