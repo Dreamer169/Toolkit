@@ -59,7 +59,8 @@ export default function FullWorkflow() {
   const [wait, setWait] = useState(11);
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [jobId, setJobId] = useState<string | null>(null);
-  const [result, setResult] = useState<{ ok: boolean; email?: string; password?: string; msg?: string } | null>(null);
+  const [count, setCount] = useState(1);
+  const [result, setResult] = useState<{ ok: boolean; email?: string; password?: string; msg?: string; accounts?: { email: string; password: string }[] } | null>(null);
   const [saved, setSaved] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
   // 打码服务配置
@@ -148,7 +149,7 @@ export default function FullWorkflow() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          count: 1, proxy, engine, headless: headless ? "true" : "false",
+          count, proxy, engine, headless: headless ? "true" : "false",
           wait, retries: 2, delay: 0,
           autoProxy: !proxy && (poolCount ?? 0) > 0,
         }),
@@ -190,10 +191,11 @@ export default function FullWorkflow() {
         if (d.nextSince != null) sinceRef.current = d.nextSince;
         if (d.status === "done") {
           clearInterval(pollRef.current!);
-          const ok = (d.accounts?.length ?? 0) > 0;
-          const email = d.accounts?.[0]?.email ?? data?.outlook.email;
-          const password = d.accounts?.[0]?.password ?? data?.outlook.password;
-          setResult({ ok, email, password, msg: ok ? "✅ 注册成功！账号已激活" : "❌ 注册失败（CAPTCHA 无法通过——需要住宅代理）" });
+          const accts: { email: string; password: string }[] = d.accounts ?? [];
+          const ok = accts.length > 0;
+          const email = accts[0]?.email ?? data?.outlook.email;
+          const password = accts[0]?.password ?? data?.outlook.password;
+          setResult({ ok, email, password, accounts: accts, msg: ok ? `✅ 注册成功！${accts.length > 1 ? `共 ${accts.length} 个账号` : "账号已激活"}` : "❌ 注册失败（CAPTCHA 无法通过——需要住宅代理）" });
           setPhase("done");
         }
       } catch {}
@@ -205,12 +207,17 @@ export default function FullWorkflow() {
     setSaveMsg("保存中…");
     const errors: string[] = [];
 
-    // 保存账号
-    const a = await fetch(`${API}/data/accounts`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ platform: "outlook", email: result.email, password: result.password ?? data.outlook.password, status: result.ok ? "active" : "inactive", notes: result.ok ? "" : "注册失败" }),
-    }).then(r => r.json()).catch(() => ({ success: false }));
-    if (!a.success) errors.push("账号保存失败");
+    // 保存账号（多账号时逐个保存）
+    const accsToSave = result.accounts && result.accounts.length > 0
+      ? result.accounts
+      : [{ email: result.email ?? "", password: result.password ?? data.outlook.password ?? "" }];
+    for (const acc of accsToSave) {
+      const a = await fetch(`${API}/data/accounts`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ platform: "outlook", email: acc.email, password: acc.password, status: result.ok ? "active" : "inactive", notes: result.ok ? "" : "注册失败" }),
+      }).then(r => r.json()).catch(() => ({ success: false }));
+      if (!a.success) errors.push(`${acc.email} 保存失败`);
+    }
 
     // 保存身份信息
     if (data.identity) {
@@ -221,7 +228,7 @@ export default function FullWorkflow() {
       if (!b.success) errors.push("身份保存失败");
     }
 
-    if (errors.length === 0) { setSaved(true); setSaveMsg("✅ 账号 + 身份信息已保存到数据库"); }
+    if (errors.length === 0) { setSaved(true); setSaveMsg(`✅ ${accsToSave.length} 个账号 + 身份信息已保存到数据库`); }
     else setSaveMsg("⚠️ 部分保存失败: " + errors.join("，"));
   }
 
@@ -457,9 +464,18 @@ export default function FullWorkflow() {
               <span>🌐</span> 使用代理: <span className="font-mono text-xs text-blue-400">{proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@")}</span>
             </div>
           )}
-          <div className="flex gap-3">
+          <div className="flex gap-3 items-center">
+            <div className="flex items-center gap-1.5 bg-[#21262d] border border-[#30363d] rounded-lg px-2 py-1.5 shrink-0">
+              <span className="text-xs text-gray-400 whitespace-nowrap">数量</span>
+              <input
+                type="number" min={1} max={10} value={count}
+                onChange={e => setCount(Math.min(10, Math.max(1, Number(e.target.value))))}
+                className="w-10 bg-transparent text-center text-sm text-white focus:outline-none"
+              />
+            </div>
             <button onClick={startRegistration} className={`flex-1 py-3 rounded-lg text-white font-semibold transition-colors ${(proxy || (poolCount ?? 0) > 0) ? "bg-blue-700 hover:bg-blue-600" : "bg-blue-900/60 hover:bg-blue-800/60 border border-blue-700/50"}`}>
-              🚀 启动 Outlook 自动注册{!proxy && (poolCount ?? 0) > 0 ? "（代理池自动选取）" : !proxy ? "（无代理）" : ""}
+              🚀 启动注册{count > 1 ? `（顺序 ×${count}）` : ""}
+              {!proxy && (poolCount ?? 0) > 0 ? "（代理池自动选取）" : !proxy ? "（无代理）" : ""}
             </button>
             <button onClick={prepare} className="px-4 py-3 bg-[#21262d] border border-[#30363d] rounded-lg text-gray-400 hover:text-white text-sm">
               重新生成
@@ -514,9 +530,26 @@ export default function FullWorkflow() {
             <span className="text-2xl">{result.ok ? "✅" : "❌"}</span>
             <div>
               <div className={`font-semibold ${result.ok ? "text-emerald-300" : "text-red-300"}`}>{result.msg}</div>
-              {result.ok && <div className="text-sm text-gray-400 mt-0.5">{result.email} / {result.password}</div>}
+              {result.ok && (!result.accounts || result.accounts.length <= 1) && (
+                <div className="text-sm text-gray-400 mt-0.5">{result.email} / {result.password}</div>
+              )}
             </div>
           </div>
+          {result.ok && result.accounts && result.accounts.length > 1 && (
+            <div className="border border-emerald-700/40 rounded-lg overflow-hidden">
+              <div className="px-3 py-2 bg-emerald-900/30 text-xs text-emerald-400 font-medium border-b border-emerald-700/30">
+                已注册 {result.accounts.length} 个账号
+              </div>
+              {result.accounts.map((a, i) => (
+                <div key={i} className="px-3 py-2 border-t border-[#21262d] first:border-0 text-xs font-mono flex gap-3">
+                  <span className="text-emerald-400 shrink-0">#{i + 1}</span>
+                  <span className="text-gray-300 truncate">{a.email}</span>
+                  <span className="text-gray-500 shrink-0">/</span>
+                  <span className="text-gray-400 truncate">{a.password}</span>
+                </div>
+              ))}
+            </div>
+          )}
           {!saved && (
             <button onClick={saveToDb} className="px-5 py-2 bg-emerald-700 hover:bg-emerald-600 rounded text-sm text-white transition-colors">
               💾 保存到数据库（账号 + 身份信息）
