@@ -1110,15 +1110,7 @@ interface RegJob {
   child?: ReturnType<import("child_process").ChildProcess["kill"] extends (...args: unknown[]) => unknown ? never : never>;
 }
 
-const regJobs = new Map<string, RegJob>();
-
-// 清理超过 30 分钟的旧任务
-function cleanOldJobs() {
-  const cutoff = Date.now() - 30 * 60 * 1000;
-  for (const [id, job] of regJobs.entries()) {
-    if (job.startedAt < cutoff) regJobs.delete(id);
-  }
-}
+// regJobs 已替换为持久化 jobQueue
 
 // 启动注册任务，立即返回 jobId
 router.post("/tools/outlook/register", async (req, res) => {
@@ -1191,8 +1183,7 @@ router.post("/tools/outlook/register", async (req, res) => {
   const proxyDisplay = proxy ? proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@") : "无代理";
   job.logs.push({ type: "start", message: `启动 ${eng} 注册 ${n} 个 Outlook 账号 (bot_protection_wait=${wait}s)${autoProxyId ? " [代理池自动选取]" : ""}...` });
   if (proxy) job.logs.push({ type: "log", message: `🌐 代理: ${proxyDisplay}` });
-  regJobs.set(jobId, job);
-  cleanOldJobs();
+  await jobQueue.create(jobId);
 
   // 立即响应 jobId（不等待注册完成）
   res.json({ success: true, jobId, message: "注册任务已启动" });
@@ -1356,14 +1347,14 @@ router.post("/tools/outlook/register", async (req, res) => {
 });
 
 // 查询任务状态（前端每 2s 轮询）
-router.get("/tools/outlook/register/:jobId", (req, res) => {
-  const job = regJobs.get(req.params.jobId);
+router.get("/tools/outlook/register/:jobId", async (req, res) => {
+  const job = await jobQueue.get(req.params.jobId);
   if (!job) {
     res.status(404).json({ success: false, error: "任务不存在" });
     return;
   }
 
-  const since   = Number(req.query.since ?? 0);   // 上次已读的日志索引
+  const since   = Number(req.query.since ?? 0);
   const newLogs = job.logs.slice(since);
 
   res.json({
@@ -1377,9 +1368,10 @@ router.get("/tools/outlook/register/:jobId", (req, res) => {
 });
 
 // 列出所有任务（实时监控用）
-router.get("/tools/jobs", (_req, res) => {
-  const jobs = Array.from(regJobs.entries()).map(([id, job]) => ({
-    id,
+router.get("/tools/jobs", async (_req, res) => {
+  const allJobs = await jobQueue.list();
+  const jobs = allJobs.map(job => ({
+    id: job.jobId,
     status: job.status,
     startedAt: job.startedAt,
     logCount: job.logs.length,
@@ -1387,18 +1379,13 @@ router.get("/tools/jobs", (_req, res) => {
     exitCode: job.exitCode,
     lastLog: job.logs.at(-1) ?? null,
   }));
-  // 最新的排前面
-  jobs.sort((a, b) => b.startedAt - a.startedAt);
   res.json({ success: true, jobs });
 });
 
 // 停止任务
 router.delete("/tools/outlook/register/:jobId", (req, res) => {
-  const job = regJobs.get(req.params.jobId);
-  if (!job) { res.status(404).json({ success: false }); return; }
-  try { (job as unknown as { _child?: { kill: () => void } })._child?.kill(); } catch {}
-  job.status = "stopped";
-  job.logs.push({ type: "warn", message: "⚠ 用户停止了任务" });
+  const stopped = jobQueue.stop(req.params.jobId);
+  if (!stopped) { res.status(404).json({ success: false }); return; }
   res.json({ success: true });
 });
 
@@ -1432,8 +1419,7 @@ router.post("/tools/cursor/register", async (req, res) => {
   const proxyDisplay = proxy ? proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@") : "无代理";
   job.logs.push({ type: "start", message: `启动 Cursor 自动注册 ${n} 个账号...` });
   if (proxy) job.logs.push({ type: "log", message: `🌐 代理: ${proxyDisplay}` });
-  regJobs.set(jobId, job);
-  cleanOldJobs();
+  await jobQueue.create(jobId);
 
   res.json({ success: true, jobId, message: "Cursor 注册任务已启动" });
 
@@ -1494,19 +1480,16 @@ router.post("/tools/cursor/register", async (req, res) => {
   });
 });
 
-router.get("/tools/cursor/register/:jobId", (req, res) => {
-  const job = regJobs.get(req.params.jobId);
+router.get("/tools/cursor/register/:jobId", async (req, res) => {
+  const job = await jobQueue.get(req.params.jobId);
   if (!job) { res.status(404).json({ success: false, error: "任务不存在" }); return; }
   const since = Number(req.query.since ?? 0);
   res.json({ success: true, status: job.status, accounts: job.accounts, logs: job.logs.slice(since), nextSince: job.logs.length, exitCode: job.exitCode });
 });
 
 router.delete("/tools/cursor/register/:jobId", (req, res) => {
-  const job = regJobs.get(req.params.jobId);
-  if (!job) { res.status(404).json({ success: false }); return; }
-  try { (job as unknown as { _child?: { kill: () => void } })._child?.kill(); } catch {}
-  job.status = "stopped";
-  job.logs.push({ type: "warn", message: "⚠ 用户停止了任务" });
+  const stopped = jobQueue.stop(req.params.jobId);
+  if (!stopped) { res.status(404).json({ success: false }); return; }
   res.json({ success: true });
 });
 
