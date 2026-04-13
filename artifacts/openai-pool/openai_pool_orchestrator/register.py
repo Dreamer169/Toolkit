@@ -27,6 +27,11 @@ import urllib.error
 from curl_cffi import requests
 from curl_cffi.curl import CurlHttpVersion
 
+
+class RegistrationHardStop(RuntimeError):
+    """Raised when the remote registration service returns a non-retryable rejection."""
+
+
 # ==========================================
 # 日志事件发射器
 # ==========================================
@@ -940,14 +945,14 @@ def run(
 
     # 随机 Chrome 指纹，避免 OpenAI 反机器人检测
     _chrome_profiles = [
-        {"major": 119, "imp": "chrome119", "build": 6045, "patch": (123, 200),
-         "sec": '"Google Chrome";v="119", "Chromium";v="119", "Not?A_Brand";v="24"'},
-        {"major": 120, "imp": "chrome120", "build": 6099, "patch": (62, 200),
-         "sec": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"'},
-        {"major": 123, "imp": "chrome123", "build": 6312, "patch": (46, 170),
-         "sec": '"Google Chrome";v="123", "Not:A-Brand";v="8", "Chromium";v="123"'},
-        {"major": 124, "imp": "chrome124", "build": 6367, "patch": (60, 180),
-         "sec": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"'},
+        {"major": 146, "imp": "chrome146", "build": 7676, "patch": (40, 180),
+         "sec": '"Google Chrome";v="146", "Chromium";v="146", "Not-A.Brand";v="8"'},
+        {"major": 133, "imp": "chrome133a", "build": 6943, "patch": (100, 200),
+         "sec": '"Google Chrome";v="133", "Chromium";v="133", "Not(A:Brand";v="99"'},
+        {"major": 136, "imp": "chrome136", "build": 7103, "patch": (92, 200),
+         "sec": '"Google Chrome";v="136", "Chromium";v="136", "Not.A-Brand";v="99"'},
+        {"major": 145, "imp": "chrome145", "build": 7649, "patch": (40, 180),
+         "sec": '"Google Chrome";v="145", "Chromium";v="145", "Not-A.Brand";v="8"'},
     ]
     _cp = random.choice(_chrome_profiles)
     _chrome_full = f"{_cp['major']}.0.{_cp['build']}.{random.randint(*_cp['patch'])}"
@@ -1324,22 +1329,31 @@ def run(
         # ------- 步骤2：创建临时邮箱 -------
         if mail_provider is not None:
             emitter.info("正在创建临时邮箱...", step="create_email")
+            email, dev_token = "", ""
             try:
-                email, dev_token = mail_provider.create_mailbox(
-                    proxy=static_proxy,
-                    proxy_selector=mail_proxy_selector,
-                )
-            except TypeError:
-                email, dev_token = mail_provider.create_mailbox(proxy=static_proxy)
+                try:
+                    email, dev_token = mail_provider.create_mailbox(
+                        proxy=static_proxy,
+                        proxy_selector=mail_proxy_selector,
+                    )
+                except TypeError:
+                    email, dev_token = mail_provider.create_mailbox(proxy=static_proxy)
+            except Exception as _mail_exc:
+                emitter.error(f"临时邮箱 API 异常: {_mail_exc}", step="create_email")
+                email, dev_token = "", ""
         else:
             emitter.info("正在创建 Mail.tm 临时邮箱...", step="create_email")
-            email, dev_token = get_email_and_token(
-                static_proxies,
-                emitter,
-                proxy_selector=mail_proxies_selector,
-            )
+            try:
+                email, dev_token = get_email_and_token(
+                    static_proxies,
+                    emitter,
+                    proxy_selector=mail_proxies_selector,
+                )
+            except Exception as _mail_exc:
+                emitter.error(f"Mail.tm 创建邮箱异常: {_mail_exc}", step="create_email")
+                email, dev_token = "", ""
         if not email or not dev_token:
-            emitter.error("临时邮箱创建失败", step="create_email")
+            emitter.error("临时邮箱创建失败，本次注册终止", step="create_email")
             return None
         emitter.success(f"临时邮箱创建成功: {email}", step="create_email")
 
@@ -1390,7 +1404,7 @@ def run(
             "prompt": "login",
             "ext-oai-did": did,
             "auth_session_logging_id": auth_session_id,
-            "screen_hint": "login_or_signup",
+            "screen_hint": "signup",
             "login_hint": email,
         })
         signin_resp = _session_post(
@@ -1431,8 +1445,85 @@ def run(
             timeout=20,
         )
         final_url = str(auth_resp.url) if hasattr(auth_resp, "url") else ""
-        emitter.info(f"Authorize 重定向完成: {final_url[:120]}", step="oauth_init")
+        emitter.info(f"Authorize 重定向完成 FULL: {final_url}", step="oauth_init")
+        emitter.info(f"Auth cookies after authorize: {list(s.cookies.keys())}", step="oauth_init")
         emitter.info(f"Device ID: {did}", step="oauth_init")
+        # ── 早期 Sentinel PoW 生成器（用于注册步骤） ──────────────────────────
+        class _EarlySentinelGen:
+            MAX_ATTEMPTS = 500000
+            ERROR_PREFIX = "wQ8Lk5FbGpA2NcR9dShT6gYjU7VxZ4D"
+            def __init__(self, dev_id, ua):
+                self.dev_id = dev_id
+                self.ua = ua
+                self.req_seed = str(random.random())
+                self.sid = str(uuid.uuid4())
+            @staticmethod
+            def _fnv1a(text):
+                h = 2166136261
+                for ch in text:
+                    h ^= ord(ch); h = (h * 16777619) & 0xFFFFFFFF
+                h ^= (h >> 16); h = (h * 2246822507) & 0xFFFFFFFF
+                h ^= (h >> 13); h = (h * 3266489909) & 0xFFFFFFFF
+                h ^= (h >> 16); return format(h & 0xFFFFFFFF, "08x")
+            def _cfg(self):
+                now_s = time.strftime("%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)", time.gmtime())
+                perf = random.uniform(1000, 50000)
+                return ["1920x1080", now_s, 4294705152, random.random(), _chrome_ua,
+                        "https://sentinel.openai.com/sentinel/20260124ceb8/sdk.js",
+                        None, None, "en-US", "en-US,en", random.random(),
+                        "hardwareConcurrency-undefined", "location",
+                        "Object", perf, self.sid, "", 4, time.time()*1000 - perf]
+            @staticmethod
+            def _b64(data):
+                return base64.b64encode(json.dumps(data, separators=(",",":")).encode()).decode()
+            def _solve(self, seed, diff, cfg, nonce):
+                cfg[3] = nonce; cfg[9] = round((time.time() - self._t0) * 1000)
+                d = self._b64(cfg); h = self._fnv1a(seed + d)
+                return (d + "~S") if h[:len(diff)] <= diff else None
+            def gen_token(self, seed=None, diff="0"):
+                seed = seed or self.req_seed; self._t0 = time.time(); cfg = self._cfg()
+                for i in range(self.MAX_ATTEMPTS):
+                    r = self._solve(seed, str(diff), cfg, i)
+                    if r: return "gAAAAAB" + r
+                return "gAAAAAB" + self.ERROR_PREFIX + self._b64(str(None))
+            def gen_req_token(self):
+                cfg = self._cfg(); cfg[3] = 1; cfg[9] = round(random.uniform(5, 50))
+                return "gAAAAAC" + self._b64(cfg)
+
+        _early_sentinel = _EarlySentinelGen(did, _chrome_ua)
+
+        def _build_sentinel_early(flow):
+            try:
+                req_body = json.dumps({"p": _early_sentinel.gen_req_token(), "id": did, "flow": flow})
+                sen_resp = _session_post(
+                    "https://sentinel.openai.com/backend-api/sentinel/req",
+                    headers={
+                        "Content-Type": "text/plain;charset=UTF-8",
+                        "Origin": "https://sentinel.openai.com",
+                        "Referer": "https://sentinel.openai.com/backend-api/sentinel/frame.html",
+                    },
+                    data=req_body,
+                    timeout=15,
+                )
+                if sen_resp.status_code != 200:
+                    return None
+                try:
+                    ch = sen_resp.json()
+                except Exception:
+                    return None
+                c_val = ch.get("token", "")
+                if not c_val:
+                    return None
+                pow_d = ch.get("proofofwork") or {}
+                if pow_d.get("required") and pow_d.get("seed"):
+                    p_val = _early_sentinel.gen_token(seed=pow_d["seed"], diff=pow_d.get("difficulty", "0"))
+                else:
+                    p_val = _early_sentinel.gen_req_token()
+                return json.dumps({"p": p_val, "t": "", "c": c_val, "id": did, "flow": flow}, separators=(",",":"))
+            except Exception:
+                return None
+
+
 
         if _stopped():
             return None
@@ -1445,17 +1536,33 @@ def run(
             "accept": "application/json",
             "content-type": "application/json",
             "origin": "https://auth.openai.com",
+            "oai-device-id": did,
         }
         _reg_headers.update(_trace_headers())
+        # Build Sentinel PoW token for the register step
+        _sen_reg = _build_sentinel_early("user_register")
+        emitter.info(f"Sentinel for register obtained: {bool(_sen_reg)}", step="signup")
+        if _sen_reg:
+            _reg_headers["openai-sentinel-token"] = _sen_reg
+        emitter.info(f"Register headers (keys): {list(_reg_headers.keys())}", step="signup")
+        # Log cookies that will be sent to auth.openai.com (safe iteration)
+        try:
+            _cookie_keys = [c.name for c in s.cookies]
+            emitter.info(f"Session cookies (all): {_cookie_keys}", step="signup")
+            _login_session = next((c.value for c in s.cookies if c.name == "login_session" and "auth.openai.com" in (c.domain or "")), None)
+            emitter.info(f"login_session cookie on auth.openai.com: {bool(_login_session)}", step="signup")
+        except Exception as _ce:
+            emitter.info(f"Cookie inspection failed: {_ce}", step="signup")
         signup_resp = _session_post(
             "https://auth.openai.com/api/accounts/user/register",
             headers=_reg_headers,
             json={"username": email, "password": account_password},
         )
         emitter.info(f"注册表单提交状态: {signup_resp.status_code}", step="signup")
+        emitter.info(f"Register response headers: {dict(signup_resp.headers)}", step="signup")
         if signup_resp.status_code != 200:
             emitter.error(
-                f"注册表单提交失败（状态码 {signup_resp.status_code}）: {str(signup_resp.text or '')[:220]}",
+                f"注册表单提交失败（状态码 {signup_resp.status_code}）: {str(signup_resp.text or '')[:500]}",
                 step="signup",
             )
             return None
@@ -1469,6 +1576,7 @@ def run(
                 "referer": "https://auth.openai.com/create-account/password",
                 "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "upgrade-insecure-requests": "1",
+                "oai-device-id": did,
             },
         )
         emitter.info(f"验证码发送状态: {otp_resp.status_code}", step="send_otp")
@@ -1522,6 +1630,7 @@ def run(
             "accept": "application/json",
             "content-type": "application/json",
             "origin": "https://auth.openai.com",
+            "oai-device-id": did,
         }
         _otp_headers.update(_trace_headers())
         code_resp = _session_post(
@@ -1559,6 +1668,7 @@ def run(
             "accept": "application/json",
             "content-type": "application/json",
             "origin": "https://auth.openai.com",
+            "oai-device-id": did,
         }
         _ca_headers.update(_trace_headers())
         create_account_resp = _session_post(
@@ -1570,7 +1680,16 @@ def run(
         emitter.info(f"账户创建状态: {create_account_status}", step="create_account")
 
         if create_account_status != 200:
-            emitter.error(create_account_resp.text, step="create_account")
+            error_text = create_account_resp.text
+            emitter.error(error_text, step="create_account")
+            error_code = ""
+            try:
+                error_payload = create_account_resp.json() if error_text else {}
+                error_code = str((error_payload.get("error") or {}).get("code") or "")
+            except Exception:
+                error_code = ""
+            if error_code == "registration_disallowed":
+                raise RegistrationHardStop("OpenAI 硬拒绝创建账户: registration_disallowed")
             return None
 
         emitter.success("账户创建成功！", step="create_account")
@@ -2015,6 +2134,10 @@ def run(
         except: pass
         return _build_token_result(_token_json, account_password=account_password)
 
+    except RegistrationHardStop:
+        try: s.close()
+        except: pass
+        raise
     except Exception as e:
         emitter.error(f"运行时发生错误: {e}", step="runtime")
         try: s.close()

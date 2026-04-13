@@ -95,23 +95,42 @@ def _build_session(proxy: str = "", proxy_selector: Optional[Callable[[], str]] 
     return s
 
 
+def _strip_html(html: str) -> str:
+    """Strip HTML tags and unescape entities to get plain text."""
+    import html as _html_mod
+    text = _html_mod.unescape(html)
+    text = re.sub(r"<style[^>]*>[\s\S]*?</style>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<script[^>]*>[\s\S]*?</script>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def _extract_code(content: str) -> Optional[str]:
     if not content:
         return None
-    m = re.search(r"background-color:\s*#F3F3F3[^>]*>[\s\S]*?(\d{6})[\s\S]*?</p>", content)
-    if m:
-        return m.group(1)
-    for pat in [
+    # 1. Strip HTML and try contextual patterns on plain text
+    plain = _strip_html(content) if "<" in content else content
+    contextual_pats = [
+        r"(?:verification|confirm|your|enter|use|code)[^\d]{0,30}(\d{6})",
+        r"(\d{6})(?:[^\d]{0,30}(?:verification|confirm|code|otp))",
         r"Verification code:?\s*(\d{6})",
         r"code is\s*(\d{6})",
-        r"Subject:.*?(\d{6})",
-        r">\s*(\d{6})\s*<",
-        r"(?<![#&])\b(\d{6})\b",
-    ]:
-        for code in re.findall(pat, content, re.IGNORECASE):
-            return code
+        r"\b(\d{6})\b",
+    ]
+    for pat in contextual_pats:
+        m = re.search(pat, plain, re.IGNORECASE)
+        if m:
+            return m.group(1)
+    # 2. Fallback: raw HTML, strip CSS hex colors to avoid false matches
+    raw_stripped = re.sub(r"#[0-9A-Fa-f]{6}\b", "", content)
+    m = re.search(r">\s*(\d{6})\s*<", raw_stripped)
+    if m:
+        return m.group(1)
+    m = re.search(r"(?<![\d#&])\b(\d{6})\b", raw_stripped)
+    if m:
+        return m.group(1)
     return None
-
 
 # ==================== 抽象基类 ====================
 
@@ -188,9 +207,8 @@ class MailTmProvider(MailProvider):
             domains = self._get_domains(session)
             if not domains:
                 return "", ""
-            # 优先使用 duckmail.sbs 主域名，避免临时域名被 OpenAI 封禁
-            _preferred = [d for d in domains if "duckmail" in d.lower()]
-            domain = random.choice(_preferred) if _preferred else random.choice(domains)
+            # 不优先 duckmail.sbs（OpenAI 会拒绝该域名）— 随机选一个
+            domain = random.choice(domains)
 
             for _ in range(5):
                 local = f"oc{secrets.token_hex(5)}"
@@ -427,9 +445,8 @@ class DuckMailProvider(MailProvider):
                 domains = [str(i.get("domain") or "") for i in items if isinstance(i, dict) and i.get("domain") and i.get("isActive", True)]
                 if not domains:
                     return "", ""
-                # 优先使用 duckmail.sbs 主域名，避免临时域名被 OpenAI 封禁
-                _preferred = [d for d in domains if "duckmail" in d.lower()]
-                domain = random.choice(_preferred) if _preferred else random.choice(domains)
+                # 不优先 duckmail.sbs（OpenAI 会拒绝该域名）— 随机选一个
+                domain = random.choice(domains)
 
                 local = f"oc{secrets.token_hex(5)}"
                 email = f"{local}@{domain}"
@@ -711,6 +728,107 @@ class CloudflareTempEmailProvider(MailProvider):
 
 # ==================== FreeMail ====================
 
+class GuerrillaMailProvider(MailProvider):
+    """GuerrillaMail provider - uses guerrillamailblock.com domain which OpenAI accepts."""
+    BASE = "https://api.guerrillamail.com/ajax.php"
+
+    def __init__(self) -> None:
+        self._sid_cookies: Dict[str, Dict[str, str]] = {}
+
+    def _save_session_cookies(self, sid: str, session: _requests.Session) -> None:
+        if not sid:
+            return
+        self._sid_cookies[sid] = _requests.utils.dict_from_cookiejar(session.cookies)
+
+    def _restore_session_cookies(self, sid: str, session: _requests.Session) -> None:
+        cookies = self._sid_cookies.get(sid)
+        if not cookies:
+            return
+        session.cookies.update(_requests.utils.cookiejar_from_dict(cookies))
+
+    def create_mailbox(
+        self,
+        proxy: str = "",
+        proxy_selector: Optional[Callable[[], str]] = None,
+    ) -> Tuple[str, str]:
+        with _build_session(proxy, proxy_selector) as session:
+            try:
+                resp = session.get(self.BASE, params={"f": "get_email_address"}, timeout=15, verify=False)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    email = data.get("email_addr", "").replace("\\040", " ")
+                    sid = data.get("sid_token", "")
+                    if email and sid:
+                        self._save_session_cookies(sid, session)
+                        return email, sid
+            except Exception as exc:
+                logger.warning("GuerrillaMail create_mailbox failed: %s", exc)
+        return "", ""
+
+    def wait_for_otp(
+        self,
+        auth_credential: str,
+        email: str,
+        proxy: str = "",
+        proxy_selector: Optional[Callable[[], str]] = None,
+        timeout: int = 120,
+        stop_event: Optional[threading.Event] = None,
+    ) -> str:
+        sid = auth_credential
+        with _build_session(proxy, proxy_selector) as session:
+            self._restore_session_cookies(sid, session)
+            start = time.time()
+            seen_ids: set = set()
+            seq = 0
+            while time.time() - start < timeout:
+                if stop_event and stop_event.is_set():
+                    return ""
+                try:
+                    resp = session.get(
+                        self.BASE,
+                        params={"f": "check_email", "seq": seq, "sid_token": sid},
+                        timeout=15, verify=False,
+                    )
+                    if resp.status_code == 200:
+                        self._save_session_cookies(sid, session)
+                        data = resp.json()
+                        messages = data.get("list", [])
+                        for msg in messages:
+                            msg_id = str(msg.get("mail_id", ""))
+                            if not msg_id or msg_id in seen_ids:
+                                continue
+                            seen_ids.add(msg_id)
+                            detail_resp = session.get(
+                                self.BASE,
+                                params={"f": "fetch_email", "email_id": msg_id, "sid_token": sid},
+                                timeout=15, verify=False,
+                            )
+                            if detail_resp.status_code == 200:
+                                self._save_session_cookies(sid, session)
+                                detail = detail_resp.json()
+                                # Filter: only process OpenAI verification emails
+                                sender = str(
+                                    detail.get("mail_from", "")
+                                    or detail.get("mail_sender", "")
+                                    or msg.get("mail_from", "")
+                                    or ""
+                                ).lower()
+                                subject = str(detail.get("mail_subject", "") or msg.get("mail_subject", "") or "").lower()
+                                body = str(detail.get("mail_body", "") or "")
+                                # Only check emails from OpenAI
+                                if ("openai" not in sender and "openai" not in subject
+                                        and "openai" not in body.lower()[:800]):
+                                    continue
+                                # Use robust code extraction (handles HTML, CSS noise)
+                                code = _extract_code(body)
+                                if code:
+                                    return code
+                        if messages:
+                            seq = int(data.get("count", seq))
+                except Exception as exc:
+                    logger.warning("GuerrillaMail wait_for_otp error: %s", exc)
+                time.sleep(5)
+        return ""
 class FreeMailProvider(MailProvider):
     def __init__(self, api_base: str, api_key: str):
         self.api_base = api_base.rstrip("/")
@@ -836,6 +954,17 @@ class MultiMailRouter:
             except Exception as e:
                 logger.warning("创建邮箱提供商 %s 失败: %s", name, e)
 
+        # Auto-add DuckMail as no-auth fallback when only one provider is configured
+        if len(self._provider_names) == 1 and "duckmail" not in self._provider_names:
+            try:
+                duck = create_provider_by_name("duckmail", {})
+                self._provider_names.append("duckmail")
+                self._providers["duckmail"] = duck
+                self._failures["duckmail"] = 0
+                logger.info("已自动追加 DuckMail 作为备用邮箱提供商")
+            except Exception as _duck_exc:
+                logger.warning("DuckMail 备用追加失败: %s", _duck_exc)
+
         if not self._providers:
             if providers_list:
                 raise RuntimeError(f"邮箱提供商配置无效: {', '.join(str(n) for n in providers_list)}")
@@ -843,6 +972,15 @@ class MultiMailRouter:
             self._provider_names = ["mailtm"]
             self._providers = {"mailtm": fallback}
             self._failures = {"mailtm": 0}
+            # Auto-add DuckMail fallback
+            try:
+                duck = create_provider_by_name("duckmail", {})
+                self._provider_names.append("duckmail")
+                self._providers["duckmail"] = duck
+                self._failures["duckmail"] = 0
+                logger.info("已自动追加 DuckMail 作为备用邮箱提供商")
+            except Exception as _duck_exc:
+                logger.warning("DuckMail 备用追加失败: %s", _duck_exc)
 
     def next_provider(self) -> Tuple[str, MailProvider]:
         with self._lock:
@@ -850,13 +988,18 @@ class MultiMailRouter:
             if not names:
                 raise RuntimeError("无可用邮箱提供商")
 
+            # Skip providers with too many consecutive failures if alternatives exist
+            FAILURE_SKIP_THRESHOLD = 5
+            healthy = [n for n in names if self._failures.get(n, 0) < FAILURE_SKIP_THRESHOLD]
+            candidate_names = healthy if healthy else names  # fall back to all when all failing
+
             if self.strategy == "random":
-                name = random.choice(names)
+                name = random.choice(candidate_names)
             elif self.strategy == "failover":
                 name = min(names, key=lambda n: self._failures.get(n, 0))
             else:
-                idx = next(self._counter) % len(names)
-                name = names[idx]
+                idx = next(self._counter) % len(candidate_names)
+                name = candidate_names[idx]
             return name, self._providers[name]
 
     def providers(self) -> List[Tuple[str, MailProvider]]:
@@ -871,6 +1014,51 @@ class MultiMailRouter:
         with self._lock:
             self._failures[provider_name] = self._failures.get(provider_name, 0) + 1
 
+
+
+class TempMailPlusProvider(MailProvider):
+    BASE = "https://tempmail.plus/api"
+
+    def create_mailbox(self, proxy="", proxy_selector=None):
+        import secrets as _sec
+        local = "oa" + _sec.token_hex(6)
+        email = local + "@tempmail.plus"
+        return email, local
+
+    def wait_for_otp(self, auth_credential, email, proxy="", proxy_selector=None, timeout=120, stop_event=None):
+        local = auth_credential
+        if "@" in email:
+            local = email.split("@")[0]
+        with _build_session(proxy, proxy_selector) as session:
+            start = time.time()
+            seen_ids = set()
+            while time.time() - start < timeout:
+                if stop_event and stop_event.is_set():
+                    return ""
+                try:
+                    resp = session.get(self.BASE + "/mails", params={"email": local, "epin": "", "limit": 10}, timeout=15, verify=False)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        for msg in data.get("mail_list", []):
+                            mid = str(msg.get("id", ""))
+                            if not mid or mid in seen_ids:
+                                continue
+                            seen_ids.add(mid)
+                            sender = str(msg.get("from_mail", "") or "").lower()
+                            subj = str(msg.get("subject", "") or "").lower()
+                            if "openai" not in sender and "openai" not in subj:
+                                continue
+                            dr = session.get(self.BASE + "/mail", params={"email": local, "epin": "", "id": mid}, timeout=15, verify=False)
+                            if dr.status_code == 200:
+                                d = dr.json()
+                                body = str(d.get("html", "") or d.get("text", "") or "")
+                                code = _extract_code(body)
+                                if code:
+                                    return code
+                except Exception as exc:
+                    logger.warning("TempMailPlus wait_for_otp error: %s", exc)
+                time.sleep(5)
+        return ""
 
 # ==================== 工厂函数 ====================
 
@@ -896,6 +1084,10 @@ def create_provider_by_name(provider_type: str, mail_cfg: Dict[str, Any]) -> Mai
             admin_password=str(mail_cfg.get("admin_password", "")).strip(),
             domain=str(mail_cfg.get("domain", "")).strip(),
         )
+    elif provider_type == "guerrillamail":
+        return GuerrillaMailProvider()
+    elif provider_type == "tempmail":
+        return TempMailPlusProvider()
     elif provider_type == "freemail":
         return FreeMailProvider(
             api_base=api_base,

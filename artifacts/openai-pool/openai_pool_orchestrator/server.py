@@ -28,7 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import __version__, TOKENS_DIR, CONFIG_FILE, STATE_FILE, STATIC_DIR, DATA_DIR
-from .register import EventEmitter, run, _fetch_proxy_from_pool
+from .register import EventEmitter, RegistrationHardStop, run, _fetch_proxy_from_pool
 from .mail_providers import create_provider, MultiMailRouter
 from .pool_maintainer import PoolMaintainer, Sub2ApiMaintainer
 
@@ -1355,7 +1355,7 @@ class TaskState:
                         stop_event=self.stop_event,
                         mail_provider=provider,
                         proxy_pool_config={
-                            "enabled": bool(config_snapshot.get("proxy_pool_enabled", False)),
+                            "enabled": bool(config_snapshot.get("proxy_pool_enabled", True)),
                             "api_url": str(config_snapshot.get("proxy_pool_api_url", "")).strip(),
                             "auth_mode": str(config_snapshot.get("proxy_pool_auth_mode", "query")).strip().lower(),
                             "api_key": str(config_snapshot.get("proxy_pool_api_key", "")).strip(),
@@ -1497,6 +1497,18 @@ class TaskState:
                             _save_state(self.success_count, self.fail_count)
                             self.status = "running"
                         attempt_emitter.error(f"{prefix}本次注册失败，稍后重试...", step="retry")
+
+                except RegistrationHardStop as e:
+                    mail_router.report_failure(provider_name)
+                    with self._task_lock:
+                        self.fail_count += 1
+                        self.run_fail_count += 1
+                        self.last_error = str(e)
+                        self.status = "failed"
+                        self.stop_reason = "registration_disallowed"
+                        _save_state(self.success_count, self.fail_count)
+                    self.stop_event.set()
+                    attempt_emitter.error(f"{prefix}{e}", step="create_account")
 
                 except Exception as e:
                     mail_router.report_failure(provider_name)
