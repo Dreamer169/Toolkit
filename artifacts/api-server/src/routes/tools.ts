@@ -1,4 +1,5 @@
 import { jobQueue } from "../lib/job-queue.js";
+import { setLiveVerifyEnabled, getLiveVerifyStatus } from "../lib/live-verify-poller.js";
 import { Router, type IRouter } from "express";
 import { createHash, randomBytes, randomUUID } from "crypto";
 import { execute, query } from "../db.js";
@@ -1023,7 +1024,7 @@ router.post("/tools/outlook/batch-oauth/start", async (req, res) => {
     const sessionList: BatchOAuthSession[] = [];
     await Promise.allSettled(rows.map(async (acc) => {
       try {
-        const r = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/devicecode", {
+        const r = await fetch("https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode", {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({ client_id: CLIENT_ID, scope: SCOPE }).toString(),
@@ -2136,7 +2137,7 @@ async function fetchViaImap(
 // 保留条件：need_mfa | imap_disabled | connection_error（账号存在，只是访问受限）
 router.post("/tools/outlook/purge-invalid", async (req, res) => {
   const { ids, dry_run: dryRunSnake, dryRun: dryRunCamel } = req.body as { ids?: number[]; dry_run?: boolean; dryRun?: boolean };
-    const dry_run = dryRunSnake ?? dryRunCamel ?? false;
+  const dry_run = dryRunSnake ?? dryRunCamel ?? false;
   try {
     const { query: dbQ, execute: dbE } = await import("../db.js");
 
@@ -2147,12 +2148,34 @@ router.post("/tools/outlook/purge-invalid", async (req, res) => {
       ids?.length ? [ids] : []
     );
 
-    const purged:  Array<{ id: number; email: string; reason: string }> = [];
-    const kept:    Array<{ id: number; email: string; reason: string }> = [];
-    const valid:   Array<{ id: number; email: string }> = [];
+    const purged: Array<{ id: number; email: string; reason: string }> = [];
+    const kept:   Array<{ id: number; email: string; reason: string }> = [];
+    const valid:  Array<{ id: number; email: string }> = [];
+
+    // ── 多重确认辅助：Graph /me ────────────────────────────────────────────
+    const checkGraphToken = async (token: string): Promise<boolean> => {
+      try {
+        const gr = await fetch("https://graph.microsoft.com/v1.0/me?$select=mail", {
+          headers: { Authorization: "Bearer " + token },
+        });
+        return gr.ok;
+      } catch { return false; }
+    };
+
+    // ── 多重确认辅助：IMAP 密码验证 ──────────────────────────────────────
+    const checkImapPassword = async (email: string, password: string): Promise<"wrong" | "ok" | "imap_disabled" | "unknown"> => {
+      try {
+        const result = await fetchViaImap(email, password, "INBOX", 1, "");
+        if (result.success) return "ok";
+        const errMsg = String((result as { error?: string }).error ?? "").toLowerCase();
+        if (errMsg.includes("invalid credentials") || errMsg.includes("authentication failed") || errMsg.includes("incorrect password")) return "wrong";
+        if (errMsg.includes("disabled") || errMsg.includes("not enabled") || errMsg.includes("access denied")) return "imap_disabled";
+        return "unknown";
+      } catch { return "unknown"; }
+    };
 
     for (const acc of rows) {
-      // 优先 refresh_token → Graph API 验证（ROPC 已被微软封锁）
+      // ── 第一轮：有 refresh_token → 尝试刷新 ──────────────────────────────
       if (acc.refresh_token) {
         const r = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
           method: "POST",
@@ -2165,6 +2188,7 @@ router.post("/tools/outlook/purge-invalid", async (req, res) => {
           }).toString(),
         });
         const td = await r.json() as { access_token?: string; refresh_token?: string; error?: string; error_description?: string };
+
         if (td.access_token) {
           if (!dry_run) {
             await dbE("UPDATE accounts SET token=$1, refresh_token=$2, status='active', updated_at=NOW() WHERE id=$3",
@@ -2173,62 +2197,115 @@ router.post("/tools/outlook/purge-invalid", async (req, res) => {
           valid.push({ id: acc.id, email: acc.email });
           continue;
         }
-        const err = (td.error ?? "unknown").toLowerCase();
+
+        const err  = (td.error ?? "unknown").toLowerCase();
         const desc = td.error_description ?? "";
         const tokenRevoked = err === "invalid_grant"
           || desc.includes("AADSTS70000")
           || desc.includes("AADSTS70008")
           || desc.includes("AADSTS700082")
           || desc.includes("AADSTS50173");
-        if (tokenRevoked) {
-          if (!dry_run) await dbE("DELETE FROM accounts WHERE id=$1", [acc.id]);
-          purged.push({ id: acc.id, email: acc.email, reason: "refresh_failed:" + err });
-        } else {
+
+        if (!tokenRevoked) {
+          // 非吊销错误（网络超时等）→ 保留
           if (!dry_run) await dbE("UPDATE accounts SET status='error', updated_at=NOW() WHERE id=$1", [acc.id]);
-          kept.push({ id: acc.id, email: acc.email, reason: "refresh_failed:" + err });
+          kept.push({ id: acc.id, email: acc.email, reason: "refresh_error:" + err });
+          continue;
         }
+
+        // ── 第二轮：refresh invalid_grant → 尝试现有 access_token ──────────
+        if (acc.token) {
+          const tokenOk = await checkGraphToken(acc.token);
+          if (tokenOk) {
+            if (!dry_run) await dbE("UPDATE accounts SET status='active', updated_at=NOW() WHERE id=$1", [acc.id]);
+            valid.push({ id: acc.id, email: acc.email });
+            continue;
+          }
+        }
+
+        // ── 第三轮：所有 token 失效 → IMAP 密码验证 ──────────────────────────
+        if (acc.password) {
+          const imapResult = await checkImapPassword(acc.email, acc.password);
+          if (imapResult === "ok") {
+            if (!dry_run) await dbE("UPDATE accounts SET status='needs_oauth', updated_at=NOW() WHERE id=$1", [acc.id]);
+            kept.push({ id: acc.id, email: acc.email, reason: "password_ok_token_expired" });
+            continue;
+          }
+          if (imapResult === "imap_disabled") {
+            if (!dry_run) await dbE("UPDATE accounts SET status='needs_oauth', updated_at=NOW() WHERE id=$1", [acc.id]);
+            kept.push({ id: acc.id, email: acc.email, reason: "imap_disabled_needs_oauth" });
+            continue;
+          }
+          if (imapResult === "wrong") {
+            // 三轮全部确认失败 → 删除
+            if (!dry_run) await dbE("DELETE FROM accounts WHERE id=$1", [acc.id]);
+            purged.push({ id: acc.id, email: acc.email, reason: "all_failed:token_revoked+wrong_password" });
+            continue;
+          }
+          // IMAP 未知错误 → 保守保留
+          if (!dry_run) await dbE("UPDATE accounts SET status='error', updated_at=NOW() WHERE id=$1", [acc.id]);
+          kept.push({ id: acc.id, email: acc.email, reason: "imap_unknown_keep" });
+          continue;
+        }
+
+        // 无密码 + refresh 吊销 → 无法恢复 → 删除
+        if (!dry_run) await dbE("DELETE FROM accounts WHERE id=$1", [acc.id]);
+        purged.push({ id: acc.id, email: acc.email, reason: "token_revoked_no_password" });
         continue;
       }
 
-      // 无 refresh_token：尝试已有 access_token 验证
+      // ── 无 refresh_token：检查现有 access_token ───────────────────────────
       if (acc.token) {
-        const gr = await fetch("https://graph.microsoft.com/v1.0/me?$select=mail", {
-          headers: { Authorization: "Bearer " + acc.token },
-        });
-        if (gr.ok) {
+        const tokenOk = await checkGraphToken(acc.token);
+        if (tokenOk) {
           valid.push({ id: acc.id, email: acc.email });
           continue;
         }
       }
 
-      // 无 token 也无 refresh_token → 按已有验证状态分类
-      if (acc.status === "wrong_password") {
+      // ── 无任何 token：按密码/状态分类 ────────────────────────────────────
+      if (acc.status === "wrong_password" && acc.password) {
+        // 第二轮确认：IMAP 再验一次，防误判
+        const imapResult = await checkImapPassword(acc.email, acc.password);
+        if (imapResult === "ok" || imapResult === "imap_disabled") {
+          if (!dry_run) await dbE("UPDATE accounts SET status='needs_oauth', updated_at=NOW() WHERE id=$1", [acc.id]);
+          kept.push({ id: acc.id, email: acc.email, reason: "password_recheck_ok" });
+          continue;
+        }
         if (!dry_run) await dbE("DELETE FROM accounts WHERE id=$1", [acc.id]);
-        purged.push({ id: acc.id, email: acc.email, reason: "wrong_password" });
+        purged.push({ id: acc.id, email: acc.email, reason: "confirmed_wrong_password" });
         continue;
       }
+
+      if (acc.status === "wrong_password") {
+        if (!dry_run) await dbE("DELETE FROM accounts WHERE id=$1", [acc.id]);
+        purged.push({ id: acc.id, email: acc.email, reason: "wrong_password_no_creds" });
+        continue;
+      }
+
       if (!acc.password) {
         kept.push({ id: acc.id, email: acc.email, reason: "no_credentials" });
         continue;
       }
 
-      // IMAP 被禁用不代表账号废弃；这类账号保留，走 OAuth/设备码重授权
+      // 有密码但无 token → needs_oauth（IMAP 被禁，等待 OAuth 重授权）
       kept.push({ id: acc.id, email: acc.email, reason: "needs_oauth" });
     }
 
     res.json({
-      success:  true,
+      success: true,
       dry_run,
-      total:    rows.length,
-      valid:    valid.length,
-      purged:   purged.length,
-      kept:     kept.length,
-      detail:   { valid, purged, kept },
+      total:   rows.length,
+      valid:   valid.length,
+      purged:  purged.length,
+      kept:    kept.length,
+      detail:  { valid, purged, kept },
     });
   } catch (e: unknown) {
     res.status(500).json({ success: false, error: String(e) });
   }
 });
+
 
 router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
   const { accountId, folder, top, search } = req.body as {
@@ -2355,7 +2432,7 @@ router.post("/tools/outlook/auto-retoken", async (req, res) => {
     job.logs.push({ type: "log", message: `__meta__ logPath=${logPath}` });
     res.json({ success: true, jobId, message: "retoken 任务已启动" });
 
-    const scriptPath = path.resolve(process.cwd(), "artifacts/api-server/outlook_retoken.py");
+    const scriptPath = path.resolve(__dirname, "../outlook_retoken.py");
     const args: string[] = ["--headless", headless ? "true" : "false"];
     if (allError) args.push("--all-error");
     if (ids && ids.length > 0) args.push("--ids", ids.join(","));
@@ -2597,6 +2674,161 @@ router.delete("/tools/outlook/message/:accountId/:messageId", async (req, res) =
   } catch (e) {
     res.status(500).json({ success: false, error: String(e) });
   }
+});
+
+
+// ── 一键点击邮件中的验证链接（Graph API 拉取正文 + patchright 访问）──────────
+router.post("/tools/outlook/click-verify-link", async (req, res) => {
+  const { accountId, messageId, verifyUrl } = req.body as {
+    accountId: number; messageId?: string; verifyUrl?: string;
+  };
+  if (!accountId) { res.status(400).json({ success: false, error: "缺少 accountId" }); return; }
+
+  try {
+    const { query: dbQ } = await import("../db.js");
+    const rows = await dbQ<{ id: number; email: string; token: string | null; refresh_token: string | null }>(
+      "SELECT id, email, token, refresh_token FROM accounts WHERE id= AND platform='outlook'",
+      [accountId]
+    );
+    if (!rows.length) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
+    const acc = rows[0];
+
+    // 刷新 token
+    let accessToken = acc.token || "";
+    if (acc.refresh_token) {
+      const tr = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: OAUTH_CLIENT_ID,
+          refresh_token: acc.refresh_token,
+          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read offline_access",
+        }).toString(),
+      });
+      const td = await tr.json() as { access_token?: string; refresh_token?: string };
+      if (tr.ok && td.access_token) {
+        accessToken = td.access_token;
+        const { execute: dbE } = await import("../db.js");
+        await dbE(
+          "UPDATE accounts SET token=, refresh_token=, updated_at=NOW() WHERE id=",
+          [accessToken, td.refresh_token ?? acc.refresh_token, acc.id]
+        );
+      }
+    }
+    if (!accessToken) { res.status(400).json({ success: false, error: "无法获取 access token" }); return; }
+
+    // 调用 Python 脚本（提取链接 + patchright 访问）
+    const scriptPath = path.resolve(__dirname, "../click_verify_link.py");
+    const params = JSON.stringify({ token: accessToken, message_id: messageId ?? "", verify_url: verifyUrl ?? "" });
+    const { spawn } = await import("child_process");
+    const result = await new Promise<{ success: boolean; verify_url?: string; final_url?: string; title?: string; error?: string }>((resolve) => {
+      const child = spawn("python3", [scriptPath, params], { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+      let out = "";
+      child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
+      child.stderr.on("data", (d: Buffer) => { process.stderr.write(d); });
+      child.on("close", () => {
+        const lines = out.trim().split("\n");
+        const last = lines.at(-1) ?? "";
+        try { resolve(JSON.parse(last)); }
+        catch { resolve({ success: false, error: last.slice(0, 200) }); }
+      });
+      child.on("error", (e) => resolve({ success: false, error: e.message }));
+      setTimeout(() => { child.kill(); resolve({ success: false, error: "超时（45s）" }); }, 45000);
+    });
+
+    res.json({ ...result, email: acc.email });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+// ── 批量扫描所有账号收件箱，自动点击待处理验证链接 ────────────────────────
+router.post("/tools/outlook/auto-verify-emails", async (req, res) => {
+  const { accountIds, subjectFilter = "verify" } = req.body as { accountIds?: number[]; subjectFilter?: string };
+  try {
+    const { query: dbQ } = await import("../db.js");
+    const rows = await dbQ<{ id: number; email: string; token: string | null; refresh_token: string | null }>(
+      accountIds?.length
+        ? "SELECT id, email, token, refresh_token FROM accounts WHERE platform='outlook' AND id = ANY($1::int[])"
+        : "SELECT id, email, token, refresh_token FROM accounts WHERE platform='outlook' AND (token IS NOT NULL OR refresh_token IS NOT NULL)",
+      accountIds?.length ? [accountIds] : []
+    );
+    const results: Array<{ accountId: number; email: string; status: string; error?: string; verifyUrl?: string }> = [];
+
+    for (const acc of rows) {
+      try {
+        let accessToken = acc.token || "";
+        if (acc.refresh_token) {
+          const tr = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              grant_type: "refresh_token",
+              client_id: OAUTH_CLIENT_ID,
+              refresh_token: acc.refresh_token,
+              scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read offline_access",
+            }).toString(),
+          });
+          const td = await tr.json() as { access_token?: string; refresh_token?: string };
+          if (tr.ok && td.access_token) accessToken = td.access_token;
+        }
+        if (!accessToken) { results.push({ accountId: acc.id, email: acc.email, status: "skip", error: "无 token" }); continue; }
+
+        // 搜索匹配主题的未读邮件
+        const searchUrl = `https://graph.microsoft.com/v1.0/me/messages?$search="subject:${subjectFilter}"&$select=id,subject,isRead&$top=50`;
+        const gr = await fetch(searchUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
+        if (!gr.ok) { results.push({ accountId: acc.id, email: acc.email, status: "skip", error: "Graph API 失败" }); continue; }
+        const gd = await gr.json() as { value?: Array<{ id: string; subject: string; isRead: boolean }> };
+        const msgs = (gd.value ?? []).filter(m => m.subject.toLowerCase().includes(subjectFilter.toLowerCase()));
+        if (!msgs.length) { results.push({ accountId: acc.id, email: acc.email, status: "none" }); continue; }
+
+        // 对每封匹配邮件执行点击验证
+        for (const msg of msgs) {
+          const scriptPath = path.resolve(__dirname, "../click_verify_link.py");
+          const params = JSON.stringify({ token: accessToken, message_id: msg.id, verify_url: "" });
+          const { spawn } = await import("child_process");
+          const clickResult = await new Promise<{ success: boolean; verify_url?: string; error?: string }>((resolve) => {
+            const child = spawn("python3", [scriptPath, params], { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+            let out = "";
+            child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
+            child.on("close", () => {
+              const last = out.trim().split("\n").at(-1) ?? "";
+              try { resolve(JSON.parse(last)); } catch { resolve({ success: false, error: last.slice(0, 100) }); }
+            });
+            child.on("error", (e) => resolve({ success: false, error: e.message }));
+            setTimeout(() => { child.kill(); resolve({ success: false, error: "timeout" }); }, 45000);
+          });
+          results.push({
+            accountId: acc.id, email: acc.email,
+            status: clickResult.success ? "clicked" : "failed",
+            error: clickResult.error,
+            verifyUrl: clickResult.verify_url,
+          });
+        }
+      } catch (e) {
+        results.push({ accountId: acc.id, email: acc.email, status: "error", error: String(e) });
+      }
+    }
+
+    const clicked = results.filter(r => r.status === "clicked").length;
+    res.json({ success: true, total: rows.length, clicked, results });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+
+// ── 实时验证轮询控制 ─────────────────────────────────────────────────────
+
+router.get("/tools/outlook/live-verify/status", (_req, res) => {
+  res.json({ success: true, ...getLiveVerifyStatus() });
+});
+
+router.post("/tools/outlook/live-verify/toggle", (req, res) => {
+  const { enabled } = req.body as { enabled: boolean };
+  setLiveVerifyEnabled(!!enabled);
+  res.json({ success: true, ...getLiveVerifyStatus() });
 });
 
 export default router;

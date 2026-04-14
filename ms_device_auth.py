@@ -9,7 +9,7 @@ Microsoft Graph API Device Code Flow 一次性授权
 import json, time, sys
 import urllib.request, urllib.parse
 
-CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"  # Azure CLI公共client_id，无需注册
+CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"  # Azure CLI公共client_id，无需注册
 TENANT   = "consumers"
 SCOPE    = "offline_access Mail.Read"
 
