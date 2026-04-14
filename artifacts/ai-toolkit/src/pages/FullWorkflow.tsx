@@ -94,7 +94,7 @@ export default function FullWorkflow() {
         setJobId(savedJobId);
         setPhase('registering');
         if (d.logs && d.logs.length) {
-          setLogs(d.logs.map(function(l) { return { ts: Date.now(), text: l.message || '', level: 'info' }; }));
+          setLogs(d.logs.map(function(l: { message?: string }) { return { ts: Date.now(), text: l.message || '', level: 'info' }; }));
         }
         sinceRef.current = d.nextSince || 0;
         addLog('🔄 已自动恢复运行中的任务: ' + savedJobId);

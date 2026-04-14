@@ -111,6 +111,11 @@ export default function MailCenter() {
   const [retokenLog,    setRetokenLog]     = useState<string[]>([]);
   const [retokenOpen,   setRetokenOpen]   = useState(false);
 
+  const [markingRead,  setMarkingRead]  = useState(false);
+  const [movingMsg,    setMovingMsg]    = useState(false);
+  const [deletingMsg,  setDeletingMsg]  = useState(false);
+  const [moveMenuOpen, setMoveMenuOpen] = useState(false);
+
   const batchPollRef                      = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadAccounts = useCallback(async () => {
@@ -292,6 +297,52 @@ export default function MailCenter() {
     return map[st] ?? { label: st, cls: "text-gray-500" };
   };
 
+  // ── 标记已读 / 未读 ────────────────────────────────────────────────────────
+  const markRead = async (msg: MailMsg, isRead: boolean) => {
+    if (!selAccount) return;
+    setMarkingRead(true);
+    const d = await fetch(`${API}/tools/outlook/message/${selAccount.id}/${encodeURIComponent(msg.id)}/read`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ isRead }),
+    }).then(r => r.json()).catch(() => ({ success: false }));
+    setMarkingRead(false);
+    if (d.success) {
+      setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, isRead } : m));
+      setSelMsg(prev => prev && prev.id === msg.id ? { ...prev, isRead } : prev);
+    }
+  };
+
+  // ── 移动邮件到文件夹 ─────────────────────────────────────────────────────
+  const moveMsg = async (msg: MailMsg, destinationId: string) => {
+    if (!selAccount) return;
+    setMovingMsg(true); setMoveMenuOpen(false);
+    const d = await fetch(`${API}/tools/outlook/message/${selAccount.id}/${encodeURIComponent(msg.id)}/move`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ destinationId }),
+    }).then(r => r.json()).catch(() => ({ success: false }));
+    setMovingMsg(false);
+    if (d.success) {
+      setMessages(prev => prev.filter(m => m.id !== msg.id));
+      setSelMsg(null);
+    }
+  };
+
+  // ── 删除邮件 ─────────────────────────────────────────────────────────────
+  const deleteMsg = async (msg: MailMsg) => {
+    if (!selAccount || !confirm("确定删除此邮件？此操作不可撤销。")) return;
+    setDeletingMsg(true);
+    const d = await fetch(`${API}/tools/outlook/message/${selAccount.id}/${encodeURIComponent(msg.id)}`, {
+      method: "DELETE",
+    }).then(r => r.json()).catch(() => ({ success: false }));
+    setDeletingMsg(false);
+    if (d.success) {
+      setMessages(prev => prev.filter(m => m.id !== msg.id));
+      setSelMsg(null);
+    }
+  };
+
   // ── 设备码手动授权（ROPC 失败时备用）────────────────────────────────────
   const startDevice = async (acc: Account) => {
     setAuthBusy(acc.id); setAuthError("");
@@ -416,7 +467,7 @@ export default function MailCenter() {
               if (!prev) return prev;
               const updated = prev.accounts.map(a =>
                 a.accountId === acc.accountId
-                  ? { ...a, status: (isExpired ? "expired" : "error") as const, errorMsg: errMsg }
+                  ? { ...a, status: (isExpired ? ("expired" as const) : ("error" as const)), errorMsg: errMsg }
                   : a
               );
               return { ...prev, accounts: updated };
@@ -708,7 +759,7 @@ export default function MailCenter() {
             const code     = extractCode(m.preview + " " + m.subject);
             const isActive = selMsg?.id === m.id;
             return (
-              <button key={m.id} onClick={() => setSelMsg(isActive ? null : m)}
+              <button key={m.id} onClick={() => { if (isActive) { setSelMsg(null); } else { setSelMsg(m); if (!m.isRead) markRead(m, true); } }}
                 className={`w-full text-left px-3 py-2.5 border-b border-[#21262d] transition-colors ${
                   isActive ? "bg-blue-600/10 border-l-2 border-l-blue-500" : "hover:bg-[#161b22] border-l-2 border-l-transparent"
                 }`}>
@@ -756,10 +807,36 @@ export default function MailCenter() {
             <div className="px-5 py-4 border-b border-[#21262d] space-y-1.5 shrink-0">
               <div className="flex items-start justify-between gap-3">
                 <h2 className="text-sm font-semibold text-white leading-snug">{selMsg.subject}</h2>
-                <button onClick={() => setSelMsg(null)}
-                  className="shrink-0 text-gray-500 hover:text-gray-300 text-xs px-2 py-0.5 rounded bg-[#21262d] hover:bg-[#30363d]">
-                  关闭
-                </button>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button onClick={() => markRead(selMsg, !selMsg.isRead)} disabled={markingRead}
+                    className="text-xs px-2 py-0.5 rounded bg-[#21262d] hover:bg-[#30363d] text-gray-400 hover:text-white disabled:opacity-40 transition-colors">
+                    {markingRead ? "…" : selMsg.isRead ? "标为未读" : "标为已读"}
+                  </button>
+                  <div className="relative">
+                    <button onClick={() => setMoveMenuOpen(v => !v)} disabled={movingMsg}
+                      className="text-xs px-2 py-0.5 rounded bg-[#21262d] hover:bg-[#30363d] text-gray-400 hover:text-white disabled:opacity-40 transition-colors">
+                      {movingMsg ? "移动中…" : "移动 ▾"}
+                    </button>
+                    {moveMenuOpen && (
+                      <div className="absolute right-0 top-full mt-1 bg-[#161b22] border border-[#30363d] rounded-lg shadow-xl z-20 min-w-[120px] py-1">
+                        {FOLDERS.filter(f => f.id !== folder).map(f => (
+                          <button key={f.id} onClick={() => moveMsg(selMsg, f.id)}
+                            className="w-full text-left px-3 py-1.5 text-xs text-gray-300 hover:bg-[#21262d] hover:text-white transition-colors">
+                            → {f.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <button onClick={() => deleteMsg(selMsg)} disabled={deletingMsg}
+                    className="text-xs px-2 py-0.5 rounded bg-red-700/50 hover:bg-red-700/70 text-red-300 disabled:opacity-40 transition-colors">
+                    {deletingMsg ? "删除中…" : "🗑 删除"}
+                  </button>
+                  <button onClick={() => { setSelMsg(null); setMoveMenuOpen(false); }}
+                    className="text-gray-500 hover:text-gray-300 text-xs px-2 py-0.5 rounded bg-[#21262d] hover:bg-[#30363d]">
+                    关闭
+                  </button>
+                </div>
               </div>
               <div className="text-xs text-gray-500 space-y-0.5">
                 <div><span className="text-gray-600">发件人：</span>{selMsg.fromName ? `${selMsg.fromName} <${selMsg.from}>` : selMsg.from}</div>
