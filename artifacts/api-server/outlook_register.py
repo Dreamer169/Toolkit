@@ -1492,6 +1492,53 @@ class PlaywrightController(BaseController):
 
 # ─── 主任务 ───────────────────────────────────────────────────────────────────
 
+
+def _skip_ms_interrupts(page, label="") -> bool:
+    """
+    Dismiss Microsoft interrupt/nag pages that appear after registration:
+      - Passkey enroll  (account.live.com/interrupt/passkey/enroll)
+      - Stay signed in? (login.live.com)
+      - Recovery email / phone nag
+      - "Don't show again" checkbox pages
+    Returns True if any button was clicked.
+    """
+    clicked = False
+    skip_selectors = [
+        # Passkey: "Maybe later" / "Skip for now"
+        'button:has-text("Skip for now")',
+        'button:has-text("Maybe later")',
+        'button:has-text("Not now")',
+        'button:has-text("Skip")',
+        'a:has-text("Skip for now")',
+        'a:has-text("Maybe later")',
+        # 中文变体
+        'button:has-text("跳过")',
+        'button:has-text("稍后")',
+        'button:has-text("暂时跳过")',
+        'button:has-text("以后再说")',
+        'a:has-text("跳过")',
+        # Stay signed in → No
+        'input[type="submit"][value="No"]',
+        'button:has-text("No")',
+        # Secondary / cancel buttons (catch-all for interrupt pages)
+        '[data-testid="secondaryButton"]',
+        '#idBtn_Back',
+    ]
+    for sel in skip_selectors:
+        try:
+            loc = page.locator(sel).first
+            if loc.is_visible(timeout=1500):
+                loc.click()
+                page.wait_for_timeout(1500)
+                if label:
+                    print(f"[skip-interrupt] {label} clicked: {sel}", flush=True)
+                clicked = True
+                break
+        except Exception:
+            continue
+    return clicked
+
+
 def get_oauth_token_in_browser(page, email: str) -> dict:
     """
     在已登录的浏览器 session 中做 OAuth2 authorization_code 授权。
@@ -1500,7 +1547,7 @@ def get_oauth_token_in_browser(page, email: str) -> dict:
     """
     import urllib.parse as _up, urllib.request as _ur, json as _json
 
-    CLIENT_ID    = '04b07795-8ddb-461a-bbee-02f9e1bf7b46'
+    CLIENT_ID    = '9e5f94bc-e8a4-4e73-b8be-63364c29d753'
     REDIRECT_URI = 'https://login.microsoftonline.com/common/oauth2/nativeclient'
     SCOPES = [
         'offline_access',
@@ -1512,22 +1559,9 @@ def get_oauth_token_in_browser(page, email: str) -> dict:
 
     captured = {'code': None, 'error': None, 'error_description': None}
 
-    def handle_route(route):
-        url = route.request.url
-        if 'nativeclient' in url:
-            params = _up.parse_qs(_up.urlparse(url).query)
-            if 'code' in params:
-                captured['code'] = params['code'][0]
-            elif 'error' in params:
-                captured['error']             = params['error'][0]
-                captured['error_description'] = params.get('error_description', [''])[0]
-        try:
-            route.abort()
-        except Exception:
-            pass
-
     try:
-        page.route(f'{REDIRECT_URI}**', handle_route)
+        # Dismiss passkey/interrupt pages before navigating to OAuth consent
+        _skip_ms_interrupts(page, label='pre-oauth')
         scope_encoded = '%20'.join(_up.quote(s, safe=':/') for s in SCOPES)
         # 修复：用 prompt=consent 代替 prompt=none
         # prompt=none 对新账号必然返回 consent_required 错误
@@ -1548,6 +1582,9 @@ def get_oauth_token_in_browser(page, email: str) -> dict:
 
         # 等待页面加载
         page.wait_for_timeout(3000)
+        # Dismiss any interrupt pages that appeared after navigation
+        _skip_ms_interrupts(page, label='post-goto-oauth')
+        page.wait_for_timeout(1000)
 
         # 自动点击同意按钮（consent 页面）
         _consent_selectors = [
@@ -1572,24 +1609,25 @@ def get_oauth_token_in_browser(page, email: str) -> dict:
             except Exception:
                 continue
 
-        # 再等一轮捕获重定向
-        page.wait_for_timeout(3000)
-
-        # 从当前 URL 补捉 code / error
+        # 使用 wait_for_url 等待 nativeclient 重定向（最多30s）
         if not captured['code'] and not captured['error']:
-            cur = page.url or ''
-            if '?' in cur:
-                params = _up.parse_qs(_up.urlparse(cur).query)
-                if 'code' in params:
-                    captured['code'] = params['code'][0]
-                elif 'error' in params:
-                    captured['error']             = params['error'][0]
-                    captured['error_description'] = params.get('error_description', [''])[0]
+            try:
+                page.wait_for_url(
+                    lambda u: 'nativeclient' in u or 'code=' in u or 'error=' in u,
+                    timeout=30000,
+                )
+            except Exception:
+                pass
 
-        try:
-            page.unroute(f'{REDIRECT_URI}**')
-        except Exception:
-            pass
+        # 从当前 URL 捕捉 code / error
+        cur = page.url or ''
+        if '?' in cur:
+            params = _up.parse_qs(_up.urlparse(cur).query)
+            if 'code' in params:
+                captured['code'] = params['code'][0]
+            elif 'error' in params:
+                captured['error']             = params['error'][0]
+                captured['error_description'] = params.get('error_description', [''])[0]
     except Exception as e:
         print(f'[oauth] 授权导航异常: {e}', flush=True)
         return {}
@@ -1825,6 +1863,8 @@ def register_one(ctrl, engine_name: str, headless: bool) -> dict:
         result["username"] = actual_email
 
         if ok:
+            # 跳过微软注册后中断页（passkey / 保持登录 / 恢复邮箱等）
+            _skip_ms_interrupts(page, label='post-register')
             # ── in-browser OAuth2 authorization_code 授权 ──────────────
             try:
                 _tokens = get_oauth_token_in_browser(page, f"{actual_email}@outlook.com")

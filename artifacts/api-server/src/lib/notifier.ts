@@ -29,7 +29,7 @@ async function sendNtfy(
     const res = await fetch(NTFY_URL, {
       method: 'POST',
       headers: {
-        'Title':    title,
+        'Title':    encodeURIComponent(title),
         'Priority': 'high',
         'Tags':     'white_check_mark,robot',
         'Content-Type': 'text/plain; charset=utf-8',

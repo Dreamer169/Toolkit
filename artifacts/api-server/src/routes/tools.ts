@@ -1,7 +1,7 @@
 import { jobQueue } from "../lib/job-queue.js";
 import { Router, type IRouter } from "express";
 import { createHash, randomBytes, randomUUID } from "crypto";
-import { execute } from "../db.js";
+import { execute, query } from "../db.js";
 import { existsSync } from "fs";
 import path from "path";
 
@@ -719,18 +719,62 @@ router.post("/tools/outlook/refresh-token", async (req, res) => {
 });
 
 router.post("/tools/outlook/messages", async (req, res) => {
-  const { accessToken, folder, top, search } = req.body as {
-    accessToken?: string; folder?: string; top?: number; search?: string;
+  const { accessToken: suppliedAccessToken, accountId, folder, top, search } = req.body as {
+    accessToken?: string; accountId?: number; folder?: string; top?: number; search?: string;
   };
-  if (!accessToken) {
-    res.status(400).json({ success: false, error: "accessToken 不能为空" });
-    return;
-  }
+  let accessToken = suppliedAccessToken || "";
+  let resolvedAccountId: number | null = typeof accountId === "number" ? accountId : null;
+  let accountEmail: string | null = null;
   const mailFolder = folder || "inbox";
   const limit = Math.min(50, Math.max(1, top ?? 20));
-  let url = `https://graph.microsoft.com/v1.0/me/mailFolders/${mailFolder}/messages?$top=${limit}&$select=id,subject,from,receivedDateTime,bodyPreview,isRead&$orderby=receivedDateTime desc`;
-  if (search) url += `&$search="${encodeURIComponent(search)}"`;
   try {
+    if (!accessToken) {
+      const rows = resolvedAccountId
+        ? await query<{ id: number; email: string; token: string | null; refresh_token: string | null }>(
+            "SELECT id, email, token, refresh_token FROM accounts WHERE id=$1 AND platform='outlook'",
+            [resolvedAccountId],
+          )
+        : await query<{ id: number; email: string; token: string | null; refresh_token: string | null }>(
+            "SELECT id, email, token, refresh_token FROM accounts WHERE platform='outlook' AND (COALESCE(token,'') <> '' OR COALESCE(refresh_token,'') <> '') ORDER BY updated_at DESC LIMIT 1",
+          );
+      if (!rows.length) {
+        res.status(400).json({ success: false, error: resolvedAccountId ? "账号不存在或不是 Outlook 账号" : "找不到可用 Outlook token" });
+        return;
+      }
+      const account = rows[0];
+      resolvedAccountId = account.id;
+      accountEmail = account.email;
+      accessToken = account.token || "";
+      if (account.refresh_token) {
+        const tr = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            grant_type: "refresh_token",
+            client_id: OAUTH_CLIENT_ID,
+            refresh_token: account.refresh_token,
+            scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access",
+          }).toString(),
+        });
+        const td = await tr.json() as { access_token?: string; refresh_token?: string; error?: string; error_description?: string };
+        if (tr.ok && td.access_token) {
+          accessToken = td.access_token;
+          await execute(
+            "UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
+            [accessToken, td.refresh_token ?? account.refresh_token, account.id],
+          );
+        } else if (!accessToken) {
+          res.status(400).json({ success: false, error: td.error_description ?? td.error ?? "刷新 Outlook token 失败" });
+          return;
+        }
+      }
+    }
+    if (!accessToken) {
+      res.status(400).json({ success: false, error: "accessToken 不能为空" });
+      return;
+    }
+    let url = `https://graph.microsoft.com/v1.0/me/mailFolders/${mailFolder}/messages?$top=${limit}&$select=id,subject,from,receivedDateTime,bodyPreview,isRead&$orderby=receivedDateTime desc`;
+    if (search) url += `&$search="${encodeURIComponent(search)}"`;
     const r = await fetch(url, {
       headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
     });
@@ -743,7 +787,7 @@ router.post("/tools/outlook/messages", async (req, res) => {
       error?: { message: string; code: string };
     };
     if (!r.ok) {
-      res.json({ success: false, error: data.error?.message ?? "获取邮件失败" });
+      res.status(r.status).json({ success: false, error: data.error?.message ?? "获取邮件失败" });
       return;
     }
     const messages = (data.value ?? []).map((m) => ({
@@ -755,12 +799,11 @@ router.post("/tools/outlook/messages", async (req, res) => {
       preview: m.bodyPreview,
       isRead: m.isRead,
     }));
-    res.json({ success: true, messages, count: messages.length });
+    res.json({ success: true, accountId: resolvedAccountId, email: accountEmail, messages, count: messages.length });
   } catch (e: unknown) {
     res.status(500).json({ success: false, error: String(e) });
   }
 });
-
 router.get("/tools/outlook/profile", async (req, res) => {
   const token = req.headers["x-access-token"] as string;
   if (!token) { res.status(400).json({ success: false, error: "缺少 x-access-token" }); return; }
@@ -1273,12 +1316,12 @@ router.post("/tools/outlook/register", async (req, res) => {
 
   child.on("close", async (code) => {
     // 解析 JSON 结果块
+    const tokenMap = new Map<string, { access_token: string; refresh_token: string }>();
     try {
       const jsonStart = jsonBuf.indexOf("[");
       if (jsonStart >= 0) {
         const cleaned = jsonBuf.slice(jsonStart).split("\n── JSON")[0].trim();
         const parsed = JSON.parse(cleaned) as Array<Record<string, unknown>>;
-        const tokenMap = new Map<string, { access_token: string; refresh_token: string }>();
         for (const r of parsed) {
           if (r.success && r.email && r.password) {
             const already = job.accounts.find(a => a.email === r.email);
@@ -2092,14 +2135,15 @@ async function fetchViaImap(
 // 删除条件：AADSTS50034(不存在) | AADSTS50126(密码错) | AADSTS53003(CA封禁)
 // 保留条件：need_mfa | imap_disabled | connection_error（账号存在，只是访问受限）
 router.post("/tools/outlook/purge-invalid", async (req, res) => {
-  const { ids, dry_run = false } = req.body as { ids?: number[]; dry_run?: boolean };
+  const { ids, dry_run: dryRunSnake, dryRun: dryRunCamel } = req.body as { ids?: number[]; dry_run?: boolean; dryRun?: boolean };
+    const dry_run = dryRunSnake ?? dryRunCamel ?? false;
   try {
     const { query: dbQ, execute: dbE } = await import("../db.js");
 
-    const rows = await dbQ<{ id: number; email: string; password: string | null; refresh_token: string | null; token: string | null }>(
+    const rows = await dbQ<{ id: number; email: string; password: string | null; refresh_token: string | null; token: string | null; status: string | null }>(
       ids?.length
-        ? "SELECT id, email, password, refresh_token, token FROM accounts WHERE platform='outlook' AND id = ANY($1::int[])"
-        : "SELECT id, email, password, refresh_token, token FROM accounts WHERE platform='outlook'",
+        ? "SELECT id, email, password, refresh_token, token, status FROM accounts WHERE platform='outlook' AND id = ANY($1::int[])"
+        : "SELECT id, email, password, refresh_token, token, status FROM accounts WHERE platform='outlook'",
       ids?.length ? [ids] : []
     );
 
@@ -2129,15 +2173,19 @@ router.post("/tools/outlook/purge-invalid", async (req, res) => {
           valid.push({ id: acc.id, email: acc.email });
           continue;
         }
-        // refresh_token 失效：AADSTS70000 系列 → 删除账号
+        const err = (td.error ?? "unknown").toLowerCase();
         const desc = td.error_description ?? "";
-        if (desc.includes("AADSTS70008") || desc.includes("AADSTS700082") || false) {
-          // token 已过期/吊销
+        const tokenRevoked = err === "invalid_grant"
+          || desc.includes("AADSTS70000")
+          || desc.includes("AADSTS70008")
+          || desc.includes("AADSTS700082")
+          || desc.includes("AADSTS50173");
+        if (tokenRevoked) {
           if (!dry_run) await dbE("DELETE FROM accounts WHERE id=$1", [acc.id]);
-          purged.push({ id: acc.id, email: acc.email, reason: "token_revoked" });
+          purged.push({ id: acc.id, email: acc.email, reason: "refresh_failed:" + err });
         } else {
           if (!dry_run) await dbE("UPDATE accounts SET status='error', updated_at=NOW() WHERE id=$1", [acc.id]);
-          kept.push({ id: acc.id, email: acc.email, reason: "refresh_failed:" + (td.error ?? "unknown") });
+          kept.push({ id: acc.id, email: acc.email, reason: "refresh_failed:" + err });
         }
         continue;
       }
@@ -2153,14 +2201,18 @@ router.post("/tools/outlook/purge-invalid", async (req, res) => {
         }
       }
 
-      // 无 token 也无 refresh_token → 无法验证，保留（需要设备码授权）
+      // 无 token 也无 refresh_token → 按已有验证状态分类
+      if (acc.status === "wrong_password") {
+        if (!dry_run) await dbE("DELETE FROM accounts WHERE id=$1", [acc.id]);
+        purged.push({ id: acc.id, email: acc.email, reason: "wrong_password" });
+        continue;
+      }
       if (!acc.password) {
         kept.push({ id: acc.id, email: acc.email, reason: "no_credentials" });
         continue;
       }
 
-      // 有密码无 token → IMAP Basic Auth（已被 MS 封锁，仅作为最后手段检测密码是否正确）
-      // 不实际删除：Basic Auth 封锁不代表账号无效，只代表需要 OAuth
+      // IMAP 被禁用不代表账号废弃；这类账号保留，走 OAuth/设备码重授权
       kept.push({ id: acc.id, email: acc.email, reason: "needs_oauth" });
     }
 
@@ -2282,9 +2334,9 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
 });
 
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Auto-retoken: spawn outlook_retoken.py, track via jobQueue
-// ─────────────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Auto-retoken: detached spawn + log file, api-server restart won't lose job
+// ---------------------------------------------------------------------------
 
 router.post("/tools/outlook/auto-retoken", async (req, res) => {
   try {
@@ -2292,25 +2344,38 @@ router.post("/tools/outlook/auto-retoken", async (req, res) => {
       allError?: boolean; headless?: boolean; ids?: number[];
     };
     const { spawn } = await import("child_process");
-    const path  = await import("path");
+    const path = await import("path");
+    const fs   = await import("fs");
 
-    const jobId = `retoken_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const job   = await jobQueue.create(jobId);
+    const jobId   = `retoken_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const logPath = `/tmp/${jobId}.log`;
+    const pidPath = `/tmp/${jobId}.pid`;
+    const job     = await jobQueue.create(jobId);
+
+    job.logs.push({ type: "log", message: `__meta__ logPath=${logPath}` });
     res.json({ success: true, jobId, message: "retoken 任务已启动" });
 
-    const scriptPath = path.resolve(process.cwd(), "outlook_retoken.py");
+    const scriptPath = path.resolve(process.cwd(), "artifacts/api-server/outlook_retoken.py");
     const args: string[] = ["--headless", headless ? "true" : "false"];
     if (allError) args.push("--all-error");
     if (ids && ids.length > 0) args.push("--ids", ids.join(","));
 
+    const logFd = fs.openSync(logPath, "w");
+
+    // detached=true: child joins own process group, survives parent restart
     const child = spawn("python3", [scriptPath, ...args], {
       env: { ...process.env },
       stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
     });
+    if (child.pid) fs.writeFileSync(pidPath, String(child.pid));
+    child.unref();
+
     jobQueue.setChild(jobId, child);
 
     const pushLog = (type: "log" | "success" | "warn" | "error", msg: string) => {
       job.logs.push({ type, message: msg.slice(0, 500) });
+      try { fs.writeSync(logFd, msg + "\n"); } catch {}
     };
 
     let buf = "";
@@ -2319,7 +2384,9 @@ router.post("/tools/outlook/auto-retoken", async (req, res) => {
       const lines = buf.split("\n");
       buf = lines.pop() ?? "";
       lines.forEach((l) => {
-        const t = l.includes("✅") ? "success" : l.includes("❌") || l.includes("失败") ? "error" : l.includes("⚠️") ? "warn" : "log";
+        const t = l.includes("\u2705") ? "success"
+          : l.includes("\u274c") || l.includes("\u5931\u8d25") ? "error"
+          : l.includes("\u26a0\ufe0f") ? "warn" : "log";
         if (l.trim()) pushLog(t, l);
       });
     });
@@ -2328,6 +2395,8 @@ router.post("/tools/outlook/auto-retoken", async (req, res) => {
     });
     child.on("close", async (code) => {
       if (buf.trim()) pushLog("log", buf);
+      try { fs.closeSync(logFd); } catch {}
+      try { fs.unlinkSync(pidPath); } catch {}
       await jobQueue.finish(jobId, code ?? -1, code === 0 ? "done" : "failed");
     });
   } catch (e) {
@@ -2338,14 +2407,32 @@ router.post("/tools/outlook/auto-retoken", async (req, res) => {
 router.get("/tools/outlook/auto-retoken/:jobId", async (req, res) => {
   try {
     const job = await jobQueue.get(req.params.jobId);
-    if (!job) { res.status(404).json({ success: false, error: "任务不存在" }); return; }
-    res.json({
-      success:  true,
-      jobId:    job.jobId,
-      status:   job.status,
-      logs:     job.logs,
-      exitCode: job.exitCode,
-    });
+    if (job) {
+      res.json({ success: true, jobId: job.jobId, status: job.status, logs: job.logs, exitCode: job.exitCode });
+      return;
+    }
+    // api-server restarted: recover from log file
+    const fs      = await import("fs");
+    const jobId   = req.params.jobId;
+    const logPath = `/tmp/${jobId}.log`;
+    const pidPath = `/tmp/${jobId}.pid`;
+    if (!fs.existsSync(logPath)) {
+      res.status(404).json({ success: false, error: "任务不存在" });
+      return;
+    }
+    const content = fs.readFileSync(logPath, "utf-8");
+    const logs = content.split("\n").filter(Boolean).map((l: string) => ({
+      type: l.includes("\u2705") ? "success"
+        : l.includes("\u274c") || l.includes("\u5931\u8d25") ? "error"
+        : l.includes("\u26a0\ufe0f") ? "warn" : "log",
+      message: l,
+    }));
+    let status = "done";
+    if (fs.existsSync(pidPath)) {
+      const pid = parseInt(fs.readFileSync(pidPath, "utf-8").trim(), 10);
+      try { process.kill(pid, 0); status = "running"; } catch { status = "done"; }
+    }
+    res.json({ success: true, jobId, status, logs, exitCode: null, recovered: true });
   } catch (e) {
     res.status(500).json({ success: false, error: String(e) });
   }
@@ -2355,7 +2442,6 @@ router.delete("/tools/outlook/auto-retoken/:jobId", (req, res) => {
   const stopped = jobQueue.stop(req.params.jobId);
   res.json({ success: stopped, message: stopped ? "已停止" : "任务不存在或已结束" });
 });
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Mark email as read / unread via Graph API
