@@ -375,7 +375,7 @@ export default function MailCenter() {
         const updated = { ...acc, token: p.accessToken, refresh_token: p.refreshToken };
         setSelAccount(updated);
         fetchMessages(updated, folder, search);
-      } else if (p.error && p.error !== "authorization_pending" && p.error !== "slow_down") {
+      } else if (!p.pending && p.error) {
         clearInterval(pollRef.current!); pollRef.current = null; setPolling(false);
         setAuthError(p.errorDescription ?? p.error);
       }
