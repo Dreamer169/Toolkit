@@ -124,22 +124,74 @@ def mailtm_wait_otp(token: str, timeout: int = 90) -> str | None:
 
 
 
+
+# ─── MS Graph OTP 读取 (with DB token fallback) ──────────────────────────────
+def _get_otp_via_graph_or_browser(email: str, password: str, timeout: int = 120):
+    """先尝试 MS Graph API 读取 OTP，失败则回退到浏览器登录。"""
+    import urllib.request, json as _json, re as _re, time as _time, subprocess
+
+    graph_token = None
+    try:
+        r = subprocess.run(
+            ['psql', 'postgresql://postgres:postgres@localhost/toolkit',
+             '-t', '-A', '-c',
+             f"SELECT token FROM accounts WHERE email='{email}' AND token IS NOT NULL LIMIT 1;"],
+            capture_output=True, text=True, timeout=5
+        )
+        t = r.stdout.strip()
+        if t:
+            graph_token = t
+            emit('info', f'🔑 找到 Graph token，用 API 读取 OTP')
+    except Exception as e:
+        emit('warn', f'DB token 查询失败: {e}')
+
+    if graph_token:
+        headers = {'Authorization': f'Bearer {graph_token}', 'Content-Type': 'application/json'}
+        deadline = _time.time() + timeout
+        seen_ids: set = set()
+        while _time.time() < deadline:
+            try:
+                url = 'https://graph.microsoft.com/v1.0/me/messages?$top=10&$orderby=receivedDateTime+desc&$select=id,subject,body,from,isRead'
+                req = urllib.request.Request(url, headers=headers)
+                resp = urllib.request.urlopen(req, timeout=10)
+                data = _json.loads(resp.read())
+                for msg in data.get('value', []):
+                    mid = msg.get('id', '')
+                    subj = msg.get('subject', '').lower()
+                    frm  = msg.get('from', {}).get('emailAddress', {}).get('address', '').lower()
+                    if mid in seen_ids:
+                        continue
+                    if 'cursor' not in subj and 'cursor' not in frm:
+                        continue
+                    seen_ids.add(mid)
+                    body = msg.get('body', {}).get('content', '')
+                    m = _re.search(r'\b(\d{6})\b', body)
+                    if m:
+                        otp = m.group(1)
+                        emit('info', f'✅ Graph API 收到验证码: {otp}')
+                        return otp
+            except Exception as e:
+                emit('warn', f'Graph API 查询失败: {e}')
+            _time.sleep(5)
+        emit('warn', 'Graph API 超时，回退到浏览器登录...')
+
+    return outlook_web_wait_otp(email, password, timeout=min(120, timeout))
+
 # ─── Outlook.com 浏览器 OTP 读取（替代 IMAP） ──────────────────────────────
 async def outlook_web_wait_otp_async(email: str, password: str, timeout: int = 120) -> str | None:
     """通过 Playwright 登录 Outlook.com，轮询收件箱获取 Cursor OTP 验证码。"""
     try:
-        from patchright.async_api import async_playwright
-    except ImportError:
         from playwright.async_api import async_playwright
+    except ImportError:
+        from patchright.async_api import async_playwright
 
     deadline = time.time() + timeout
     import os as _os
     # 检查 DISPLAY（Xvfb 模式）决定是否无头
     _outlook_headless = _os.environ.get("DISPLAY", "") == ""
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
+        browser = await pw.firefox.launch(
             headless=_outlook_headless,
-            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
         )
         ctx = await browser.new_context(locale="en-US", timezone_id="America/New_York")
         page = await ctx.new_page()
@@ -388,6 +440,65 @@ async def page_snapshot(page) -> list[dict]:
         return []
 
 
+
+# ── [Firefox ETP 修复] Turnstile token 等待器 ─────────────────────────────────
+async def wait_for_turnstile_token(page, timeout_ms: int = 35000):
+    emit('info', f'ETP已禁用，等待 Turnstile token (最多 {timeout_ms}ms)...')
+    # 方法1: 等待 cf-turnstile-response 被填入
+    try:
+        await page.wait_for_function(
+            r"""() => {
+                const inp = document.querySelector('input[name="cf-turnstile-response"]');
+                return inp && inp.value && inp.value.length > 10;
+            }""",
+            timeout=timeout_ms,
+        )
+        token = await page.evaluate(
+            "document.querySelector('[name=\"cf-turnstile-response\"]').value"
+        )
+        if token and len(token) > 10:
+            emit('info', f'Turnstile token OK ({len(token)} chars)')
+            return token
+    except Exception:
+        pass
+
+    # 方法2: 扫描所有 iframe 找 turnstile response
+    try:
+        for frame in page.frames:
+            try:
+                val = await frame.evaluate(
+                    "document.querySelector('[name=\"cf-turnstile-response\"]')?.value || ''"
+                )
+                if val and len(val) > 10:
+                    emit('info', f'Turnstile from iframe ({len(val)} chars)')
+                    return val
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 方法3: 用 window.turnstile.getResponse() API
+    try:
+        captured = await page.evaluate(r"""() => {
+            if (typeof window.turnstile === 'undefined') return null;
+            const widgets = document.querySelectorAll('[id^="cf-chl-widget"]');
+            for (const w of widgets) {
+                try {
+                    const r = window.turnstile.getResponse(w.id);
+                    if (r && r.length > 10) return r;
+                } catch(e) {}
+            }
+            return null;
+        }""")
+        if captured and len(captured) > 10:
+            emit('info', f'Turnstile via getResponse() ({len(captured)} chars)')
+            return captured
+    except Exception:
+        pass
+
+    emit('warn', 'Turnstile token 超时，将尝试直接提交')
+    return None
+
 async def find_input_smart(page, *keywords) -> str | None:
     """
     [j-cli snapshot 思想] 通过关键字语义搜索表单字段
@@ -446,12 +557,12 @@ async def register_one(proxy: str, headless: bool = True, provided_email: str = 
     emit("info", "🌐 启动浏览器 → cursor.sh signup...")
 
     try:
-        from patchright.async_api import async_playwright
+        from playwright.async_api import async_playwright
     except ImportError:
         try:
-            from playwright.async_api import async_playwright
+            from patchright.async_api import async_playwright
         except ImportError:
-            emit("error", "❌ 未安装 patchright/playwright")
+            emit("error", "❌ 未安装 playwright/patchright")
             return None
 
     proxy_cfg = None
@@ -465,12 +576,38 @@ async def register_one(proxy: str, headless: bool = True, provided_email: str = 
     async with async_playwright() as pw:
         launch_opts = {
             "headless": headless,
-            "args": ["--no-sandbox", "--disable-blink-features=AutomationControlled"],
         }
         if proxy_cfg:
             launch_opts["proxy"] = proxy_cfg
 
-        browser = await pw.chromium.launch(**launch_opts)
+        # ── Firefox ETP 禁用（允许 Cloudflare Turnstile challenges.cloudflare.com）──
+        # Firefox 默认的 Enhanced Tracking Protection 会拦截 challenges.cloudflare.com
+        # 导致 Turnstile iframe 无法加载，cf-turnstile-response 永远为空
+        FIREFOX_ETP_PREFS = {
+            # 完全关闭增强跟踪保护
+            privacy.trackingprotection.enabled: False,
+            privacy.trackingprotection.pbmode.enabled: False,
+            privacy.trackingprotection.cryptomining.enabled: False,
+            privacy.trackingprotection.fingerprinting.enabled: False,
+            privacy.trackingprotection.socialtracking.enabled: False,
+            # 不限制第三方 Cookie（Turnstile 需要）
+            network.cookie.cookieBehavior: 0,
+            # 关闭严格内容拦截
+            privacy.antitracking.enabled: False,
+            privacy.restrict3rdpartystorage.rollout.enabledByDefault: False,
+            # 关闭 Strict Mode ETP
+            browser.contentblocking.category: standard,
+            # 允许 iframe 内跨源请求
+            security.fileuri.strict_origin_policy: False,
+            # 关闭 resist fingerprinting（会干扰 Turnstile 的指纹收集）
+            privacy.resistFingerprinting: False,
+            privacy.resistFingerprinting.pbmode: False,
+            # 允许 WebGL（Turnstile 指纹收集用）
+            webgl.disabled: False,
+        }
+        if firefox_user_prefs not in launch_opts:
+            launch_opts[firefox_user_prefs] = FIREFOX_ETP_PREFS
+        browser = await pw.firefox.launch(**launch_opts)
         ctx = await browser.new_context(
             locale="en-US",
             timezone_id="America/New_York",
@@ -541,7 +678,16 @@ async def register_one(proxy: str, headless: bool = True, provided_email: str = 
                 emit("info", f"📧 [CSS] 填写邮箱: {email}")
             await page.wait_for_timeout(500)
 
-            # Step 4: 提交
+            # Step 4: 提交（先检查 Turnstile，ETP 已禁用故 Turnstile 可正常加载）
+            # Turnstile 可能出现在 email step 或 password step
+            _ts4_present = await page.evaluate(
+                "!!document.querySelector('[id^="cf-chl-widget"], [class*="cf-turnstile"], iframe[src*="challenges.cloudflare.com"]')"
+            )
+            if _ts4_present:
+                emit("info", "🔐 [ETP已禁用] 检测到 Turnstile，等待 token 回调...")
+                await wait_for_turnstile_token(page, timeout_ms=40000)
+                await page.wait_for_timeout(600)
+
             continue_btn = page.locator("button[type='submit'], button:has-text('Continue'), button:has-text('Sign up')")
             if await continue_btn.count() > 0:
                 await continue_btn.first.click()
@@ -601,10 +747,18 @@ async def register_one(proxy: str, headless: bool = True, provided_email: str = 
                 confirm_sel = await find_input_smart(page, "confirm", "repeat")
                 if confirm_sel and confirm_sel != pw_sel:
                     await page.fill(confirm_sel, password)
+                # ETP 已禁用，等待密码 step 上的 Turnstile（WorkOS password form）
+                _pw_ts = await page.evaluate(
+                    "!!document.querySelector('[id^="cf-chl-widget"], iframe[src*="challenges.cloudflare.com"]')"
+                )
+                if _pw_ts:
+                    emit("info", "🔐 [ETP已禁用] 密码表单 Turnstile，等待解题...")
+                    await wait_for_turnstile_token(page, timeout_ms=40000)
+                    await page.wait_for_timeout(600)
                 submit_btn = page.locator("button[type='submit']")
                 if await submit_btn.count() > 0:
                     await submit_btn.first.click()
-                    emit("info", "🔑 [快照] 已设置密码")
+                    emit("info", "🔑 [快照] 已设置密码（Turnstile 已通过）")
                 await page.wait_for_timeout(2000)
 
             # Step 7: 等待网络拦截捕获 token（最多额外等 5s）
@@ -722,4 +876,5 @@ async def main():
 
 
 if __name__ == "__main__":
+
     asyncio.run(main())
