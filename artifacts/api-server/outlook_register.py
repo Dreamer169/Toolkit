@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 
 from faker import Faker
+from browser_fingerprint import gen_profile, context_kwargs, apply_fingerprint_sync, profile_summary
 
 fake = Faker("zh_CN")
 
@@ -994,9 +995,9 @@ class PatchrightController(BaseController):
                         print(f"[captcha] 🖱 按住 再次按下: PAGE=({_cx2:.0f},{_cy2:.0f})", flush=True)
                         page.mouse.move(_cx2, _cy2)
                         page.mouse.down()
-                        page.wait_for_timeout(3200)  # 按住3.2秒，等待音频加载
+                        page.wait_for_timeout(4500)  # 按住4.5秒，等待音频加载
                         page.mouse.up()
-                        print("[captcha] ✅ 再次按下已按住3.2s！（Arkose press-and-hold）", flush=True)
+                        print("[captcha] ✅ 再次按下已按住4.5s！（Arkose press-and-hold）", flush=True)
                         _press_clicked = True
                     else:
                         print(f"[captcha]   再次按下 bounding_box 无效: {_box2}", flush=True)
@@ -1028,19 +1029,19 @@ class PatchrightController(BaseController):
                                     _cy = _pa_box['y'] + _pa_box['height'] / 2
                                     page.mouse.move(_cx, _cy)
                                     page.mouse.down()
-                                    page.wait_for_timeout(3200)
+                                    page.wait_for_timeout(4500)
                                     page.mouse.up()
-                                    print(f"[captcha] ✅ 方法B 再次按下(hold 3.2s, 坐标法) in frame {_hfr.url[:40]}", flush=True)
+                                    print(f"[captcha] ✅ 方法B 再次按下(hold 4.5s, 坐标法) in frame {_hfr.url[:40]}", flush=True)
                                 else:
                                     # 跨域/about:blank frame → 只用dispatch_event
                                     reason = 'cross-origin' if _is_cross_origin else 'box无效'
-                                    print(f"[captcha] 方法B dispatch_event({reason}) hold 3.2s (frame {_hfr.url[:40]})", flush=True)
+                                    print(f"[captcha] 方法B dispatch_event({reason}) hold 4.5s (frame {_hfr.url[:40]})", flush=True)
                                     try:
                                         _pa_loc.first.dispatch_event('mousedown')
-                                        page.wait_for_timeout(3200)
+                                        page.wait_for_timeout(4500)
                                         _pa_loc.first.dispatch_event('mouseup')
                                         _pa_loc.first.dispatch_event('click')
-                                        print(f"[captcha] ✅ 方法B dispatch_event hold 3.2s 完成", flush=True)
+                                        print(f"[captcha] ✅ 方法B dispatch_event hold 4.5s 完成", flush=True)
                                     except Exception as _de:
                                         print(f"[captcha]   方法B dispatch_event异常: {_de}", flush=True)
                                         _pa_loc.first.click(force=True, timeout=3000)
@@ -1097,7 +1098,7 @@ class PatchrightController(BaseController):
                                             _hcy = _hbox2['y'] + _hbox2['height'] / 2
                                             page.mouse.move(_hcx, _hcy)
                                             page.mouse.down()
-                                            page.wait_for_timeout(3200)
+                                            page.wait_for_timeout(4500)
                                             page.mouse.up()
                                         else:
                                             _hfr.locator(f'#{_hid}').first.click(force=True, timeout=3000)
@@ -1722,172 +1723,16 @@ def register_one(ctrl, engine_name: str, headless: bool) -> dict:
         result["error"] = "浏览器启动失败"
         return result
 
-    # ── 浏览器指纹伪装（与住宅代理地区匹配）──────────────────────────────
-    # 常见 US 用户分辨率与像素比
-    SCREEN_PRESETS = [
-        (1920, 1080, 1),
-        (1440, 900,  1),
-        (1536, 864,  1),
-        (2560, 1440, 2),
-        (1600, 900,  1),
-        (1680, 1050, 1),
-        (1920, 1200, 1),
-        (2560, 1080, 1),
-    ]  # 已移除 1366x768 和 1280x800：CAPTCHA按钮在小视口下会超出屏幕
-    sw, sh, dpr = random.choice(SCREEN_PRESETS)
-    # 窗口比屏幕略小（浏览器 chrome 占用部分空间）
-    vw = sw - random.randint(0, 40)
-    vh = max(900, sh - random.randint(60, 130))  # 保证视口至少900高，防止CAPTCHA超出
+    # ── 共享浏览器指纹档案（与 Cursor 注册完全一致）──────────────────────────
+    # gen_profile 生成与 Cursor 相同的 UA/WebGL/canvas/Audio/machine_id/battery
+    # locale="zh-CN" 保持与原版一致（Outlook 注册 UI 为中文）
+    fp = gen_profile(locale="zh-CN")
+    print(f"[register] 指纹: {profile_summary(fp)}", flush=True)
 
-    # 常见 Chrome UA（匹配 patchright 基于的 Chromium 版本）
-    CHROME_UAS = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-    ]
-    user_agent = random.choice(CHROME_UAS)
-
-    # US 时区随机选取
-    US_TIMEZONES = [
-        "America/New_York", "America/Chicago", "America/Denver",
-        "America/Los_Angeles", "America/Phoenix", "America/Detroit",
-    ]
-    timezone_id = random.choice(US_TIMEZONES)
-
-    is_win = "Windows" in user_agent
-    platform_str = "Win32" if is_win else "MacIntel"
-    hw_concurrency = random.choice([4, 6, 8, 12, 16])
-    device_memory  = random.choice([4, 8, 16])
-    ch_ver = "131"  # 与 UA 中的 Chrome 版本对齐
-
-    context = b.new_context(
-        # locale 保持 zh-CN：注册页面用中文 UI，选择器全部匹配
-        # 中国用户使用美国住宅 IP 是非常常见的场景（留学生/VPN 用户）
-        locale="zh-CN",
-        timezone_id=timezone_id,
-        viewport={"width": vw, "height": vh},
-        screen={"width": sw, "height": sh},
-        device_scale_factor=dpr,
-        color_scheme="light",
-        user_agent=user_agent,
-        java_script_enabled=True,
-        accept_downloads=False,
-        extra_http_headers={
-            # 中文优先的 Accept-Language（与 locale 一致）
-            "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-            "sec-ch-ua": f'"Chromium";v="{ch_ver}", "Google Chrome";v="{ch_ver}", "Not_A Brand";v="24"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": f'"{"Windows" if is_win else "macOS"}"',
-            "sec-fetch-dest": "document",
-            "sec-fetch-mode": "navigate",
-            "sec-fetch-site": "none",
-            "sec-fetch-user": "?1",
-            "upgrade-insecure-requests": "1",
-        },
-    )
-    # ── 深度指纹伪装（参考 HotmailBot Pro 技术点）──────────────────────────
-    import uuid as _uuid
-    machine_id = str(_uuid.uuid4())           # 每次会话生成唯一机器ID
-    canvas_noise = random.randint(1, 9999)    # canvas 哈希噪点种子
-    webgl_vendors = [
-        ("Google Inc. (NVIDIA)", "ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Ti Direct3D11 vs_5_0 ps_5_0, D3D11)"),
-        ("Google Inc. (Intel)", "ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)"),
-        ("Google Inc. (AMD)", "ANGLE (AMD, AMD Radeon RX 580 Direct3D11 vs_5_0 ps_5_0, D3D11)"),
-        ("Apple Inc.", "Apple M1"),
-        ("Google Inc. (NVIDIA)", "ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 Direct3D11 vs_5_0 ps_5_0, D3D11)"),
-        ("Google Inc. (Intel)", "ANGLE (Intel, Intel(R) Iris Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)"),
-    ]
-    webgl_vendor, webgl_renderer = random.choice(webgl_vendors)
-    # 随机插件列表（伪装成普通用户）
-    plugins_js = "[{name:'Chrome PDF Plugin'},{name:'Chrome PDF Viewer'},{name:'Native Client'}]"
-    # 注入所有指纹欺骗脚本
-    context.add_init_script(f"""
-        // navigator 属性
-        Object.defineProperty(navigator, 'hardwareConcurrency', {{ get: () => {hw_concurrency} }});
-        Object.defineProperty(navigator, 'deviceMemory', {{ get: () => {device_memory} }});
-        Object.defineProperty(navigator, 'platform', {{ get: () => '{platform_str}' }});
-        Object.defineProperty(navigator, 'language', {{ get: () => 'zh-CN' }});
-        Object.defineProperty(navigator, 'languages', {{ get: () => ['zh-CN', 'zh', 'en-US', 'en'] }});
-        Object.defineProperty(screen, 'colorDepth', {{ get: () => 24 }});
-        Object.defineProperty(screen, 'pixelDepth', {{ get: () => 24 }});
-        // 隐藏 webdriver 标志
-        Object.defineProperty(navigator, 'webdriver', {{ get: () => undefined }});
-        // 插件伪装（非空 = 真实浏览器）
-        Object.defineProperty(navigator, 'plugins', {{
-            get: () => {{
-                const arr = {plugins_js};
-                arr.length = arr.length; return arr;
-            }}
-        }});
-        // canvas 指纹噪点
-        (function() {{
-            const orig = HTMLCanvasElement.prototype.toDataURL;
-            HTMLCanvasElement.prototype.toDataURL = function(type) {{
-                const ctx = this.getContext('2d');
-                if (ctx) {{
-                    const noise = {canvas_noise};
-                    const px = ctx.getImageData(0, 0, 1, 1);
-                    px.data[0] = (px.data[0] + noise) % 256;
-                    ctx.putImageData(px, 0, 0);
-                }}
-                return orig.apply(this, arguments);
-            }};
-            const orig2 = CanvasRenderingContext2D.prototype.getImageData;
-            CanvasRenderingContext2D.prototype.getImageData = function(x, y, w, h) {{
-                const data = orig2.apply(this, arguments);
-                const noise = {canvas_noise};
-                for (let i = 0; i < data.data.length; i += 100) {{
-                    data.data[i] = (data.data[i] + noise % 3) % 256;
-                }}
-                return data;
-            }};
-        }})();
-        // WebGL 指纹伪装
-        (function() {{
-            const getParam = WebGLRenderingContext.prototype.getParameter;
-            WebGLRenderingContext.prototype.getParameter = function(param) {{
-                if (param === 37445) return '{webgl_vendor}';    // UNMASKED_VENDOR_WEBGL
-                if (param === 37446) return '{webgl_renderer}';  // UNMASKED_RENDERER_WEBGL
-                return getParam.apply(this, arguments);
-            }};
-            try {{
-                const getParam2 = WebGL2RenderingContext.prototype.getParameter;
-                WebGL2RenderingContext.prototype.getParameter = function(param) {{
-                    if (param === 37445) return '{webgl_vendor}';
-                    if (param === 37446) return '{webgl_renderer}';
-                    return getParam2.apply(this, arguments);
-                }};
-            }} catch(e) {{}}
-        }})();
-        // Audio 指纹噪点
-        (function() {{
-            const orig = AudioBuffer.prototype.getChannelData;
-            AudioBuffer.prototype.getChannelData = function(ch) {{
-                const data = orig.apply(this, arguments);
-                const noise = {canvas_noise} * 1e-7;
-                for (let i = 0; i < data.length; i += 200) {{
-                    data[i] += noise;
-                }}
-                return data;
-            }};
-        }})();
-        // 机器 ID（localStorage 写入，模拟真实设备持久化）
-        try {{
-            localStorage.setItem('device_id', '{machine_id}');
-            localStorage.setItem('machine_id', '{machine_id}');
-        }} catch(e) {{}}
-        // 电池 API（避免暴露无电池=服务器环境）
-        try {{
-            navigator.getBattery = async () => ({{
-                charging: true, chargingTime: 0,
-                dischargingTime: Infinity, level: {round(random.uniform(0.6, 1.0), 2)},
-                addEventListener: () => {{}}, removeEventListener: () {{}}
-            }});
-        }} catch(e) {{}}
-    """)
-    print(f"[register] 指纹: UA={user_agent[:40]}... WebGL={webgl_vendor[:20]} Screen={sw}x{sh} TZ={timezone_id} MachineID={machine_id[:8]}...", flush=True)
+    # 创建 browser context（统一参数：UA / 时区 / 屏幕 / sec-ch-ua headers）
+    context = b.new_context(**context_kwargs(fp))
+    # 注入完整指纹伪装脚本（canvas / WebGL / Audio / Battery / MachineID / navigator）
+    apply_fingerprint_sync(context, fp)
     page = context.new_page()
     t0 = time.time()
 

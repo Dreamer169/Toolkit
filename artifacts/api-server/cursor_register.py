@@ -23,6 +23,8 @@ import secrets
 import string
 import sys
 import time
+from urllib.parse import urlparse
+from browser_fingerprint import gen_profile, context_kwargs, apply_fingerprint, profile_summary
 import urllib.request
 import urllib.error
 from urllib.parse import urlparse
@@ -580,39 +582,15 @@ async def register_one(proxy: str, headless: bool = True, provided_email: str = 
         if proxy_cfg:
             launch_opts["proxy"] = proxy_cfg
 
-        # ── Firefox ETP 禁用（允许 Cloudflare Turnstile challenges.cloudflare.com）──
-        # Firefox 默认的 Enhanced Tracking Protection 会拦截 challenges.cloudflare.com
-        # 导致 Turnstile iframe 无法加载，cf-turnstile-response 永远为空
-        FIREFOX_ETP_PREFS = {
-            # 完全关闭增强跟踪保护
-            privacy.trackingprotection.enabled: False,
-            privacy.trackingprotection.pbmode.enabled: False,
-            privacy.trackingprotection.cryptomining.enabled: False,
-            privacy.trackingprotection.fingerprinting.enabled: False,
-            privacy.trackingprotection.socialtracking.enabled: False,
-            # 不限制第三方 Cookie（Turnstile 需要）
-            network.cookie.cookieBehavior: 0,
-            # 关闭严格内容拦截
-            privacy.antitracking.enabled: False,
-            privacy.restrict3rdpartystorage.rollout.enabledByDefault: False,
-            # 关闭 Strict Mode ETP
-            browser.contentblocking.category: standard,
-            # 允许 iframe 内跨源请求
-            security.fileuri.strict_origin_policy: False,
-            # 关闭 resist fingerprinting（会干扰 Turnstile 的指纹收集）
-            privacy.resistFingerprinting: False,
-            privacy.resistFingerprinting.pbmode: False,
-            # 允许 WebGL（Turnstile 指纹收集用）
-            webgl.disabled: False,
-        }
-        if firefox_user_prefs not in launch_opts:
-            launch_opts[firefox_user_prefs] = FIREFOX_ETP_PREFS
-        browser = await pw.firefox.launch(**launch_opts)
-        ctx = await browser.new_context(
-            locale="en-US",
-            timezone_id="America/New_York",
-            viewport={"width": 1280, "height": 800},
-        )
+        # ── 切换至 patchright Chromium（彻底解决 Turnstile 问题）────────────────
+        # Firefox ETP 会拦截 challenges.cloudflare.com，导致 cf-turnstile-response 永远为空
+        # patchright 内置反检测 + 与 Outlook 共享同一套指纹档案 → WorkOS Radar 信任度更高
+        fp = gen_profile(locale="en-US")
+        emit("info", f"🖥️  浏览器指纹: {profile_summary(fp)}")
+        browser = await pw.chromium.launch(**launch_opts)
+        ctx = await browser.new_context(**context_kwargs(fp))
+        # 注入完整指纹伪装：canvas / WebGL1+2 / Audio / Battery / MachineID / navigator
+        await apply_fingerprint(ctx, fp)
         page = await ctx.new_page()
 
         # ── [j-cli CDP] 在任何导航之前安装网络拦截器 ──
@@ -681,7 +659,7 @@ async def register_one(proxy: str, headless: bool = True, provided_email: str = 
             # Step 4: 提交（先检查 Turnstile，ETP 已禁用故 Turnstile 可正常加载）
             # Turnstile 可能出现在 email step 或 password step
             _ts4_present = await page.evaluate(
-                "!!document.querySelector('[id^="cf-chl-widget"], [class*="cf-turnstile"], iframe[src*="challenges.cloudflare.com"]')"
+                """() => !!document.querySelector('[id^="cf-chl-widget"],[class*="cf-turnstile"],iframe[src*="challenges.cloudflare.com"]')"""
             )
             if _ts4_present:
                 emit("info", "🔐 [ETP已禁用] 检测到 Turnstile，等待 token 回调...")
@@ -749,7 +727,7 @@ async def register_one(proxy: str, headless: bool = True, provided_email: str = 
                     await page.fill(confirm_sel, password)
                 # ETP 已禁用，等待密码 step 上的 Turnstile（WorkOS password form）
                 _pw_ts = await page.evaluate(
-                    "!!document.querySelector('[id^="cf-chl-widget"], iframe[src*="challenges.cloudflare.com"]')"
+                    """() => !!document.querySelector('[id^="cf-chl-widget"],iframe[src*="challenges.cloudflare.com"]')"""
                 )
                 if _pw_ts:
                     emit("info", "🔐 [ETP已禁用] 密码表单 Turnstile，等待解题...")
