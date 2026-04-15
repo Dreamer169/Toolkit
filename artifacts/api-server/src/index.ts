@@ -1,5 +1,7 @@
 import app from "./app";
 import { initNotifier } from "./lib/notifier.js";
+import { startLiveVerifyPoller } from "./lib/live-verify-poller.js";
+import { startCfPoolMaintainer } from "./lib/cf-pool-maintainer.js";
 import { logger } from "./lib/logger";
 
 const rawPort = process.env["PORT"];
@@ -17,6 +19,8 @@ if (Number.isNaN(port) || port <= 0) {
 }
 
 initNotifier();
+startLiveVerifyPoller(30_000);
+startCfPoolMaintainer();
 app.listen(port, (err) => {
   if (err) {
     logger.error({ err }, "Error listening on port");

@@ -20,13 +20,12 @@ CF_SUBNETS = [
     "108.162.194",
 ]
 
-def gen_candidates(n=60):
+def gen_candidates(n=200):
     ips = []
     seen = set()
-    random.seed(42)
     for subnet in CF_SUBNETS:
         parts = subnet.split(".")
-        for _ in range(5):
+        for _ in range(20):
             if len(parts) == 2:
                 ip = f"{subnet}.{random.randint(0,255)}.{random.randint(1,254)}"
             else:
@@ -45,7 +44,7 @@ def test_ip(ip, port=443, timeout=3):
     except:
         return ip, False
 
-candidates = gen_candidates(60)
+candidates = gen_candidates(200)
 print(f"测试 {len(candidates)} 个候选 CF IP (port 443)...", flush=True)
 
 good = []

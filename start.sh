@@ -98,6 +98,12 @@ CREATE TABLE IF NOT EXISTS job_snapshots (
 SQL
 echo "  数据库表初始化完成 ✅"
 
+echo "[1.6/6] 构建最新代码..."
+cd /workspaces/Toolkit
+pnpm --filter @workspace/api-server run build
+pnpm --filter @workspace/ai-toolkit run build
+echo "  最新代码构建完成 ✅"
+
 echo "[2/6] 启动 API 服务器..."
 pkill -f 'dist/index.mjs' 2>/dev/null || true
 sleep 1
@@ -117,6 +123,17 @@ sleep 6
 FRONTEND_PORT=$(grep -o 'localhost:[0-9]*' $LOG_DIR/frontend.log | head -1 | cut -d: -f2)
 FRONTEND_PORT=${FRONTEND_PORT:-8081}
 echo "  前端 OK (port $FRONTEND_PORT)"
+
+echo "[3.5/6] 启动 OpenAI Pool..."
+pkill -f 'openai_pool_orchestrator' 2>/dev/null || true
+pkill -f '/workspaces/Toolkit/artifacts/openai-pool' 2>/dev/null || true
+if command -v fuser >/dev/null 2>&1; then fuser -k 8000/tcp 2>/dev/null || true; fi
+sleep 1
+cd /workspaces/Toolkit/artifacts/openai-pool
+nohup env PORT=8000 PYTHONPATH=/workspaces/Toolkit/artifacts/openai-pool python3 -m openai_pool_orchestrator > $LOG_DIR/openai-pool.log 2>&1 &
+sleep 3
+curl -sf http://localhost:8000/api/status > /dev/null && echo "  OpenAI Pool OK (port 8000)" || echo "  OpenAI Pool 启动中（查看 $LOG_DIR/openai-pool.log）"
+cd /workspaces/Toolkit
 
 echo "[4/6] 启动 ngrok..."
 pkill ngrok 2>/dev/null || true
@@ -142,7 +159,7 @@ nohup xray run -c /workspaces/Toolkit/xray.json > $LOG_DIR/xray.log 2>&1 &
 sleep 3
 XRAY_IP=$(curl -s --proxy socks5://127.0.0.1:10808 --connect-timeout 10 https://api.ipify.org 2>/dev/null)
 echo "  Xray OK - 出口IP: $XRAY_IP"
-pkill -f xray-watchdog 2>/dev/null
+pkill -f xray-watchdog 2>/dev/null || true
 nohup bash /workspaces/Toolkit/xray-watchdog.sh > /tmp/toolkit_logs/xray-watchdog.log 2>&1 &
 echo "  Xray IP守护已启动"
 

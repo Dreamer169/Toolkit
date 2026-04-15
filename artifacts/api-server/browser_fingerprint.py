@@ -37,8 +37,28 @@ CHROME_UAS = [
 US_TIMEZONES = [
     "America/New_York", "America/Chicago", "America/Denver",
     "America/Los_Angeles", "America/Phoenix", "America/Detroit",
-    "America/Seattle", "America/Boston", "America/Miami",
+    "America/Indiana/Indianapolis", "America/Anchorage", "America/Boise",
 ]
+
+TIMEZONE_ALIASES = {
+    "America/Boston": "America/New_York",
+    "America/Miami": "America/New_York",
+}
+
+
+def normalize_timezone_id(timezone_id: str) -> str:
+    """Return an ICU/IANA timezone accepted by Playwright."""
+    return TIMEZONE_ALIASES.get(timezone_id, timezone_id)
+
+
+def validate_timezone_id(timezone_id: str) -> str:
+    try:
+        from zoneinfo import ZoneInfo
+
+        ZoneInfo(timezone_id)
+    except Exception as exc:
+        raise ValueError(f"Invalid timezone_id for Playwright/ICU: {timezone_id}") from exc
+    return timezone_id
 
 # 分辨率预设（真实用户分布）
 SCREEN_PRESETS: list = [
@@ -123,7 +143,7 @@ def gen_profile(locale: str = "en-US") -> BrowserProfile:
         is_win=is_win,
         platform_str="Win32" if is_win else "MacIntel",
         ch_ver=ch_ver,
-        timezone_id=random.choice(US_TIMEZONES),
+        timezone_id=validate_timezone_id(normalize_timezone_id(random.choice(US_TIMEZONES))),
         locale=locale,
         screen_w=sw, screen_h=sh, dpr=dpr,
         viewport_w=vw, viewport_h=vh,
@@ -149,7 +169,7 @@ def context_kwargs(profile: BrowserProfile) -> dict:
 
     return dict(
         locale=profile.locale,
-        timezone_id=profile.timezone_id,
+        timezone_id=validate_timezone_id(normalize_timezone_id(profile.timezone_id)),
         viewport={"width": profile.viewport_w, "height": profile.viewport_h},
         screen={"width": profile.screen_w,    "height": profile.screen_h},
         device_scale_factor=profile.dpr,

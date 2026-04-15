@@ -2,6 +2,29 @@
  * OpenAI Pool Orchestrator — v5.2.1
  */
 
+/**
+ * Keep API calls inside the /openai-pool reverse-proxy mount when embedded.
+ */
+const OPENAI_POOL_BASE = (() => {
+  const path = window.location.pathname;
+  return path === '/openai-pool' || path.startsWith('/openai-pool/') ? '/openai-pool' : '';
+})();
+const nativeFetch = window.fetch.bind(window);
+window.fetch = (input, init) => {
+  if (typeof input === 'string' && input.startsWith('/api/')) {
+    input = OPENAI_POOL_BASE + input;
+  }
+  return nativeFetch(input, init);
+};
+const NativeEventSource = window.EventSource;
+window.EventSource = function(url, config) {
+  if (typeof url === 'string' && url.startsWith('/api/')) {
+    url = OPENAI_POOL_BASE + url;
+  }
+  return new NativeEventSource(url, config);
+};
+window.EventSource.prototype = NativeEventSource.prototype;
+
 // ==========================================
 // 状态
 // ==========================================

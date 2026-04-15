@@ -452,8 +452,8 @@ export default function OutlookManager() {
               </div>
               {/* 数量 */}
               <div>
-                <label className="text-[11px] text-gray-500 mb-1 block">注册数量 (max 10)</label>
-                <input type="number" min={1} max={10} value={regCount} onChange={e => setRegCount(+e.target.value)} disabled={regBusy}
+                <label className="text-[11px] text-gray-500 mb-1 block">注册数量</label>
+                <input type="number" min={1} max={999} value={regCount} onChange={e => setRegCount(+e.target.value)} disabled={regBusy}
                   className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-2 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-blue-500 disabled:opacity-50" />
               </div>
               {/* bot_protection_wait */}

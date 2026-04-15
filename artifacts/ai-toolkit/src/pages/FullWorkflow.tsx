@@ -494,9 +494,9 @@ export default function FullWorkflow() {
             <div className="flex items-center gap-1.5 bg-[#21262d] border border-[#30363d] rounded-lg px-2 py-1.5 shrink-0">
               <span className="text-xs text-gray-400 whitespace-nowrap">数量</span>
               <input
-                type="number" min={1} max={10} value={count}
-                onChange={e => setCount(Math.min(10, Math.max(1, Number(e.target.value))))}
-                className="w-10 bg-transparent text-center text-sm text-white focus:outline-none"
+                type="number" min={1} max={999} value={count}
+                onChange={e => setCount(Math.max(1, Number(e.target.value)))}
+                className="w-14 bg-transparent text-center text-sm text-white focus:outline-none"
               />
             </div>
             <button onClick={startRegistration} className={`flex-1 py-3 rounded-lg text-white font-semibold transition-colors ${(proxy || (poolCount ?? 0) > 0) ? "bg-blue-700 hover:bg-blue-600" : "bg-blue-900/60 hover:bg-blue-800/60 border border-blue-700/50"}`}>

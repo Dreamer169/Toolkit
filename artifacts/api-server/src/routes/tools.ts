@@ -673,7 +673,7 @@ router.get("/tools/machine-id/script/:os", (req, res) => {
 
 // ── 浏览器指纹 ────────────────────────────────────────────
 router.get("/tools/fingerprint/generate", (req, res) => {
-  const count = Math.min(10, Math.max(1, Number(req.query.count) || 1));
+  const count = Math.max(1, Math.floor(Number(req.query.count) || 1));
   const profiles = Array.from({ length: count }, generateFingerprint);
   res.json({ success: true, count, profiles });
 });
@@ -1190,7 +1190,7 @@ router.post("/tools/outlook/register", async (req, res) => {
   if (!proxy && autoProxy) {
     try {
       const { query: dbQuery, execute: dbExec } = await import("../db.js");
-      const need = Math.min(10, Math.max(1, count));
+      const need = Math.max(1, Math.floor(Number(count) || 1));
       const rows = await dbQuery<{ id: number; formatted: string }>(
         `SELECT id, formatted FROM proxies WHERE status != 'banned' ORDER BY used_count ASC, RANDOM() LIMIT ${need}`
       );
@@ -1220,7 +1220,7 @@ router.post("/tools/outlook/register", async (req, res) => {
     }
   } catch {}
 
-  const n   = Math.min(10, Math.max(1, count));
+  const n   = Math.max(1, Math.floor(Number(count) || 1));
   const eng = ["patchright", "playwright"].includes(engine) ? engine : "patchright";
   const jobId = `reg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
@@ -1228,7 +1228,6 @@ router.post("/tools/outlook/register", async (req, res) => {
   const job = await jobQueue.create(jobId);
   job.logs.push({ type: "start", message: `启动 ${eng} 注册 ${n} 个 Outlook 账号 (bot_protection_wait=${wait}s)${autoProxyId ? " [代理池自动选取]" : ""}...` });
   if (proxy) job.logs.push({ type: "log", message: `🌐 代理: ${proxyDisplay}` });
-
   // 立即响应 jobId（不等待注册完成）
   res.json({ success: true, jobId, message: "注册任务已启动" });
 
@@ -1260,7 +1259,9 @@ router.post("/tools/outlook/register", async (req, res) => {
     job.logs.push({ type: "log", message: `☁️ CF IP 池模式：每账号独占一个 CF 节点` });
   }
 
-  const child = spawn("python3", args, { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+  const _spawnEnv: Record<string, string> = { ...process.env as Record<string, string>, PYTHONUNBUFFERED: "1" };
+  if (!headless) _spawnEnv["DISPLAY"] = process.env.DISPLAY || ":99";
+  const child = spawn("python3", args, { env: _spawnEnv });
   jobQueue.setChild(jobId, child);
 
   let jsonBuf = "";
@@ -1437,7 +1438,9 @@ router.post("/tools/cursor/register", async (req, res) => {
     proxy: proxyInput = "",
     headless = true,
     autoProxy = false,
-  } = req.body as { count?: number; proxy?: string; headless?: boolean; autoProxy?: boolean };
+    cdpUrl = "",
+    userDataDir = "",
+  } = req.body as { count?: number; proxy?: string; headless?: boolean; autoProxy?: boolean; cdpUrl?: string; userDataDir?: string };
 
   let proxy = proxyInput;
   if (!proxy && autoProxy) {
@@ -1460,6 +1463,10 @@ router.post("/tools/cursor/register", async (req, res) => {
   const job = await jobQueue.create(jobId);
   job.logs.push({ type: "start", message: `启动 Cursor 自动注册 ${n} 个账号...` });
   if (proxy) job.logs.push({ type: "log", message: `🌐 代理: ${proxyDisplay}` });
+  if (cdpUrl) job.logs.push({ type: "log", message: "🆓 免费真实浏览器模式：使用外部 Chrome CDP" });
+  if (userDataDir) job.logs.push({ type: "log", message: "🆓 免费持久 Profile 模式：复用 Chrome 用户数据目录" });
+
+  // Cursor 注册默认只走免费真实浏览器/Profile 路径，不自动启用付费打码服务。
 
   res.json({ success: true, jobId, message: "Cursor 注册任务已启动" });
 
@@ -1467,6 +1474,8 @@ router.post("/tools/cursor/register", async (req, res) => {
   const scriptPath = new URL("../cursor_register.py", import.meta.url).pathname;
   const args = [scriptPath, "--count", String(n), "--headless", headless ? "true" : "false"];
   if (proxy) args.push("--proxy", proxy);
+  if (cdpUrl) args.push("--cdp-url", cdpUrl);
+  if (userDataDir) args.push("--user-data-dir", userDataDir);
 
   const child = spawn("python3", args, { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
   jobQueue.setChild(jobId, child);
@@ -1554,6 +1563,147 @@ router.get("/tools/cursor/register/:jobId", async (req, res) => {
 });
 
 router.delete("/tools/cursor/register/:jobId", (req, res) => {
+  const stopped = jobQueue.stop(req.params.jobId);
+  if (!stopped) { res.status(404).json({ success: false }); return; }
+  res.json({ success: true });
+});
+
+
+// ── Cursor HTTP 注册（无浏览器，纯 HTTP 协议）────────────────────────────────
+// POST /tools/cursor/register-http
+router.post("/tools/cursor/register-http", async (req, res) => {
+  const {
+    email = "",
+    password = "",
+    proxy: proxyInput = "",
+    useXray = false,
+    skipStep1 = false,
+    autoProxy = false,
+    captchaService = "yescaptcha",
+    captchaKey = "",
+    imapHost = "",
+    imapUser = "",
+    imapPass = "",
+    outlookAccountId,
+  } = req.body as {
+    email?: string; password?: string; proxy?: string;
+    useXray?: boolean; skipStep1?: boolean; autoProxy?: boolean;
+    captchaService?: string; captchaKey?: string;
+    imapHost?: string; imapUser?: string; imapPass?: string;
+    outlookAccountId?: number;
+  };
+
+  let proxy = proxyInput;
+  if (useXray) {
+    proxy = "socks5://127.0.0.1:10808";
+  } else if (!proxy && autoProxy) {
+    try {
+      const { query: dbQuery } = await import("../db.js");
+      const rows = await dbQuery<{ formatted: string }>(
+        "SELECT formatted FROM proxies WHERE status != 'banned' ORDER BY used_count ASC, RANDOM() LIMIT 1"
+      );
+      if (rows[0]) proxy = rows[0].formatted;
+    } catch {}
+  }
+
+  let resolvedEmail = email;
+  let resolvedImapUser = imapUser;
+  let resolvedImapPass = imapPass;
+  if (outlookAccountId) {
+    try {
+      const { query: dbQuery } = await import("../db.js");
+      const rows = await dbQuery<{ email: string; password: string | null }>(
+        "SELECT email, password FROM accounts WHERE id=$1 AND platform='outlook'",
+        [outlookAccountId]
+      );
+      if (rows[0]) {
+        resolvedEmail = resolvedEmail || rows[0].email;
+        if (!resolvedImapUser) resolvedImapUser = rows[0].email;
+        if (!resolvedImapPass) resolvedImapPass = rows[0].password ?? "";
+      }
+    } catch {}
+  }
+
+  const jobId = `curhttp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const job = await jobQueue.create(jobId);
+  const proxyDisplay = proxy ? proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@") : "无代理";
+  job.logs.push({ type: "start", message: `启动 Cursor HTTP 注册（纯 HTTP，无浏览器）...` });
+  if (proxy) job.logs.push({ type: "log", message: `🌐 代理: ${proxyDisplay}` });
+  if (skipStep1) job.logs.push({ type: "log", message: "⏭️  跳过 Step1（直接 Server Action）" });
+
+  res.json({ success: true, jobId, message: "Cursor HTTP 注册任务已启动" });
+
+  const { spawn } = await import("child_process");
+  const scriptPath = new URL("../cursor_register_http.py", import.meta.url).pathname;
+  const args = [scriptPath];
+  if (resolvedEmail)   args.push("--email", resolvedEmail);
+  if (password)        args.push("--password", password);
+  if (proxy)           args.push("--proxy", proxy);
+  if (useXray)         args.push("--use-xray");
+  if (skipStep1)       args.push("--skip-step1");
+  if (captchaService)  args.push("--captcha-service", captchaService);
+  if (captchaKey)      args.push("--captcha-key", captchaKey);
+  if (imapHost || resolvedImapUser) {
+    args.push("--imap-host",  imapHost || "outlook.office365.com");
+    args.push("--imap-user",  resolvedImapUser);
+    args.push("--imap-pass",  resolvedImapPass);
+  }
+
+  const child = spawn("python3", args, { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+  jobQueue.setChild(jobId, child);
+
+  child.stdout.on("data", (chunk: Buffer) => {
+    for (const line of chunk.toString().split("\n")) {
+      const s = line.trim();
+      if (!s) continue;
+      try {
+        const ev = JSON.parse(s);
+        if (ev.success === true && ev.token) {
+          job.accounts.push({ email: ev.email, password: ev.password, token: ev.token });
+          job.logs.push({ type: "success", message: `✅ 注册成功: ${ev.email} | token ${ev.token.length} chars` });
+          import("../db.js").then(({ execute: dbExec }) => {
+            dbExec(
+              `INSERT INTO accounts (platform, email, password, token, status, notes, created_at)
+               VALUES ('cursor', $1, $2, $3, 'active', 'HTTP注册', NOW())
+               ON CONFLICT (platform, email) DO UPDATE
+                 SET password = EXCLUDED.password, token = EXCLUDED.token, status = 'active'`,
+              [ev.email, ev.password, ev.token]
+            ).catch(() => {});
+          }).catch(() => {});
+          return;
+        }
+        if (ev.success === false && ev.error) {
+          job.logs.push({ type: "error", message: `❌ ${ev.error}` });
+          return;
+        }
+      } catch {}
+      const isErr = /error|Error|failed|失败|异常/.test(s) && !/Step.*->/.test(s);
+      job.logs.push({ type: isErr ? "error" : "log", message: s });
+    }
+  });
+
+  child.stderr.on("data", (chunk: Buffer) => {
+    const s = chunk.toString().trim();
+    if (s && !s.includes("DeprecationWarning") && !s.includes("FutureWarning")) {
+      job.logs.push({ type: "error", message: s.slice(0, 300) });
+    }
+  });
+
+  child.on("close", async (code) => {
+    const ok = (job.accounts as unknown[]).length;
+    job.logs.push({ type: ok ? "done" : "error", message: `任务结束  成功: ${ok} 个` });
+    await jobQueue.finish(jobId, code ?? -1, ok ? "done" : "failed");
+  });
+});
+
+router.get("/tools/cursor/register-http/:jobId", async (req, res) => {
+  const job = await jobQueue.get(req.params.jobId);
+  if (!job) { res.status(404).json({ success: false, error: "任务不存在" }); return; }
+  const since = Number(req.query.since ?? 0);
+  res.json({ success: true, status: job.status, accounts: job.accounts, logs: job.logs.slice(since), nextSince: job.logs.length });
+});
+
+router.delete("/tools/cursor/register-http/:jobId", (req, res) => {
   const stopped = jobQueue.stop(req.params.jobId);
   if (!stopped) { res.status(404).json({ success: false }); return; }
   res.json({ success: true });
@@ -1804,11 +1954,28 @@ router.post("/tools/outlook/imap-inbox", async (req, res) => {
 router.get("/tools/outlook/accounts", async (req, res) => {
   try {
     const { query } = await import("../db.js");
-    const rows = await query(
-      "SELECT id, email, password, token, refresh_token, status, notes, created_at FROM accounts WHERE platform='outlook' ORDER BY created_at DESC",
+    const rows = await query<{
+      id: number; email: string; password: string | null; token: string | null; refresh_token: string | null;
+      status: string | null; notes: string | null; created_at: string;
+    }>(
+      `SELECT id, email, password, token, refresh_token, status, notes, created_at
+       FROM accounts
+       WHERE platform='outlook'
+       ORDER BY
+         CASE WHEN status='active' THEN 0 ELSE 1 END,
+         CASE WHEN COALESCE(refresh_token,'') <> '' OR COALESCE(token,'') <> '' THEN 0 ELSE 1 END,
+         updated_at DESC NULLS LAST,
+         created_at DESC`,
       []
     );
-    res.json({ success: true, accounts: rows });
+    res.json({
+      success: true,
+      accounts: rows.map((row) => ({
+        ...row,
+        token: row.token ? "ok" : null,
+        refresh_token: row.refresh_token ? "ok" : null,
+      })),
+    });
   } catch (e: unknown) {
     res.status(500).json({ success: false, error: String(e) });
   }

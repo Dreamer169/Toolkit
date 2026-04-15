@@ -174,6 +174,7 @@ class MailProvider(ABC):
 class MailTmProvider(MailProvider):
     def __init__(self, api_base: str = "https://api.mail.tm"):
         self.api_base = api_base.rstrip("/")
+        self._global_seen: Dict[str, set] = {}
 
     def _headers(self, token: str = "", use_json: bool = False) -> Dict[str, str]:
         h: Dict[str, str] = {"Accept": "application/json"}
@@ -246,7 +247,9 @@ class MailTmProvider(MailProvider):
         stop_event: Optional[threading.Event] = None,
     ) -> str:
         with _build_session(proxy, proxy_selector) as session:
-            seen_ids: set = set()
+            if email not in self._global_seen:
+                self._global_seen[email] = set()
+            seen_ids = self._global_seen[email]
             start = time.time()
 
             while time.time() - start < timeout:
@@ -314,6 +317,7 @@ class MoeMailProvider(MailProvider):
     def __init__(self, api_base: str, api_key: str):
         self.api_base = api_base.rstrip("/")
         self.api_key = api_key
+        self._global_seen: Dict[str, set] = {}
 
     def _headers(self) -> Dict[str, str]:
         return {"X-API-Key": self.api_key}
@@ -419,6 +423,7 @@ class DuckMailProvider(MailProvider):
     def __init__(self, api_base: str = "https://api.duckmail.sbs", bearer_token: str = ""):
         self.api_base = api_base.rstrip("/")
         self.bearer_token = bearer_token
+        self._global_seen: Dict[str, set] = {}
 
     def _auth_headers(self, token: str = "") -> Dict[str, str]:
         h: Dict[str, str] = {"Accept": "application/json"}
@@ -484,7 +489,9 @@ class DuckMailProvider(MailProvider):
         stop_event: Optional[threading.Event] = None,
     ) -> str:
         with _build_session(proxy, proxy_selector) as session:
-            seen_ids: set = set()
+            if email not in self._global_seen:
+                self._global_seen[email] = set()
+            seen_ids = self._global_seen[email]
             start = time.time()
 
             while time.time() - start < timeout:
@@ -534,6 +541,7 @@ class CloudflareTempEmailProvider(MailProvider):
         self.domain = str(domain).strip()
         # 使用线程本地 token，避免多线程下邮箱 token 串用。
         self._tls = threading.local()
+        self._global_seen: Dict[str, set] = {}
 
     def _get_random_domain(self) -> str:
         if not self.domain:
@@ -646,7 +654,9 @@ class CloudflareTempEmailProvider(MailProvider):
             return ""
         print(f"[CFMail] wait_for_otp 进入! email={email}, api_base={self.api_base}, jwt前16={token[:16] if token else 'EMPTY'}", flush=True)
         with _build_session(proxy, proxy_selector) as session:
-            seen_ids: set = set()
+            if email not in self._global_seen:
+                self._global_seen[email] = set()
+            seen_ids = self._global_seen[email]
             start = time.time()
             poll_count = 0
 
@@ -734,6 +744,7 @@ class GuerrillaMailProvider(MailProvider):
 
     def __init__(self) -> None:
         self._sid_cookies: Dict[str, Dict[str, str]] = {}
+        self._global_seen: Dict[str, set] = {}
 
     def _save_session_cookies(self, sid: str, session: _requests.Session) -> None:
         if not sid:
@@ -778,7 +789,9 @@ class GuerrillaMailProvider(MailProvider):
         with _build_session(proxy, proxy_selector) as session:
             self._restore_session_cookies(sid, session)
             start = time.time()
-            seen_ids: set = set()
+            if email not in self._global_seen:
+                self._global_seen[email] = set()
+            seen_ids = self._global_seen[email]
             seq = 0
             while time.time() - start < timeout:
                 if stop_event and stop_event.is_set():
@@ -879,7 +892,9 @@ class FreeMailProvider(MailProvider):
     ) -> str:
         with _build_session(proxy, proxy_selector) as session:
             start = time.time()
-            seen_ids: set = set()
+            if email not in self._global_seen:
+                self._global_seen[email] = set()
+            seen_ids = self._global_seen[email]
 
             while time.time() - start < timeout:
                 if stop_event and stop_event.is_set():
@@ -1002,6 +1017,9 @@ class MultiMailRouter:
 class TempMailPlusProvider(MailProvider):
     BASE = "https://tempmail.plus/api"
 
+    def __init__(self):
+        self._global_seen: Dict[str, set] = {}
+
     def create_mailbox(self, proxy="", proxy_selector=None):
         import secrets as _sec
         local = "oa" + _sec.token_hex(6)
@@ -1014,7 +1032,9 @@ class TempMailPlusProvider(MailProvider):
             local = email.split("@")[0]
         with _build_session(proxy, proxy_selector) as session:
             start = time.time()
-            seen_ids = set()
+            if email not in self._global_seen:
+                self._global_seen[email] = set()
+            seen_ids = self._global_seen[email]
             while time.time() - start < timeout:
                 if stop_event and stop_event.is_set():
                     return ""

@@ -117,6 +117,8 @@ export default function MailCenter() {
   const [moveMenuOpen, setMoveMenuOpen] = useState(false);
 
   const batchPollRef                      = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [liveVerify, setLiveVerify]         = useState<{ enabled: boolean; lastRun: string | null; lastStats: { total: number; clicked: number; skipped: number; failed: number } } | null>(null);
+  const [liveVerifyBusy, setLiveVerifyBusy] = useState(false);
 
   const loadAccounts = useCallback(async () => {
     const d = await fetch(`${API}/tools/outlook/accounts`).then(r => r.json()).catch(() => ({}));
@@ -124,6 +126,30 @@ export default function MailCenter() {
   }, []);
 
   useEffect(() => { loadAccounts(); }, [loadAccounts]);
+
+  // ── 实时验证轮询：加载状态 ─────────────────────────────────────────────
+  const loadLiveVerifyStatus = useCallback(async () => {
+    const d = await fetch(`${API}/tools/outlook/live-verify/status`).then(r => r.json()).catch(() => null);
+    if (d?.success) setLiveVerify(d);
+  }, []);
+
+  const toggleLiveVerify = async () => {
+    if (!liveVerify) return;
+    setLiveVerifyBusy(true);
+    const d = await fetch(`${API}/tools/outlook/live-verify/toggle`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !liveVerify.enabled }),
+    }).then(r => r.json()).catch(() => null);
+    setLiveVerifyBusy(false);
+    if (d?.success) setLiveVerify(d);
+  };
+
+  useEffect(() => {
+    loadLiveVerifyStatus();
+    const iv = setInterval(loadLiveVerifyStatus, 15_000);
+    return () => clearInterval(iv);
+  }, [loadLiveVerifyStatus]);
 
   const fetchMessages = useCallback(async (acc: Account, fld: string, q: string) => {
     setBusy(true); setError(""); setNeedsAuth(false); setMessages([]); setSelMsg(null);
@@ -529,7 +555,32 @@ export default function MailCenter() {
             {purging ? '清洗中…' : '🗑️ 一键清洗风控'}
           </button>
           <button onClick={startAutoRetoken} disabled={retokenBusy || accounts.length === 0} className="px-3 py-1.5 text-xs rounded bg-violet-600 hover:bg-violet-500 disabled:opacity-40 transition-colors text-white font-medium">{retokenBusy ? "🔄 重授权中…" : "🤖 自动 retoken"}</button>
-          {purgeStats && (
+                {/* 实时验证状态栏 */}
+      {liveVerify && (
+        <div className="flex items-center gap-3 px-4 py-2 bg-[#0d1117] border-b border-[#21262d] text-xs">
+          <span className={`font-semibold ${liveVerify.enabled ? 'text-emerald-400' : 'text-gray-500'}`}>
+            {liveVerify.enabled ? '🟢 实时验证：开启' : '⚫ 实时验证：关闭'}
+          </span>
+          {liveVerify.lastRun && (
+            <span className="text-gray-500">
+              上次扫描：{new Date(liveVerify.lastRun).toLocaleTimeString('zh-CN')} &nbsp;
+              ✅ {liveVerify.lastStats.clicked} 已点击 / 失败 {liveVerify.lastStats.failed} / 跳过 {liveVerify.lastStats.skipped}
+            </span>
+          )}
+          <button
+            onClick={toggleLiveVerify}
+            disabled={liveVerifyBusy}
+            className={`ml-auto px-3 py-1 rounded text-xs font-medium transition-colors ${
+              liveVerify.enabled
+                ? 'bg-red-900/40 hover:bg-red-800/60 text-red-300'
+                : 'bg-emerald-900/40 hover:bg-emerald-800/60 text-emerald-300'
+            } disabled:opacity-50`}
+          >
+            {liveVerifyBusy ? '处理中…' : liveVerify.enabled ? '暂停自动验证' : '开启自动验证'}
+          </button>
+        </div>
+      )}
+      {purgeStats && (
             <div className="text-[10px] px-1 py-0.5 rounded bg-[#21262d] text-gray-400 flex gap-2">
               <span className="text-emerald-400">✓ 有效 {purgeStats.valid}</span>
               <span className="text-red-400">✗ 删除 {purgeStats.purged}</span>

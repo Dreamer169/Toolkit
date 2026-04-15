@@ -28,6 +28,21 @@ module.exports = {
       "autorestart": true
     },
     {
+      "name": "openai-pool",
+      "script": "python3",
+      "args": "-m openai_pool_orchestrator",
+      "cwd": "/workspaces/Toolkit/artifacts/openai-pool",
+      "interpreter": "none",
+      "env": {
+        "PORT": "8000",
+        "PYTHONPATH": "/workspaces/Toolkit/artifacts/openai-pool"
+      },
+      "restart_delay": 5000,
+      "max_restarts": 20,
+      "watch": false,
+      "autorestart": true
+    },
+    {
       "name": "fakemail-bridge",
       "script": "/workspaces/Toolkit/artifacts/api-server/fakemail_bridge.py",
       "interpreter": "python3",

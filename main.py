@@ -21,9 +21,10 @@ def main():
     print('=== Toolkit 启动 ===')
 
     if fallback:
-        print('[*] 使用备用 IP 列表模式')
-        # Directly import and run with hardcoded list
-        import xray_update  # noqa: F401
+        print('[*] 使用备用 IP 列表模式（跳过探测）')
+        import xray_update
+        xray_update.run(ips=xray_update.FALLBACK_IPS)
+        print('\n✅ 完成：xray.json 已用备用 IP 列表更新')
         return
 
     if not dry_run:

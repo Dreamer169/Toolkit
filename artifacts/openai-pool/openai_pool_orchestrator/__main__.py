@@ -89,7 +89,8 @@ def _install_windows_ctrl_handler(
 def main() -> None:
     print("=" * 50)
     print(f"  OpenAI Pool Orchestrator v{__version__}")
-    print("  访问: http://localhost:18421")
+    port = int(os.environ.get("PORT", "8000"))
+    print(f"  访问: http://localhost:{port}")
     print("  按 Ctrl+C 可退出")
     print("=" * 50)
 
@@ -98,7 +99,7 @@ def main() -> None:
     config = uvicorn.Config(
         app,
         host="0.0.0.0",
-        port=18421,
+        port=port,
         log_level="warning",
         timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT,
     )
