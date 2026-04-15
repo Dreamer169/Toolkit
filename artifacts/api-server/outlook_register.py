@@ -539,13 +539,25 @@ class PatchrightController(BaseController):
         self._net_audio_urls: list = []
         _AUDIO_EXTS = ('.mp3', '.wav', '.ogg', '.m4a', '.aac')
         _AUDIO_KWS  = ('audio-challenge', '/audio/', '/sound/', 'speak',
-                       'arkose', 'funcaptcha', 'hsprotect.net/api')
+                       'arkose', 'funcaptcha')
+        # 已知遥测/信标端点，绝不是音频，排除之
+        _AUDIO_EXCL = ('beacon', 'telemetry', 'metric', 'analytics',
+                       'tracking', 'pixel', 'collector', 'stats', 'ping')
+        # hsprotect.net /api/ 路径下只有包含音频关键词的才算音频
+        _HSP_AUDIO_KWS = ('audio', 'sound', 'speech', 'voice', 'captcha', 'challenge')
         def _on_audio_req(request):
             url = request.url
             low = url.lower()
+            if any(ex in low for ex in _AUDIO_EXCL):
+                return  # 排除遥测/信标端点（如 /api/v2/msft/beacon）
+            is_hsp_audio = (
+                'hsprotect.net' in low
+                and '/api/' in low
+                and any(ak in low for ak in _HSP_AUDIO_KWS)
+            )
             if (any(low.endswith(e) for e in _AUDIO_EXTS)
                     or any(kw in low for kw in _AUDIO_KWS)
-                    or ('hsprotect.net' in low and '/api/' in low)):
+                    or is_hsp_audio):
                 if url not in self._net_audio_urls:
                     self._net_audio_urls.append(url)
                     print(f"[captcha] 🌐 [早期拦截] 音频URL: {url[:120]}", flush=True)
@@ -1010,9 +1022,20 @@ class PatchrightController(BaseController):
                                     page.mouse.down()
                                     page.wait_for_timeout(3200)
                                     page.mouse.up()
+                                    print(f"[captcha] ✅ 方法B 再次按下(hold 3.2s, 坐标法) in frame {_hfr.url[:40]}", flush=True)
                                 else:
-                                    _pa_loc.first.click(force=True, timeout=3000)
-                                print(f"[captcha] ✅ 方法B 再次按下(hold 3.2s) in frame {_hfr.url[:40]}", flush=True)
+                                    # bounding_box 无效（跨域嵌套frame坐标不可达）
+                                    # 改用 dispatch_event 直接派发 mousedown/mouseup，保证3.2s持续
+                                    print(f"[captcha] 方法B bounding_box无效，改用dispatch_event持续按住3.2s (frame {_hfr.url[:40]})", flush=True)
+                                    try:
+                                        _pa_loc.first.dispatch_event('mousedown')
+                                        page.wait_for_timeout(3200)
+                                        _pa_loc.first.dispatch_event('mouseup')
+                                        _pa_loc.first.dispatch_event('click')
+                                        print(f"[captcha] ✅ 方法B dispatch_event hold 3.2s 完成", flush=True)
+                                    except Exception as _de:
+                                        print(f"[captcha]   方法B dispatch_event异常: {_de}", flush=True)
+                                        _pa_loc.first.click(force=True, timeout=3000)
                                 _press_clicked = True
                                 page.wait_for_timeout(3000)
                                 break
