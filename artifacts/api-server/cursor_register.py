@@ -27,7 +27,6 @@ from urllib.parse import urlparse
 from browser_fingerprint import gen_profile, context_kwargs, apply_fingerprint, profile_summary
 import urllib.request
 import urllib.error
-from urllib.parse import urlparse
 
 
 # ─── 工具函数 ────────────────────────────────────────────────────────────────
@@ -183,19 +182,18 @@ def _get_otp_via_graph_or_browser(email: str, password: str, timeout: int = 120)
 async def outlook_web_wait_otp_async(email: str, password: str, timeout: int = 120) -> str | None:
     """通过 Playwright 登录 Outlook.com，轮询收件箱获取 Cursor OTP 验证码。"""
     try:
-        from playwright.async_api import async_playwright
-    except ImportError:
         from patchright.async_api import async_playwright
+    except ImportError:
+        from playwright.async_api import async_playwright
 
     deadline = time.time() + timeout
     import os as _os
-    # 检查 DISPLAY（Xvfb 模式）决定是否无头
     _outlook_headless = _os.environ.get("DISPLAY", "") == ""
     async with async_playwright() as pw:
-        browser = await pw.firefox.launch(
-            headless=_outlook_headless,
-        )
-        ctx = await browser.new_context(locale="en-US", timezone_id="America/New_York")
+        browser = await pw.chromium.launch(headless=_outlook_headless)
+        fp2 = gen_profile(locale="en-US")
+        ctx = await browser.new_context(**context_kwargs(fp2))
+        await apply_fingerprint(ctx, fp2)
         page = await ctx.new_page()
         try:
             emit("info", f"🔐 登录 Outlook.com (headless={_outlook_headless})...")
@@ -249,7 +247,7 @@ async def outlook_web_wait_otp_async(email: str, password: str, timeout: int = 1
                         await item.click()
                         await page.wait_for_timeout(2000)
                         body = await page.locator("[role='main'], .ReadingPaneContent").inner_text()
-                        m = re.search(r'(\d{6})', body)
+                        m = re.search(r'\b(\d{6})\b', body)
                         if m:
                             emit("info", f"✅ Outlook 收到验证码: {m.group(1)}")
                             return m.group(1)
@@ -559,10 +557,10 @@ async def register_one(proxy: str, headless: bool = True, provided_email: str = 
     emit("info", "🌐 启动浏览器 → cursor.sh signup...")
 
     try:
-        from playwright.async_api import async_playwright
+        from patchright.async_api import async_playwright
     except ImportError:
         try:
-            from patchright.async_api import async_playwright
+            from playwright.async_api import async_playwright
         except ImportError:
             emit("error", "❌ 未安装 playwright/patchright")
             return None
