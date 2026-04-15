@@ -847,8 +847,8 @@ class PatchrightController(BaseController):
             # ── 点击无障碍按钮（轮椅图标）────────────────────────────────────
             clicked_accessibility = _click_a11y_btn(frame2)
             if not clicked_accessibility:
-                print("[captcha] 无障碍按钮点击失败，放弃本次", flush=True)
-                return False
+                print("[captcha] 无障碍按钮点击失败，continue 到下一次尝试", flush=True)
+                continue
 
             print("[captcha] ✅ 无障碍按钮点击成功", flush=True)
             page.wait_for_timeout(2000)
@@ -1014,8 +1014,16 @@ class PatchrightController(BaseController):
                         try:
                             _pa_loc = _hfr.locator('[aria-label="再次按下"]')
                             if _pa_loc.count() > 0:
+                                # Bug2修复: about:blank 跨域嵌套frame的bounding_box()
+                                # 即使返回非None坐标也是frame内坐标而非page坐标，不可信
+                                # 统一走dispatch_event，不依赖坐标系
+                                _is_cross_origin = ('about:blank' in _hfr.url or
+                                                    _hfr.url == '' or
+                                                    'hsprotect.net' not in _hfr.url)
                                 _pa_box = _pa_loc.first.bounding_box(timeout=2000)
-                                if _pa_box and _pa_box.get('width', 0) > 0:
+                                _box_usable = (_pa_box and _pa_box.get('width', 0) > 0
+                                               and not _is_cross_origin)
+                                if _box_usable:
                                     _cx = _pa_box['x'] + _pa_box['width'] / 2
                                     _cy = _pa_box['y'] + _pa_box['height'] / 2
                                     page.mouse.move(_cx, _cy)
@@ -1024,9 +1032,9 @@ class PatchrightController(BaseController):
                                     page.mouse.up()
                                     print(f"[captcha] ✅ 方法B 再次按下(hold 3.2s, 坐标法) in frame {_hfr.url[:40]}", flush=True)
                                 else:
-                                    # bounding_box 无效（跨域嵌套frame坐标不可达）
-                                    # 改用 dispatch_event 直接派发 mousedown/mouseup，保证3.2s持续
-                                    print(f"[captcha] 方法B bounding_box无效，改用dispatch_event持续按住3.2s (frame {_hfr.url[:40]})", flush=True)
+                                    # 跨域/about:blank frame → 只用dispatch_event
+                                    reason = 'cross-origin' if _is_cross_origin else 'box无效'
+                                    print(f"[captcha] 方法B dispatch_event({reason}) hold 3.2s (frame {_hfr.url[:40]})", flush=True)
                                     try:
                                         _pa_loc.first.dispatch_event('mousedown')
                                         page.wait_for_timeout(3200)
@@ -1261,6 +1269,7 @@ class PatchrightController(BaseController):
                                 inputPlaceholder: input ? input.placeholder : '',
                                 hasPlayBtn: !!playBtn,
                                 playBtnId: playBtn ? (playBtn.id || '') : '',
+                                bodyLen: document.body ? document.body.innerHTML.length : 0,
                                 url: window.location.href
                             };
                         }
@@ -1272,8 +1281,12 @@ class PatchrightController(BaseController):
                         audio_frame = fr
                     if info.get('hasInput'):
                         input_frame = fr
-                    if info.get('hasPlayBtn') and not audio_url:
+                    # Bug3修复: bodyLen<1500的frame是无障碍轮椅图标(约652字节)，非音频播放器
+                    _btn_body_len = info.get('bodyLen', 0) if hasattr(info, 'get') else 0
+                    if info.get('hasPlayBtn') and not audio_url and _btn_body_len > 1500:
                         play_btn_frames.append((fr, info.get('playBtnId', '')))
+                    elif info.get('hasPlayBtn') and _btn_body_len <= 1500:
+                        print(f"[captcha] 跳过假阳性playBtn frame (bodyLen={_btn_body_len}<1500, url={fr.url[:40]})", flush=True)
                 except Exception:
                     pass
 
