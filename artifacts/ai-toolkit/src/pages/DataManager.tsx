@@ -630,20 +630,20 @@ function ArchiveDetailModal({ email, platform, onClose }: { email: string; platf
               )}
               {archive.fingerprint && (
                 <div className="bg-[#0d1117] rounded-lg p-3">
-                  <span className="text-xs text-gray-500 block mb-1">浏览器指纹</span>
-                  <pre className="text-xs text-gray-400 font-mono break-all whitespace-pre-wrap overflow-auto max-h-32">{JSON.stringify(archive.fingerprint, null, 2)}</pre>
+                  <span className="text-xs text-gray-500 block mb-1">浏览器指纹 ({Object.keys(archive.fingerprint).length} 字段)</span>
+                  <pre className="text-xs text-gray-400 font-mono break-all whitespace-pre-wrap overflow-auto max-h-64">{JSON.stringify(archive.fingerprint, null, 2)}</pre>
                 </div>
               )}
               {archive.identity_data && (
                 <div className="bg-[#0d1117] rounded-lg p-3">
-                  <span className="text-xs text-gray-500 block mb-1">使用的身份资料</span>
-                  <pre className="text-xs text-gray-400 font-mono break-all whitespace-pre-wrap overflow-auto max-h-32">{JSON.stringify(archive.identity_data, null, 2)}</pre>
+                  <span className="text-xs text-gray-500 block mb-1">完整身份包 ({Object.keys(archive.identity_data).length} 字段)</span>
+                  <pre className="text-xs text-gray-400 font-mono break-all whitespace-pre-wrap overflow-auto max-h-96">{JSON.stringify(archive.identity_data, null, 2)}</pre>
                 </div>
               )}
               {archive.cookies && (
                 <div className="bg-[#0d1117] rounded-lg p-3">
-                  <span className="text-xs text-gray-500 block mb-1">Cookies</span>
-                  <pre className="text-xs text-gray-400 font-mono break-all whitespace-pre-wrap overflow-auto max-h-32">{JSON.stringify(archive.cookies, null, 2)}</pre>
+                  <span className="text-xs text-gray-500 block mb-1">Cookies ({Object.keys(archive.cookies).length} 字段)</span>
+                  <pre className="text-xs text-gray-400 font-mono break-all whitespace-pre-wrap overflow-auto max-h-64">{JSON.stringify(archive.cookies, null, 2)}</pre>
                 </div>
               )}
               {archive.notes && (
@@ -668,6 +668,8 @@ function ArchivesPanel() {
   const [detailId, setDetailId] = useState<Archive | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({ platform: "outlook", email: "", password: "", username: "", token: "", refresh_token: "", machine_id: "", proxy_used: "", registration_email: "", notes: "" });
+  const [jsonFields, setJsonFields] = useState({ identity_data: "", fingerprint: "", cookies: "" });
+  const [jsonErrors, setJsonErrors] = useState({ identity_data: "", fingerprint: "", cookies: "" });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [copied, setCopied] = useState<string>("");
@@ -687,12 +689,24 @@ function ArchivesPanel() {
 
   useEffect(() => { load(); }, [load]);
 
+  function validateJson(key: "identity_data" | "fingerprint" | "cookies", val: string) {
+    if (!val.trim()) { setJsonErrors(e => ({ ...e, [key]: "" })); return true; }
+    try { JSON.parse(val); setJsonErrors(e => ({ ...e, [key]: "" })); return true; }
+    catch { setJsonErrors(e => ({ ...e, [key]: "JSON 格式错误" })); return false; }
+  }
+
   async function addArchive() {
     if (!form.email) { setMsg("email 必填"); return; }
+    const ok = (["identity_data", "fingerprint", "cookies"] as const).every(k => validateJson(k, jsonFields[k]));
+    if (!ok) { setMsg("请修正 JSON 格式错误"); return; }
     setBusy(true); setMsg("");
-    const d = await fetch(`${API}/data/archives`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) }).then(r => r.json()).catch(() => ({}));
+    const payload: Record<string, unknown> = { ...form };
+    for (const k of ["identity_data", "fingerprint", "cookies"] as const) {
+      if (jsonFields[k].trim()) payload[k] = JSON.parse(jsonFields[k]);
+    }
+    const d = await fetch(`${API}/data/archives`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }).then(r => r.json()).catch(() => ({}));
     setBusy(false);
-    if (d.success) { setMsg("✅ 已保存"); setShowAdd(false); load(); }
+    if (d.success) { setMsg("✅ 已保存"); setShowAdd(false); setJsonFields({ identity_data: "", fingerprint: "", cookies: "" }); load(); }
     else setMsg("❌ " + (d.error || "失败"));
   }
 
@@ -730,8 +744,30 @@ function ArchivesPanel() {
               </div>
             ))}
           </div>
+          <div className="border-t border-[#30363d] pt-3 space-y-2">
+            <p className="text-xs text-gray-500 font-medium">扩展 JSON 字段（可选，支持任意字段数）</p>
+            {([
+              { key: "identity_data" as const, label: "身份包 identity_data", placeholder: `{\n  "firstName": "John",\n  "lastName": "Doe",\n  "gender": "male",\n  "birthDate": "1990-01-15",\n  "phone": "+1-555-0100",\n  "ssn": "123-45-6789",\n  "passport": "AB1234567",\n  "country": "US",\n  "city": "New York",\n  "address": "123 Main St",\n  "zipCode": "10001",\n  "creditCard": "4111111111111111",\n  "cvv": "123",\n  "expiry": "12/28"\n  // ... 最多支持任意字段\n}` },
+              { key: "fingerprint" as const, label: "浏览器指纹 fingerprint", placeholder: `{\n  "userAgent": "Mozilla/5.0...",\n  "language": "en-US",\n  "timezone": "America/New_York",\n  "screen": "1920x1080",\n  "colorDepth": 24,\n  "platform": "Win32"\n}` },
+              { key: "cookies" as const, label: "Cookies", placeholder: `{\n  "session": "abc123...",\n  "auth_token": "eyJ...",\n  "cf_clearance": "xxx"\n}` },
+            ] as const).map(({ key, label, placeholder }) => (
+              <div key={key}>
+                <label className="text-xs text-gray-400">{label}</label>
+                <textarea
+                  rows={4}
+                  value={jsonFields[key]}
+                  placeholder={placeholder}
+                  onChange={e => { setJsonFields(f => ({ ...f, [key]: e.target.value })); if (jsonErrors[key]) validateJson(key, e.target.value); }}
+                  onBlur={e => validateJson(key, e.target.value)}
+                  className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-xs text-white font-mono mt-1 resize-y placeholder-gray-700"
+                  style={{ minHeight: 72 }}
+                />
+                {jsonErrors[key] && <p className="text-red-400 text-xs mt-0.5">⚠ {jsonErrors[key]}</p>}
+              </div>
+            ))}
+          </div>
           <div className="flex gap-2 justify-end">
-            <button onClick={() => setShowAdd(false)} className="px-3 py-1.5 text-xs text-gray-400 hover:text-white">取消</button>
+            <button onClick={() => { setShowAdd(false); setJsonFields({ identity_data: "", fingerprint: "", cookies: "" }); setJsonErrors({ identity_data: "", fingerprint: "", cookies: "" }); }} className="px-3 py-1.5 text-xs text-gray-400 hover:text-white">取消</button>
             <button onClick={addArchive} disabled={busy} className="px-4 py-1.5 bg-emerald-700 rounded text-xs text-white hover:bg-emerald-600 disabled:opacity-50">保存</button>
           </div>
         </div>
