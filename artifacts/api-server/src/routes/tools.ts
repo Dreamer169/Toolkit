@@ -991,6 +991,50 @@ function cleanOldBatchSessions() {
   }
 }
 
+async function createBatchOAuthSessions(rows: { id: number; email: string }[]) {
+  cleanOldBatchSessions();
+  const CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
+  const SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access";
+  const sessionList: BatchOAuthSession[] = [];
+  await Promise.allSettled(rows.map(async (acc) => {
+    try {
+      const r = await fetch("https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ client_id: CLIENT_ID, scope: SCOPE }).toString(),
+      });
+      const d = await r.json() as {
+        device_code?: string; user_code?: string; verification_uri?: string;
+        error?: string; error_description?: string;
+      };
+      if (!d.device_code || !d.user_code) {
+        sessionList.push({
+          accountId: acc.id, email: acc.email,
+          deviceCode: "", userCode: "", verificationUri: "",
+          status: "error", errorMsg: d.error_description ?? d.error ?? "获取设备码失败",
+          createdAt: Date.now(),
+        });
+      } else {
+        sessionList.push({
+          accountId: acc.id, email: acc.email,
+          deviceCode: d.device_code, userCode: d.user_code,
+          verificationUri: d.verification_uri ?? "https://microsoft.com/devicelogin",
+          status: "pending", createdAt: Date.now(),
+        });
+      }
+    } catch (e) {
+      sessionList.push({
+        accountId: acc.id, email: acc.email,
+        deviceCode: "", userCode: "", verificationUri: "",
+        status: "error", errorMsg: String(e), createdAt: Date.now(),
+      });
+    }
+  }));
+  const sessionId = `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  batchOAuthSessions.set(sessionId, sessionList);
+  return { sessionId, sessionList };
+}
+
 // POST /tools/outlook/batch-oauth/start
 // 为没有 token 的账号批量申请设备码
 router.post("/tools/outlook/batch-oauth/start", async (req, res) => {
@@ -1017,48 +1061,7 @@ router.post("/tools/outlook/batch-oauth/start", async (req, res) => {
       return;
     }
 
-    const CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
-    const SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access";
-
-    // 并发为每个账号申请设备码（微软不限制并发）
-    const sessionList: BatchOAuthSession[] = [];
-    await Promise.allSettled(rows.map(async (acc) => {
-      try {
-        const r = await fetch("https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode", {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({ client_id: CLIENT_ID, scope: SCOPE }).toString(),
-        });
-        const d = await r.json() as {
-          device_code?: string; user_code?: string; verification_uri?: string;
-          error?: string; error_description?: string;
-        };
-        if (!d.device_code || !d.user_code) {
-          sessionList.push({
-            accountId: acc.id, email: acc.email,
-            deviceCode: "", userCode: "", verificationUri: "",
-            status: "error", errorMsg: d.error_description ?? d.error ?? "获取设备码失败",
-            createdAt: Date.now(),
-          });
-        } else {
-          sessionList.push({
-            accountId: acc.id, email: acc.email,
-            deviceCode: d.device_code, userCode: d.user_code,
-            verificationUri: d.verification_uri ?? "https://microsoft.com/devicelogin",
-            status: "pending", createdAt: Date.now(),
-          });
-        }
-      } catch (e) {
-        sessionList.push({
-          accountId: acc.id, email: acc.email,
-          deviceCode: "", userCode: "", verificationUri: "",
-          status: "error", errorMsg: String(e), createdAt: Date.now(),
-        });
-      }
-    }));
-
-    const sessionId = `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    batchOAuthSessions.set(sessionId, sessionList);
+    const { sessionId, sessionList } = await createBatchOAuthSessions(rows);
 
     res.json({
       success: true,
@@ -1206,6 +1209,8 @@ router.post("/tools/outlook/register", async (req, res) => {
     } catch {}
   }
 
+  const effectiveProxyMode = !proxy && autoProxy ? "cf" : proxyMode;
+
   // 读取打码服务配置（可选）
   let captchaService = "";
   let captchaKey     = "";
@@ -1220,7 +1225,7 @@ router.post("/tools/outlook/register", async (req, res) => {
     }
   } catch {}
 
-  const n   = Math.max(1, Math.floor(Number(count) || 1));
+  const n   = Math.min(999, Math.max(1, Math.floor(Number(count) || 1)));
   const eng = ["patchright", "playwright"].includes(engine) ? engine : "patchright";
   const jobId = `reg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
@@ -1228,6 +1233,7 @@ router.post("/tools/outlook/register", async (req, res) => {
   const job = await jobQueue.create(jobId);
   job.logs.push({ type: "start", message: `启动 ${eng} 注册 ${n} 个 Outlook 账号 (bot_protection_wait=${wait}s)${autoProxyId ? " [代理池自动选取]" : ""}...` });
   if (proxy) job.logs.push({ type: "log", message: `🌐 代理: ${proxyDisplay}` });
+  if (autoProxy && proxyList.length > 0) job.logs.push({ type: "log", message: `🌐 已从代理池选取 ${proxyList.length} 个节点` });
   // 立即响应 jobId（不等待注册完成）
   res.json({ success: true, jobId, message: "注册任务已启动" });
 
@@ -1254,7 +1260,7 @@ router.post("/tools/outlook/register", async (req, res) => {
     args.push("--captcha-service", captchaService, "--captcha-key", captchaKey);
     job.logs.push({ type: "log", message: `🔑 打码服务: ${captchaService}` });
   }
-  if (proxyMode === "cf") {
+  if (effectiveProxyMode === "cf") {
     args.push("--proxy-mode", "cf", "--cf-port", String(cfPort));
     job.logs.push({ type: "log", message: `☁️ CF IP 池模式：每账号独占一个 CF 节点` });
   }
@@ -1342,16 +1348,22 @@ router.post("/tools/outlook/register", async (req, res) => {
     // ── 持久化到数据库 + 立即 ROPC 自动授权 ────────────────────────────────
     if (okCount > 0) {
       await (async () => {
-        const ROPC_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
-        const ROPC_SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access";
+        const pendingOAuthRows: { id: number; email: string }[] = [];
         for (const acc of job.accounts) {
-          // 1. 保存账号
+          let accountRow: { id: number } | null = null;
           try {
-            await execute(
+            accountRow = await queryOne<{ id: number }>(
               `INSERT INTO accounts (platform, email, password, status)
                VALUES ($1, $2, $3, $4)
-               ON CONFLICT DO NOTHING`,
+               ON CONFLICT (platform, email) DO UPDATE SET password=EXCLUDED.password,status=EXCLUDED.status,updated_at=NOW()
+               RETURNING id`,
               ["outlook", acc.email, acc.password, "active"],
+            );
+            await execute(
+              `INSERT INTO temp_emails (address,password,provider,status,notes)
+               VALUES ($1,$2,$3,$4,$5)
+               ON CONFLICT (address) DO UPDATE SET password=EXCLUDED.password,status=EXCLUDED.status,notes=EXCLUDED.notes`,
+              [acc.email, acc.password, "outlook", "active", "Outlook 自动注册"],
             );
           } catch (dbErr) {
             job.logs.push({ type: "warn", message: `⚠ DB 保存失败(${acc.email}): ${dbErr}` });
@@ -1369,6 +1381,9 @@ router.post("/tools/outlook/register", async (req, res) => {
                 [inlineAccess, inlineRefresh ?? null, acc.email],
               );
               job.logs.push({ type: "success", message: `[key] ${acc.email} in-browser OAuth 授权成功` });
+            } else if (accountRow?.id) {
+              pendingOAuthRows.push({ id: accountRow.id, email: acc.email });
+              job.logs.push({ type: "warn", message: `[warn] ${acc.email} 未内联到 token，正在自动申请设备码` });
             } else {
               job.logs.push({ type: "warn", message: `[warn] ${acc.email} 未内联到 token，需手动设备码授权` });
             }
@@ -1376,7 +1391,22 @@ router.post("/tools/outlook/register", async (req, res) => {
             job.logs.push({ type: "warn", message: `[err] ${acc.email} 保存 token 异常: ${authErr}` });
           }
         }
-        job.logs.push({ type: "log", message: `📦 已保存并尝试授权 ${okCount} 个账号` });
+        if (pendingOAuthRows.length > 0) {
+          try {
+            const { sessionId, sessionList } = await createBatchOAuthSessions(pendingOAuthRows);
+            job.logs.push({ type: "log", message: `🔐 已自动创建邮箱授权会话: ${sessionId}` });
+            for (const s of sessionList) {
+              if (s.status === "pending") {
+                job.logs.push({ type: "warn", message: `🔐 ${s.email} 设备码: ${s.userCode} · 打开 ${s.verificationUri} 输入后会自动入库 token` });
+              } else {
+                job.logs.push({ type: "warn", message: `🔐 ${s.email} 设备码申请失败: ${s.errorMsg ?? "未知错误"}` });
+              }
+            }
+          } catch (oauthErr) {
+            job.logs.push({ type: "warn", message: `⚠ 自动申请设备码失败: ${oauthErr}` });
+          }
+        }
+        job.logs.push({ type: "log", message: `📦 已保存账号库 + 邮箱库，并尝试授权 ${okCount} 个账号` });
       })();
     }
 

@@ -25,9 +25,19 @@ router.post("/data/accounts", async (req, res) => {
     if (!email || !password) { res.status(400).json({ success: false, error: "email 和 password 必填" }); return; }
     const row = await queryOne(
       `INSERT INTO accounts (platform,email,password,username,token,refresh_token,status,notes,tags)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       ON CONFLICT (platform,email) DO UPDATE SET password=EXCLUDED.password,username=EXCLUDED.username,token=COALESCE(EXCLUDED.token,accounts.token),refresh_token=COALESCE(EXCLUDED.refresh_token,accounts.refresh_token),status=EXCLUDED.status,notes=COALESCE(EXCLUDED.notes,accounts.notes),tags=COALESCE(EXCLUDED.tags,accounts.tags),updated_at=NOW()
+       RETURNING *`,
       [platform, email, password, username || null, token || null, refresh_token || null, status, notes || null, tags || null]
     );
+    if (platform === "outlook") {
+      await execute(
+        `INSERT INTO temp_emails (address,password,provider,status,notes)
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (address) DO UPDATE SET password=EXCLUDED.password,status=EXCLUDED.status,notes=COALESCE(EXCLUDED.notes,temp_emails.notes)`,
+        [email, password, "outlook", status, notes || "Outlook 账号库同步"],
+      );
+    }
     res.json({ success: true, data: row });
   } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
 });

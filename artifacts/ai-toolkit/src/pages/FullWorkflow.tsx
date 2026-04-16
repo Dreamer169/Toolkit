@@ -52,14 +52,14 @@ export default function FullWorkflow() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [data, setData] = useState<PrepareData | null>(null);
   const [proxy, setProxy] = useState("");
-  const [autoProxy, setAutoProxy] = useState(false);
+  const [autoProxy, setAutoProxy] = useState(true);
   const [poolCount, setPoolCount] = useState<number | null>(null);
   const [engine, setEngine] = useState("patchright");
   const [headless, setHeadless] = useState(true);
   const [wait, setWait] = useState(11);
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [jobId, setJobId] = useState<string | null>(null);
-  const [count, setCount] = useState(1);
+  const [count, setCount] = useState("1");
   const [result, setResult] = useState<{ ok: boolean; email?: string; password?: string; msg?: string; accounts?: { email: string; password: string }[] } | null>(null);
   const [saved, setSaved] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
@@ -108,6 +108,9 @@ export default function FullWorkflow() {
   useEffect(() => {
     fetch(`${API}/data/proxies`).then(r => r.json()).then(d => {
       if (d.success) setPoolCount(d.total);
+    }).catch(() => {});
+    fetch(`${API}/tools/cf-pool/status`).then(r => r.json()).then(d => {
+      if (d.success && typeof d.available === "number") setPoolCount(d.available);
     }).catch(() => {});
     fetch(`${API}/data/captcha-config`).then(r => r.json()).then(d => {
       if (d.success) {
@@ -164,6 +167,8 @@ export default function FullWorkflow() {
 
   async function startRegistration() {
     if (!data) return;
+    const submitCount = Math.min(999, Math.max(1, Math.floor(Number(count) || 1)));
+    setCount(String(submitCount));
     setPhase("registering");
     setLogs([{ ts: Date.now(), text: "🚀 启动完整工作流...", level: "info" }]);
     sinceRef.current = 0;
@@ -173,9 +178,10 @@ export default function FullWorkflow() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          count, proxy, engine, headless: headless ? "true" : "false",
+          count: submitCount, proxy, engine, headless: headless ? "true" : "false",
           wait, retries: 2, delay: 0,
-          autoProxy: !proxy && (poolCount ?? 0) > 0,
+          autoProxy: !proxy && autoProxy,
+          proxyMode: !proxy && autoProxy ? "cf" : "",
         }),
       });
       const d = await r.json();
@@ -221,7 +227,12 @@ export default function FullWorkflow() {
           const ok = accts.length > 0;
           const email = accts[0]?.email ?? data?.outlook.email;
           const password = accts[0]?.password ?? data?.outlook.password;
-          setResult({ ok, email, password, accounts: accts, msg: ok ? `✅ 注册成功！${accts.length > 1 ? `共 ${accts.length} 个账号` : "账号已激活"}，请前往「邮件中心」点击「设备码」完成邮箱授权。` : "❌ 注册失败（CAPTCHA 无法通过——需要住宅代理）" });
+          setResult({ ok, email, password, accounts: accts, msg: ok ? `✅ 注册成功！${accts.length > 1 ? `共 ${accts.length} 个账号` : "账号已激活"}，已自动保存到账号库和邮箱库；如日志出现设备码，请打开链接输入完成授权。` : "❌ 注册失败（CAPTCHA 无法通过——需要住宅代理）" });
+          if (ok) {
+            setSaved(true);
+            setSaveMsg(`✅ ${accts.length} 个账号已自动入库`);
+          }
+          sessionStorage.removeItem('fw_jobId');
           setPhase("done");
         }
       } catch {}
@@ -494,14 +505,15 @@ export default function FullWorkflow() {
             <div className="flex items-center gap-1.5 bg-[#21262d] border border-[#30363d] rounded-lg px-2 py-1.5 shrink-0">
               <span className="text-xs text-gray-400 whitespace-nowrap">数量</span>
               <input
-                type="number" min={1} max={999} value={count}
-                onChange={e => setCount(Math.max(1, Number(e.target.value)))}
-                className="w-14 bg-transparent text-center text-sm text-white focus:outline-none"
+                type="number" min={1} max={999} step={1} value={count}
+                onChange={e => setCount(e.target.value.replace(/[^0-9]/g, ""))}
+                onBlur={() => setCount(String(Math.min(999, Math.max(1, Math.floor(Number(count) || 1)))))}
+                className="w-20 bg-transparent text-center text-sm text-white focus:outline-none"
               />
             </div>
-            <button onClick={startRegistration} className={`flex-1 py-3 rounded-lg text-white font-semibold transition-colors ${(proxy || (poolCount ?? 0) > 0) ? "bg-blue-700 hover:bg-blue-600" : "bg-blue-900/60 hover:bg-blue-800/60 border border-blue-700/50"}`}>
-              🚀 启动注册{count > 1 ? `（顺序 ×${count}）` : ""}
-              {!proxy && (poolCount ?? 0) > 0 ? "（代理池自动选取）" : !proxy ? "（无代理）" : ""}
+            <button onClick={startRegistration} className={`flex-1 py-3 rounded-lg text-white font-semibold transition-colors ${(proxy || autoProxy) ? "bg-blue-700 hover:bg-blue-600" : "bg-blue-900/60 hover:bg-blue-800/60 border border-blue-700/50"}`}>
+              🚀 启动注册{Number(count) > 1 ? `（顺序 ×${count}）` : ""}
+              {!proxy && autoProxy ? "（代理池自动选取）" : !proxy ? "（无代理）" : ""}
             </button>
             <button onClick={prepare} className="px-4 py-3 bg-[#21262d] border border-[#30363d] rounded-lg text-gray-400 hover:text-white text-sm">
               重新生成
@@ -512,10 +524,11 @@ export default function FullWorkflow() {
               if (!data) return;
               setSaved(false); setSaveMsg("");
               const a = await fetch(`${API}/data/accounts`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ platform:"outlook", email: data.outlook.email, password: data.outlook.password, status:"inactive", notes:"已生成待注册" }) }).then(r=>r.json()).catch(()=>({}));
+              await fetch(`${API}/data/emails`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ address: data.outlook.email, password: data.outlook.password, provider:"outlook", status:"inactive", notes:"已生成待注册" }) }).then(r=>r.json()).catch(()=>({}));
               if (data.identity) {
                 await fetch(`${API}/data/identities`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ first_name: data.identity.firstName, last_name: data.identity.lastName, gender: data.identity.gender === "female" ? "Female" : "Male", birthday: data.identity.birthday, phone: data.identity.phone, email: data.identity.email, address: data.identity.address, city: data.identity.city, state: data.identity.state, zip: data.identity.zip, country: data.identity.country, username: data.identity.username, password: data.identity.password }) }).then(r=>r.json()).catch(()=>{});
               }
-              if (a.success) { setSaved(true); setSaveMsg("✅ 凭据已保存到数据库（状态：待注册）——有代理时可回来启动注册"); }
+              if (a.success) { setSaved(true); setSaveMsg("✅ 凭据已保存到账号库和邮箱库（状态：待注册）——有代理时可回来启动注册"); }
               else setSaveMsg("❌ 保存失败：" + (a.error || "未知"));
             }}
             className="w-full py-2 bg-[#21262d] border border-[#30363d] rounded-lg text-sm text-gray-400 hover:text-white hover:bg-[#30363d] transition-colors"
@@ -603,7 +616,7 @@ export default function FullWorkflow() {
         <p>• <span className="text-gray-300">浏览器指纹</span>：patchright 每次启动自动随机化 Canvas/WebGL/音频哈希、UA、时区、分辨率——无需手动配置</p>
         <p>• <span className="text-gray-300">机器 ID</span>：与 Cursor 机器 ID 重置无关，注册走的是浏览器自动化，每次都是全新浏览器实例</p>
         <p>• <span className="text-gray-300">CAPTCHA</span>：Microsoft 对数据中心 IP 强制要求，必须使用住宅代理才能通过</p>
-        <p>• <span className="text-gray-300">自动入库</span>：注册完成后点「保存到数据库」，账号和身份信息同时存入「数据管理中心」</p>
+        <p>• <span className="text-gray-300">自动入库</span>：注册完成后会自动写入账号库和邮箱库；没有内联 token 时自动生成设备码授权提示</p>
       </div>
     </div>
   );
