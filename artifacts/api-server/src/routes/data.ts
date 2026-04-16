@@ -484,7 +484,7 @@ router.post("/data/proxies/import", async (req, res) => {
       if (!host) continue;
       try {
         await execute(
-          `INSERT INTO proxies (formatted, host, port, username, password) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (formatted) DO NOTHING`,
+          `INSERT INTO proxies (formatted, host, port, username, password, status) VALUES ($1,$2,$3,$4,$5,'idle') ON CONFLICT (formatted) DO NOTHING`,
           [formatted, host, port, user, pass]
         );
         inserted++;
