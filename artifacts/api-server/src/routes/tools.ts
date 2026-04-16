@@ -1215,8 +1215,10 @@ router.post("/tools/outlook/register", async (req, res) => {
     }
   }
 
-  // effectiveProxyMode: 只有明确传入 proxyMode="cf" 时才走 CF 模式，不再自动回退
-  const effectiveProxyMode = proxyMode;
+  // effectiveProxyMode: 只有明确传入 proxyMode="cf" 且 autoProxy 未从 DB 选到代理时才走 CF 模式。
+  // 若 autoProxy 已从 DB 代理池选取了 socks5 代理，强制清除 proxyMode，防止两套代理系统冲突
+  // （CF IP 池 与 DB socks5 池 是完全独立的两套机制，不能混用）
+  const effectiveProxyMode = (proxyMode === "cf" && proxyList.length > 0) ? "" : proxyMode;
 
   // 读取打码服务配置（可选）
   let captchaService = "";
