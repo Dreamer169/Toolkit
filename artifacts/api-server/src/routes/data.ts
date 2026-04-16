@@ -484,11 +484,11 @@ router.post("/data/proxies/import", async (req, res) => {
       if (!host) continue;
       try {
         await execute(
-          `INSERT INTO proxies (raw, formatted, host, port, username, password) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (formatted) DO NOTHING`,
-          [raw, formatted, host, port, user, pass]
+          `INSERT INTO proxies (formatted, host, port, username, password) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (formatted) DO NOTHING`,
+          [formatted, host, port, user, pass]
         );
         inserted++;
-      } catch {}
+      } catch (err) { console.error("proxy insert err:", String(err)); }
     }
     res.json({ success: true, inserted, total: lines.length });
   } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
