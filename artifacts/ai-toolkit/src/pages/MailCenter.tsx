@@ -119,6 +119,10 @@ export default function MailCenter() {
   const batchPollRef                      = useRef<ReturnType<typeof setInterval> | null>(null);
   const [liveVerify, setLiveVerify]         = useState<{ enabled: boolean; lastRun: string | null; lastStats: { total: number; clicked: number; skipped: number; failed: number } } | null>(null);
   const [liveVerifyBusy, setLiveVerifyBusy] = useState(false);
+  const [showManualAdd, setShowManualAdd]   = useState(false);
+  const [manualForm, setManualForm]         = useState({ email: "", password: "", token: "" });
+  const [manualBusy, setManualBusy]         = useState(false);
+  const [manualMsg, setManualMsg]           = useState("");
 
   const loadAccounts = useCallback(async () => {
     const d = await fetch(`${API}/tools/outlook/accounts`).then(r => r.json()).catch(() => ({}));
@@ -269,6 +273,26 @@ export default function MailCenter() {
     }
   };
 
+
+  // 手动添加 Outlook 账号
+  const addManualAccount = async () => {
+    if (!manualForm.email || !manualForm.password) { setManualMsg("邮箱和密码必填"); return; }
+    setManualBusy(true); setManualMsg("");
+    const d = await fetch(`${API}/data/accounts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ platform: "outlook", email: manualForm.email, password: manualForm.password, token: manualForm.token || undefined }),
+    }).then(r => r.json()).catch(() => ({ success: false, error: "网络错误" }));
+    setManualBusy(false);
+    if (d.success) {
+      setManualMsg("✅ 账号已添加");
+      setManualForm({ email: "", password: "", token: "" });
+      setTimeout(() => { setShowManualAdd(false); setManualMsg(""); }, 1000);
+      await loadAccounts();
+    } else {
+      setManualMsg("❌ " + (d.error || "保存失败"));
+    }
+  };
 
   // browser auto-retoken
   const startAutoRetoken = async () => {
@@ -555,6 +579,20 @@ export default function MailCenter() {
             {purging ? '清洗中…' : '🗑️ 一键清洗风控'}
           </button>
           <button onClick={startAutoRetoken} disabled={retokenBusy || accounts.length === 0} className="px-3 py-1.5 text-xs rounded bg-violet-600 hover:bg-violet-500 disabled:opacity-40 transition-colors text-white font-medium">{retokenBusy ? "🔄 重授权中…" : "🤖 自动 retoken"}</button>
+          <button onClick={() => { setShowManualAdd(s => !s); setManualMsg(""); }} className="w-full py-1.5 bg-emerald-700/70 hover:bg-emerald-700 rounded text-xs text-white font-medium transition-colors">
+            {showManualAdd ? "取消添加" : "➕ 手动添加账号"}
+          </button>
+          {showManualAdd && (
+            <div className="space-y-2 mt-1">
+              <input value={manualForm.email} onChange={e => setManualForm(f => ({...f, email: e.target.value}))} placeholder="邮箱地址" className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-xs text-white placeholder-gray-600" />
+              <input value={manualForm.password} onChange={e => setManualForm(f => ({...f, password: e.target.value}))} placeholder="密码" type="password" className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-xs text-white placeholder-gray-600" />
+              <input value={manualForm.token} onChange={e => setManualForm(f => ({...f, token: e.target.value}))} placeholder="Token（可选）" className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-xs text-white placeholder-gray-600 font-mono" />
+              {manualMsg && <p className={`text-xs px-1 ${manualMsg.startsWith("✅") ? "text-emerald-400" : "text-red-400"}`}>{manualMsg}</p>}
+              <button onClick={addManualAccount} disabled={manualBusy} className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded text-xs text-white font-medium transition-colors">
+                {manualBusy ? "保存中…" : "确认添加"}
+              </button>
+            </div>
+          )}
                 {/* 实时验证状态栏 */}
       {liveVerify && (
         <div className="flex items-center gap-3 px-4 py-2 bg-[#0d1117] border-b border-[#21262d] text-xs">

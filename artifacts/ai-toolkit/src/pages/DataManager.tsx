@@ -3,18 +3,20 @@ import { useState, useEffect, useCallback } from "react";
 const API = import.meta.env.BASE_URL.replace(/\/$/, "") + "/api";
 
 type Platform = "outlook" | "chatgpt" | "claude" | "gemini" | "cursor" | "grok" | "codex" | "other";
-type Tab = "accounts" | "identities" | "emails" | "configs" | "stats" | "guide";
+type Tab = "accounts" | "archives" | "emails" | "configs" | "stats" | "guide";
 
 interface Account {
   id: number; platform: string; email: string; password: string;
-  username?: string; token?: string; status: string; notes?: string;
+  username?: string; token?: string; refresh_token?: string; status: string; notes?: string;
   created_at: string;
 }
-interface Identity {
-  id: number; full_name: string; first_name: string; last_name: string;
-  gender: string; birthday?: string; phone?: string; email?: string;
-  address?: string; city?: string; state?: string; zip?: string;
-  country?: string; username?: string; password?: string; created_at: string;
+interface Archive {
+  id: number; platform: string; email: string; password?: string;
+  username?: string; token?: string; refresh_token?: string;
+  machine_id?: string; fingerprint?: Record<string, unknown>;
+  proxy_used?: string; identity_data?: Record<string, unknown>;
+  cookies?: Record<string, unknown>; registration_email?: string;
+  status: string; notes?: string; created_at: string; updated_at: string;
 }
 interface TempEmail {
   id: number; address: string; password: string; provider: string;
@@ -23,9 +25,10 @@ interface TempEmail {
 interface Config { id: number; key: string; value: string; description?: string; }
 interface Stats {
   accounts: { total: number; active: number };
-  identities: { total: number };
+  archives: { total: number };
   emails: { total: number };
   long_term: { total: number };
+  proxies: { idle: number; active: number; banned: number };
   byPlatform: { platform: string; count: number }[];
 }
 
@@ -48,14 +51,16 @@ function StatsPanel() {
     fetch(`${API}/data/stats`).then(r => r.json()).then(d => d.success && setStats(d)).catch(() => {});
   }, []);
   if (!stats) return <p className="text-gray-500 text-center py-12">加载中…</p>;
+  const proxyTotal = (stats.proxies?.idle ?? 0) + (stats.proxies?.active ?? 0) + (stats.proxies?.banned ?? 0);
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label:"账号总数", value: stats.accounts.total, sub:`${stats.accounts.active} 个有效`, color:"text-blue-400" },
+          { label:"AI服务池", value: stats.accounts.total, sub:`${stats.accounts.active} 个有效`, color:"text-blue-400" },
           { label:"有效账号", value: stats.accounts.active, sub:`共 ${stats.accounts.total} 个`, color:"text-emerald-400" },
-          { label:"身份信息", value: stats.identities.total, sub:"条记录", color:"text-amber-400" },
-          { label:"长期/临时", value: stats.long_term.total + stats.emails.total, sub:`${stats.long_term.total} 长期 · ${stats.emails.total} 临时`, color:"text-purple-400" },
+          { label:"档案库", value: stats.archives?.total ?? 0, sub:"条完整记录", color:"text-amber-400" },
+          { label:"邮箱库", value: stats.emails.total, sub:`${stats.long_term.total} 长期邮箱`, color:"text-purple-400" },
+          { label:"代理池", value: proxyTotal, sub:`${stats.proxies?.idle ?? 0} 可用 · ${stats.proxies?.banned ?? 0} 封禁`, color:"text-cyan-400" },
         ].map(({ label, value, sub, color }) => (
           <div key={label} className="bg-[#161b22] border border-[#30363d] rounded-lg p-4 text-center">
             <div className={`text-3xl font-bold ${color}`}>{value}</div>
@@ -100,6 +105,7 @@ function AccountsPanel() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [copied, setCopied] = useState<string>("");
+  const [archiveDetail, setArchiveDetail] = useState<{ email: string; platform: string } | null>(null);
 
   function copy(text: string, key: string) {
     navigator.clipboard.writeText(text).then(() => {
@@ -240,8 +246,8 @@ function AccountsPanel() {
 
       {/* 账号列表 */}
       <div className="bg-[#161b22] border border-[#30363d] rounded-lg overflow-hidden">
-        <div className="grid grid-cols-[70px_1fr_1fr_80px_60px_44px] gap-2 px-3 py-2 bg-[#21262d] text-xs text-gray-500 font-medium">
-          <span>平台</span><span>邮箱（点击复制）</span><span>密码（点击复制）</span><span>状态</span><span>创建</span><span></span>
+        <div className="grid grid-cols-[60px_1fr_1fr_80px_50px_80px_44px] gap-2 px-3 py-2 bg-[#21262d] text-xs text-gray-500 font-medium">
+          <span>平台</span><span>邮箱</span><span>密码</span><span>Token</span><span>状态</span><span>创建</span><span></span>
         </div>
         {accounts.length === 0 && (
           <p className="text-center text-gray-600 text-sm py-8">暂无账号，点击「添加账号」或「批量导入」</p>
@@ -249,34 +255,46 @@ function AccountsPanel() {
         {accounts.map(a => {
           const emailKey = `email-${a.id}`;
           const pwKey    = `pw-${a.id}`;
+          const tokKey   = `tok-${a.id}`;
           const emailCopied = copied === emailKey;
           const pwCopied    = copied === pwKey;
-          const pw = a.password || "";
+          const tokCopied   = copied === tokKey;
+          const pw  = a.password || "";
+          const tok = a.token || "";
           return (
-            <div key={a.id} className="grid grid-cols-[70px_1fr_1fr_80px_60px_44px] gap-2 px-3 py-2 border-t border-[#21262d] text-xs hover:bg-[#21262d]/50 group items-center">
-              <span className={`font-medium ${PLATFORM_COLORS[a.platform] ?? "text-gray-400"}`}>{a.platform}</span>
-              <button
-                onClick={() => copy(a.email, emailKey)}
-                title={a.email}
-                className={`text-left font-mono truncate transition-colors ${emailCopied ? "text-emerald-400" : "text-white hover:text-blue-300"}`}
-              >
-                {emailCopied ? "已复制 ✓" : a.email}
-              </button>
-              <button
-                onClick={() => copy(pw, pwKey)}
-                title={pw}
-                className={`text-left font-mono truncate transition-colors ${pwCopied ? "text-emerald-400" : "text-gray-300 hover:text-blue-300"}`}
-              >
-                {pwCopied ? "已复制 ✓" : (pw || <span className="text-gray-600 italic">无密码</span>)}
-              </button>
-              <span className={`px-2 py-0.5 rounded-full text-center w-fit ${a.status === "active" ? "bg-emerald-900/40 text-emerald-400" : a.status === "banned" ? "bg-red-900/40 text-red-400" : "bg-gray-800 text-gray-500"}`}>{a.status === "active" ? "有效" : a.status === "banned" ? "封禁" : "失效"}</span>
-              <span className="text-gray-600">{formatDate(a.created_at).split(" ")[0]}</span>
-              <button onClick={() => deleteAccount(a.id)} className="text-red-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs">删除</button>
+            <div key={a.id} className="border-t border-[#21262d] text-xs hover:bg-[#21262d]/50 group">
+              <div className="grid grid-cols-[60px_1fr_1fr_80px_50px_80px_44px] gap-2 px-3 py-2 items-center">
+                <span className={`font-medium ${PLATFORM_COLORS[a.platform] ?? "text-gray-400"}`}>{a.platform}</span>
+                <button onClick={() => copy(a.email, emailKey)} title={a.email}
+                  className={`text-left font-mono truncate transition-colors ${emailCopied ? "text-emerald-400" : "text-white hover:text-blue-300"}`}>
+                  {emailCopied ? "✓ 已复制" : a.email}
+                </button>
+                <button onClick={() => copy(pw, pwKey)} title={pw}
+                  className={`text-left font-mono truncate transition-colors ${pwCopied ? "text-emerald-400" : "text-gray-300 hover:text-blue-300"}`}>
+                  {pwCopied ? "✓ 已复制" : (pw || <span className="text-gray-600 italic">—</span>)}
+                </button>
+                {tok ? (
+                  <button onClick={() => copy(tok, tokKey)} title={tok}
+                    className={`text-left font-mono truncate transition-colors ${tokCopied ? "text-emerald-400" : "text-blue-400 hover:text-blue-300"}`}>
+                    {tokCopied ? "✓ 已复制" : tok.slice(0, 10) + "…"}
+                  </button>
+                ) : <span className="text-gray-700">—</span>}
+                <span className={`px-1.5 py-0.5 rounded-full text-center w-fit ${a.status === "active" ? "bg-emerald-900/40 text-emerald-400" : a.status === "banned" ? "bg-red-900/40 text-red-400" : "bg-gray-800 text-gray-500"}`}>
+                  {a.status === "active" ? "有效" : a.status === "banned" ? "封禁" : "失效"}
+                </span>
+                <span className="text-gray-600">{formatDate(a.created_at).split(" ")[0]}</span>
+                <div className="flex items-center gap-1.5">
+                  <button onClick={() => setArchiveDetail({ email: a.email, platform: a.platform })}
+                    className="text-blue-500 hover:text-blue-300 text-xs opacity-0 group-hover:opacity-100 transition-opacity">详细</button>
+                  <button onClick={() => deleteAccount(a.id)} className="text-red-600 hover:text-red-400 text-xs opacity-0 group-hover:opacity-100 transition-opacity">删</button>
+                </div>
+              </div>
             </div>
           );
         })}
       </div>
       <p className="text-xs text-gray-600 text-right">共 {accounts.length} 条</p>
+      {archiveDetail && <ArchiveDetailModal email={archiveDetail.email} platform={archiveDetail.platform} onClose={() => setArchiveDetail(null)} />}
     </div>
   );
 }
@@ -383,7 +401,15 @@ function EmailsPanel() {
   const [form, setForm] = useState({ address:"", password:"", provider:"mailtm", token:"", notes:"" });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
-  const [showToken, setShowToken] = useState<number | null>(null);
+  const [copied, setCopied] = useState<string>("");
+  const [archiveDetail, setArchiveDetail] = useState<{ email: string; platform: string } | null>(null);
+
+  function copy(text: string, key: string) {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(key);
+      setTimeout(() => setCopied(k => k === key ? "" : k), 1500);
+    });
+  }
 
   const load = useCallback(async () => {
     const d = await fetch(`${API}/data/emails`).then(r => r.json()).catch(() => ({}));
@@ -461,28 +487,286 @@ function EmailsPanel() {
           )}
 
           <div className="bg-[#161b22] border border-[#30363d] rounded-lg overflow-hidden">
-            <div className="grid grid-cols-[1fr_80px_1fr_80px_60px] gap-2 px-3 py-2 bg-[#21262d] text-xs text-gray-500 font-medium">
-              <span>邮箱地址</span><span>服务商</span><span>密码</span><span>状态</span><span></span>
+            <div className="grid grid-cols-[1fr_70px_1fr_90px_60px_80px] gap-2 px-3 py-2 bg-[#21262d] text-xs text-gray-500 font-medium">
+              <span>邮箱地址</span><span>服务商</span><span>密码</span><span>Token</span><span>状态</span><span></span>
             </div>
             {emails.length === 0 && <p className="text-center text-gray-600 text-sm py-8">暂无邮箱记录</p>}
-            {emails.map(e => (
-              <div key={e.id} className="grid grid-cols-[1fr_80px_1fr_80px_60px] gap-2 px-3 py-2 border-t border-[#21262d] text-xs hover:bg-[#21262d]/50 group items-center">
-                <div className="flex items-center gap-2">
-                  <span className="text-white font-mono">{e.address}</span>
-                  {e.token && <button onClick={() => setShowToken(showToken === e.id ? null : e.id)} className="text-gray-600 hover:text-gray-400 text-xs">Token</button>}
+            {emails.map(e => {
+              const addrKey = `addr-${e.id}`;
+              const pwKey   = `epw-${e.id}`;
+              const tokKey  = `etok-${e.id}`;
+              const addrCopied = copied === addrKey;
+              const pwCopied   = copied === pwKey;
+              const tokCopied  = copied === tokKey;
+              return (
+                <div key={e.id} className="border-t border-[#21262d] text-xs hover:bg-[#21262d]/50 group">
+                  <div className="grid grid-cols-[1fr_70px_1fr_90px_60px_80px] gap-2 px-3 py-2 items-center">
+                    <button onClick={() => copy(e.address, addrKey)} title={e.address}
+                      className={`text-left font-mono truncate transition-colors ${addrCopied ? "text-emerald-400" : "text-white hover:text-blue-300"}`}>
+                      {addrCopied ? "✓ 已复制" : e.address}
+                    </button>
+                    <span className="text-gray-400">{e.provider}</span>
+                    <button onClick={() => copy(e.password || "", pwKey)} title={e.password}
+                      className={`text-left font-mono truncate transition-colors ${pwCopied ? "text-emerald-400" : "text-gray-300 hover:text-blue-300"}`}>
+                      {pwCopied ? "✓ 已复制" : (e.password || <span className="text-gray-600 italic">—</span>)}
+                    </button>
+                    {e.token ? (
+                      <button onClick={() => copy(e.token!, tokKey)} title={e.token}
+                        className={`text-left font-mono truncate transition-colors ${tokCopied ? "text-emerald-400" : "text-blue-400 hover:text-blue-300"}`}>
+                        {tokCopied ? "✓ 已复制" : e.token.slice(0, 10) + "…"}
+                      </button>
+                    ) : <span className="text-gray-700">—</span>}
+                    <span className={`px-1.5 py-0.5 rounded-full w-fit ${e.status === "active" ? "bg-emerald-900/40 text-emerald-400" : "bg-gray-800 text-gray-500"}`}>
+                      {e.status === "active" ? "有效" : "失效"}
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <button onClick={() => setArchiveDetail({ email: e.address, platform: e.provider })}
+                        className="text-blue-500 hover:text-blue-300 text-xs opacity-0 group-hover:opacity-100 transition-opacity">详细</button>
+                      <button onClick={() => deleteEmail(e.id)} className="text-red-600 hover:text-red-400 text-xs opacity-0 group-hover:opacity-100 transition-opacity">删</button>
+                    </div>
+                  </div>
                 </div>
-                <span className="text-gray-400">{e.provider}</span>
-                <span className="text-gray-400 font-mono">{e.password}</span>
-                <span className={`px-2 py-0.5 rounded-full w-fit ${e.status === "active" ? "bg-emerald-900/40 text-emerald-400" : "bg-gray-800 text-gray-500"}`}>{e.status === "active" ? "有效" : "失效"}</span>
-                <button onClick={() => deleteEmail(e.id)} className="text-red-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs">删除</button>
-                {showToken === e.id && e.token && (
-                  <div className="col-span-5 bg-[#0d1117] rounded p-2 font-mono text-xs text-gray-400 break-all">{e.token}</div>
-                )}
+              );
+            })}
+          </div>
+          <p className="text-xs text-gray-600 text-right">共 {emails.length} 条</p>
+          {archiveDetail && <ArchiveDetailModal email={archiveDetail.email} platform={archiveDetail.platform} onClose={() => setArchiveDetail(null)} />}
+        </div>
+    </div>
+  );
+}
+
+// ─── Archive Detail Modal ───────────────────────────────────────────────────
+function ArchiveDetailModal({ email, platform, onClose }: { email: string; platform: string; onClose: () => void }) {
+  const [archive, setArchive] = useState<Archive | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [copied, setCopied] = useState<string>("");
+
+  function copy(text: string, key: string) {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(key);
+      setTimeout(() => setCopied(k => k === key ? "" : k), 1500);
+    });
+  }
+
+  useEffect(() => {
+    setLoading(true);
+    fetch(`${API}/data/archives/by-email?email=${encodeURIComponent(email)}&platform=${encodeURIComponent(platform)}`)
+      .then(r => r.json())
+      .then(d => { if (d.success && d.data) setArchive(d.data); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [email, platform]);
+
+  const Field = ({ label, value, copyKey }: { label: string; value?: string | null; copyKey?: string }) => (
+    <div className="flex flex-col gap-0.5">
+      <span className="text-xs text-gray-500">{label}</span>
+      {value ? (
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-mono text-gray-200 break-all">{value}</span>
+          {copyKey && (
+            <button onClick={() => copy(value, copyKey)} className={`text-xs shrink-0 ${copied === copyKey ? "text-emerald-400" : "text-gray-600 hover:text-blue-400"}`}>
+              {copied === copyKey ? "✓" : "复制"}
+            </button>
+          )}
+        </div>
+      ) : <span className="text-xs text-gray-700 italic">—</span>}
+    </div>
+  );
+
+  return (
+    <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-[#161b22] border border-[#30363d] rounded-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-3 border-b border-[#30363d]">
+          <div>
+            <h2 className="text-white font-semibold text-sm">档案详情</h2>
+            <p className="text-xs text-gray-500">{platform} · {email}</p>
+          </div>
+          <button onClick={onClose} className="text-gray-500 hover:text-white text-lg leading-none">×</button>
+        </div>
+        <div className="p-5">
+          {loading ? (
+            <p className="text-center text-gray-500 py-8 text-sm">加载中…</p>
+          ) : !archive ? (
+            <p className="text-center text-gray-500 py-8 text-sm">该账号暂无档案记录<br/><span className="text-xs text-gray-600">注册成功的账号会自动保存，也可在档案库手动添加</span></p>
+          ) : (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <Field label="平台" value={archive.platform} />
+                <Field label="状态" value={archive.status === "active" ? "✅ 有效" : "❌ " + archive.status} />
+                <Field label="邮箱" value={archive.email} copyKey="email" />
+                <Field label="密码" value={archive.password} copyKey="pwd" />
+                <Field label="用户名" value={archive.username} copyKey="uname" />
+                <Field label="注册邮箱" value={archive.registration_email} copyKey="regemail" />
+                <Field label="机器 ID" value={archive.machine_id} copyKey="machid" />
+                <Field label="使用代理" value={archive.proxy_used} copyKey="proxy" />
+              </div>
+              {archive.token && (
+                <div className="bg-[#0d1117] rounded-lg p-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs text-gray-500">Access Token</span>
+                    <button onClick={() => copy(archive.token!, "tok")} className={`text-xs ${copied === "tok" ? "text-emerald-400" : "text-gray-600 hover:text-blue-400"}`}>
+                      {copied === "tok" ? "✓ 已复制" : "复制"}
+                    </button>
+                  </div>
+                  <pre className="text-xs text-gray-400 font-mono break-all whitespace-pre-wrap">{archive.token}</pre>
+                </div>
+              )}
+              {archive.refresh_token && (
+                <div className="bg-[#0d1117] rounded-lg p-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs text-gray-500">Refresh Token</span>
+                    <button onClick={() => copy(archive.refresh_token!, "rtok")} className={`text-xs ${copied === "rtok" ? "text-emerald-400" : "text-gray-600 hover:text-blue-400"}`}>
+                      {copied === "rtok" ? "✓ 已复制" : "复制"}
+                    </button>
+                  </div>
+                  <pre className="text-xs text-gray-400 font-mono break-all whitespace-pre-wrap">{archive.refresh_token}</pre>
+                </div>
+              )}
+              {archive.fingerprint && (
+                <div className="bg-[#0d1117] rounded-lg p-3">
+                  <span className="text-xs text-gray-500 block mb-1">浏览器指纹</span>
+                  <pre className="text-xs text-gray-400 font-mono break-all whitespace-pre-wrap overflow-auto max-h-32">{JSON.stringify(archive.fingerprint, null, 2)}</pre>
+                </div>
+              )}
+              {archive.identity_data && (
+                <div className="bg-[#0d1117] rounded-lg p-3">
+                  <span className="text-xs text-gray-500 block mb-1">使用的身份资料</span>
+                  <pre className="text-xs text-gray-400 font-mono break-all whitespace-pre-wrap overflow-auto max-h-32">{JSON.stringify(archive.identity_data, null, 2)}</pre>
+                </div>
+              )}
+              {archive.cookies && (
+                <div className="bg-[#0d1117] rounded-lg p-3">
+                  <span className="text-xs text-gray-500 block mb-1">Cookies</span>
+                  <pre className="text-xs text-gray-400 font-mono break-all whitespace-pre-wrap overflow-auto max-h-32">{JSON.stringify(archive.cookies, null, 2)}</pre>
+                </div>
+              )}
+              {archive.notes && (
+                <div className="bg-[#0d1117] rounded-lg p-3">
+                  <span className="text-xs text-gray-500 block mb-1">备注</span>
+                  <p className="text-xs text-gray-400">{archive.notes}</p>
+                </div>
+              )}
+              <div className="text-xs text-gray-600 text-right">创建：{formatDate(archive.created_at)}</div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Archives Panel (档案库) ─────────────────────────────────────────────────
+function ArchivesPanel() {
+  const [archives, setArchives] = useState<Archive[]>([]);
+  const [search, setSearch] = useState("");
+  const [detailId, setDetailId] = useState<Archive | null>(null);
+  const [showAdd, setShowAdd] = useState(false);
+  const [form, setForm] = useState({ platform: "outlook", email: "", password: "", username: "", token: "", refresh_token: "", machine_id: "", proxy_used: "", registration_email: "", notes: "" });
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [copied, setCopied] = useState<string>("");
+
+  function copy(text: string, key: string) {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(key);
+      setTimeout(() => setCopied(k => k === key ? "" : k), 1500);
+    });
+  }
+
+  const load = useCallback(async () => {
+    const q = search ? `?search=${encodeURIComponent(search)}` : "";
+    const d = await fetch(`${API}/data/archives${q}`).then(r => r.json()).catch(() => ({}));
+    if (d.success) setArchives(d.data);
+  }, [search]);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function addArchive() {
+    if (!form.email) { setMsg("email 必填"); return; }
+    setBusy(true); setMsg("");
+    const d = await fetch(`${API}/data/archives`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) }).then(r => r.json()).catch(() => ({}));
+    setBusy(false);
+    if (d.success) { setMsg("✅ 已保存"); setShowAdd(false); load(); }
+    else setMsg("❌ " + (d.error || "失败"));
+  }
+
+  async function deleteArchive(id: number) {
+    if (!confirm("确认删除此档案？")) return;
+    await fetch(`${API}/data/archives/${id}`, { method: "DELETE" }).then(r => r.json()).catch(() => {});
+    load();
+  }
+
+  const PLATFORM_EMOJI: Record<string, string> = { outlook: "📧", chatgpt: "🤖", claude: "🧠", gemini: "💎", cursor: "⌨️", grok: "🔮", codex: "🔬", other: "❓" };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-2">
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="搜索邮箱/用户名/备注…" className="flex-1 bg-[#161b22] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white placeholder-gray-600" />
+        <button onClick={() => setShowAdd(s => !s)} className="px-3 py-1.5 bg-emerald-700 rounded text-xs text-white hover:bg-emerald-600">+ 手动添加</button>
+      </div>
+
+      {msg && <p className={`text-sm px-3 py-2 rounded ${msg.startsWith("✅") ? "bg-emerald-900/40 text-emerald-300" : "bg-red-900/40 text-red-300"}`}>{msg}</p>}
+
+      {showAdd && (
+        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4 space-y-3">
+          <h3 className="text-sm font-semibold text-white">手动添加档案</h3>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-xs text-gray-400">平台</label>
+              <select value={form.platform} onChange={e => setForm(f => ({...f, platform: e.target.value}))} className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white mt-1">
+                {["outlook","chatgpt","claude","gemini","cursor","grok","codex","other"].map(p => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </div>
+            {(["email","password","username","token","refresh_token","machine_id","proxy_used","registration_email","notes"] as const).map(k => (
+              <div key={k} className={k === "token" || k === "refresh_token" || k === "notes" ? "col-span-2" : ""}>
+                <label className="text-xs text-gray-400">{{ email:"邮箱*", password:"密码", username:"用户名", token:"Token", refresh_token:"Refresh Token", machine_id:"机器ID", proxy_used:"使用代理", registration_email:"注册邮箱", notes:"备注" }[k]}</label>
+                <input value={form[k]} onChange={e => setForm(f => ({...f, [k]: e.target.value}))} className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white mt-1 font-mono" />
               </div>
             ))}
           </div>
-          <p className="text-xs text-gray-600 text-right">共 {emails.length} 条</p>
+          <div className="flex gap-2 justify-end">
+            <button onClick={() => setShowAdd(false)} className="px-3 py-1.5 text-xs text-gray-400 hover:text-white">取消</button>
+            <button onClick={addArchive} disabled={busy} className="px-4 py-1.5 bg-emerald-700 rounded text-xs text-white hover:bg-emerald-600 disabled:opacity-50">保存</button>
+          </div>
         </div>
+      )}
+
+      <div className="bg-[#161b22] border border-[#30363d] rounded-lg overflow-hidden">
+        <div className="grid grid-cols-[50px_1fr_1fr_80px_60px_80px_60px] gap-2 px-3 py-2 bg-[#21262d] text-xs text-gray-500 font-medium">
+          <span>平台</span><span>邮箱</span><span>密码</span><span>代理IP</span><span>机器ID</span><span>创建</span><span></span>
+        </div>
+        {archives.length === 0 && <p className="text-center text-gray-600 text-sm py-8">暂无档案记录，注册成功后会自动保存</p>}
+        {archives.map(a => {
+          const emailKey = `ae-${a.id}`;
+          const pwKey = `apw-${a.id}`;
+          return (
+            <div key={a.id} className="border-t border-[#21262d] text-xs hover:bg-[#21262d]/50 group">
+              <div className="grid grid-cols-[50px_1fr_1fr_80px_60px_80px_60px] gap-2 px-3 py-2 items-center">
+                <span className={`font-medium ${PLATFORM_COLORS[a.platform] ?? "text-gray-400"}`}>{PLATFORM_EMOJI[a.platform] ?? "❓"} {a.platform}</span>
+                <button onClick={() => copy(a.email, emailKey)} title={a.email}
+                  className={`text-left font-mono truncate transition-colors ${copied === emailKey ? "text-emerald-400" : "text-white hover:text-blue-300"}`}>
+                  {copied === emailKey ? "✓ 已复制" : a.email}
+                </button>
+                <button onClick={() => copy(a.password || "", pwKey)} title={a.password}
+                  className={`text-left font-mono truncate transition-colors ${copied === pwKey ? "text-emerald-400" : "text-gray-300 hover:text-blue-300"}`}>
+                  {copied === pwKey ? "✓ 已复制" : (a.password || <span className="text-gray-600 italic">—</span>)}
+                </button>
+                <span className="text-gray-500 font-mono truncate">{a.proxy_used ? a.proxy_used.replace(/socks5:\/\/[^@]+@/, "") : "—"}</span>
+                <span className="text-gray-600 font-mono truncate">{a.machine_id ? a.machine_id.slice(0, 8) + "…" : "—"}</span>
+                <span className="text-gray-600">{formatDate(a.created_at).split(" ")[0]}</span>
+                <div className="flex items-center gap-1.5">
+                  <button onClick={() => setDetailId(a)} className="text-blue-500 hover:text-blue-300 text-xs opacity-0 group-hover:opacity-100 transition-opacity">详细</button>
+                  <button onClick={() => deleteArchive(a.id)} className="text-red-600 hover:text-red-400 text-xs opacity-0 group-hover:opacity-100 transition-opacity">删</button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <p className="text-xs text-gray-600 text-right">共 {archives.length} 条</p>
+      {detailId && (
+        <ArchiveDetailModal email={detailId.email} platform={detailId.platform} onClose={() => setDetailId(null)} />
+      )}
     </div>
   );
 }
@@ -853,12 +1137,12 @@ export default function DataManager() {
   const [tab, setTab] = useState<Tab>("stats");
 
   const TABS: { key: Tab; label: string }[] = [
-    { key:"stats",      label:"📊 数据统计" },
-    { key:"guide",      label:"📋 工作指南" },
-    { key:"accounts",   label:"🔑 账号库" },
-    { key:"identities", label:"🪪 身份库" },
-    { key:"emails",     label:"📬 邮箱库" },
-    { key:"configs",    label:"⚙️ 系统配置" },
+    { key:"stats",    label:"📊 数据统计" },
+    { key:"guide",    label:"📋 工作指南" },
+    { key:"accounts", label:"🤖 AI服务池" },
+    { key:"archives", label:"🗄️ 档案库" },
+    { key:"emails",   label:"📬 邮箱库" },
+    { key:"configs",  label:"⚙️ 系统配置" },
   ];
 
   return (
@@ -883,12 +1167,12 @@ export default function DataManager() {
         ))}
       </div>
 
-      {tab === "stats"      && <StatsPanel />}
-      {tab === "guide"      && <GuidePanel />}
-      {tab === "accounts"   && <AccountsPanel />}
-      {tab === "identities" && <IdentitiesPanel />}
-      {tab === "emails"     && <EmailsPanel />}
-      {tab === "configs"    && <ConfigsPanel />}
+      {tab === "stats"    && <StatsPanel />}
+      {tab === "guide"    && <GuidePanel />}
+      {tab === "accounts" && <AccountsPanel />}
+      {tab === "archives" && <ArchivesPanel />}
+      {tab === "emails"   && <EmailsPanel />}
+      {tab === "configs"  && <ConfigsPanel />}
     </div>
   );
 }

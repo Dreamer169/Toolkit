@@ -1187,7 +1187,8 @@ router.post("/tools/outlook/register", async (req, res) => {
     ? proxiesInput.split(/[\n,]+/).map((p: string) => p.trim()).filter(Boolean)
     : proxyInput ? [proxyInput] : [];
 
-  // 如果没有提供代理，且 autoProxy=true，则从代理池自动选取 (按账号数量选多个代理，1IP1账号)
+  // 如果没有提供代理，且 autoProxy=true，则从代理池（DB）自动选取 (按账号数量选多个代理，1IP1账号)
+  // 代理池是持久化共享 IP 库，所有功能统一从此调用，不重新生成
   let proxy = proxyList[0] || "";
   let autoProxyId: number | null = null;
   if (!proxy && autoProxy) {
@@ -1200,16 +1201,21 @@ router.post("/tools/outlook/register", async (req, res) => {
       if (rows.length > 0) {
         proxy = rows[0].formatted;
         autoProxyId = rows[0].id;
-        // 多账号时将所有选中代理加入轮换列表
         for (const r of rows) {
           if (!proxyList.includes(r.formatted)) proxyList.push(r.formatted);
           await dbExec("UPDATE proxies SET used_count = used_count + 1, last_used = NOW(), status = 'active' WHERE id = $1", [r.id]);
         }
+      } else {
+        // 代理池为空时不再自动回退到 CF 动态生成，记录警告
+        job.logs.push({ type: "warn", message: "⚠ 代理池为空或全部封禁，请先在「数据管理中心→代理池」导入代理，或手动填写代理地址" });
       }
-    } catch {}
+    } catch (e) {
+      job.logs.push({ type: "warn", message: `⚠ 代理池查询失败: ${e}` });
+    }
   }
 
-  const effectiveProxyMode = !proxy && autoProxy ? "cf" : proxyMode;
+  // effectiveProxyMode: 只有明确传入 proxyMode="cf" 时才走 CF 模式，不再自动回退
+  const effectiveProxyMode = proxyMode;
 
   // 读取打码服务配置（可选）
   let captchaService = "";
@@ -1365,6 +1371,26 @@ router.post("/tools/outlook/register", async (req, res) => {
                ON CONFLICT (address) DO UPDATE SET password=EXCLUDED.password,status=EXCLUDED.status,notes=EXCLUDED.notes`,
               [acc.email, acc.password, "outlook", "active", "Outlook 自动注册"],
             );
+            // 档案库：保存完整注册记录（含代理、身份、指纹）
+            try {
+              const tok = tokenMap.get(acc.email);
+              const archiveProxy = proxyList.length > 0 ? proxyList[0] : (proxy || null);
+              const archiveIdentity = (job as unknown as Record<string, unknown>).identity ?? null;
+              const archiveFingerprint = (job as unknown as Record<string, unknown>).fingerprint ?? null;
+              await execute(
+                `INSERT INTO archives (platform,email,password,token,refresh_token,proxy_used,identity_data,fingerprint,status,notes)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                 ON CONFLICT DO NOTHING`,
+                [
+                  "outlook", acc.email, acc.password,
+                  tok?.access_token || null, tok?.refresh_token || null,
+                  archiveProxy,
+                  archiveIdentity ? JSON.stringify(archiveIdentity) : null,
+                  archiveFingerprint ? JSON.stringify(archiveFingerprint) : null,
+                  "active", "Outlook 自动注册",
+                ]
+              );
+            } catch {}
           } catch (dbErr) {
             job.logs.push({ type: "warn", message: `⚠ DB 保存失败(${acc.email}): ${dbErr}` });
             continue;
