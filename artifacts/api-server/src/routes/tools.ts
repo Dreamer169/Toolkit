@@ -2,7 +2,7 @@ import { jobQueue } from "../lib/job-queue.js";
 import { setLiveVerifyEnabled, getLiveVerifyStatus } from "../lib/live-verify-poller.js";
 import { Router, type IRouter } from "express";
 import { createHash, randomBytes, randomUUID } from "crypto";
-import { execute, query } from "../db.js";
+import { execute, query, queryOne } from "../db.js";
 import { existsSync } from "fs";
 import path from "path";
 
@@ -1191,11 +1191,12 @@ router.post("/tools/outlook/register", async (req, res) => {
   // 代理池是持久化共享 IP 库，所有功能统一从此调用，不重新生成
   let proxy = proxyList[0] || "";
   let autoProxyId: number | null = null;
+  // 收集代理池阶段的日志（此时 job 尚未创建，稍后合并）
+  const preJobLogs: Array<{ type: string; message: string }> = [];
   if (!proxy && autoProxy) {
     try {
-      const { query: dbQuery, execute: dbExec } = await import("../db.js");
       const need = Math.max(1, Math.floor(Number(count) || 1));
-      const rows = await dbQuery<{ id: number; formatted: string }>(
+      const rows = await query<{ id: number; formatted: string }>(
         `SELECT id, formatted FROM proxies WHERE status != 'banned' ORDER BY used_count ASC, RANDOM() LIMIT ${need}`
       );
       if (rows.length > 0) {
@@ -1203,14 +1204,14 @@ router.post("/tools/outlook/register", async (req, res) => {
         autoProxyId = rows[0].id;
         for (const r of rows) {
           if (!proxyList.includes(r.formatted)) proxyList.push(r.formatted);
-          await dbExec("UPDATE proxies SET used_count = used_count + 1, last_used = NOW(), status = 'active' WHERE id = $1", [r.id]);
+          await execute("UPDATE proxies SET used_count = used_count + 1, last_used = NOW(), status = 'active' WHERE id = $1", [r.id]);
         }
       } else {
         // 代理池为空时不再自动回退到 CF 动态生成，记录警告
-        job.logs.push({ type: "warn", message: "⚠ 代理池为空或全部封禁，请先在「数据管理中心→代理池」导入代理，或手动填写代理地址" });
+        preJobLogs.push({ type: "warn", message: "⚠ 代理池为空或全部封禁，请先在「数据管理中心→代理池」导入代理，或手动填写代理地址" });
       }
     } catch (e) {
-      job.logs.push({ type: "warn", message: `⚠ 代理池查询失败: ${e}` });
+      preJobLogs.push({ type: "warn", message: `⚠ 代理池查询失败: ${e}` });
     }
   }
 
@@ -1237,6 +1238,9 @@ router.post("/tools/outlook/register", async (req, res) => {
 
   const proxyDisplay = proxy ? proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@") : "无代理";
   const job = await jobQueue.create(jobId);
+  // 将代理池阶段收集的日志合并
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  for (const l of preJobLogs) job.logs.push(l as any);
   job.logs.push({ type: "start", message: `启动 ${eng} 注册 ${n} 个 Outlook 账号 (bot_protection_wait=${wait}s)${autoProxyId ? " [代理池自动选取]" : ""}...` });
   if (proxy) job.logs.push({ type: "log", message: `🌐 代理: ${proxyDisplay}` });
   if (autoProxy && proxyList.length > 0) job.logs.push({ type: "log", message: `🌐 已从代理池选取 ${proxyList.length} 个节点` });
