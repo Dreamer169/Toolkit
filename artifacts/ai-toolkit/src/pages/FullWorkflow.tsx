@@ -106,11 +106,9 @@ export default function FullWorkflow() {
 
   // 加载代理池数量 + 打码配置
   useEffect(() => {
+    // 只显示 DB 共享 socks5 代理池数量（与其他功能共用的住宅代理池）
     fetch(`${API}/data/proxies`).then(r => r.json()).then(d => {
       if (d.success) setPoolCount(d.total);
-    }).catch(() => {});
-    fetch(`${API}/tools/cf-pool/status`).then(r => r.json()).then(d => {
-      if (d.success && typeof d.available === "number") setPoolCount(d.available);
     }).catch(() => {});
     fetch(`${API}/data/captcha-config`).then(r => r.json()).then(d => {
       if (d.success) {
@@ -181,7 +179,7 @@ export default function FullWorkflow() {
           count: submitCount, proxy, engine, headless: headless ? "true" : "false",
           wait, retries: 2, delay: 0,
           autoProxy: !proxy && autoProxy,
-          proxyMode: !proxy && autoProxy ? "cf" : "",
+          // proxyMode 不传 "cf" — CF IP池是独立功能，autoProxy 只走 DB 共享 socks5 代理池
         }),
       });
       const d = await r.json();
