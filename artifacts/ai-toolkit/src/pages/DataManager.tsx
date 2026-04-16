@@ -10,6 +10,12 @@ interface Account {
   username?: string; token?: string; refresh_token?: string; status: string; notes?: string;
   created_at: string;
 }
+interface Identity {
+  id: number; full_name: string; first_name: string; last_name: string;
+  gender: string; birthday?: string; phone?: string; email?: string;
+  address?: string; city?: string; state?: string; zip?: string;
+  country?: string; username?: string; password?: string; created_at: string;
+}
 interface Archive {
   id: number; platform: string; email: string; password?: string;
   username?: string; token?: string; refresh_token?: string;
