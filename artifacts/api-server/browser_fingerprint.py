@@ -45,6 +45,23 @@ TIMEZONE_ALIASES = {
     "America/Miami": "America/New_York",
 }
 
+# locale → 对应时区池（保证指纹内部一致性）
+LOCALE_TIMEZONES: dict[str, list[str]] = {
+    "zh-CN": ["Asia/Shanghai", "Asia/Chongqing", "Asia/Harbin"],
+    "zh-TW": ["Asia/Taipei"],
+    "en-US": US_TIMEZONES,
+    "en-GB": ["Europe/London"],
+    "en-AU": ["Australia/Sydney", "Australia/Melbourne"],
+    "en-SG": ["Asia/Singapore"],
+    "ja-JP": ["Asia/Tokyo"],
+    "ko-KR": ["Asia/Seoul"],
+    "fr-FR": ["Europe/Paris"],
+    "de-DE": ["Europe/Berlin"],
+    "es-ES": ["Europe/Madrid"],
+    "pt-BR": ["America/Sao_Paulo"],
+    "ru-RU": ["Europe/Moscow"],
+}
+
 
 def normalize_timezone_id(timezone_id: str) -> str:
     """Return an ICU/IANA timezone accepted by Playwright."""
@@ -125,6 +142,7 @@ class BrowserProfile:
 def gen_profile(locale: str = "en-US") -> BrowserProfile:
     """
     生成一个完整的浏览器指纹档案。
+    时区自动匹配 locale，保证指纹内部一致性（zh-CN → Asia/Shanghai 等）。
     整个注册会话内应复用同一份 profile，保证指纹一致性。
     """
     ua = random.choice(CHROME_UAS)
@@ -138,12 +156,16 @@ def gen_profile(locale: str = "en-US") -> BrowserProfile:
 
     webgl_vendor, webgl_renderer = random.choice(WEBGL_VENDORS)
 
+    # 时区跟随 locale，未知 locale 回退到 US 时区池
+    tz_pool = LOCALE_TIMEZONES.get(locale, US_TIMEZONES)
+    tz = validate_timezone_id(normalize_timezone_id(random.choice(tz_pool)))
+
     return BrowserProfile(
         user_agent=ua,
         is_win=is_win,
         platform_str="Win32" if is_win else "MacIntel",
         ch_ver=ch_ver,
-        timezone_id=validate_timezone_id(normalize_timezone_id(random.choice(US_TIMEZONES))),
+        timezone_id=tz,
         locale=locale,
         screen_w=sw, screen_h=sh, dpr=dpr,
         viewport_w=vw, viewport_h=vh,
@@ -162,10 +184,22 @@ def context_kwargs(profile: BrowserProfile) -> dict:
     同时设置 sec-ch-ua headers 与 UA 保持一致（Outlook / Cursor 共用）。
     """
     os_str = "Windows" if profile.is_win else "macOS"
-    if profile.locale == "zh-CN":
-        accept_lang = "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7"
-    else:
-        accept_lang = "en-US,en;q=0.9"
+    # Accept-Language 跟随 locale，保证与浏览器语言设置完全一致
+    _ACCEPT_LANG_MAP: dict[str, str] = {
+        "zh-CN": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        "zh-TW": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        "ja-JP": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
+        "ko-KR": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "fr-FR": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+        "de-DE": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
+        "es-ES": "es-ES,es;q=0.9,en-US;q=0.8,en;q=0.7",
+        "pt-BR": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        "ru-RU": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "en-GB": "en-GB,en;q=0.9,en-US;q=0.8",
+        "en-AU": "en-AU,en;q=0.9,en-US;q=0.8",
+        "en-SG": "en-SG,en;q=0.9,en-US;q=0.8",
+    }
+    accept_lang = _ACCEPT_LANG_MAP.get(profile.locale, "en-US,en;q=0.9")
 
     return dict(
         locale=profile.locale,
