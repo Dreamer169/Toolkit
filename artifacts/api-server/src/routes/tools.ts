@@ -1361,6 +1361,7 @@ router.post("/tools/outlook/register", async (req, res) => {
         const pendingOAuthRows: { id: number; email: string }[] = [];
         for (const acc of job.accounts) {
           let accountRow: { id: number } | null = null;
+          // 1. 保存到账号库（失败则跳过该账号）
           try {
             accountRow = await queryOne<{ id: number }>(
               `INSERT INTO accounts (platform, email, password, status)
@@ -1369,35 +1370,43 @@ router.post("/tools/outlook/register", async (req, res) => {
                RETURNING id`,
               ["outlook", acc.email, acc.password, "active"],
             );
+          } catch (dbErr) {
+            job.logs.push({ type: "warn", message: `⚠ 账号库保存失败(${acc.email}): ${dbErr}` });
+            continue;
+          }
+          // 2. 同步到邮箱库（独立 try，失败不阻断后续）
+          try {
             await execute(
               `INSERT INTO temp_emails (address,password,provider,status,notes)
                VALUES ($1,$2,$3,$4,$5)
                ON CONFLICT (address) DO UPDATE SET password=EXCLUDED.password,status=EXCLUDED.status,notes=EXCLUDED.notes`,
               [acc.email, acc.password, "outlook", "active", "Outlook 自动注册"],
             );
-            // 档案库：保存完整注册记录（含代理、身份、指纹）
-            try {
-              const tok = tokenMap.get(acc.email);
-              const archiveProxy = proxyList.length > 0 ? proxyList[0] : (proxy || null);
-              const archiveIdentity = (job as unknown as Record<string, unknown>).identity ?? null;
-              const archiveFingerprint = (job as unknown as Record<string, unknown>).fingerprint ?? null;
-              await execute(
-                `INSERT INTO archives (platform,email,password,token,refresh_token,proxy_used,identity_data,fingerprint,status,notes)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-                 ON CONFLICT DO NOTHING`,
-                [
-                  "outlook", acc.email, acc.password,
-                  tok?.access_token || null, tok?.refresh_token || null,
-                  archiveProxy,
-                  archiveIdentity ? JSON.stringify(archiveIdentity) : null,
-                  archiveFingerprint ? JSON.stringify(archiveFingerprint) : null,
-                  "active", "Outlook 自动注册",
-                ]
-              );
-            } catch {}
-          } catch (dbErr) {
-            job.logs.push({ type: "warn", message: `⚠ DB 保存失败(${acc.email}): ${dbErr}` });
-            continue;
+          } catch (emailErr) {
+            job.logs.push({ type: "warn", message: `⚠ 邮箱库同步失败(${acc.email}): ${emailErr}` });
+          }
+          // 3. 保存到档案库（独立 try，失败不阻断后续）
+          try {
+            const tok = tokenMap.get(acc.email);
+            const archiveProxy = proxyList.length > 0 ? proxyList[0] : (proxy || null);
+            const archiveIdentity = (job as unknown as Record<string, unknown>).identity ?? null;
+            const archiveFingerprint = (job as unknown as Record<string, unknown>).fingerprint ?? null;
+            await execute(
+              `INSERT INTO archives (platform,email,password,token,refresh_token,proxy_used,identity_data,fingerprint,status,notes)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+               ON CONFLICT DO NOTHING`,
+              [
+                "outlook", acc.email, acc.password,
+                tok?.access_token || null, tok?.refresh_token || null,
+                archiveProxy,
+                archiveIdentity ? JSON.stringify(archiveIdentity) : null,
+                archiveFingerprint ? JSON.stringify(archiveFingerprint) : null,
+                "active", "Outlook 自动注册",
+              ]
+            );
+            job.logs.push({ type: "log", message: `[档案库] ${acc.email} 已保存` });
+          } catch (archErr) {
+            job.logs.push({ type: "warn", message: `⚠ 档案库保存失败(${acc.email}): ${archErr}` });
           }
           // 2. In-browser authorization_code flow token
           //    ROPC (grant_type=password) disabled for personal MS accounts
