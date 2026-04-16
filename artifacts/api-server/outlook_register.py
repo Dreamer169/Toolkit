@@ -1725,7 +1725,8 @@ def register_one(ctrl, engine_name: str, headless: bool) -> dict:
 
     # ── 共享浏览器指纹档案（与 Cursor 注册完全一致）──────────────────────────
     # gen_profile 生成与 Cursor 相同的 UA/WebGL/canvas/Audio/machine_id/battery
-    # locale="zh-CN" 保持与原版一致（Outlook 注册 UI 为中文）
+    # locale="zh-CN"：Outlook 注册 UI 中文模式（时区自动匹配 Asia/Shanghai）
+    # browser_fingerprint.py 的 LOCALE_TIMEZONES 确保时区与 locale 完全一致
     fp = gen_profile(locale="zh-CN")
     print(f"[register] 指纹: {profile_summary(fp)}", flush=True)
 
