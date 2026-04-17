@@ -98,5 +98,16 @@ module.exports = {
       "watch": false,
       "autorestart": true
     }
+    {
+      "name": "ngrok",
+      "script": "/usr/local/bin/ngrok",
+      "args": "http 3000 --domain=tried-habitant-kindly.ngrok-free.dev --log=stdout",
+      "interpreter": "none",
+      "cwd": "/root/Toolkit",
+      "restart_delay": 5000,
+      "max_restarts": 20,
+      "watch": false,
+      "autorestart": true
+    },
   ]
 };
