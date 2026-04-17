@@ -1174,7 +1174,7 @@ router.post("/tools/outlook/register", async (req, res) => {
     wait     = 11,
     retries  = 2,
     autoProxy = false,
-    proxyMode = "",               // "cf" = 使用 CF IP 池
+    proxyMode = "cf",             // "cf" = 使用 CF IP 池 + xray 中继
     cfPort    = 443,
   } = req.body as {
     count?: number; proxy?: string; proxies?: string; headless?: boolean; delay?: number;
@@ -1187,38 +1187,13 @@ router.post("/tools/outlook/register", async (req, res) => {
     ? proxiesInput.split(/[\n,]+/).map((p: string) => p.trim()).filter(Boolean)
     : proxyInput ? [proxyInput] : [];
 
-  // 如果没有提供代理，且 autoProxy=true，则从代理池（DB）自动选取 (按账号数量选多个代理，1IP1账号)
-  // 代理池是持久化共享 IP 库，所有功能统一从此调用，不重新生成
   let proxy = proxyList[0] || "";
-  let autoProxyId: number | null = null;
-  // 收集代理池阶段的日志（此时 job 尚未创建，稍后合并）
   const preJobLogs: Array<{ type: string; message: string }> = [];
-  if (!proxy && autoProxy) {
-    try {
-      const need = Math.max(1, Math.floor(Number(count) || 1));
-      const rows = await query<{ id: number; formatted: string }>(
-        `SELECT id, formatted FROM proxies WHERE status != 'banned' ORDER BY used_count ASC, RANDOM() LIMIT ${need}`
-      );
-      if (rows.length > 0) {
-        proxy = rows[0].formatted;
-        autoProxyId = rows[0].id;
-        for (const r of rows) {
-          if (!proxyList.includes(r.formatted)) proxyList.push(r.formatted);
-          await execute("UPDATE proxies SET used_count = used_count + 1, last_used = NOW(), status = 'active' WHERE id = $1", [r.id]);
-        }
-      } else {
-        // 代理池为空时不再自动回退到 CF 动态生成，记录警告
-        preJobLogs.push({ type: "warn", message: "⚠ 代理池为空或全部封禁，请先在「数据管理中心→代理池」导入代理，或手动填写代理地址" });
-      }
-    } catch (e) {
-      preJobLogs.push({ type: "warn", message: `⚠ 代理池查询失败: ${e}` });
-    }
+  if (!proxy && autoProxy && proxyMode !== "cf") {
+    preJobLogs.push({ type: "warn", message: "⚠ 已停用旧 DB/quarkip 代理池，自动代理改用 CF IP 池 + xray" });
   }
 
-  // effectiveProxyMode: 只有明确传入 proxyMode="cf" 且 autoProxy 未从 DB 选到代理时才走 CF 模式。
-  // 若 autoProxy 已从 DB 代理池选取了 socks5 代理，强制清除 proxyMode，防止两套代理系统冲突
-  // （CF IP 池 与 DB socks5 池 是完全独立的两套机制，不能混用）
-  const effectiveProxyMode = (proxyMode === "cf" && proxyList.length > 0) ? "" : proxyMode;
+  const effectiveProxyMode = proxyList.length > 0 ? "" : "cf";
 
   // 读取打码服务配置（可选）
   let captchaService = "";
@@ -1243,9 +1218,8 @@ router.post("/tools/outlook/register", async (req, res) => {
   // 将代理池阶段收集的日志合并
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   for (const l of preJobLogs) job.logs.push(l as any);
-  job.logs.push({ type: "start", message: `启动 ${eng} 注册 ${n} 个 Outlook 账号 (bot_protection_wait=${wait}s)${autoProxyId ? " [代理池自动选取]" : ""}...` });
+  job.logs.push({ type: "start", message: `启动 ${eng} 注册 ${n} 个 Outlook 账号 (bot_protection_wait=${wait}s)${effectiveProxyMode === "cf" ? " [CF+xray代理池]" : proxy ? " [手动代理]" : ""}...` });
   if (proxy) job.logs.push({ type: "log", message: `🌐 代理: ${proxyDisplay}` });
-  if (autoProxy && proxyList.length > 0) job.logs.push({ type: "log", message: `🌐 已从代理池选取 ${proxyList.length} 个节点` });
   // 立即响应 jobId（不等待注册完成）
   res.json({ success: true, jobId, message: "注册任务已启动" });
 
@@ -1274,7 +1248,7 @@ router.post("/tools/outlook/register", async (req, res) => {
   }
   if (effectiveProxyMode === "cf") {
     args.push("--proxy-mode", "cf", "--cf-port", String(cfPort));
-    job.logs.push({ type: "log", message: `☁️ CF IP 池模式：每账号独占一个 CF 节点` });
+    job.logs.push({ type: "log", message: `☁️ CF+xray 代理池：每账号独占一个已测速 CF 节点` });
   }
 
   const _spawnEnv: Record<string, string> = { ...process.env as Record<string, string>, PYTHONUNBUFFERED: "1" };
@@ -1518,7 +1492,7 @@ router.post("/tools/cursor/register", async (req, res) => {
     try {
       const { query: dbQuery } = await import("../db.js");
       const rows = await dbQuery<{ id: number; formatted: string }>(
-        "SELECT id, formatted FROM proxies WHERE status != 'banned' ORDER BY used_count ASC, RANDOM() LIMIT 1"
+        "SELECT id, formatted FROM proxies WHERE status != 'banned' AND formatted NOT ILIKE '%quarkip%' AND formatted NOT ILIKE '%pool-us%' ORDER BY used_count ASC, RANDOM() LIMIT 1"
       );
       if (rows[0]) {
         proxy = rows[0].formatted;
@@ -1671,7 +1645,7 @@ router.post("/tools/cursor/register-http", async (req, res) => {
     try {
       const { query: dbQuery } = await import("../db.js");
       const rows = await dbQuery<{ formatted: string }>(
-        "SELECT formatted FROM proxies WHERE status != 'banned' ORDER BY used_count ASC, RANDOM() LIMIT 1"
+        "SELECT formatted FROM proxies WHERE status != 'banned' AND formatted NOT ILIKE '%quarkip%' AND formatted NOT ILIKE '%pool-us%' ORDER BY used_count ASC, RANDOM() LIMIT 1"
       );
       if (rows[0]) proxy = rows[0].formatted;
     } catch {}

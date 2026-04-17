@@ -421,12 +421,13 @@ class BaseController:
         raise NotImplementedError
 
 
+
 # ─── Patchright 控制器 ────────────────────────────────────────────────────────
 class PatchrightController(BaseController):
-    """
-    与原版 PatchrightController.handle_captcha() 完全一致:
-    双 iframe 嵌套的无障碍挑战按钮点击
-    """
+    # [付费打码已禁] """
+    # [付费打码已禁] 与原版 PatchrightController.handle_captcha() 完全一致:
+    # [付费打码已禁] 双 iframe 嵌套的无障碍挑战按钮点击
+    # [付费打码已禁] """
     def launch(self, headless=True):
         from patchright.sync_api import sync_playwright
         p = sync_playwright().start()
@@ -575,9 +576,9 @@ class PatchrightController(BaseController):
         if accessibility_ok:
             return True
 
-        # ── 方式3：打码服务降级 ──────────────────────────────────────────
-        print("[captcha] 两种免费方法失败，尝试打码服务…", flush=True)
-        return self._solve_with_service(page, blob_container or [])
+        # ── [已禁用]方式3：打码服务降级 ──────────────────────────────────────────
+        # [已禁用] print("[captcha] 两种免费方法失败，尝试打码服务…", flush=True)
+        # [已禁用] return self._solve_with_service(page, blob_container or [])
 
     def _try_accessibility_challenge(self, page) -> bool:
         """
@@ -1031,6 +1032,46 @@ class PatchrightController(BaseController):
                             if _js_r:
                                 print(f"[captcha] ✅ 方法A-JS: frame press-hold 4.5s (btn={_js_r})", flush=True)
                                 _press_clicked = True
+                                # 验证 press-hold 是否真正通过（检查无障碍按钮 aria-disabled）
+                                page.wait_for_timeout(2000)
+                                _a11y_still_disabled = False
+                                for _chk_fr in page.frames:
+                                    try:
+                                        _disabled = _chk_fr.evaluate("""
+                                            () => {
+                                                const btn = document.querySelector('[aria-label="可访问性挑战"]');
+                                                return btn ? btn.getAttribute('aria-disabled') : null;
+                                            }
+                                        """)
+                                        if _disabled == 'true':
+                                            _a11y_still_disabled = True
+                                            break
+                                    except Exception:
+                                        pass
+                                if _a11y_still_disabled:
+                                    print("[captcha] ⚠ JS press-hold 未通过验证（aria-disabled仍true）—— 尝试真实鼠标按住px-captcha", flush=True)
+                                    # 尝试真实鼠标事件（在 px-captcha 的 page 坐标按住）
+                                    _real_hold_done = False
+                                    for _rhfr in page.frames:
+                                        try:
+                                            _px_box = _rhfr.locator('#px-captcha').first.bounding_box(timeout=2000)
+                                            if _px_box and _px_box.get('width', 0) > 0:
+                                                _rx = _px_box['x'] + _px_box['width'] / 2
+                                                _ry = _px_box['y'] + _px_box['height'] / 2
+                                                page.mouse.move(_rx, _ry)
+                                                page.mouse.down()
+                                                page.wait_for_timeout(5500)
+                                                page.mouse.up()
+                                                print(f"[captcha] ✅ 真实鼠标 px-captcha 按住5.5s ({_rx:.0f},{_ry:.0f})", flush=True)
+                                                _real_hold_done = True
+                                                break
+                                        except Exception:
+                                            pass
+                                    if not _real_hold_done:
+                                        print("[captcha] ⚠ 真实鼠标按住也失败，跳过音频（CAPTCHA将在retry再试）", flush=True)
+                                        return False  # 快速退出，节省100+秒
+                                else:
+                                    print("[captcha] ✅ JS press-hold 已通过验证（aria-disabled 解除）", flush=True)
                                 break
                         except Exception:
                             pass
@@ -1186,8 +1227,43 @@ class PatchrightController(BaseController):
 
             if not _second_click_done:
                 print("[captcha] ⚠ 可访问性挑战按钮未找到，跳过", flush=True)
-            # ── 点击后等待音频挑战界面加载（8s）────────────────────────────
-            page.wait_for_timeout(8000)
+            # ── 按住后轮询等待音频加载（最多20s，每2s检查一次网络拦截URL）──
+            print("[captcha] 轮询等待音频加载（最多20s）…", flush=True)
+            _poll_audio_start = time.time()
+            while time.time() - _poll_audio_start < 20:
+                _net_now = getattr(self, '_net_audio_urls', [])
+                if _net_now:
+                    print(f"[captcha] ✅ 网络拦截到音频URL (等待{time.time()-_poll_audio_start:.1f}s): {_net_now[0][:80]}", flush=True)
+                    break
+                # 检查 fetching-volume 是否消失（意味着音频已加载）
+                _fetch_done = False
+                for _pf2 in page.frames:
+                    try:
+                        _fv = _pf2.evaluate("() => !document.querySelector('.fetching-volume') && document.querySelector('audio')")
+                        if _fv:
+                            _fetch_done = True
+                            break
+                    except Exception:
+                        pass
+                if _fetch_done:
+                    print(f"[captcha] ✅ fetching-volume 消失，音频元素已出现（等待{time.time()-_poll_audio_start:.1f}s）", flush=True)
+                    break
+                page.wait_for_timeout(2000)
+            else:
+                print("[captcha] ⚠ 20s内音频未加载完成（代理延迟或挑战仍在fetching）", flush=True)
+
+            # 额外缓冲：若 fetching-volume 仍在则再等 5s
+            _fv_still = False
+            for _fvf in page.frames:
+                try:
+                    _fv_still = _fvf.evaluate("() => !!document.querySelector('.fetching-volume')")
+                    if _fv_still:
+                        break
+                except Exception:
+                    pass
+            if _fv_still:
+                print("[captcha] ⚠ fetching-volume 仍在加载，再等5s…", flush=True)
+                page.wait_for_timeout(5000)
 
             # ── 截图 + 深度诊断（hsprotect frames 完整 HTML）────────────────
             try:
@@ -1316,26 +1392,43 @@ class PatchrightController(BaseController):
                 try:
                     info = fr.evaluate("""
                         () => {
-                            // 音频元素（src 直接可读）
-                            const audio = document.querySelector('audio[src], audio source, [class*="audio"] audio');
-                            // PX 下载链接（href=音频文件）
-                            const aLinks = Array.from(document.querySelectorAll('a[href]')).filter(a =>
-                                a.href && (a.href.includes('.mp3') || a.href.includes('.wav') ||
-                                           a.href.includes('.ogg') || a.href.includes('audio') ||
-                                           a.href.includes('sound') || a.href.includes('speak')));
-                            // 输入框
+                            // FIX: use querySelector('audio') and read .src property (not attribute)
+                            const audio = document.querySelector('audio');
+                            let audioSrc = '';
+                            if (audio) {
+                                audioSrc = audio.src || '';
+                                if (!audioSrc) {
+                                    const srcEl = audio.querySelector('source');
+                                    if (srcEl) audioSrc = srcEl.src || srcEl.getAttribute('src') || '';
+                                }
+                            }
+                            if (!audioSrc) {
+                                const aLinks = Array.from(document.querySelectorAll('a[href]')).filter(a =>
+                                    a.href && (a.href.includes('.mp3') || a.href.includes('.wav') ||
+                                               a.href.includes('.ogg') || a.href.includes('audio') ||
+                                               a.href.includes('sound') || a.href.includes('speak')));
+                                if (aLinks.length) audioSrc = aLinks[0].href;
+                            }
+                            // Performance API fallback: find audio URLs loaded by the browser
+                            let perfAudioUrl = '';
+                            try {
+                                const entries = performance.getEntriesByType('resource');
+                                const ae = entries.find(e =>
+                                    e.initiatorType !== 'beacon' && (
+                                    e.name.includes('.mp3') || e.name.includes('.wav') ||
+                                    e.name.includes('.ogg') || e.name.includes('/audio/') ||
+                                    e.name.includes('audio-challenge') || e.name.includes('funcaptcha') ||
+                                    (e.name.includes('hsprotect.net') && e.name.includes('audio'))));
+                                if (ae) perfAudioUrl = ae.name;
+                            } catch(e) {}
                             const input = document.querySelector('input[type="text"], input[type="tel"], input[placeholder], textarea');
-                            // 播放按钮（可能需要点击触发音频）
                             const playBtn = document.querySelector(
                                 '[class*="play"],[aria-label*="play"],[aria-label*="Play"],' +
                                 'a[role="button"],button[class*="audio"],button[class*="sound"],' +
                                 '[data-cy*="audio"],[id*="audio"],[id*="sound"]');
-                            const audioSrc = audio
-                                ? (audio.src || (audio.querySelector && audio.querySelector('source')
-                                     ? audio.querySelector('source').src : ''))
-                                : (aLinks.length ? aLinks[0].href : '');
                             return {
-                                audioSrc: audioSrc,
+                                audioSrc: audioSrc || perfAudioUrl,
+                                perfAudioUrl: perfAudioUrl,
                                 hasInput: !!input,
                                 inputPlaceholder: input ? input.placeholder : '',
                                 hasPlayBtn: !!playBtn,
@@ -1354,10 +1447,24 @@ class PatchrightController(BaseController):
                         input_frame = fr
                     # Bug3修复: bodyLen<1500的frame是无障碍轮椅图标(约652字节)，非音频播放器
                     _btn_body_len = info.get('bodyLen', 0) if hasattr(info, 'get') else 0
-                    if info.get('hasPlayBtn') and not audio_url and _btn_body_len > 1500:
+                    # 额外过滤：aria-label="可访问性挑战"的按钮是轮椅图标，不是音频播放器
+                    _is_a11y_only = False
+                    try:
+                        _a11y_check = fr.evaluate("""
+                            () => {
+                                const btn = document.querySelector('[aria-label="可访问性挑战"]');
+                                const hasAudio = document.querySelector('[aria-label*="play"],[aria-label*="Play"],[class*="play"],[class*="audio"]');
+                                return { isA11yOnly: !!btn && !hasAudio };
+                            }
+                        """)
+                        _is_a11y_only = _a11y_check.get('isA11yOnly', False)
+                    except Exception:
+                        pass
+                    if info.get('hasPlayBtn') and not audio_url and _btn_body_len > 1500 and not _is_a11y_only:
                         play_btn_frames.append((fr, info.get('playBtnId', '')))
-                    elif info.get('hasPlayBtn') and _btn_body_len <= 1500:
-                        print(f"[captcha] 跳过假阳性playBtn frame (bodyLen={_btn_body_len}<1500, url={fr.url[:40]})", flush=True)
+                    elif info.get('hasPlayBtn') and (_btn_body_len <= 1500 or _is_a11y_only):
+                        reason = f"bodyLen={_btn_body_len}<1500" if _btn_body_len <= 1500 else "是可访问性挑战按钮(非音频)"
+                        print(f"[captcha] 跳过假阳性playBtn frame ({reason}, url={fr.url[:40]})", flush=True)
                 except Exception:
                     pass
 
@@ -1378,10 +1485,16 @@ class PatchrightController(BaseController):
                         _pf.evaluate("(document.querySelector('a[role=\"button\"],button') || {}).click && document.querySelector('a[role=\"button\"],button').click()")
                     except Exception:
                         pass
-            page.wait_for_timeout(5000)  # 等音频加载
-            print("[captcha] 点击播放按钮后重新扫描…", flush=True)
-            audio_url = None; audio_frame = None; input_frame = None
-            _scan_frames_for_audio(page.frames)
+            page.wait_for_timeout(8000)  # 等音频加载（增加到8s）
+            # FIX: check _net_audio_urls first - play click triggers audio XHR
+            _fresh_net = getattr(self, '_net_audio_urls', [])
+            if _fresh_net:
+                print(f"[captcha] play后网络拦截到音频URL: {_fresh_net[0][:100]}", flush=True)
+                audio_url = _fresh_net[0]
+            else:
+                print("[captcha] 点击播放按钮后重新扫描…", flush=True)
+                audio_url = None; audio_frame = None; input_frame = None
+                _scan_frames_for_audio(page.frames)
 
         if not audio_url:
             print("[captcha] ⚠ 未找到音频元素", flush=True)
@@ -1529,7 +1642,8 @@ class PlaywrightController(BaseController):
         if ok:
             return True
         print("[captcha] Enter挑战失败，尝试打码服务…", flush=True)
-        return self._solve_with_service(page, blob_container or [])
+        # [已禁用] return self._solve_with_service(page, blob_container or [])
+        return False  # 付费打码服务已禁用
 
     def _try_enter_challenge(self, page) -> bool:
         """原版 Enter键 + hsprotect.net 流量监听逻辑"""
@@ -1919,8 +2033,8 @@ def main():
     parser.add_argument("--retries",         type=int,   default=MAX_CAPTCHA_RETRIES)
     parser.add_argument("--delay",           type=int,   default=5,            help="每次注册间隔秒数")
     parser.add_argument("--output",          type=str,   default="",           help="输出文件")
-    parser.add_argument("--captcha-service", type=str,   default="",           help="打码服务: 2captcha | capmonster")
-    parser.add_argument("--captcha-key",     type=str,   default="",           help="打码服务 API Key")
+    # [已禁用] parser.add_argument("--captcha-service", type=str,   default="",           help="打码服务: 2captcha | capmonster")
+    # [已禁用] parser.add_argument("--captcha-key",     type=str,   default="",           help="打码服务 API Key")
     parser.add_argument("--proxy-mode",      type=str,   default="",           help="cf = 从 CF IP 池自动分配代理")
     parser.add_argument("--cf-port",         type=int,   default=443,          help="CF 代理端口（默认443）")
     args = parser.parse_args()
@@ -1930,14 +2044,14 @@ def main():
 
     # 构建打码服务 solver（可选）
     solver = None
-    captcha_service = args.captcha_service or ""
-    captcha_key     = args.captcha_key     or ""
-    if captcha_service and captcha_key:
-        import sys as _sys, os as _os
-        _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
-        from captcha_solver import build_solver
-        solver = build_solver(captcha_service, captcha_key)
-        print(f"[captcha] 打码服务已启用: {captcha_service}", flush=True)
+    captcha_service = ""
+    captcha_key     = ""
+    # [已禁用] if captcha_service and captcha_key:
+    #     import sys as _sys, os as _os
+    #     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    #     from captcha_solver import build_solver
+    # [已禁用] solver = build_solver(captcha_service, captcha_key)
+    # [已禁用] print(f"[captcha] 打码服务已启用: {captcha_service}", flush=True)
 
     # 解析代理列表（--proxies 优先于 --proxy）
     proxy_list = []

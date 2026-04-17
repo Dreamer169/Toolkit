@@ -179,7 +179,8 @@ export default function FullWorkflow() {
           count: submitCount, proxy, engine, headless: headless ? "true" : "false",
           wait, retries: 2, delay: 0,
           autoProxy: !proxy && autoProxy,
-          // proxyMode 不传 "cf" — CF IP池是独立功能，autoProxy 只走 DB 共享 socks5 代理池
+          proxyMode: !proxy && autoProxy ? "cf" : "",
+          cfPort: 443,
         }),
       });
       const d = await r.json();
@@ -511,7 +512,7 @@ export default function FullWorkflow() {
             </div>
             <button onClick={startRegistration} className={`flex-1 py-3 rounded-lg text-white font-semibold transition-colors ${(proxy || autoProxy) ? "bg-blue-700 hover:bg-blue-600" : "bg-blue-900/60 hover:bg-blue-800/60 border border-blue-700/50"}`}>
               🚀 启动注册{Number(count) > 1 ? `（顺序 ×${count}）` : ""}
-              {!proxy && autoProxy ? "（代理池自动选取）" : !proxy ? "（无代理）" : ""}
+              {!proxy && autoProxy ? "（CF+xray代理池）" : !proxy ? "（无代理）" : ""}
             </button>
             <button onClick={prepare} className="px-4 py-3 bg-[#21262d] border border-[#30363d] rounded-lg text-gray-400 hover:text-white text-sm">
               重新生成

@@ -46,7 +46,7 @@ export default function OutlookManager() {
 
   // CF 代理池
   type CfPoolStatus = { available: number; used_total: number; pool: {ip:string;latency:number}[] };
-  const [proxyMode,   setProxyMode]   = useState<"manual"|"cf">("manual");
+  const [proxyMode,   setProxyMode]   = useState<"manual"|"cf">("cf");
   const [cfPool,      setCfPool]      = useState<CfPoolStatus|null>(null);
   const [cfPoolBusy,  setCfPoolBusy]  = useState(false);
 
@@ -510,7 +510,7 @@ export default function OutlookManager() {
                     onChange={e => setRegProxy(e.target.value)}
                     disabled={regBusy}
                     rows={regProxy.split('\n').filter(Boolean).length > 1 ? Math.min(5, regProxy.split('\n').length + 1) : 2}
-                    placeholder={`socks5://user:pass@pool-us.quarkip.io:7777\nsocks5://user:pass@pool-us2.quarkip.io:7777`}
+                    placeholder={`socks5://user:pass@host:port\nhttp://user:pass@host:port`}
                     className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-xs font-mono text-gray-300 focus:outline-none focus:border-blue-500 disabled:opacity-50 placeholder-gray-600 resize-none"
                   />
                   {regProxy.split('\n').filter(l => l.trim()).length > 1 && (

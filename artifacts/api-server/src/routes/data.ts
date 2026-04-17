@@ -428,7 +428,7 @@ router.get("/data/proxies", async (req, res) => {
 router.get("/data/proxies/pick", async (req, res) => {
   try {
     const row = await queryOne<{ id: number; formatted: string }>(
-      "SELECT id, formatted FROM proxies WHERE status != 'banned' ORDER BY used_count ASC, RANDOM() LIMIT 1"
+      "SELECT id, formatted FROM proxies WHERE status != 'banned' AND formatted NOT ILIKE '%quarkip%' AND formatted NOT ILIKE '%pool-us%' ORDER BY used_count ASC, RANDOM() LIMIT 1"
     );
     if (!row) { res.json({ success: false, error: "代理池为空，请先导入代理" }); return; }
     await execute(

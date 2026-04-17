@@ -108,9 +108,10 @@ Critical implementation details:
 4. Supports up to 5 concurrent registrations
 
 ### Proxy pool
-- 100 quarkip residential US proxies (sessid 177593745410000–177593745410099)
-- `socks5_relay.py` creates a local unauthenticated SOCKS5 relay (Chromium can't use authenticated SOCKS5 directly)
-- Each registration gets a fresh relay on an ephemeral port
+- Outlook registration no longer uses the old DB/quarkip proxy pool by default.
+- Default automatic proxy mode is CF IP pool + per-account xray relay.
+- Manual proxy input is still supported for known-good proxies.
+- `socks5_relay.py` creates a local unauthenticated SOCKS5 relay only when a manual authenticated SOCKS5 proxy is provided.
 
 ### Key files
 - `artifacts/api-server/outlook_register.py` — Outlook registration (patchright + CAPTCHA bypass)
