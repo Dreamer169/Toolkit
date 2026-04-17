@@ -439,10 +439,12 @@ function propagateFailureToSiblings(failedNode: GatewayNode) {
 
 function nodeMatchesRequestedModel(node: GatewayNode, model: string) {
   if (!model) return true;
-  if (node.model === model) return true;
-  if (node.type === "reseek-openai" && OPENAI_MODELS.includes(model)) return true;
-  if (node.type === "reseek-anthropic" && ANTHROPIC_MODELS.includes(model)) return true;
-  if (node.type === "reseek-gemini" && GEMINI_MODELS.includes(model)) return true;
+  // B16 Fix: strip provider prefix e.g. "anthropic/claude-sonnet-4-6" -> "claude-sonnet-4-6"
+  const bare = model.includes("/") ? model.split("/").pop()! : model;
+  if (node.model === model || node.model === bare) return true;
+  if (node.type === "reseek-openai" && (OPENAI_MODELS.includes(model) || OPENAI_MODELS.includes(bare))) return true;
+  if (node.type === "reseek-anthropic" && (ANTHROPIC_MODELS.includes(model) || ANTHROPIC_MODELS.includes(bare))) return true;
+  if (node.type === "reseek-gemini" && (GEMINI_MODELS.includes(model) || GEMINI_MODELS.includes(bare))) return true;
   return node.type === "remote-sub2api" || node.type === "friend-openai";
 }
 
@@ -737,10 +739,13 @@ async function streamNode(node: GatewayNode, req: Request, res: Response, body: 
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("x-gateway-node", node.id);
-  res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] })}\n\n`);
+  const sseId = `chatcmpl-${Date.now()}`;
+  const sseModel = typeof body.model === "string" ? body.model : node.model;
+  const sseCreated = Math.floor(Date.now() / 1000);
+  res.write(`data: ${JSON.stringify({ id: sseId, object: "chat.completion.chunk", created: sseCreated, model: sseModel, choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] })}\n\n`);
   if (content)
-    res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`);
-  res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`);
+    res.write(`data: ${JSON.stringify({ id: sseId, object: "chat.completion.chunk", created: sseCreated, model: sseModel, choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`);
+  res.write(`data: ${JSON.stringify({ id: sseId, object: "chat.completion.chunk", created: sseCreated, model: sseModel, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`);
   res.write("data: [DONE]\n\n");
   res.end();
   return true;
@@ -1059,6 +1064,8 @@ router.post("/nodes/batch-probe", async (req, res) => {
   const rows = results.map((r) => r.status === "fulfilled" ? r.value : { url: "", ok: false, error: String((r as PromiseRejectedResult).reason), registered: false });
   const succeeded = rows.filter((r) => r.ok).length;
   const registered = rows.filter((r) => r.registered).length;
+  // B16 Fix: persist newly registered nodes so they survive server restarts
+  if (registered > 0) savePersistedNodes(runtimeNodes);
   res.json({ success: succeeded > 0, summary: { total: rows.length, succeeded, failed: rows.length - succeeded, registered }, rows, nodes: allNodes().map(nodeSnapshot) });
 });
 
@@ -1343,9 +1350,16 @@ router.post(["/relay/:nodeId", "/relay"], async (req, res) => {
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 60_000);
+    // B16 Fix: forward original request Authorization header unless caller overrides it
+    const reqAuth = req.header("authorization");
+    const relayHeaders: Record<string, string> = { "Content-Type": "application/json" };
+    if (reqAuth && !extraHeaders["Authorization"] && !extraHeaders["authorization"]) {
+      relayHeaders["Authorization"] = reqAuth;
+    }
+    Object.assign(relayHeaders, extraHeaders);
     const r = await fetch(url, {
       method: method.toUpperCase(),
-      headers: { "Content-Type": "application/json", ...extraHeaders },
+      headers: relayHeaders,
       ...(relayBody ? { body: JSON.stringify(relayBody) } : {}),
       signal: ctrl.signal,
     });
