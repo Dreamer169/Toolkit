@@ -187,6 +187,38 @@ async function pushToSub2Api(nodeName: string, openaiBaseUrl: string, openaiApiK
   } catch { /* fire-and-forget */ }
 }
 
+// ═══ 后台健康探测循环 ═══════════════════════════════════════════════════════════
+// 每 5 分钟主动探测所有 friend-openai 节点，自动标记 idle/down 节点
+// 避免长期持有无效的 ready 状态（Replit 工作区停止后会返回 HTML 空闲页面）
+
+async function backgroundProbeOnce(): Promise<void> {
+  const targets = allNodes().filter(
+    (n) => n.type === "friend-openai" && n.enabled
+  );
+  for (const node of targets) {
+    const started = Date.now();
+    const result = await probeNodeUrl(node.baseUrl, node.apiKey, 10_000);
+    if (result.ok) {
+      // 探测成功：如果之前因网络故障被标为 down，现在恢复
+      if (node.downUntil > 0 && !node.creditExhaustedAt) {
+        node.downUntil = 0;
+        node.lastError = undefined;
+      }
+      node.lastLatencyMs = result.latencyMs;
+    } else {
+      // 探测失败：按指数退避更新 downUntil
+      recordFailure(node, undefined, result.error || "probe-fail", started);
+    }
+  }
+}
+
+// 延迟 30s 后首次探测（给节点注册留时间），之后每 5 分钟一次
+setTimeout(() => {
+  void backgroundProbeOnce();
+  setInterval(() => { void backgroundProbeOnce(); }, 5 * 60 * 1000);
+}, 30_000);
+
+
 // ═══ 持久化存储 ══════════════════════════════════════════════════════════════
 // 运行时动态注册的节点写到 JSON 文件，服务重启后自动恢复
 const DATA_DIR = (process.env["DATA_DIR"] || join(process.cwd(), "data")).replace(/\/$/, "");
@@ -466,11 +498,17 @@ function recordFailure(node: GatewayNode, status: number | undefined, error: str
     // 节点过载/限流/不可用：NODE_DOWN_MS 冷却（默认 60s）
     node.downUntil = Date.now() + NODE_DOWN_MS;
   } else if (
-    /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|network.*error|fetch.*failed|aborted/i.test(error)
-    || status === undefined
+    /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|network.*error|fetch.*failed|aborted|HTML.*工作区/i.test(error)
+    || status === undefined || status === 502
   ) {
-    // 网络中断/节点宕机：NODE_DOWN_MS 冷却（之前没退避，会无限重试）
-    node.downUntil = Date.now() + NODE_DOWN_MS;
+    // B20: 指数退避：连续失败越多，冷却越长（1min→5min→30min→2h→次日零点）
+    const consecutiveFails = node.failures;
+    const backoff = consecutiveFails <= 1 ? NODE_DOWN_MS
+      : consecutiveFails <= 3 ? NODE_DOWN_MS * 5
+      : consecutiveFails <= 6 ? NODE_DOWN_MS * 30
+      : consecutiveFails <= 12 ? NODE_DOWN_MS * 120
+      : msUntilUtcMidnight();
+    node.downUntil = Date.now() + backoff;
   }
 }
 
@@ -626,7 +664,7 @@ async function fetchTextWithTimeout(url: string, init: RequestInit, timeoutMs = 
 async function callOpenAiCompatibleNode(node: GatewayNode, req: Request, body: ChatBody) {
   const requestBody = openAiCompatibleBody(body, node);
   const authorization = node.apiKey ? `Bearer ${node.apiKey}` : req.header("authorization");
-  return await fetchTextWithTimeout(`${node.baseUrl}/v1/chat/completions`, {
+  const result = await fetchTextWithTimeout(`${node.baseUrl}/v1/chat/completions`, {
     method: "POST",
     headers: {
       ...(authorization ? { Authorization: authorization } : {}),
@@ -634,6 +672,15 @@ async function callOpenAiCompatibleNode(node: GatewayNode, req: Request, body: C
     },
     body: JSON.stringify(requestBody),
   });
+  // B21: 工作区停止时返回 200+HTML，需检测并伪造 502
+  if (result.response.ok) {
+    const ct = result.response.headers.get("content-type") || "";
+    if (ct.includes("text/html")) {
+      const fakeResp = new Response("上游返回 HTML（工作区已停止）", { status: 502 });
+      return { response: fakeResp, text: "上游返回 HTML（工作区已停止）" };
+    }
+  }
+  return result;
 }
 
 async function callOpenAiResponsesNode(node: GatewayNode, body: ChatBody) {
@@ -774,6 +821,13 @@ async function streamNode(node: GatewayNode, req: Request, res: Response, body: 
         clearTimeout(streamTimeout);
         return false;
       }
+      // B18: 若上游返回 HTML（Replit idle）而非 SSE/JSON，视为失败
+      const streamCT = response.headers.get("content-type") || "";
+      if (streamCT.includes("text/html")) {
+        clearTimeout(streamTimeout);
+        recordFailure(node, 200, "上游返回 HTML（工作区可能已停止）", started);
+        return false;
+      }
       recordSuccess(node, response.status, started);
       res.status(200);
       res.setHeader("Content-Type", response.headers.get("content-type") || "text/event-stream");
@@ -829,7 +883,11 @@ async function probeNodeUrl(rawUrl: string, apiKey?: string, timeoutMs = 10_000)
       const res = await fetch(`${baseUrl}${path}`, { headers, signal: ctrl.signal });
       clearTimeout(timer);
       if (res.ok) {
-        const data = await res.json().catch(() => ({})) as { data?: Array<{ id: string }>; success?: boolean };
+        // B17: 验证响应是真实 JSON（Replit idle 页面返回 200+HTML，必须排除）
+        const ct = res.headers.get("content-type") || "";
+        if (!ct.includes("json") && !ct.includes("text/plain")) continue; // HTML → 跳过
+        const data = await res.json().catch(() => null) as { data?: Array<{ id: string }>; success?: boolean } | null;
+        if (data === null) continue; // JSON 解析失败 → 跳过
         const models = Array.isArray(data.data) ? data.data.map((m) => m.id).slice(0, 5) : [];
         return { ok: true, latencyMs: Date.now() - started, models };
       }
