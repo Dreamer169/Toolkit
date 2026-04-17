@@ -245,7 +245,7 @@ class BaseController:
 
         # ── Step 1: 打开注册页，等待同意按钮 ──────────────────────────────
         try:
-            page.goto(REGISTER_URL, timeout=20000, wait_until="domcontentloaded")
+            page.goto(REGISTER_URL, timeout=35000, wait_until="domcontentloaded")
             page.get_by_text("同意并继续").wait_for(timeout=30000)
             start_time = time.time()
             page.wait_for_timeout(0.1 * self.wait_time)
@@ -1262,12 +1262,18 @@ class PatchrightController(BaseController):
 
             # ── 兜底：检查页面是否已通过 ─────────────────────────────────────
             page.wait_for_timeout(3000)
-            if page.get_by_text("取消").count() > 0:
-                print("[captcha] ✅ 出现取消按钮，认为已通过", flush=True)
-                return True
-            if (page.get_by_text("一些异常活动").count()
-                    or page.get_by_text("此站点正在维护，暂时无法使用，请稍后重试。").count()):
-                return False
+            try:
+                if page.get_by_text("取消").count() > 0:
+                    print("[captcha] ✅ 出现取消按钮，认为已通过", flush=True)
+                    return True
+                if (page.get_by_text("一些异常活动").count()
+                        or page.get_by_text("此站点正在维护，暂时无法使用，请稍后重试。").count()):
+                    return False
+            except Exception as nav_err:
+                if "context was destroyed" in str(nav_err).lower() or "navigation" in str(nav_err).lower():
+                    print("[captcha] ✅ 页面已导航（上下文销毁），认为 CAPTCHA 通过", flush=True)
+                    return True
+                raise
             try:
                 page.wait_for_selector('iframe[title="验证质询"]', timeout=2000)
                 print("[captcha] ❌ CAPTCHA 仍然存在", flush=True)
