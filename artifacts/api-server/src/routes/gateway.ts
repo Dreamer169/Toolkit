@@ -67,6 +67,10 @@ const router = Router();
 const REMOTE_SUB2API_URL = (process.env["REMOTE_GATEWAY_BASE_URL"] || "").replace(/\/$/, "");
 const SUB2API_ENABLED = REMOTE_SUB2API_URL.length > 0 && REMOTE_SUB2API_URL !== "disabled";
 const SUB2API_API_KEY = process.env["SUB2API_API_KEY"] || process.env["SUB2API_ADMIN_KEY"] || "";
+// sub2api 管理员凭证——用于把新 Replit 子节点的 integration 推入 sub2api 账号池
+const SUB2API_ADMIN_BASE_URL = (process.env["SUB2API_ADMIN_BASE_URL"] || REMOTE_SUB2API_URL).replace(/\/$/, "");
+const SUB2API_ADMIN_EMAIL = process.env["SUB2API_ADMIN_EMAIL"] || "";
+const SUB2API_ADMIN_PASSWORD = process.env["SUB2API_ADMIN_PASSWORD"] || "";
 const OPENAI_BASE_URL = (process.env["AI_INTEGRATIONS_OPENAI_BASE_URL"] || "").replace(/\/$/, "");
 const OPENAI_API_KEY = process.env["AI_INTEGRATIONS_OPENAI_API_KEY"] || "";
 const ANTHROPIC_BASE_URL = (process.env["AI_INTEGRATIONS_ANTHROPIC_BASE_URL"] || "").replace(/\/$/, "");
@@ -121,6 +125,66 @@ function msUntilUtcMidnight(): number {
   midnight.setUTCDate(midnight.getUTCDate() + 1);
   midnight.setUTCHours(0, 0, 0, 0);
   return Math.max(60_000, midnight.getTime() - now);
+}
+
+// ═══ sub2api 账号自动同步 ═══════════════════════════════════════════════════════
+// 子节点携带 Replit AI integration 凭证自注册时，把该凭证推入 sub2api 账号池
+
+let _sub2apiJwt: string | null = null;
+let _sub2apiJwtExp = 0;
+
+async function getOrRefreshSub2ApiToken(): Promise<string | null> {
+  if (!SUB2API_ADMIN_EMAIL || !SUB2API_ADMIN_PASSWORD || !SUB2API_ADMIN_BASE_URL) return null;
+  if (_sub2apiJwt && Date.now() < _sub2apiJwtExp - 600_000) return _sub2apiJwt;
+  try {
+    const r = await fetch(`${SUB2API_ADMIN_BASE_URL}/api/v1/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: SUB2API_ADMIN_EMAIL, password: SUB2API_ADMIN_PASSWORD }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!r.ok) return null;
+    const d = await r.json() as { data?: { access_token?: string; expires_in?: number } };
+    const token = d.data?.access_token;
+    if (!token) return null;
+    _sub2apiJwt = token;
+    _sub2apiJwtExp = Date.now() + (d.data?.expires_in ?? 86400) * 1000;
+    return token;
+  } catch { return null; }
+}
+
+// 幂等地把 Replit AI integration 凭证注册为 sub2api openai/apikey 账号
+async function pushToSub2Api(nodeName: string, openaiBaseUrl: string, openaiApiKey: string): Promise<void> {
+  if (!openaiBaseUrl || !openaiApiKey) return;
+  const token = await getOrRefreshSub2ApiToken();
+  if (!token) return;
+  const base = SUB2API_ADMIN_BASE_URL;
+  const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+  try {
+    const list = await fetch(`${base}/api/v1/admin/accounts?page=1&page_size=200`, { headers, signal: AbortSignal.timeout(8000) });
+    if (list.ok) {
+      const ld = await list.json() as { data?: { items?: Array<{ credentials?: Record<string, unknown> }> } };
+      const already = (ld.data?.items ?? []).some(
+        (a) => (a.credentials?.["base_url"] as string | undefined) === openaiBaseUrl
+      );
+      if (already) return; // 同 base_url 已存在，幂等跳过
+    }
+  } catch { /* ignore */ }
+  try {
+    await fetch(`${base}/api/v1/admin/accounts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        name: `Replit-${nodeName}`,
+        platform: "openai",
+        type: "apikey",
+        credentials: { base_url: openaiBaseUrl, api_key: openaiApiKey },
+        concurrency: 5,
+        priority: 2,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch { /* fire-and-forget */ }
 }
 
 // ═══ 持久化存储 ══════════════════════════════════════════════════════════════
@@ -1260,8 +1324,9 @@ router.post("/nodes/:id/recover", (req, res) => {
 // 新 Replit 工作区启动后调用远端服务器的此接口自动加入节点池
 // POST /api/gateway/self-register  body: { gatewayUrl, name? }
 router.post("/self-register", async (req, res) => {
-  const { gatewayUrl, name } = req.body as {
-    gatewayUrl?: string; name?: string; execSecret?: string; // execSecret 保留字段但不再存为 apiKey
+  const { gatewayUrl, name, openaiBaseUrl, openaiApiKey } = req.body as {
+    gatewayUrl?: string; name?: string; execSecret?: string;
+    openaiBaseUrl?: string; openaiApiKey?: string;
   };
   if (!gatewayUrl || !gatewayUrl.startsWith("http")) {
     res.status(400).json({ ok: false, error: "gatewayUrl 必须是 http(s) URL" });
@@ -1283,6 +1348,7 @@ router.post("/self-register", async (req, res) => {
       existing.downUntil = 0;
     }
     existing.lastUsedAt = new Date().toISOString();
+    void pushToSub2Api(existing.name, openaiBaseUrl || "", openaiApiKey || "");
     res.json({ ok: true, action: "heartbeat", node: nodeSnapshot(existing) });
     return;
   }
@@ -1305,6 +1371,7 @@ router.post("/self-register", async (req, res) => {
   };
   runtimeNodes.push(node);
   savePersistedNodes(runtimeNodes);
+  void pushToSub2Api(node.name, openaiBaseUrl || "", openaiApiKey || "");
   res.json({ ok: true, action: "registered", nodeId: id, node: nodeSnapshot(node), latencyMs: probe.latencyMs });
 });
 

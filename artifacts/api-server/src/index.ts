@@ -76,6 +76,9 @@ async function doSelfRegister(attempt = 1, isHeartbeat = false): Promise<void> {
       body: JSON.stringify({
         gatewayUrl: SELF_GATEWAY_URL,
         name: SELF_REGISTER_NAME || undefined,
+        // 把本工作区 Replit AI integration 凭证上报，主节点自动推入 sub2api
+        openaiBaseUrl: process.env["AI_INTEGRATIONS_OPENAI_BASE_URL"] || undefined,
+        openaiApiKey: process.env["AI_INTEGRATIONS_OPENAI_API_KEY"] || undefined,
       }),
       signal: AbortSignal.timeout(12_000),
     });
