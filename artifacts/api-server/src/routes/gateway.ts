@@ -1401,6 +1401,10 @@ router.post("/self-register", async (req, res) => {
   const existing = allNodes().find((n) => n.baseUrl === baseUrl);
   if (existing) {
     if (name) existing.name = name;
+    // 更新存活时间：重置 downUntil（探测通过说明节点仍存活）
+    if (existing.downUntil > 0 && existing.downUntil <= Date.now() + 60_000) existing.downUntil = 0;
+    // 若节点来自 runtimeNodes（动态注册），持久化保存
+    if (runtimeNodes.includes(existing)) savePersistedNodes(runtimeNodes);
     const credentialPush = await pushSelfRegisterCredentialsToSub2Api(body, baseUrl, name);
     res.json({ ok: true, action: "already-registered", node: nodeSnapshot(existing), credentialPush });
     return;
@@ -1493,6 +1497,11 @@ router.post(["/relay/:nodeId", "/relay"], async (req, res) => {
     res.status(502).json({ ok: false, error: "中继失败", target: url, detail: String(e) });
   }
 });
+
+// ═══ 周期性持久化自动存盘（每 5 分钟）══════════════════════════════════════════
+setInterval(() => {
+  if (runtimeNodes.length > 0) savePersistedNodes(runtimeNodes);
+}, 5 * 60_000);
 
 // ═══ B21：后台周期探测 friend-openai / register 节点 ══════════════════════════
 // 每 5 分钟对所有 register/runtime source 的 friend-openai 节点做一次健康探测
