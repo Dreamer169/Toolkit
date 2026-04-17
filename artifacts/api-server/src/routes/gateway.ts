@@ -62,6 +62,7 @@ type GeminiResult = {
 
 const router = Router();
 const REMOTE_SUB2API_URL = (process.env["REMOTE_GATEWAY_BASE_URL"] || "http://45.205.27.69:9090").replace(/\/$/, "");
+const SUB2API_API_KEY = process.env["SUB2API_API_KEY"] || process.env["SUB2API_ADMIN_KEY"] || "";
 const OPENAI_BASE_URL = (process.env["AI_INTEGRATIONS_OPENAI_BASE_URL"] || "").replace(/\/$/, "");
 const OPENAI_API_KEY = process.env["AI_INTEGRATIONS_OPENAI_API_KEY"] || "";
 const ANTHROPIC_BASE_URL = (process.env["AI_INTEGRATIONS_ANTHROPIC_BASE_URL"] || "").replace(/\/$/, "");
@@ -200,6 +201,7 @@ function createBuiltInNodes(): GatewayNode[] {
       name: "45.205.27.69 Sub2API",
       type: "remote-sub2api",
       baseUrl: REMOTE_SUB2API_URL,
+      apiKey: SUB2API_API_KEY || undefined,
       model: "upstream",
       priority: 1,
       enabled: true,
