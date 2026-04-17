@@ -5,7 +5,7 @@ import { fileURLToPath } from "url";
 
 // ═══ 类型 ═══════════════════════════════════════════════════════════════════
 
-type NodeType = "remote-sub2api" | "local-gateway" | "reseek-ai" | "friend";
+type NodeType = "remote-sub2api" | "local-gateway" | "replit-gateway" | "reseek-ai" | "friend";
 
 type GatewayNode = {
   id: string;
@@ -58,6 +58,11 @@ const DATA_DIR = resolve(__dirname_local, "../../data");
 const NODES_FILE = resolve(DATA_DIR, "gateway-nodes.json");
 
 const LOCAL_GATEWAY_BASE_URL = (process.env["LOCAL_GATEWAY_BASE_URL"] || "").replace(/\/$/, "");
+const REPLIT_SUBNODES_RAW = process.env["REPLIT_SUBNODES"] || "";
+const REPLIT_SUBNODES: string[] = [
+  ...(LOCAL_GATEWAY_BASE_URL ? [LOCAL_GATEWAY_BASE_URL] : []),
+  ...REPLIT_SUBNODES_RAW.split(/[,|;]/).map((s: string) => s.trim().replace(/\/$/, "")).filter((s: string) => s.startsWith("http")),
+].filter((u: string, i: number, a: string[]) => u && a.indexOf(u) === i);
 const REMOTE_GATEWAY_BASE_URL = (process.env["REMOTE_GATEWAY_BASE_URL"] || "http://45.205.27.69:9090").replace(/\/$/, "");
 const RESEEK_AI_BASE_URL = (process.env["AI_INTEGRATIONS_OPENAI_BASE_URL"] || "").replace(/\/$/, "");
 const RESEEK_AI_API_KEY = process.env["AI_INTEGRATIONS_OPENAI_API_KEY"] || "";
@@ -125,18 +130,19 @@ const builtinNodes: GatewayNode[] = [
     successes: 0,
     failures: 0,
   },
-  {
-    id: "local-replit-gateway",
-    name: "Replit 本地兜底网关",
-    type: "local-gateway",
-    baseUrl: LOCAL_GATEWAY_BASE_URL,
+  // 动态 Replit 子节点（来自 LOCAL_GATEWAY_BASE_URL + REPLIT_SUBNODES）
+  ...REPLIT_SUBNODES.map((url, i) => ({
+    id: `replit-gw-${i + 1}`,
+    name: `Replit 子节点 #${i + 1}`,
+    type: "replit-gateway" as NodeType,
+    baseUrl: url,
     model: "gpt-5.2",
     priority: 2,
-    enabled: Boolean(LOCAL_GATEWAY_BASE_URL),
+    enabled: true,
     downUntil: 0,
     successes: 0,
     failures: 0,
-  },
+  })),
   ...Array.from({ length: RESEEK_NODE_COUNT }, (_, i) => ({
     id: `reseek-ai-${i + 1}`,
     name: `Reseek AI 子节点 ${i + 1}`,
@@ -236,14 +242,18 @@ async function fetchTextWithTimeout(url: string, init: RequestInit, timeoutMs = 
 
 function sanitizeForReseek(body: ChatBody, model: string) {
   const next: ChatBody = { ...body };
-  next.model = LOCAL_MODELS.includes(model) ? model : "gpt-5.2";
-  if (typeof next.max_tokens === "number" && typeof next.max_completion_tokens !== "number") {
+  next.model = LOCAL_MODELS.includes(model) ? model : gpt-5.2;
+  if (typeof next.max_tokens === number && typeof next.max_completion_tokens !== number) {
     next.max_completion_tokens = next.max_tokens;
   }
   delete next.max_tokens;
   if (/^gpt-5|^o\d|^o4-/i.test(String(next.model))) {
     delete next.temperature;
     delete next.top_p;
+    // 推理模型保证最低 200 token，防止推理吃掉 token 后正文为空
+    if (!next.max_completion_tokens || next.max_completion_tokens < 200) {
+      next.max_completion_tokens = 200;
+    }
   }
   return next;
 }
@@ -320,7 +330,7 @@ async function callNode(
   }
 
   // ── Local gateway（/v1/chat/completions）───────────────────
-  if (node.type === "local-gateway") {
+  if (node.type === "local-gateway" || node.type === "replit-gateway") {
     try {
       const result = await fetchTextWithTimeout(`${node.baseUrl}/v1/chat/completions`, {
         method: "POST",
@@ -363,7 +373,7 @@ async function callNode(
 }
 
 async function streamNode(node: GatewayNode, req: Request, res: Response, body: ChatBody): Promise<boolean> {
-  if (node.type === "reseek-ai" || node.type === "local-gateway") {
+  if (node.type === "reseek-ai" || node.type === "local-gateway" || node.type === "replit-gateway") {
     const result = await callNode(node, req, body);
     if (!result || !result.response.ok) return false;
     let text = "";
@@ -692,5 +702,76 @@ router.get("/v1/diagnose", async (_req, res) => {
 
   res.json({ success: true, timestamp: new Date().toISOString(), results });
 });
+
+// ═══ Replit 账号一键注册 ════════════════════════════════════════════════════
+// POST /api/gateway/v1/nodes/replit  { url, name? }
+// 探测 URL 是否为有效 Replit 网关，探测成功后以 friend 节点持久化
+router.post("/v1/nodes/replit", async (req, res) => {
+  const { url, name } = req.body as { url?: string; name?: string };
+  if (!url || !url.startsWith("http")) {
+    res.status(400).json({ success: false, error: "url 必填且须以 http 开头" });
+    return;
+  }
+  const base = url.replace(/\/$/, "");
+  // 探测健康检查
+  let probe: { ok: boolean; ws?: string; nodes?: number; error?: string } = { ok: false };
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 12_000);
+    const r = await fetch(`${base}/v1/info`, { signal: ctrl.signal });
+    clearTimeout(timer);
+    if (r.ok) {
+      const j = await r.json() as { workspace?: string; nodes_total?: number };
+      probe = { ok: true, ws: j.workspace, nodes: j.nodes_total };
+    } else {
+      // 回退到 /v1/health
+      const r2 = await fetch(`${base}/v1/health`, { signal: AbortSignal.timeout(8_000) });
+      probe = { ok: r2.ok };
+    }
+  } catch (e) {
+    probe = { ok: false, error: String(e).slice(0, 100) };
+  }
+  if (!probe.ok) {
+    res.status(502).json({ success: false, error: "Replit 网关探测失败", detail: probe.error });
+    return;
+  }
+  // 检查是否已存在相同 URL
+  const existing = nodes.find(n => n.baseUrl === base);
+  if (existing) {
+    existing.enabled = true;
+    existing.downUntil = 0;
+    res.json({ success: true, action: "updated", node: nodeSnapshot(existing), probe });
+    return;
+  }
+  // 以 friend 节点注册（持久化）
+  const id = `replit-acc-${Date.now().toString(36)}`;
+  const node = buildFriendNode({
+    id,
+    name: name || `Replit账号 (${probe.ws || id.slice(-6)})`,
+    baseUrl: base,
+    apiKey: "",
+    model: "gpt-5.2",
+    priority: 2,
+    enabled: true,
+  });
+  nodes.push(node);
+  savePersistentNodes(getFriendNodes());
+  res.json({ success: true, action: "registered", node: nodeSnapshot(node), probe });
+});
+
+// ═══ Replit 节点健康自动恢复（每 90s 探测一次 down 中的 Replit 节点）══════
+setInterval(async () => {
+  const now = Date.now();
+  const downReplit = nodes.filter(
+    n => (n.type === "replit-gateway" || (n.type === "friend" && n.baseUrl?.includes("replit.dev")))
+      && n.downUntil > 0 && n.downUntil < now + 300_000, // 只探测还在 down 或即将 cooldown 的
+  );
+  for (const n of downReplit) {
+    try {
+      const r = await fetch(`${n.baseUrl}/v1/health`, { signal: AbortSignal.timeout(8_000) });
+      if (r.ok) { n.downUntil = 0; console.log(`[gateway-recovery] ${n.id} 已恢复`); }
+    } catch { /* 仍然不可用 */ }
+  }
+}, 90_000);
 
 export default router;
