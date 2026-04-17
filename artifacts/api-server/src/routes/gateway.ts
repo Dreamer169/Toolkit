@@ -62,6 +62,7 @@ type GeminiResult = {
 
 const router = Router();
 const REMOTE_SUB2API_URL = (process.env["REMOTE_GATEWAY_BASE_URL"] || "http://45.205.27.69:9090").replace(/\/$/, "");
+const SUB2API_ENABLED = REMOTE_SUB2API_URL.length > 0 && REMOTE_SUB2API_URL !== "disabled";
 const SUB2API_API_KEY = process.env["SUB2API_API_KEY"] || process.env["SUB2API_ADMIN_KEY"] || "";
 const OPENAI_BASE_URL = (process.env["AI_INTEGRATIONS_OPENAI_BASE_URL"] || "").replace(/\/$/, "");
 const OPENAI_API_KEY = process.env["AI_INTEGRATIONS_OPENAI_API_KEY"] || "";
@@ -70,7 +71,7 @@ const ANTHROPIC_API_KEY = process.env["AI_INTEGRATIONS_ANTHROPIC_API_KEY"] || ""
 const GEMINI_BASE_URL = (process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"] || "").replace(/\/$/, "");
 const GEMINI_API_KEY = process.env["AI_INTEGRATIONS_GEMINI_API_KEY"] || "";
 const RESEEK_OPENAI_NODE_COUNT = Math.min(24, Math.max(1, Number(process.env["RESEEK_AI_NODE_COUNT"] || 6)));
-const NODE_DOWN_MS = Math.max(30_000, Number(process.env["GATEWAY_NODE_DOWN_MS"] || 180_000));
+const NODE_DOWN_MS = Math.max(30_000, Number(process.env["GATEWAY_NODE_DOWN_MS"] || 60_000));
 const OPENAI_MODELS = ["gpt-5.2", "gpt-5-mini", "gpt-5-nano", "o4-mini"];
 const OPENAI_REASONING_MODELS = ["o4-mini", "o3", "o3-mini", "o1", "o1-mini"]; // 只有这些支持 reasoning 参数
 const ANTHROPIC_MODELS = ["claude-sonnet-4-6", "claude-haiku-4-5"];
@@ -204,7 +205,7 @@ function createBuiltInNodes(): GatewayNode[] {
       apiKey: SUB2API_API_KEY || undefined,
       model: "upstream",
       priority: 1,
-      enabled: true,
+      enabled: SUB2API_ENABLED,
       downUntil: 0,
       successes: 0,
       failures: 0,
@@ -308,8 +309,10 @@ function recordFailure(node: GatewayNode, status: number | undefined, error: str
   if (isCreditExhausted(error) || status === 402) {
     node.downUntil = Date.now() + msUntilUtcMidnight();
     node.creditExhaustedAt = Date.now();
+  } else if (/no available.*account|ErrNoAvailableAccounts/i.test(error)) {
+    node.downUntil = Date.now() + 30_000;
   } else if (
-    /no available OpenAI accounts|temporarily unavailable|invalid_endpoint|rate limit|quota|overloaded/i.test(error)
+    /temporarily unavailable|invalid_endpoint|rate limit|quota|overloaded/i.test(error)
     || status === 503 || status === 429
   ) {
     node.downUntil = Date.now() + NODE_DOWN_MS;
