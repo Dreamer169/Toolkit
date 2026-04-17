@@ -3,6 +3,7 @@ CF IP 代理池
 - 从 Cloudflare 官方 IP 段随机抽取 IP
 - TCP 连通性测速 (port 443)
 - 池子维护：每批独占，用完换新批
+- 持久化：进程重启后从文件恢复已测速的有效 IP，无需重新测速
 """
 import random, socket, time, threading, json, os
 from ipaddress import ip_network
@@ -37,9 +38,33 @@ _used_history = []   # 已用过的 IP（本次会话内不重用）
 def _save_state():
     try:
         with open(POOL_STATE_FILE, 'w') as f:
-            json.dump({'available': _available, 'history_count': len(_used_history)}, f)
+            json.dump({
+                'available': _available,
+                'used_history': _used_history[-500:],  # 保留最近 500 条避免文件过大
+            }, f)
     except Exception:
         pass
+
+def _load_state():
+    """进程启动时从文件恢复已测速的有效 IP，避免每次重新测速"""
+    global _available, _used_history
+    try:
+        if not os.path.exists(POOL_STATE_FILE):
+            return
+        with open(POOL_STATE_FILE, 'r') as f:
+            data = json.load(f)
+        loaded_avail = data.get('available', [])
+        loaded_hist  = data.get('used_history', [])
+        # 只恢复 latency 字段合法的条目
+        valid = [x for x in loaded_avail if isinstance(x.get('ip'), str) and isinstance(x.get('latency'), (int, float))]
+        if valid:
+            _available = valid
+            _used_history = list(loaded_hist)
+    except Exception:
+        pass
+
+# ── 启动时加载持久化状态 ───────────────────────────────────────
+_load_state()
 
 def get_pool_status() -> dict:
     with _pool_lock:
@@ -160,4 +185,3 @@ def release_ip(job_id: str):
     """注册完成后释放（已用 IP 不放回池，由 history 记录）"""
     with _pool_lock:
         _in_use.pop(job_id, None)
-
