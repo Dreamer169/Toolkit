@@ -1619,10 +1619,8 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
         # 等待页面加载
         page.wait_for_timeout(3000)
 
-        # ── 检测并处理 OAuth 流程中出现的 CAPTCHA ──────────────────────────────
-        # 两类页面需要区分处理：
-        # 1. signup.live.com / login.live.com/oauth  → 真实重 CAPTCHA，需要 handler 后重导航
-        # 2. account.live.com/Consent               → 同意页上的轻 CAPTCHA，原地解决后点 Accept
+        # ── 统一 OAuth 页面处理循环 ──────────────────────────────────────────────
+        # 轮询检测页面状态，动态决策：同意页/重CAPTCHA页/其他，最多 7 轮 × ~8s
         _CONSENT_ACCEPT_SELS = [
             '[data-testid="appConsentPrimaryButton"]',
             'input[type="submit"][value*="Accept"]',
@@ -1636,7 +1634,6 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
         ]
 
         def _try_click_accept() -> bool:
-            """尝试点击 OAuth 同意按钮，成功返回 True。"""
             for _sel in _CONSENT_ACCEPT_SELS:
                 try:
                     btn = page.locator(_sel).first
@@ -1649,42 +1646,43 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
                     continue
             return False
 
-        _cur_url = page.url or ''
-        _on_consent = 'account.live.com/Consent' in _cur_url
+        for _poll_round in range(7):
+            _poll_url = page.url or ''
+            print(f'[oauth] 轮询 round={_poll_round+1} url={_poll_url[:80]}', flush=True)
 
-        if _on_consent:
-            # 同意页：CAPTCHA 轻量，原地解决，不重导航（重导航会重置验证状态）
-            print(f'[oauth] consent页面，等待PX验证自动通过并尝试点击Accept...', flush=True)
-            page.wait_for_timeout(5000)  # 给 PX 自动验证时间
-            for _consent_try in range(3):
+            # 已到达终止 URL
+            if ('nativeclient' in _poll_url or 'code=' in _poll_url or
+                    'error=' in _poll_url):
+                print(f'[oauth] ✅ 已到达授权终止页', flush=True)
+                break
+
+            # 同意页（account.live.com/Consent）：原地等待并尝试 Accept
+            if 'account.live.com/Consent' in _poll_url:
                 if _try_click_accept():
                     break
-                # Accept 按钮未出现：调用 CAPTCHA 处理器（原地，不重导航）
-                if captcha_handler and _consent_try < 2:
-                    print(f'[oauth] ⚠ Accept未出现，调用验证码处理器（第{_consent_try+1}次，原地）...', flush=True)
+                if captcha_handler:
+                    print(f'[oauth] ⚠ consent页Accept未出现，原地调用CAPTCHA处理器...', flush=True)
                     try:
                         captcha_handler(page)
-                        page.wait_for_timeout(3000)
+                        page.wait_for_timeout(2000)
                     except Exception as _ce:
                         print(f'[oauth] consent CAPTCHA处理异常: {_ce}', flush=True)
                 else:
                     page.wait_for_timeout(5000)
-        else:
-            # signup.live.com 等重 CAPTCHA 页：需要 handler 后重导航到 OAuth URL
-            for _oauth_captcha_attempt in range(2):
-                _cur_url2 = page.url or ''
-                _is_hard_captcha = ('signup.live.com' in _cur_url2 or
-                                    'login.live.com/oauth' in _cur_url2)
-                if not _is_hard_captcha or not captcha_handler:
-                    break
-                print(f'[oauth] ⚠ 检测到重CAPTCHA（{_cur_url2[:80]}），调用处理器... (第{_oauth_captcha_attempt+1}次)', flush=True)
-                try:
-                    captcha_handler(page)
-                    page.wait_for_timeout(4000)
-                except Exception as _ce:
-                    print(f'[oauth] CAPTCHA处理异常: {_ce}', flush=True)
+
+            # 重 CAPTCHA 页（signup.live.com 等）：handler 后重导航
+            elif ('signup.live.com' in _poll_url or
+                  'login.live.com/oauth' in _poll_url):
+                print(f'[oauth] ⚠ 重CAPTCHA页，调用处理器 (round={_poll_round+1})...', flush=True)
+                if captcha_handler:
+                    try:
+                        captcha_handler(page)
+                        page.wait_for_timeout(3000)
+                    except Exception as _ce:
+                        print(f'[oauth] CAPTCHA处理异常: {_ce}', flush=True)
                 _after_url = page.url or ''
-                if 'nativeclient' in _after_url or 'code=' in _after_url or 'error=' in _after_url:
+                if ('nativeclient' in _after_url or 'code=' in _after_url or
+                        'error=' in _after_url):
                     break
                 print(f'[oauth] 重新导航授权页...', flush=True)
                 try:
@@ -1692,10 +1690,11 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
                 except Exception:
                     pass
                 page.wait_for_timeout(3000)
-            # 非同意页面，最后尝试点击 Accept
-            _skip_ms_interrupts(page, label='post-goto-oauth')
-            page.wait_for_timeout(1000)
-            _try_click_accept()
+
+            # 其他页（login、interrupt、未知）：驱散中断后等待
+            else:
+                _skip_ms_interrupts(page, label=f'oauth-poll-{_poll_round}')
+                page.wait_for_timeout(5000)
         # ────────────────────────────────────────────────────────────────────────
 
         # 使用 wait_for_url 等待 nativeclient 重定向（最多30s）
