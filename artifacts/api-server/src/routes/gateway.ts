@@ -55,7 +55,7 @@ type GeminiResult = {
 // ═══ 配置 ═══════════════════════════════════════════════════════════════════
 
 const router = Router();
-const REMOTE_GATEWAY_BASE_URL = (process.env["REMOTE_GATEWAY_BASE_URL"] || "http://45.205.27.69:9090").replace(/\/$/, "");
+const REMOTE_SUB2API_URL = (process.env["REMOTE_GATEWAY_BASE_URL"] || "http://45.205.27.69:9090").replace(/\/$/, "");
 const OPENAI_BASE_URL = (process.env["AI_INTEGRATIONS_OPENAI_BASE_URL"] || "").replace(/\/$/, "");
 const OPENAI_API_KEY = process.env["AI_INTEGRATIONS_OPENAI_API_KEY"] || "";
 const ANTHROPIC_BASE_URL = (process.env["AI_INTEGRATIONS_ANTHROPIC_BASE_URL"] || "").replace(/\/$/, "");
@@ -65,6 +65,7 @@ const GEMINI_API_KEY = process.env["AI_INTEGRATIONS_GEMINI_API_KEY"] || "";
 const RESEEK_OPENAI_NODE_COUNT = Math.min(24, Math.max(1, Number(process.env["RESEEK_AI_NODE_COUNT"] || 6)));
 const NODE_DOWN_MS = Math.max(30_000, Number(process.env["GATEWAY_NODE_DOWN_MS"] || 180_000));
 const OPENAI_MODELS = ["gpt-5.2", "gpt-5-mini", "gpt-5-nano", "o4-mini"];
+const OPENAI_REASONING_MODELS = ["o4-mini", "o3", "o3-mini", "o1", "o1-mini"]; // 只有这些支持 reasoning 参数
 const ANTHROPIC_MODELS = ["claude-sonnet-4-6", "claude-haiku-4-5"];
 const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-3-flash-preview"];
 
@@ -78,7 +79,7 @@ function isCreditExhausted(text: string) {
   return CREDIT_PATTERNS.some((p) => p.test(text));
 }
 
-// 计算到下个 UTC 00:00 的剩余毫秒（至少 60s，防止边界情况）
+// 到下个 UTC 00:00 的剩余毫秒（额度冷却时长）
 function msUntilUtcMidnight(): number {
   const now = Date.now();
   const midnight = new Date(now);
@@ -94,9 +95,9 @@ function stableId(prefix: string, value: string) {
   return `${prefix}-${createHash("sha1").update(value).digest("hex").slice(0, 10)}`;
 }
 
-function parseFriendNodesFromEnv() {
+function parseFriendNodesFromEnv(): GatewayNode[] {
   const raw = process.env["GATEWAY_FRIEND_NODES"];
-  if (!raw) return [] as GatewayNode[];
+  if (!raw) return [];
   try {
     const parsed = JSON.parse(raw) as Array<{
       id?: string; name?: string; baseUrl?: string;
@@ -117,7 +118,7 @@ function parseFriendNodesFromEnv() {
       source: "env" as const,
     }));
   } catch {
-    return [] as GatewayNode[];
+    return [];
   }
 }
 
@@ -150,7 +151,7 @@ function createBuiltInNodes(): GatewayNode[] {
       id: "remote-sub2api",
       name: "45.205.27.69 Sub2API",
       type: "remote-sub2api",
-      baseUrl: REMOTE_GATEWAY_BASE_URL,
+      baseUrl: REMOTE_SUB2API_URL,
       model: "upstream",
       priority: 1,
       enabled: true,
@@ -254,10 +255,7 @@ function recordFailure(node: GatewayNode, status: number | undefined, error: str
   node.lastError = error.slice(0, 500);
   node.lastLatencyMs = Date.now() - started;
   node.lastUsedAt = new Date().toISOString();
-
   if (isCreditExhausted(error) || status === 402) {
-    // 额度耗尽：冷却到下个 UTC 00:00（而非固定 23h）
-    // 注意：到期后自动恢复参与调度，无需手动批量启用
     node.downUntil = Date.now() + msUntilUtcMidnight();
     node.creditExhaustedAt = Date.now();
   } else if (
@@ -404,19 +402,24 @@ async function callOpenAiCompatibleNode(node: GatewayNode, req: Request, body: C
 async function callOpenAiResponsesNode(node: GatewayNode, body: ChatBody) {
   const model = requestedModel(body, node, OPENAI_MODELS);
   const outputTokens = Math.max(512, maxTokens(body));
+  // BUG FIX: reasoning 参数仅对 o 系列推理模型有效（o4-mini, o3 等）
+  // gpt-5.x 传 reasoning 会返回 400，必须剔除
+  const isReasoningModel = OPENAI_REASONING_MODELS.some((m) => model === m || model.startsWith(m));
+  const payload: Record<string, unknown> = {
+    model,
+    input: responsesInput(body),
+    max_output_tokens: outputTokens,
+  };
+  if (isReasoningModel) {
+    payload["reasoning"] = { effort: "low" };
+  }
   const result = await fetchTextWithTimeout(`${node.baseUrl}/responses`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${node.apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      model,
-      input: responsesInput(body),
-      max_output_tokens: outputTokens,
-      reasoning: { effort: "minimal" },
-      text: { verbosity: "low" },
-    }),
+    body: JSON.stringify(payload),
   });
   if (!result.response.ok) return result;
   const parsed = JSON.parse(result.text || "{}") as ResponsesApiResult;
@@ -554,37 +557,30 @@ async function streamNode(node: GatewayNode, req: Request, res: Response, body: 
 
 // ═══ 节点探测工具 ════════════════════════════════════════════════════════════
 
-async function probeNodeUrl(rawUrl: string, apiKey?: string, timeoutMs = 10_000): Promise<{
-  ok: boolean; latencyMs: number; models?: string[]; error?: string;
-}> {
+async function probeNodeUrl(rawUrl: string, apiKey?: string, timeoutMs = 10_000) {
   const baseUrl = rawUrl.replace(/\/$/, "");
   const started = Date.now();
-  try {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-
-    // 先试 /health，再试 /v1/models
-    for (const path of ["/health", "/v1/models", "/nodes"]) {
-      try {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-        const res = await fetch(`${baseUrl}${path}`, { headers, signal: ctrl.signal });
-        clearTimeout(timer);
-        if (res.ok) {
-          const data = await res.json().catch(() => ({})) as { data?: Array<{ id: string }>; success?: boolean };
-          const models = Array.isArray(data.data) ? data.data.map((m) => m.id).slice(0, 5) : [];
-          return { ok: true, latencyMs: Date.now() - started, models };
-        }
-      } catch {}
-    }
-    return { ok: false, latencyMs: Date.now() - started, error: "所有探测路径均无响应" };
-  } catch (e) {
-    return { ok: false, latencyMs: Date.now() - started, error: String(e) };
+  for (const path of ["/health", "/v1/models", "/nodes", "/stats"]) {
+    try {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+      const res = await fetch(`${baseUrl}${path}`, { headers, signal: ctrl.signal });
+      clearTimeout(timer);
+      if (res.ok) {
+        const data = await res.json().catch(() => ({})) as { data?: Array<{ id: string }>; success?: boolean };
+        const models = Array.isArray(data.data) ? data.data.map((m) => m.id).slice(0, 5) : [];
+        return { ok: true, latencyMs: Date.now() - started, models };
+      }
+    } catch {}
   }
+  return { ok: false, latencyMs: Date.now() - started, error: "所有探测路径均无响应" };
 }
 
-// ═══ HTTP 路由 ════════════════════════════════════════════════════════════════
+// ═══ HTTP 路由 — 状态和管理 ═══════════════════════════════════════════════════
 
+// ── 健康/统计 ─────────────────────────────────────────────────────────────────
 router.get(["/health", "/v1/stats", "/stats", "/nodes"], (_req, res) => {
   const snapshots = allNodes().map(nodeSnapshot);
   const msLeft = msUntilUtcMidnight();
@@ -613,7 +609,149 @@ router.get(["/health", "/v1/stats", "/stats", "/nodes"], (_req, res) => {
   });
 });
 
-// ── 添加节点（单个或批量）────────────────────────────────────────────────────
+// ── 连通性诊断 ────────────────────────────────────────────────────────────────
+router.get("/diagnose", async (_req, res) => {
+  const results: Record<string, { ok: boolean; latencyMs: number; error?: string; detail?: string }> = {};
+
+  // 1. 远端 Sub2API（仅检查连通性，不需要账号）
+  {
+    const t = Date.now();
+    try {
+      const r = await fetch(`${REMOTE_SUB2API_URL}/api/v1/admin/dashboard/stats`, {
+        headers: { Authorization: "Bearer test" },
+        signal: AbortSignal.timeout(6000),
+      });
+      const text = await r.text();
+      // 401 说明服务可达但需要认证，视为连通
+      results["remote-sub2api"] = {
+        ok: r.status === 401 || r.ok,
+        latencyMs: Date.now() - t,
+        detail: `HTTP ${r.status}`,
+        ...(!r.ok && r.status !== 401 ? { error: text.slice(0, 100) } : {}),
+      };
+    } catch (e) {
+      results["remote-sub2api"] = { ok: false, latencyMs: Date.now() - t, error: String(e) };
+    }
+  }
+
+  // 2. Reseek OpenAI（用真实 /responses 调用，最低 token）
+  if (OPENAI_BASE_URL && OPENAI_API_KEY) {
+    const t = Date.now();
+    try {
+      const r = await fetch(`${OPENAI_BASE_URL}/responses`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "gpt-5-nano", input: "hi", max_output_tokens: 64 }),
+        signal: AbortSignal.timeout(15000),
+      });
+      const text = await r.text();
+      results["reseek-openai"] = {
+        ok: r.ok,
+        latencyMs: Date.now() - t,
+        detail: `HTTP ${r.status}`,
+        ...(!r.ok ? { error: text.slice(0, 150) } : {}),
+      };
+    } catch (e) {
+      results["reseek-openai"] = { ok: false, latencyMs: Date.now() - t, error: String(e) };
+    }
+  } else {
+    results["reseek-openai"] = { ok: false, latencyMs: 0, error: "集成未配置" };
+  }
+
+  // 3. Reseek Anthropic
+  if (ANTHROPIC_BASE_URL && ANTHROPIC_API_KEY) {
+    const t = Date.now();
+    try {
+      const r = await fetch(`${ANTHROPIC_BASE_URL}/messages`, {
+        method: "POST",
+        headers: { "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "claude-haiku-4-5", max_tokens: 5, messages: [{ role: "user", content: "hi" }] }),
+        signal: AbortSignal.timeout(15000),
+      });
+      const text = await r.text();
+      results["reseek-anthropic"] = {
+        ok: r.ok,
+        latencyMs: Date.now() - t,
+        detail: `HTTP ${r.status}`,
+        ...(!r.ok ? { error: text.slice(0, 150) } : {}),
+      };
+    } catch (e) {
+      results["reseek-anthropic"] = { ok: false, latencyMs: Date.now() - t, error: String(e) };
+    }
+  } else {
+    results["reseek-anthropic"] = { ok: false, latencyMs: 0, error: "集成未配置" };
+  }
+
+  // 4. Reseek Gemini
+  if (GEMINI_BASE_URL && GEMINI_API_KEY) {
+    const t = Date.now();
+    try {
+      const r = await fetch(`${GEMINI_BASE_URL}/models/gemini-2.5-flash:generateContent`, {
+        method: "POST",
+        headers: { "x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "hi" }] }], generationConfig: { maxOutputTokens: 5 } }),
+        signal: AbortSignal.timeout(15000),
+      });
+      const text = await r.text();
+      results["reseek-gemini"] = {
+        ok: r.ok,
+        latencyMs: Date.now() - t,
+        detail: `HTTP ${r.status}`,
+        ...(!r.ok ? { error: text.slice(0, 150) } : {}),
+      };
+    } catch (e) {
+      results["reseek-gemini"] = { ok: false, latencyMs: Date.now() - t, error: String(e) };
+    }
+  } else {
+    results["reseek-gemini"] = { ok: false, latencyMs: 0, error: "集成未配置" };
+  }
+
+  const allOk = Object.values(results).some((r) => r.ok);
+  res.json({ ok: allOk, timestamp: new Date().toISOString(), checks: results });
+});
+
+// ── Sub2API 管理接口透传 ──────────────────────────────────────────────────────
+// 前端以 /api/gateway 为 baseUrl，向 /api/gateway/api/v1/admin/* 等路径发请求
+// 这些路径在 Express 路由层收到时已去掉了 /api/gateway 前缀
+// 所以这里匹配 /api/v1/* 和 /api/accounts/* 转发到远端 Sub2API
+router.all(/^\/(api\/v1|api\/accounts)\//, async (req, res) => {
+  const targetUrl = `${REMOTE_SUB2API_URL}${req.path}`;
+  const queryStr = Object.keys(req.query).length
+    ? "?" + new URLSearchParams(req.query as Record<string, string>).toString()
+    : "";
+  const upstream = `${targetUrl}${queryStr}`;
+
+  try {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const auth = req.header("authorization") || req.header("x-api-key");
+    if (auth) {
+      headers["Authorization"] = auth.startsWith("Bearer ") ? auth : `Bearer ${auth}`;
+    }
+
+    const hasBody = ["POST", "PUT", "PATCH"].includes(req.method);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 30_000);
+
+    const upstream_res = await fetch(upstream, {
+      method: req.method,
+      headers,
+      ...(hasBody && req.body ? { body: JSON.stringify(req.body) } : {}),
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+
+    const text = await upstream_res.text();
+    res.status(upstream_res.status);
+    const ct = upstream_res.headers.get("content-type") || "application/json";
+    res.setHeader("content-type", ct);
+    res.setHeader("x-proxied-to", REMOTE_SUB2API_URL);
+    res.send(text);
+  } catch (e) {
+    res.status(502).json({ success: false, error: "远端 Sub2API 不可达", detail: String(e), target: REMOTE_SUB2API_URL });
+  }
+});
+
+// ── 节点管理 ─────────────────────────────────────────────────────────────────
 router.post("/nodes", (req, res) => {
   const body = req.body as {
     nodes?: Array<{ name?: string; baseUrl?: string; apiKey?: string; model?: string; priority?: number }>;
@@ -624,7 +762,7 @@ router.post("/nodes", (req, res) => {
   for (const item of incoming) {
     if (!item.baseUrl) continue;
     const baseUrl = String(item.baseUrl).replace(/\/$/, "");
-    if (allNodes().some((n) => n.baseUrl === baseUrl)) continue; // 去重
+    if (allNodes().some((n) => n.baseUrl === baseUrl)) continue;
     const id = stableId("friend", `${baseUrl}-${item.model || ""}-${runtimeNodes.length}`);
     const node: GatewayNode = {
       id,
@@ -646,7 +784,6 @@ router.post("/nodes", (req, res) => {
   res.json({ success: added.length > 0, added, nodes: allNodes().map(nodeSnapshot) });
 });
 
-// ── 删除节点 ─────────────────────────────────────────────────────────────────
 router.delete("/nodes/:id", (req, res) => {
   const index = runtimeNodes.findIndex((node) => node.id === req.params.id);
   if (index < 0) {
@@ -657,7 +794,6 @@ router.delete("/nodes/:id", (req, res) => {
   res.json({ success: true, removed, nodes: allNodes().map(nodeSnapshot) });
 });
 
-// ── 修改节点（启用/禁用/更新）────────────────────────────────────────────────
 router.patch("/nodes/:id", (req, res) => {
   const node = allNodes().find((n) => n.id === req.params.id);
   if (!node) {
@@ -669,7 +805,7 @@ router.patch("/nodes/:id", (req, res) => {
   };
   if (typeof enabled === "boolean") {
     node.enabled = enabled;
-    if (enabled) { node.downUntil = 0; node.creditExhaustedAt = undefined; } // 手动启用时清除冷却
+    if (enabled) { node.downUntil = 0; node.creditExhaustedAt = undefined; }
   }
   if (typeof priority === "number") node.priority = priority;
   if (apiKey !== undefined) node.apiKey = apiKey;
@@ -678,7 +814,7 @@ router.patch("/nodes/:id", (req, res) => {
   res.json({ success: true, node: nodeSnapshot(node) });
 });
 
-// ── 单节点探测（不注册）──────────────────────────────────────────────────────
+// ── 单节点探测 ────────────────────────────────────────────────────────────────
 router.post("/nodes/probe", async (req, res) => {
   const { baseUrl, apiKey } = req.body as { baseUrl?: string; apiKey?: string };
   if (!baseUrl) {
@@ -689,9 +825,7 @@ router.post("/nodes/probe", async (req, res) => {
   res.json({ success: result.ok, baseUrl, ...result });
 });
 
-// ── 批量探测 + 注册（一键接入多个 Replit 子节点）────────────────────────────
-// POST /api/gateway/nodes/batch-probe
-// Body: { urls: ["https://...", ...], apiKey?: "", model?: "", autoRegister?: true }
+// ── 批量探测 + 自动注册 ──────────────────────────────────────────────────────
 router.post("/nodes/batch-probe", async (req, res) => {
   const { urls, apiKey, model, autoRegister = true, priority = 3 } = req.body as {
     urls?: string[]; apiKey?: string; model?: string; autoRegister?: boolean; priority?: number;
@@ -700,33 +834,27 @@ router.post("/nodes/batch-probe", async (req, res) => {
     res.status(400).json({ success: false, error: "urls 数组不能为空" });
     return;
   }
-  const limited = urls.slice(0, 50);
 
   const results = await Promise.allSettled(
-    limited.map(async (rawUrl) => {
+    urls.slice(0, 50).map(async (rawUrl) => {
       const baseUrl = rawUrl.trim().replace(/\/$/, "");
       const probe = await probeNodeUrl(baseUrl, apiKey);
       let registered = false;
       let nodeId: string | undefined;
       if (probe.ok && autoRegister && !allNodes().some((n) => n.baseUrl === baseUrl)) {
         const id = stableId("friend", `${baseUrl}-${model || ""}-${runtimeNodes.length}`);
-        const node: GatewayNode = {
-          id,
-          name: `Replit 子节点 (${new URL(baseUrl).hostname.split(".")[0]})`,
-          type: "friend-openai",
-          baseUrl,
-          apiKey,
-          model: model || "gpt-5-mini",
-          priority: Number(priority) || 3,
-          enabled: true,
-          downUntil: 0,
-          successes: 0,
-          failures: 0,
-          source: "runtime",
-        };
-        runtimeNodes.push(node);
-        registered = true;
-        nodeId = id;
+        try {
+          const hostname = new URL(baseUrl).hostname.split(".")[0];
+          const node: GatewayNode = {
+            id, name: `Replit(${hostname})`, type: "friend-openai",
+            baseUrl, apiKey, model: model || "gpt-5-mini",
+            priority: Number(priority) || 3, enabled: true,
+            downUntil: 0, successes: 0, failures: 0, source: "runtime",
+          };
+          runtimeNodes.push(node);
+          registered = true;
+          nodeId = id;
+        } catch {}
       } else if (allNodes().some((n) => n.baseUrl === baseUrl)) {
         registered = true;
         nodeId = allNodes().find((n) => n.baseUrl === baseUrl)?.id;
@@ -735,19 +863,13 @@ router.post("/nodes/batch-probe", async (req, res) => {
     }),
   );
 
-  const rows = results.map((r) => (r.status === "fulfilled" ? r.value : { url: "", ok: false, error: String((r as PromiseRejectedResult).reason), registered: false }));
+  const rows = results.map((r) => r.status === "fulfilled" ? r.value : { url: "", ok: false, error: String((r as PromiseRejectedResult).reason), registered: false });
   const succeeded = rows.filter((r) => r.ok).length;
   const registered = rows.filter((r) => r.registered).length;
-
-  res.json({
-    success: succeeded > 0,
-    summary: { total: rows.length, succeeded, failed: rows.length - succeeded, registered },
-    rows,
-    nodes: allNodes().map(nodeSnapshot),
-  });
+  res.json({ success: succeeded > 0, summary: { total: rows.length, succeeded, failed: rows.length - succeeded, registered }, rows, nodes: allNodes().map(nodeSnapshot) });
 });
 
-// ── 测试单个节点（简单 chat）──────────────────────────────────────────────────
+// ── 测试节点 ──────────────────────────────────────────────────────────────────
 router.post("/nodes/:id/test", async (req, res) => {
   const node = allNodes().find((n) => n.id === req.params.id);
   if (!node) {
@@ -791,15 +913,10 @@ router.get("/v1/models", async (req, res) => {
     const started = Date.now();
     try {
       const authorization = node.apiKey ? `Bearer ${node.apiKey}` : req.header("authorization");
-      const result = await fetchTextWithTimeout(
-        `${node.baseUrl}/v1/models`,
-        { method: "GET", headers: { ...(authorization ? { Authorization: authorization } : {}) } },
-        12_000,
-      );
+      const result = await fetchTextWithTimeout(`${node.baseUrl}/v1/models`, { method: "GET", headers: { ...(authorization ? { Authorization: authorization } : {}) } }, 12_000);
       if (result.response.ok) {
         const parsed = JSON.parse(result.text || "{}") as { data?: Array<Record<string, unknown>> };
-        if (Array.isArray(parsed.data))
-          data.push(...parsed.data.map((model) => ({ ...model, gateway_node: node.id })));
+        if (Array.isArray(parsed.data)) data.push(...parsed.data.map((model) => ({ ...model, gateway_node: node.id })));
         recordSuccess(node, result.response.status, started);
       } else {
         errors.push({ node: node.id, status: result.response.status, error: result.text });
@@ -834,9 +951,7 @@ router.post("/v1/chat/completions", async (req, res) => {
       }
     }
     if (!res.headersSent)
-      res.status(503).json({
-        error: { message: "所有网关节点都暂时不可用", type: "gateway_unavailable", details: errors },
-      });
+      res.status(503).json({ error: { message: "所有网关节点都暂时不可用", type: "gateway_unavailable", details: errors } });
     return;
   }
 
@@ -856,9 +971,7 @@ router.post("/v1/chat/completions", async (req, res) => {
       errors.push({ node: node.id, error: String(error) });
     }
   }
-  res.status(503).json({
-    error: { message: "所有网关节点都暂时不可用", type: "gateway_unavailable", details: errors },
-  });
+  res.status(503).json({ error: { message: "所有网关节点都暂时不可用", type: "gateway_unavailable", details: errors } });
 });
 
 export default router;
