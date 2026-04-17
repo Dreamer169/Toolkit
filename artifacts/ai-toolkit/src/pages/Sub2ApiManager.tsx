@@ -18,6 +18,9 @@ export default function Sub2ApiManager() {
   const [gatewayStats, setGatewayStats] = useState<Record<string, unknown> | null>(null);
   const [chatLoading, setChatLoading] = useState(false);
   const [chatResult, setChatResult] = useState<Record<string, unknown> | null>(null);
+  const [friendNodes, setFriendNodes] = useState("");
+  const [friendLoading, setFriendLoading] = useState(false);
+  const [friendResult, setFriendResult] = useState<Record<string, unknown> | null>(null);
 
   const tokenLines = tokens.split("\n").filter((t) => t.trim());
 
@@ -141,6 +144,38 @@ export default function Sub2ApiManager() {
     setChatLoading(false);
   };
 
+  const registerFriendNodes = async () => {
+    const nodes = friendNodes
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line, index) => {
+        const [baseUrl, apiKey, model, name] = line.split("|").map((item) => item?.trim());
+        return {
+          baseUrl,
+          apiKey: apiKey || undefined,
+          model: model || "gpt-5-mini",
+          name: name || `Friend 节点 ${index + 1}`,
+        };
+      });
+    if (!nodes.length) return;
+    setFriendLoading(true);
+    setFriendResult(null);
+    try {
+      const r = await fetch("/api/gateway/nodes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nodes }),
+      });
+      const data = await r.json() as Record<string, unknown>;
+      setFriendResult({ success: r.ok, status: r.status, data });
+      await loadGatewayStats();
+    } catch (e) {
+      setFriendResult({ success: false, error: String(e) });
+    }
+    setFriendLoading(false);
+  };
+
   const SUB2API_FORMATS = [
     { label: "Sub2Api 格式", placeholder: "https://api.sub2api.com", help: "Bearer Token 认证，支持批量上传 Codex Token" },
     { label: "CPA 格式",     placeholder: "https://api.cpa.io",        help: "x-api-key 认证，用于上传 OpenAI Access Token" },
@@ -231,7 +266,7 @@ export default function Sub2ApiManager() {
         <div>
           <h3 className="text-sm font-semibold text-gray-300">多节点网关检测</h3>
           <p className="text-xs text-gray-500 mt-1">
-            /api/gateway/v1/chat/completions 会优先调用 45.205.27.69，远端无账号或 503 时自动切到多个 Reseek AI 子节点轮询。
+            /api/gateway/v1/chat/completions 会优先调用 45.205.27.69，远端无账号或 503 时自动切到 Reseek OpenAI / Anthropic / Gemini 以及 friend 节点轮询。
           </p>
         </div>
 
@@ -275,6 +310,34 @@ export default function Sub2ApiManager() {
             </pre>
           </div>
         )}
+
+        <div className="bg-[#0d1117] border border-[#30363d] rounded-lg p-4 space-y-3">
+          <div>
+            <h4 className="text-sm font-medium text-gray-300">添加 Friend 子节点</h4>
+            <p className="text-xs text-gray-500 mt-1">
+              每行一个 OpenAI-compatible 节点：baseUrl|apiKey|model|name。apiKey 可留空，运行时加入当前轮询池。
+            </p>
+          </div>
+          <textarea
+            value={friendNodes}
+            onChange={(e) => { setFriendNodes(e.target.value); setFriendResult(null); }}
+            placeholder={"https://friend-node.example.com|sk-xxx|gpt-4o|好友节点 1\nhttps://another-node.example.com|sk-xxx|gpt-5-mini|备用节点 2"}
+            rows={4}
+            className="w-full bg-[#010409] border border-[#30363d] rounded-lg px-3 py-2 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500 font-mono resize-none"
+          />
+          <button
+            onClick={registerFriendNodes}
+            disabled={friendLoading || !friendNodes.trim()}
+            className="w-full py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg text-sm text-white transition-all"
+          >
+            {friendLoading ? "添加中..." : "添加到轮询池"}
+          </button>
+          {friendResult && (
+            <pre className="text-xs text-gray-300 overflow-auto max-h-40">
+              {JSON.stringify(friendResult, null, 2)}
+            </pre>
+          )}
+        </div>
       </div>
 
       {/* 批量上传 */}
