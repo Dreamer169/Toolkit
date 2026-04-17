@@ -15,6 +15,9 @@ export default function Sub2ApiManager() {
   const [result, setResult]     = useState<UploadResult | null>(null);
   const [checking, setChecking] = useState(false);
   const [stats, setStats]       = useState<Record<string, unknown> | null>(null);
+  const [gatewayStats, setGatewayStats] = useState<Record<string, unknown> | null>(null);
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatResult, setChatResult] = useState<Record<string, unknown> | null>(null);
 
   const tokenLines = tokens.split("\n").filter((t) => t.trim());
 
@@ -98,6 +101,46 @@ export default function Sub2ApiManager() {
     setLoading(false);
   };
 
+  const loadGatewayStats = async () => {
+    setChecking(true);
+    setGatewayStats(null);
+    try {
+      const r = await fetch("/api/gateway/v1/stats");
+      setGatewayStats(await r.json() as Record<string, unknown>);
+    } catch (e) {
+      setGatewayStats({ success: false, error: String(e) });
+    }
+    setChecking(false);
+  };
+
+  const testGatewayChat = async () => {
+    setChatLoading(true);
+    setChatResult(null);
+    try {
+      const started = Date.now();
+      const r = await fetch("/api/gateway/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
+        body: JSON.stringify({
+          model: "gpt-5-mini",
+          messages: [
+            { role: "system", content: "You are a gateway health checker. Reply with a short confirmation." },
+            { role: "user", content: "Return gateway-ok and the current node is working." },
+          ],
+          stream: false,
+          max_completion_tokens: 64,
+        }),
+      });
+      const gatewayNode = r.headers.get("x-gateway-node");
+      const data = await r.json() as Record<string, unknown>;
+      setChatResult({ success: r.ok, status: r.status, gatewayNode, latencyMs: Date.now() - started, data });
+      await loadGatewayStats();
+    } catch (e) {
+      setChatResult({ success: false, error: String(e) });
+    }
+    setChatLoading(false);
+  };
+
   const SUB2API_FORMATS = [
     { label: "Sub2Api 格式", placeholder: "https://api.sub2api.com", help: "Bearer Token 认证，支持批量上传 Codex Token" },
     { label: "CPA 格式",     placeholder: "https://api.cpa.io",        help: "x-api-key 认证，用于上传 OpenAI Access Token" },
@@ -138,7 +181,7 @@ export default function Sub2ApiManager() {
             onClick={() => { setPlatform("sub2api"); setApiUrl("/api/gateway"); setResult(null); setStats(null); }}
             className="mt-3 w-full py-2 bg-emerald-600/15 hover:bg-emerald-600/25 border border-emerald-500/30 rounded-lg text-sm text-emerald-300 transition-all"
           >
-            使用已打通的 45.205.27.69 远程网关
+            使用多节点网关（远端 Sub2API + Reseek AI 兜底）
           </button>
         </div>
 
@@ -179,6 +222,56 @@ export default function Sub2ApiManager() {
             <p className="text-xs text-gray-500 mb-2">平台返回数据</p>
             <pre className="text-xs text-gray-300 overflow-auto max-h-32">
               {JSON.stringify(stats, null, 2)}
+            </pre>
+          </div>
+        )}
+      </div>
+
+      <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-5 space-y-4">
+        <div>
+          <h3 className="text-sm font-semibold text-gray-300">多节点网关检测</h3>
+          <p className="text-xs text-gray-500 mt-1">
+            /api/gateway/v1/chat/completions 会优先调用 45.205.27.69，远端无账号或 503 时自动切到多个 Reseek AI 子节点轮询。
+          </p>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            onClick={loadGatewayStats}
+            disabled={checking}
+            className="py-2 bg-[#21262d] hover:bg-[#30363d] disabled:opacity-50 border border-[#30363d] rounded-lg text-sm text-gray-300 transition-all"
+          >
+            {checking ? "检测中..." : "查看节点状态"}
+          </button>
+          <button
+            onClick={testGatewayChat}
+            disabled={chatLoading}
+            className="py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 rounded-lg text-sm text-white transition-all"
+          >
+            {chatLoading ? "请求中..." : "真实聊天测试"}
+          </button>
+        </div>
+
+        {gatewayStats && (
+          <div className="bg-[#0d1117] rounded-lg p-4 border border-[#30363d]">
+            <p className="text-xs text-gray-500 mb-2">网关节点池</p>
+            <pre className="text-xs text-gray-300 overflow-auto max-h-56">
+              {JSON.stringify(gatewayStats, null, 2)}
+            </pre>
+          </div>
+        )}
+
+        {chatResult && (
+          <div className={`rounded-lg p-4 border ${
+            chatResult.success
+              ? "bg-emerald-500/10 border-emerald-500/30"
+              : "bg-red-500/10 border-red-500/30"
+          }`}>
+            <p className={`text-sm font-medium mb-2 ${chatResult.success ? "text-emerald-400" : "text-red-400"}`}>
+              {chatResult.success ? "聊天请求成功" : "聊天请求失败"}
+            </p>
+            <pre className="text-xs text-gray-300 overflow-auto max-h-48">
+              {JSON.stringify(chatResult, null, 2)}
             </pre>
           </div>
         )}
