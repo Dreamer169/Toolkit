@@ -613,8 +613,8 @@ router.post("/v1/nodes/:id/recover", (req, res) => {
 
 // ═══ Sub2API 管理代理 ═════════════════════════════════════════════════════════
 
-router.use("/v1/sub2api-admin", async (req: Request, res: Response) => {
-  const subPath = (req.url as string).split("?")[0];
+router.all("/v1/sub2api-admin{/*path}", async (req: Request, res: Response) => {
+  const subPath = req.path.replace(/^\/v1\/sub2api-admin/, "") || "/";
   const targetUrl = `${SUB2API_ADMIN_URL}${subPath}`;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 30_000);
