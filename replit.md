@@ -130,6 +130,8 @@ Critical implementation details:
 - `proxies` — proxy pool with used_count, status (active/banned)
 - `configs` — key-value config store (captcha config, etc.)
 - `work_guide` — work guide entries (type: tip/warning/workflow/doc)
+- API startup now calls `initDatabase()` from `artifacts/api-server/src/db.ts`, creating `accounts`, `temp_emails`, `archives`, `proxies`, `configs`, and `identities` automatically before live pollers start.
+- Outlook generation runtime requires Python 3.11 packages from `pyproject.toml`, Patchright/Playwright Chromium browsers, and Chromium system libraries including `nspr`, `nss`, and `libgbm`.
 
 ---
 

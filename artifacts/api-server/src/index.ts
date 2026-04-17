@@ -7,15 +7,26 @@ import { startLiveVerifyPoller } from "./lib/live-verify-poller.js";
 import { startCfPoolMaintainer } from "./lib/cf-pool-maintainer.js";
 import { handleClientConnection, handlePlaywrightConnection } from "./lib/cdp_relay_ws.js";
 import { logger } from "./lib/logger";
+import { initDatabase } from "./db.js";
 
 const rawPort = process.env["PORT"];
 if (!rawPort) throw new Error("PORT environment variable is required but was not provided.");
 const port = Number(rawPort);
 if (Number.isNaN(port) || port <= 0) throw new Error(`Invalid PORT value: "${rawPort}"`);
 
-initNotifier();
-startLiveVerifyPoller(10_000);
-startCfPoolMaintainer();
+async function startServer() {
+  await initDatabase();
+  initNotifier();
+  startLiveVerifyPoller(10_000);
+  startCfPoolMaintainer();
+  server.listen(port, (err?: Error) => {
+    if (err) {
+      logger.error({ err }, "Error listening on port");
+      process.exit(1);
+    }
+    logger.info({ port }, "Server listening (with CDP relay WS)");
+  });
+}
 
 // 创建 HTTP server（用于挂载 WebSocket）
 const server = createServer(app);
@@ -44,10 +55,7 @@ server.on("upgrade", (req: IncomingMessage, socket, head) => {
   }
 });
 
-server.listen(port, (err?: Error) => {
-  if (err) {
-    logger.error({ err }, "Error listening on port");
-    process.exit(1);
-  }
-  logger.info({ port }, "Server listening (with CDP relay WS)");
+startServer().catch((err) => {
+  logger.error({ err }, "Failed to start server");
+  process.exit(1);
 });
