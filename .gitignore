@@ -52,3 +52,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.bak
+data/
+artifacts/data/
+tmp_gateway_update_files/
+.env.local

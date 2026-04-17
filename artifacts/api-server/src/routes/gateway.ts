@@ -1,5 +1,11 @@
 import { Router, type Request, type Response } from "express";
 import { createHash } from "crypto";
+import { exec as execCmd } from "child_process";
+import { promisify } from "util";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import { join } from "path";
+
+const execAsync = promisify(execCmd);
 
 // ═══ 类型 ═══════════════════════════════════════════════════════════════════
 
@@ -88,7 +94,49 @@ function msUntilUtcMidnight(): number {
   return Math.max(60_000, midnight.getTime() - now);
 }
 
-const runtimeNodes: GatewayNode[] = [];
+// ═══ 持久化存储 ══════════════════════════════════════════════════════════════
+// 运行时动态注册的节点写到 JSON 文件，服务重启后自动恢复
+const DATA_DIR = (process.env["DATA_DIR"] || join(process.cwd(), "data")).replace(/\/$/, "");
+const NODES_FILE = join(DATA_DIR, "gateway-nodes.json");
+const EXEC_SECRET = process.env["EXEC_SECRET"] || "";
+
+function loadPersistedNodes(): GatewayNode[] {
+  try {
+    if (!existsSync(NODES_FILE)) return [];
+    const raw = readFileSync(NODES_FILE, "utf8");
+    const arr = JSON.parse(raw) as Array<Partial<GatewayNode>>;
+    return arr
+      .filter((n) => n.baseUrl && n.type)
+      .map((n) => ({
+        id: n.id || stableId("friend", String(n.baseUrl)),
+        name: n.name || "持久化节点",
+        type: (n.type as GatewayNodeType) || "friend-openai",
+        baseUrl: String(n.baseUrl).replace(/\/$/, ""),
+        apiKey: n.apiKey,
+        model: n.model || "gpt-5-mini",
+        priority: n.priority ?? 3,
+        enabled: n.enabled !== false,
+        downUntil: 0,
+        successes: 0,
+        failures: 0,
+        source: "runtime" as const,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function savePersistedNodes(nodes: GatewayNode[]) {
+  try {
+    if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
+    writeFileSync(NODES_FILE, JSON.stringify(nodes.map((n) => ({
+      id: n.id, name: n.name, type: n.type, baseUrl: n.baseUrl,
+      apiKey: n.apiKey, model: n.model, priority: n.priority, enabled: n.enabled,
+    })), null, 2), "utf8");
+  } catch {}
+}
+
+const runtimeNodes: GatewayNode[] = loadPersistedNodes();
 let cursor = 0;
 
 function stableId(prefix: string, value: string) {
@@ -781,6 +829,7 @@ router.post("/nodes", (req, res) => {
     runtimeNodes.push(node);
     added.push(nodeSnapshot(node));
   }
+  if (added.length > 0) savePersistedNodes(runtimeNodes);
   res.json({ success: added.length > 0, added, nodes: allNodes().map(nodeSnapshot) });
 });
 
@@ -791,6 +840,7 @@ router.delete("/nodes/:id", (req, res) => {
     return;
   }
   const removed = runtimeNodes.splice(index, 1).map(nodeSnapshot);
+  savePersistedNodes(runtimeNodes);
   res.json({ success: true, removed, nodes: allNodes().map(nodeSnapshot) });
 });
 
@@ -974,4 +1024,153 @@ router.post("/v1/chat/completions", async (req, res) => {
   res.status(503).json({ error: { message: "所有网关节点都暂时不可用", type: "gateway_unavailable", details: errors } });
 });
 
+// ── HTTP Exec（SSH 替代：远端控制 Replit 工作区）────────────────────────────
+// 远端服务器无法 SSH 进 Replit（防火墙封闭），用此端点代替
+// 安全：必须设置 EXEC_SECRET 环境变量，且请求头携带 X-Exec-Secret 匹配
+router.post("/exec", async (req, res) => {
+  if (!EXEC_SECRET) {
+    res.status(403).json({ ok: false, error: "未配置 EXEC_SECRET，exec 端点已禁用" });
+    return;
+  }
+  const reqSecret = req.header("x-exec-secret") || req.header("authorization")?.replace(/^Bearer /, "");
+  if (reqSecret !== EXEC_SECRET) {
+    res.status(401).json({ ok: false, error: "认证失败" });
+    return;
+  }
+  const { cmd, timeout: timeoutSec = 30 } = req.body as { cmd?: string; timeout?: number };
+  if (!cmd || typeof cmd !== "string") {
+    res.status(400).json({ ok: false, error: "cmd 不能为空" });
+    return;
+  }
+  // 拒绝明显危险命令
+  const FORBIDDEN = /rm\s+-rf\s+\/|mkfs|dd\s+if=/;
+  if (FORBIDDEN.test(cmd)) {
+    res.status(400).json({ ok: false, error: "命令被拒绝（危险操作）" });
+    return;
+  }
+  try {
+    const { stdout, stderr } = await execAsync(cmd, {
+      timeout: Math.min(Number(timeoutSec), 120) * 1000,
+      maxBuffer: 512 * 1024,
+    });
+    res.json({ ok: true, stdout: stdout.slice(0, 50000), stderr: stderr.slice(0, 10000) });
+  } catch (e: unknown) {
+    const err = e as { stdout?: string; stderr?: string; message?: string };
+    res.status(500).json({ ok: false, stdout: err.stdout || "", stderr: err.stderr || "", error: err.message });
+  }
+});
+
+// ── 子节点自注册 (self-register) ──────────────────────────────────────────────
+// 新 Replit 工作区启动后调用远端服务器的此接口自动加入节点池
+// POST /api/gateway/self-register  body: { gatewayUrl, name?, execSecret? }
+router.post("/self-register", async (req, res) => {
+  const { gatewayUrl, name, execSecret } = req.body as {
+    gatewayUrl?: string; name?: string; execSecret?: string;
+  };
+  if (!gatewayUrl || !gatewayUrl.startsWith("http")) {
+    res.status(400).json({ ok: false, error: "gatewayUrl 必须是 http(s) URL" });
+    return;
+  }
+  const baseUrl = gatewayUrl.replace(/\/$/, "");
+  // 探测目标是否真的是 gateway
+  const probe = await probeNodeUrl(baseUrl, undefined, 8000);
+  if (!probe.ok) {
+    res.status(422).json({ ok: false, error: "探测失败，URL 不可达", detail: probe.error });
+    return;
+  }
+  // 已存在则更新 name/execSecret，否则新建
+  const existing = allNodes().find((n) => n.baseUrl === baseUrl);
+  if (existing) {
+    if (name) existing.name = name;
+    res.json({ ok: true, action: "already-registered", node: nodeSnapshot(existing) });
+    return;
+  }
+  let hostname = baseUrl;
+  try { hostname = new URL(baseUrl).hostname.split(".")[0]; } catch {}
+  const id = stableId("friend", baseUrl);
+  const node: GatewayNode = {
+    id,
+    name: name || `子节点(${hostname})`,
+    type: "friend-openai",
+    baseUrl,
+    apiKey: execSecret,  // 存为 apiKey，调用时作为 Authorization
+    model: "gpt-5-mini",
+    priority: 3,
+    enabled: true,
+    downUntil: 0,
+    successes: 0,
+    failures: 0,
+    source: "runtime",
+  };
+  runtimeNodes.push(node);
+  savePersistedNodes(runtimeNodes);
+  res.json({ ok: true, action: "registered", nodeId: id, node: nodeSnapshot(node), latencyMs: probe.latencyMs });
+});
+
+// ── 对等节点列表 (peers) ───────────────────────────────────────────────────────
+// 返回所有 friend-openai 和 runtime 节点的公开信息，用于子节点间互相发现
+router.get("/peers", (_req, res) => {
+  const peers = allNodes()
+    .filter((n) => n.type === "friend-openai" || n.source === "env" || n.source === "runtime")
+    .map((n) => ({
+      id: n.id,
+      name: n.name,
+      baseUrl: n.baseUrl,
+      model: n.model,
+      status: n.enabled && n.downUntil <= Date.now() ? "ready" : "down",
+      latencyMs: n.lastLatencyMs,
+    }));
+  res.json({ peers, count: peers.length });
+});
+
+// ── 对等节点中继 (relay) ───────────────────────────────────────────────────────
+// 任何一个子节点都可以把请求中继到另一个已注册的子节点
+// POST /api/gateway/relay/:nodeId   body: { path, method, headers, body }
+// 或者 POST /api/gateway/relay  body: { targetUrl, path, method, headers?, body? }
+router.post(["/relay/:nodeId", "/relay"], async (req, res) => {
+  const nodeId = (req.params as { nodeId?: string }).nodeId;
+  const { targetUrl, path: targetPath = "/v1/chat/completions", method = "POST",
+    headers: extraHeaders = {}, body: relayBody } = req.body as {
+    targetUrl?: string; path?: string; method?: string;
+    headers?: Record<string, string>; body?: unknown;
+  };
+
+  let targetBaseUrl = targetUrl?.replace(/\/$/, "");
+  if (nodeId) {
+    const node = allNodes().find((n) => n.id === nodeId);
+    if (!node) {
+      res.status(404).json({ ok: false, error: "目标节点不存在", nodeId });
+      return;
+    }
+    targetBaseUrl = node.baseUrl;
+  }
+  if (!targetBaseUrl) {
+    res.status(400).json({ ok: false, error: "需要 nodeId 或 targetUrl" });
+    return;
+  }
+
+  const url = `${targetBaseUrl}${targetPath.startsWith("/") ? targetPath : "/" + targetPath}`;
+  const started = Date.now();
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 60_000);
+    const r = await fetch(url, {
+      method: method.toUpperCase(),
+      headers: { "Content-Type": "application/json", ...extraHeaders },
+      ...(relayBody ? { body: JSON.stringify(relayBody) } : {}),
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    const text = await r.text();
+    res.status(r.status);
+    res.setHeader("x-relay-target", targetBaseUrl);
+    res.setHeader("x-relay-latency-ms", String(Date.now() - started));
+    res.setHeader("content-type", r.headers.get("content-type") || "application/json");
+    res.send(text);
+  } catch (e) {
+    res.status(502).json({ ok: false, error: "中继失败", target: url, detail: String(e) });
+  }
+});
+
 export default router;
+

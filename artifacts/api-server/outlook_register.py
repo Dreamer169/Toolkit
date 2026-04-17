@@ -1004,6 +1004,37 @@ class PatchrightController(BaseController):
                 except Exception as _e4:
                     print(f"[captcha]   再次按下 异常（Arkose）: {_e4}", flush=True)
 
+                # 方法A-JS：在frame内部用async JS模拟press-hold（规避跨域bounding_box限制）
+                if not _press_clicked:
+                    _js_frames = ([_frame2] if _frame2 is not None else []) + list(page.frames)
+                    for _jfr in _js_frames:
+                        try:
+                            _js_r = _jfr.evaluate("""
+                                async () => {
+                                    const labels = ["再次按下","Press","Hold","押下","Нажмите"];
+                                    let btn = null;
+                                    for (const l of labels) {
+                                        btn = document.querySelector(`[aria-label*="${l}"]`);
+                                        if (btn) break;
+                                    }
+                                    if (!btn) btn = document.querySelector('a[role="button"]') ||
+                                                    document.querySelector('[tabindex="0"][id]');
+                                    if (!btn) return null;
+                                    const lbl = btn.getAttribute("aria-label") || btn.id || btn.tagName;
+                                    btn.dispatchEvent(new MouseEvent("mousedown", {bubbles:true, cancelable:true}));
+                                    await new Promise(r => setTimeout(r, 4500));
+                                    btn.dispatchEvent(new MouseEvent("mouseup", {bubbles:true, cancelable:true}));
+                                    btn.dispatchEvent(new MouseEvent("click", {bubbles:true, cancelable:true}));
+                                    return lbl;
+                                }
+                            """)
+                            if _js_r:
+                                print(f"[captcha] ✅ 方法A-JS: frame press-hold 4.5s (btn={_js_r})", flush=True)
+                                _press_clicked = True
+                                break
+                        except Exception:
+                            pass
+
                 # 方法B：逐 frame 搜索（针对10-frame重型挑战中的跨域button）
                 # page.locator() 无法穿透跨域iframe边界，必须对每个frame单独调用locator()
                 if not _press_clicked:
@@ -1033,18 +1064,35 @@ class PatchrightController(BaseController):
                                     page.mouse.up()
                                     print(f"[captcha] ✅ 方法B 再次按下(hold 4.5s, 坐标法) in frame {_hfr.url[:40]}", flush=True)
                                 else:
-                                    # 跨域/about:blank frame → 只用dispatch_event
+                                    # 跨域/about:blank frame → JS async press-hold（dispatch_event会因frame detach失败）
                                     reason = 'cross-origin' if _is_cross_origin else 'box无效'
-                                    print(f"[captcha] 方法B dispatch_event({reason}) hold 4.5s (frame {_hfr.url[:40]})", flush=True)
+                                    print(f"[captcha] 方法B JS-hold({reason}) 4.5s (frame {_hfr.url[:40]})", flush=True)
                                     try:
-                                        _pa_loc.first.dispatch_event('mousedown')
-                                        page.wait_for_timeout(4500)
-                                        _pa_loc.first.dispatch_event('mouseup')
-                                        _pa_loc.first.dispatch_event('click')
-                                        print(f"[captcha] ✅ 方法B dispatch_event hold 4.5s 完成", flush=True)
+                                        _js_r2 = _hfr.evaluate("""
+                                            async () => {
+                                                const labels = ["再次按下","Press","Hold","押下"];
+                                                let btn = null;
+                                                for (const l of labels) {
+                                                    btn = document.querySelector(`[aria-label*="${l}"]`);
+                                                    if (btn) break;
+                                                }
+                                                if (!btn) btn = document.querySelector('a[role="button"]');
+                                                if (!btn) return null;
+                                                btn.dispatchEvent(new MouseEvent("mousedown", {bubbles:true, cancelable:true}));
+                                                await new Promise(r => setTimeout(r, 4500));
+                                                btn.dispatchEvent(new MouseEvent("mouseup", {bubbles:true, cancelable:true}));
+                                                btn.dispatchEvent(new MouseEvent("click", {bubbles:true, cancelable:true}));
+                                                return btn.getAttribute("aria-label") || btn.id || btn.tagName;
+                                            }
+                                        """)
+                                        if _js_r2:
+                                            print(f"[captcha] ✅ 方法B JS-hold 4.5s 完成 (btn={_js_r2})", flush=True)
                                     except Exception as _de:
-                                        print(f"[captcha]   方法B dispatch_event异常: {_de}", flush=True)
-                                        _pa_loc.first.click(force=True, timeout=3000)
+                                        print(f"[captcha]   方法B JS-hold异常: {_de}", flush=True)
+                                        try:
+                                            _pa_loc.first.click(force=True, timeout=3000)
+                                        except Exception:
+                                            pass
                                 _press_clicked = True
                                 page.wait_for_timeout(3000)
                                 break
@@ -1100,15 +1148,31 @@ class PatchrightController(BaseController):
                                             page.mouse.down()
                                             page.wait_for_timeout(4500)
                                             page.mouse.up()
-                                        else:
-                                            _hfr.locator(f'#{_hid}').first.click(force=True, timeout=3000)
-                                        _clicked_this = True
-                                    except Exception:
-                                        try:
-                                            _hfr.evaluate(f"(document.getElementById('{_hid}')||{{}}).click && document.getElementById('{_hid}').click()")
                                             _clicked_this = True
-                                        except Exception:
-                                            pass
+                                        else:
+                                            raise Exception("bounding_box无效")
+                                    except Exception:
+                                        # JS async press-hold（规避跨域坐标问题）
+                                        try:
+                                            _eid = _hid.replace("'", "\'") 
+                                            _js_r3 = _hfr.evaluate(f"""
+                                                async () => {{
+                                                    const el = document.getElementById('{_eid}') ||
+                                                               document.querySelector('a[role="button"]') ||
+                                                               document.querySelector('[tabindex="0"][id]');
+                                                    if (!el) return null;
+                                                    el.dispatchEvent(new MouseEvent("mousedown", {{bubbles:true, cancelable:true}}));
+                                                    await new Promise(r => setTimeout(r, 4500));
+                                                    el.dispatchEvent(new MouseEvent("mouseup", {{bubbles:true, cancelable:true}}));
+                                                    el.dispatchEvent(new MouseEvent("click", {{bubbles:true, cancelable:true}}));
+                                                    return el.id || el.tagName;
+                                                }}
+                                            """)
+                                            if _js_r3:
+                                                print(f"[captcha] ✅ 方法B-JS press-hold 4.5s (el={_js_r3})", flush=True)
+                                                _clicked_this = True
+                                        except Exception as _je3:
+                                            print(f"[captcha]   方法B-JS 异常: {_je3}", flush=True)
                                 elif _hhref and any(k in _hhref for k in ['.mp3', '.wav', 'audio', 'sound']):
                                     print(f"[captcha] 方法B 直接音频href: {_hhref[:80]}", flush=True)
                                     _clicked_this = True
