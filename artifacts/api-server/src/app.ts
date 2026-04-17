@@ -1,7 +1,7 @@
 import express, { type Express } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
-import { createProxyMiddleware } from "http-proxy-middleware";
+import { createProxyMiddleware, fixRequestBody } from "http-proxy-middleware";
 import router from "./routes";
 import { logger } from "./lib/logger";
 import path from "path";
@@ -34,6 +34,31 @@ app.use(
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+const remoteGatewayBase = (process.env["REMOTE_GATEWAY_BASE_URL"] || "http://45.205.27.69:9090").replace(/\/$/, "");
+
+app.use(
+  "/api/gateway",
+  createProxyMiddleware({
+    target: remoteGatewayBase,
+    changeOrigin: true,
+    pathRewrite: { "^/api/gateway": "" },
+    proxyTimeout: 120000,
+    timeout: 120000,
+    on: {
+      proxyReq: (proxyReq, req) => {
+        fixRequestBody(proxyReq, req);
+        proxyReq.setHeader("x-reseek-gateway", "remote");
+      },
+      error: (_err, _req, res) => {
+        (res as express.Response).status(502).json({
+          success: false,
+          error: "远程网关暂时不可用，请确认 45.205.27.69:9090 已启动",
+        });
+      },
+    },
+  }),
+);
 
 app.use("/api", router);
 

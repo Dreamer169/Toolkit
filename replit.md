@@ -65,6 +65,9 @@ Shared backend API server on port 8080.
 - `DELETE /api/tools/cursor/register/:jobId` — 停止 Cursor 注册任务
 - `GET /api/tools/jobs` — 列出所有任务（实时监控用）
 - `POST /api/tools/proxy-request` — 代理请求（避免 CORS，限 sub2api/cpa/xai 等白名单域名）
+- `GET /api/tools/gateway/status` — 检查 45.205.27.69 远程网关与远程执行桥状态
+- `POST /api/tools/gateway/request` — 服务端调用 45.205.27.69:9090 网关相对路径
+- `/api/gateway/*` — OpenAI/Sub2API 兼容网关转发入口，转发到 `REMOTE_GATEWAY_BASE_URL`（默认 `http://45.205.27.69:9090`）
 - `GET /api/tools/machine-id/generate` — 生成 Cursor 机器 ID
 - `GET /api/tools/ip-check` — IP 查询
 - `GET /api/tools/info-generate` — 信息生成
@@ -136,3 +139,4 @@ Critical implementation details:
 - **CAPTCHA**: Always try free accessibility bypass first; never use paid solver unless user explicitly sets it in config
 - **team-all-in-one**: Flask service on port 5000 (reads PORT env var)
 - **openai-pool**: FastAPI service on port 8000 (reads PORT env var)
+- **Remote gateway bridge**: frontend defaults to `/api/gateway`, API server proxies to `45.205.27.69:9090`; `remote-exec.js` exposes `/health` and `/exec` on port 9999 for controlled remote operations.

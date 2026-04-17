@@ -8,7 +8,7 @@ interface UploadResult {
 
 export default function Sub2ApiManager() {
   const [platform, setPlatform] = useState<"sub2api" | "cpa">("sub2api");
-  const [apiUrl, setApiUrl]     = useState("https://api.sub2api.com");
+  const [apiUrl, setApiUrl]     = useState("/api/gateway");
   const [apiKey, setApiKey]     = useState("");
   const [tokens, setTokens]     = useState("");
   const [loading, setLoading]   = useState(false);
@@ -18,22 +18,50 @@ export default function Sub2ApiManager() {
 
   const tokenLines = tokens.split("\n").filter((t) => t.trim());
 
+  const bridgeRequest = async (
+    endpoint: string,
+    options: { method?: string; headers?: Record<string, string>; body?: unknown } = {},
+  ): Promise<{ success: boolean; status?: number; data?: Record<string, unknown>; error?: string }> => {
+    const method = options.method ?? "GET";
+    if (endpoint.startsWith("/")) {
+      const r = await fetch(endpoint, {
+        method,
+        headers: { "Content-Type": "application/json", ...(options.headers ?? {}) },
+        body: method !== "GET" && options.body !== undefined
+          ? (typeof options.body === "string" ? options.body : JSON.stringify(options.body))
+          : undefined,
+      });
+      let data: Record<string, unknown> = {};
+      try { data = await r.json() as Record<string, unknown>; } catch { data = { raw: await r.text() }; }
+      return { success: r.ok, status: r.status, data };
+    }
+
+    const r = await fetch(`/api/tools/proxy-request`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: endpoint,
+        method,
+        headers: options.headers,
+        body: typeof options.body === "string" ? options.body : options.body === undefined ? undefined : JSON.stringify(options.body),
+      }),
+    });
+    return await r.json() as { success: boolean; status?: number; data?: Record<string, unknown>; error?: string };
+  };
+
   const checkStats = async () => {
     if (!apiUrl || !apiKey) return;
     setChecking(true);
     setStats(null);
     try {
       const endpoint = platform === "sub2api"
-        ? `${apiUrl.replace(/\/$/, "")}/api/v1/dashboard`
+        ? `${apiUrl.replace(/\/$/, "")}/api/v1/admin/dashboard/stats`
         : `${apiUrl.replace(/\/$/, "")}/api/stats`;
-      const r = await fetch(`/api/tools/proxy-request`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: endpoint, headers: { Authorization: `Bearer ${apiKey}`, "x-api-key": apiKey } }),
+      const d = await bridgeRequest(endpoint, {
+        headers: { Authorization: `Bearer ${apiKey}`, "x-api-key": apiKey },
       });
-      const d = await r.json() as { success: boolean; data: Record<string, unknown> };
       if (d.success) setStats(d.data);
-      else setStats({ error: "无法获取统计信息，请检查 API URL 和 Key" });
+      else setStats({ error: d.error ?? "无法获取统计信息，请检查 API URL 和 Key", status: d.status });
     } catch (e) {
       setStats({ error: String(e) });
     }
@@ -47,28 +75,22 @@ export default function Sub2ApiManager() {
     try {
       const tks = tokenLines.map((t) => t.trim()).filter(Boolean);
       const endpoint = platform === "sub2api"
-        ? `${apiUrl.replace(/\/$/, "")}/api/v1/tokens/batch`
+        ? `${apiUrl.replace(/\/$/, "")}/api/v1/admin/accounts/batch`
         : `${apiUrl.replace(/\/$/, "")}/api/accounts/add`;
 
-      const body = platform === "sub2api"
+      const requestBody = platform === "sub2api"
         ? { tokens: tks }
         : { accounts: tks };
 
-      const r = await fetch(`/api/tools/proxy-request`, {
+      const d = await bridgeRequest(endpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          url: endpoint,
-          method: "POST",
-          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        }),
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: requestBody,
       });
-      const d = await r.json() as { success: boolean; data: Record<string, unknown> };
       if (d.success) {
         setResult({ success: true, message: "上传成功", count: tks.length });
       } else {
-        setResult({ success: false, message: d.data?.error as string ?? "上传失败" });
+        setResult({ success: false, message: d.data?.error as string ?? d.error ?? "上传失败" });
       }
     } catch (e) {
       setResult({ success: false, message: String(e) });
@@ -112,6 +134,12 @@ export default function Sub2ApiManager() {
             ))}
           </div>
           <p className="text-xs text-gray-600 mt-2">{cur.help}</p>
+          <button
+            onClick={() => { setPlatform("sub2api"); setApiUrl("/api/gateway"); setResult(null); setStats(null); }}
+            className="mt-3 w-full py-2 bg-emerald-600/15 hover:bg-emerald-600/25 border border-emerald-500/30 rounded-lg text-sm text-emerald-300 transition-all"
+          >
+            使用已打通的 45.205.27.69 远程网关
+          </button>
         </div>
 
         {/* API 配置 */}
@@ -215,7 +243,7 @@ export default function Sub2ApiManager() {
           </div>
           <div className="flex gap-2">
             <span className="text-yellow-400 shrink-0">注意</span>
-            <span>上传操作通过服务器中转请求，避免 CORS 问题。API Key 仅用于本次请求，不会被存储。</span>
+            <span>默认通过 /api/gateway 调用 45.205.27.69:9090，上传操作走服务器中转，API Key 仅用于本次请求，不会被存储。</span>
           </div>
         </div>
       </div>

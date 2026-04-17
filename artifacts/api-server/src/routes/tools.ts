@@ -1790,6 +1790,62 @@ router.get("/tools/ip-check", async (req, res) => {
   }
 });
 
+const REMOTE_GATEWAY_BASE_URL = (process.env["REMOTE_GATEWAY_BASE_URL"] || "http://45.205.27.69:9090").replace(/\/$/, "");
+const REMOTE_EXEC_BASE_URL = (process.env["REMOTE_EXEC_BASE_URL"] || "http://45.205.27.69:9999").replace(/\/$/, "");
+const REMOTE_EXEC_TOKEN = process.env["REMOTE_EXEC_TOKEN"] || "zencoder-exec-2026";
+
+async function fetchJsonWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { ...options, signal: controller.signal });
+    const text = await r.text();
+    let data: unknown = null;
+    try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+    return { ok: r.ok, status: r.status, data };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+router.get("/tools/gateway/status", async (_req, res) => {
+  const gateway = await fetchJsonWithTimeout(`${REMOTE_GATEWAY_BASE_URL}/`, { method: "GET" }, 8000)
+    .then((r) => ({ reachable: true, status: r.status, baseUrl: REMOTE_GATEWAY_BASE_URL }))
+    .catch((e: unknown) => ({ reachable: false, baseUrl: REMOTE_GATEWAY_BASE_URL, error: String(e) }));
+
+  const exec = await fetchJsonWithTimeout(`${REMOTE_EXEC_BASE_URL}/health`, {
+    method: "GET",
+    headers: { "x-token": REMOTE_EXEC_TOKEN },
+  }, 8000)
+    .then((r) => ({ reachable: r.ok, status: r.status, baseUrl: REMOTE_EXEC_BASE_URL, data: r.data }))
+    .catch((e: unknown) => ({ reachable: false, baseUrl: REMOTE_EXEC_BASE_URL, error: String(e) }));
+
+  res.json({ success: Boolean(gateway.reachable), gateway, exec, replitPath: "/api/gateway" });
+});
+
+router.post("/tools/gateway/request", async (req, res) => {
+  try {
+    const { path: gatewayPath = "/", method = "GET", headers: extraHeaders = {}, body } = req.body as {
+      path?: string; method?: string; headers?: Record<string, string>; body?: unknown;
+    };
+    const normalizedPath = String(gatewayPath).startsWith("/") ? String(gatewayPath) : `/${gatewayPath}`;
+    if (/^https?:\/\//i.test(normalizedPath)) {
+      res.status(400).json({ success: false, error: "path 只能是远程网关相对路径" });
+      return;
+    }
+
+    const payload = typeof body === "string" ? body : body === undefined ? undefined : JSON.stringify(body);
+    const r = await fetchJsonWithTimeout(`${REMOTE_GATEWAY_BASE_URL}${normalizedPath}`, {
+      method,
+      headers: { "Content-Type": "application/json", ...extraHeaders },
+      body: method.toUpperCase() !== "GET" && method.toUpperCase() !== "HEAD" ? payload : undefined,
+    }, 120000);
+    res.status(r.ok ? 200 : 502).json({ success: r.ok, status: r.status, data: r.data, upstream: REMOTE_GATEWAY_BASE_URL });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
 router.post("/tools/proxy-check", async (req, res) => {
   const { proxy } = req.body as { proxy?: string };
   if (!proxy) {
@@ -1921,6 +1977,7 @@ router.post("/tools/proxy-request", async (req, res) => {
     if (!url) { res.status(400).json({ success: false, error: "url 不能为空" }); return; }
 
     const allowed = [
+      "45.205.27.69",
       "sub2api.com", "cpa.io", "cpaapi.io", "oaifree.com", "api.x.ai",
       "api.anthropic.com", "api.openai.com", "api.deepseek.com",
       "generativelanguage.googleapis.com",

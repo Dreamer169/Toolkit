@@ -64,6 +64,19 @@ module.exports = {
       "autorestart": true
     },
     {
+      "name": "remote-exec",
+      "script": "/workspaces/Toolkit/remote-exec.js",
+      "cwd": "/workspaces/Toolkit",
+      "interpreter": "node",
+      "env": {
+        "EXEC_PORT": "9999"
+      },
+      "restart_delay": 5000,
+      "max_restarts": 20,
+      "watch": false,
+      "autorestart": true
+    },
+    {
       "name": "keepalive",
       "script": "/workspaces/Toolkit/keepalive.sh",
       "interpreter": "bash",
