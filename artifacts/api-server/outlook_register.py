@@ -245,7 +245,7 @@ class BaseController:
 
         # ── Step 1: 打开注册页，等待同意按钮 ──────────────────────────────
         try:
-            page.goto(REGISTER_URL, timeout=35000, wait_until="domcontentloaded")
+            page.goto(REGISTER_URL, timeout=20000, wait_until="domcontentloaded")
             page.get_by_text("同意并继续").wait_for(timeout=30000)
             start_time = time.time()
             page.wait_for_timeout(0.1 * self.wait_time)
