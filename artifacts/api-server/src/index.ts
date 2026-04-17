@@ -79,6 +79,11 @@ async function doSelfRegister(attempt = 1, isHeartbeat = false): Promise<void> {
         // 把本工作区 Replit AI integration 凭证上报，主节点自动推入 sub2api
         openaiBaseUrl: process.env["AI_INTEGRATIONS_OPENAI_BASE_URL"] || undefined,
         openaiApiKey: process.env["AI_INTEGRATIONS_OPENAI_API_KEY"] || undefined,
+        // B26: 同时上报 Anthropic / Gemini integration 凭证
+        anthropicBaseUrl: process.env["AI_INTEGRATIONS_ANTHROPIC_BASE_URL"] || undefined,
+        anthropicApiKey: process.env["AI_INTEGRATIONS_ANTHROPIC_API_KEY"] || undefined,
+        geminiBaseUrl: process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"] || undefined,
+        geminiApiKey: process.env["AI_INTEGRATIONS_GEMINI_API_KEY"] || undefined,
       }),
       signal: AbortSignal.timeout(12_000),
     });
