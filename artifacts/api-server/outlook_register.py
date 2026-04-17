@@ -1620,36 +1620,42 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
         page.wait_for_timeout(3000)
 
         # ── 检测并处理 OAuth 流程中出现的 CAPTCHA ──────────────────────────────
-        # 微软对新账号触发 OAuth 时可能再次要求 CAPTCHA（redirect 到 signup.live.com）
-        for _oauth_captcha_attempt in range(2):
+        # 微软对新账号触发 OAuth 时可能再次要求 CAPTCHA
+        # 检测条件：URL 含 captcha 相关域，或页面中存在 CAPTCHA 元素
+        def _oauth_has_captcha(pg) -> bool:
+            try:
+                u = pg.url or ''
+                url_match = ('signup.live.com' in u or
+                             'login.live.com/oauth' in u or
+                             'account.live.com/Consent' in u)
+                elem_match = pg.locator(
+                    '#px-captcha, iframe[src*="hsprotect"], iframe[src*="arkoselabs"]'
+                ).count() > 0
+                return url_match or elem_match
+            except Exception:
+                return False
+
+        for _oauth_captcha_attempt in range(3):
+            if not captcha_handler or not _oauth_has_captcha(page):
+                break  # 无 CAPTCHA 或无处理器，进入正常同意按钮流程
             _cur_url = page.url or ''
-            _is_signup_page = 'signup.live.com' in _cur_url or 'login.live.com/oauth' in _cur_url
-            _has_captcha = False
-            if _is_signup_page:
-                try:
-                    _has_captcha = page.locator('#px-captcha, iframe[src*="hsprotect"]').count() > 0
-                except Exception:
-                    _has_captcha = _is_signup_page  # 保守估计
-            if _is_signup_page and captcha_handler:
-                print(f'[oauth] ⚠ 检测到 CAPTCHA 重定向（{_cur_url[:80]}），调用验证码处理器... (第{_oauth_captcha_attempt+1}次)', flush=True)
-                try:
-                    captcha_handler(page)
-                    page.wait_for_timeout(4000)
-                except Exception as _ce:
-                    print(f'[oauth] CAPTCHA 处理异常: {_ce}', flush=True)
-                # 检查是否已跳转到 nativeclient / code
-                _after_url = page.url or ''
-                if 'nativeclient' in _after_url or 'code=' in _after_url or 'error=' in _after_url:
-                    break
-                # 否则重新导航到 OAuth URL
-                print(f'[oauth] CAPTCHA 处理后重新导航授权页...', flush=True)
-                try:
-                    page.goto(auth_url, timeout=20000, wait_until='domcontentloaded')
-                except Exception:
-                    pass
-                page.wait_for_timeout(3000)
-            else:
-                break  # 非 signup 页，正常 OAuth 流程
+            print(f'[oauth] ⚠ 检测到 CAPTCHA（{_cur_url[:80]}），调用验证码处理器... (第{_oauth_captcha_attempt+1}次)', flush=True)
+            try:
+                captcha_handler(page)
+                page.wait_for_timeout(4000)
+            except Exception as _ce:
+                print(f'[oauth] CAPTCHA 处理异常: {_ce}', flush=True)
+            # 检查是否已跳转到 nativeclient / code
+            _after_url = page.url or ''
+            if 'nativeclient' in _after_url or 'code=' in _after_url or 'error=' in _after_url:
+                break
+            # 否则重新导航到 OAuth URL
+            print(f'[oauth] CAPTCHA 处理后重新导航授权页...', flush=True)
+            try:
+                page.goto(auth_url, timeout=20000, wait_until='domcontentloaded')
+            except Exception:
+                pass
+            page.wait_for_timeout(3000)
         # ────────────────────────────────────────────────────────────────────────
 
         # Dismiss any interrupt pages that appeared after navigation
