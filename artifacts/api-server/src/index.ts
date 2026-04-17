@@ -19,7 +19,7 @@ if (Number.isNaN(port) || port <= 0) {
 }
 
 initNotifier();
-startLiveVerifyPoller(30_000);
+startLiveVerifyPoller(10_000);
 startCfPoolMaintainer();
 app.listen(port, (err) => {
   if (err) {
