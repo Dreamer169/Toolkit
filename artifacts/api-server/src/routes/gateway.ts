@@ -1274,11 +1274,16 @@ router.post("/self-register", async (req, res) => {
     res.status(422).json({ ok: false, error: "探测失败，URL 不可达", detail: probe.error });
     return;
   }
-  // 已存在则更新名称，否则新建
+  // 已存在：心跳模式——不重探测，直接更新状态后返回
   const existing = allNodes().find((n) => n.baseUrl === baseUrl);
   if (existing) {
     if (name) existing.name = name;
-    res.json({ ok: true, action: "already-registered", node: nodeSnapshot(existing) });
+    // 心跳恢复：若节点因短暂故障被标记 down，重注册时清空（节点声明自己活着）
+    if (existing.downUntil > 0 && !existing.creditExhaustedAt) {
+      existing.downUntil = 0;
+    }
+    existing.lastUsedAt = new Date().toISOString();
+    res.json({ ok: true, action: "heartbeat", node: nodeSnapshot(existing) });
     return;
   }
   let hostname = baseUrl;

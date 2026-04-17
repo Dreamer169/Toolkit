@@ -4,9 +4,7 @@ import { logger } from "./lib/logger";
 const rawPort = process.env["PORT"];
 
 if (!rawPort) {
-  throw new Error(
-    "PORT environment variable is required but was not provided.",
-  );
+  throw new Error("PORT environment variable is required but was not provided.");
 }
 
 const port = Number(rawPort);
@@ -15,18 +13,61 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
-// ── 启动自注册 ────────────────────────────────────────────────────────────────
-// 新 Replit 工作区启动后向主节点（远端服务器 gateway）报告自己的 URL，自动加入节点池
-// 配置：在新工作区设置以下两个 env var 即可：
-//   SELF_REGISTER_URL  = 主节点 gateway 地址，例如 https://ngrok地址.ngrok-free.app
-//                        或 https://f38ac22e-xxxx.spock.replit.dev/api/gateway
-//   SELF_GATEWAY_URL   = 本工作区自己的 gateway 地址，例如 https://新工作区URL.replit.dev/api/gateway
-//   SELF_REGISTER_NAME = 可选，节点显示名称，例如 "账号B-OpenAI"
-const SELF_REGISTER_URL = (process.env["SELF_REGISTER_URL"] || "").trim().replace(/\/$/, "");
-const SELF_GATEWAY_URL = (process.env["SELF_GATEWAY_URL"] || "").trim().replace(/\/$/, "");
-const SELF_REGISTER_NAME = (process.env["SELF_REGISTER_NAME"] || "").trim();
+// ── 自注册：新 Replit 工作区启动后自动向主节点报到，加入节点池 ──────────────────
+//
+// 最简配置（只需一个变量）：
+//   SELF_REGISTER_URL = https://fantasize-outtakes-backpedal.ngrok-free.dev/api/gateway
+//                       （主节点的 gateway 地址）
+//
+// 可选覆盖：
+//   SELF_GATEWAY_URL   = 本工作区对外 URL（不填则自动从 Replit 环境变量推断）
+//   SELF_REGISTER_NAME = 节点显示名（不填则取 REPL_OWNER/REPL_SLUG）
+//
+// Replit 自动注入的变量（无需手动填）：
+//   REPLIT_DEV_DOMAIN  = 开发预览域名，格式 xxxxxxxx-xxxx.spock.replit.dev
+//   REPLIT_DOMAINS     = 已发布域名（逗号分隔），比 dev 域名更稳定
+//   REPL_OWNER / REPL_SLUG = 工作区身份信息
 
-async function doSelfRegister(attempt = 1): Promise<void> {
+const SELF_REGISTER_URL = (process.env["SELF_REGISTER_URL"] || "").trim().replace(/\/$/, "");
+const HEARTBEAT_INTERVAL_MS = 20 * 60 * 1000; // 每 20 分钟重注册，防主节点重启丢失节点
+
+/** 自动推断本工作区的 gateway 对外 URL */
+function resolveGatewayUrl(): string {
+  // 1. 显式覆盖优先
+  const explicit = (process.env["SELF_GATEWAY_URL"] || "").trim().replace(/\/$/, "");
+  if (explicit) return explicit;
+
+  // 2. 已发布域名（最稳定，优先使用第一个）
+  const published = (process.env["REPLIT_DOMAINS"] || "")
+    .split(",")
+    .map((s) => s.trim())
+    .find((s) => s.length > 0);
+  if (published) return `https://${published}/api/gateway`;
+
+  // 3. 开发预览域名（始终注入到 Replit 工作区）
+  const devDomain = (process.env["REPLIT_DEV_DOMAIN"] || "").trim();
+  if (devDomain) return `https://${devDomain}/api/gateway`;
+
+  return "";
+}
+
+/** 自动推断节点显示名 */
+function resolveNodeName(): string {
+  const explicit = (process.env["SELF_REGISTER_NAME"] || "").trim();
+  if (explicit) return explicit;
+  const owner = (process.env["REPL_OWNER"] || "").trim();
+  const slug = (process.env["REPL_SLUG"] || "").trim();
+  if (owner && slug) return `${owner}/${slug}`;
+  if (owner) return owner;
+  return "";
+}
+
+const SELF_GATEWAY_URL = resolveGatewayUrl();
+const SELF_REGISTER_NAME = resolveNodeName();
+
+let registered = false;
+
+async function doSelfRegister(attempt = 1, isHeartbeat = false): Promise<void> {
   if (!SELF_REGISTER_URL || !SELF_GATEWAY_URL) return;
   try {
     const resp = await fetch(`${SELF_REGISTER_URL}/self-register`, {
@@ -40,24 +81,41 @@ async function doSelfRegister(attempt = 1): Promise<void> {
     });
     const data = await resp.json() as { ok?: boolean; action?: string; node?: { id?: string } };
     if (data.ok) {
-      logger.info(
-        { action: data.action, nodeId: data.node?.id, target: SELF_REGISTER_URL },
-        "Self-register: 已加入主节点",
-      );
+      if (!registered) {
+        // 首次成功：info 级别，记录节点 ID
+        logger.info(
+          { action: data.action, nodeId: data.node?.id, master: SELF_REGISTER_URL, self: SELF_GATEWAY_URL },
+          "Self-register: 已加入主节点池",
+        );
+        registered = true;
+      } else if (!isHeartbeat) {
+        logger.debug({ action: data.action, nodeId: data.node?.id }, "Self-register: OK");
+      }
+      // 心跳成功静默，不打日志（隐蔽）
     } else {
-      logger.warn({ data, target: SELF_REGISTER_URL }, "Self-register: 返回失败");
-      // 非致命，不重试
+      logger.warn({ data, master: SELF_REGISTER_URL }, "Self-register: 主节点返回失败");
     }
   } catch (e) {
+    // 指数退避重试：30s → 60s → 120s（最多 3 次）
     if (attempt <= 3) {
-      // 最多重试 3 次，每次间隔 30s（服务器可能还没完全就绪）
       const delayMs = attempt * 30_000;
-      logger.warn({ error: String(e), attempt, retryInMs: delayMs }, "Self-register 失败，将重试");
-      setTimeout(() => { void doSelfRegister(attempt + 1); }, delayMs);
+      logger.warn(
+        { error: String(e), attempt, retryInMs: delayMs },
+        "Self-register: 连接失败，将重试",
+      );
+      setTimeout(() => { void doSelfRegister(attempt + 1, isHeartbeat); }, delayMs);
     } else {
-      logger.warn({ error: String(e) }, "Self-register 已达最大重试次数，跳过");
+      logger.warn({ error: String(e) }, "Self-register: 达到最大重试次数，放弃本轮");
     }
   }
+}
+
+/** 周期心跳：每 HEARTBEAT_INTERVAL_MS 重注册一次，防主节点重启后丢失 runtime 节点 */
+function startHeartbeat() {
+  if (!SELF_REGISTER_URL || !SELF_GATEWAY_URL) return;
+  setInterval(() => {
+    void doSelfRegister(1, true);
+  }, HEARTBEAT_INTERVAL_MS);
 }
 
 app.listen(port, (err) => {
@@ -65,15 +123,11 @@ app.listen(port, (err) => {
     logger.error({ err }, "Error listening on port");
     process.exit(1);
   }
-
   logger.info({ port }, "Server listening");
 
-  // 延迟 5s 再自注册：确保服务本身已完全就绪，可以被主节点探测
   if (SELF_REGISTER_URL && SELF_GATEWAY_URL) {
-    logger.info(
-      { selfGateway: SELF_GATEWAY_URL, masterGateway: SELF_REGISTER_URL },
-      "Self-register: 5s 后向主节点注册",
-    );
+    // 延迟 5s 再注册：确保服务完全就绪、可被主节点探测
     setTimeout(() => { void doSelfRegister(); }, 5_000);
+    startHeartbeat();
   }
 });
