@@ -23,7 +23,7 @@ type GatewayNode = {
   successes: number;
   failures: number;
   apiKey?: string;
-  source: "built-in" | "env" | "runtime";
+  source: "built-in" | "env" | "runtime" | "register";
   lastStatus?: number;
   lastError?: string;
   lastLatencyMs?: number;
@@ -58,19 +58,27 @@ type GeminiResult = {
   candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }>;
 };
 
+type SelfRegisterBody = {
+  gatewayUrl?: string;
+  name?: string;
+  execSecret?: string;
+  openaiBaseUrl?: string;
+  openaiApiKey?: string;
+  anthropicBaseUrl?: string;
+  anthropicApiKey?: string;
+  geminiBaseUrl?: string;
+  geminiApiKey?: string;
+};
+
 // ═══ 配置 ═══════════════════════════════════════════════════════════════════
 
 const router = Router();
 // REMOTE_GATEWAY_BASE_URL: 远端 Sub2API 地址。
-// 留空 = 禁用 remote-sub2api 节点（Replit 子节点模式，不需要再路由回 Sub2API）
+// 留空 = 禁用 remote-sub2api 节点（Reseek 子节点模式，不需要再路由回 Sub2API）
 // 设为 http://localhost:9090 = 远端主节点模式（PM2 ecosystem 显式配置）
 const REMOTE_SUB2API_URL = (process.env["REMOTE_GATEWAY_BASE_URL"] || "").replace(/\/$/, "");
 const SUB2API_ENABLED = REMOTE_SUB2API_URL.length > 0 && REMOTE_SUB2API_URL !== "disabled";
 const SUB2API_API_KEY = process.env["SUB2API_API_KEY"] || process.env["SUB2API_ADMIN_KEY"] || "";
-// sub2api 管理员凭证——用于把新 Replit 子节点的 integration 推入 sub2api 账号池
-const SUB2API_ADMIN_BASE_URL = (process.env["SUB2API_ADMIN_BASE_URL"] || REMOTE_SUB2API_URL).replace(/\/$/, "");
-const SUB2API_ADMIN_EMAIL = process.env["SUB2API_ADMIN_EMAIL"] || "";
-const SUB2API_ADMIN_PASSWORD = process.env["SUB2API_ADMIN_PASSWORD"] || "";
 const OPENAI_BASE_URL = (process.env["AI_INTEGRATIONS_OPENAI_BASE_URL"] || "").replace(/\/$/, "");
 const OPENAI_API_KEY = process.env["AI_INTEGRATIONS_OPENAI_API_KEY"] || "";
 const ANTHROPIC_BASE_URL = (process.env["AI_INTEGRATIONS_ANTHROPIC_BASE_URL"] || "").replace(/\/$/, "");
@@ -85,8 +93,13 @@ const OPENAI_MODELS = ["gpt-5.2", "gpt-5-mini", "gpt-5-nano", "o4-mini"];
 const OPENAI_REASONING_MODELS = ["o4-mini", "o3", "o3-mini", "o1", "o1-mini"]; // 只有这些支持 reasoning 参数
 const ANTHROPIC_MODELS = ["claude-sonnet-4-6", "claude-haiku-4-5"];
 const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-3-flash-preview"];
+const SUB2API_GROUP_IDS = {
+  openai: 2,
+  anthropic: 6,
+  gemini: 3,
+};
 
-// B15 修复：额外凭据组——聚合多套 Replit AI integration / 第三方 OpenAI 兼容端点
+// B15 修复：额外凭据组——聚合多套 Reseek AI integration / 第三方 OpenAI 兼容端点
 // EXTRA_OPENAI_NODES=[{"baseUrl":"https://...","apiKey":"sk-...","name":"slot2","count":4}]
 // EXTRA_ANTHROPIC_NODES=[{"baseUrl":"https://...","apiKey":"sk-ant-..."}]
 // EXTRA_GEMINI_NODES=[{"baseUrl":"https://...","apiKey":"AIza..."}]
@@ -127,121 +140,6 @@ function msUntilUtcMidnight(): number {
   return Math.max(60_000, midnight.getTime() - now);
 }
 
-// ═══ sub2api 账号自动同步 ═══════════════════════════════════════════════════════
-// 子节点携带 Replit AI integration 凭证自注册时，把该凭证推入 sub2api 账号池
-
-let _sub2apiJwt: string | null = null;
-let _sub2apiJwtExp = 0;
-
-async function getOrRefreshSub2ApiToken(): Promise<string | null> {
-  if (!SUB2API_ADMIN_EMAIL || !SUB2API_ADMIN_PASSWORD || !SUB2API_ADMIN_BASE_URL) return null;
-  if (_sub2apiJwt && Date.now() < _sub2apiJwtExp - 600_000) return _sub2apiJwt;
-  try {
-    const r = await fetch(`${SUB2API_ADMIN_BASE_URL}/api/v1/auth/login`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: SUB2API_ADMIN_EMAIL, password: SUB2API_ADMIN_PASSWORD }),
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!r.ok) return null;
-    const d = await r.json() as { data?: { access_token?: string; expires_in?: number } };
-    const token = d.data?.access_token;
-    if (!token) return null;
-    _sub2apiJwt = token;
-    _sub2apiJwtExp = Date.now() + (d.data?.expires_in ?? 86400) * 1000;
-    return token;
-  } catch { return null; }
-}
-
-// 幂等地把 Replit AI integration 凭证注册为 sub2api 账号
-// platform: "openai"|"anthropic"|"gemini"，groupId: sub2api 分组 ID
-async function pushToSub2Api(
-  nodeName: string, baseUrl: string, apiKey: string,
-  platform = "openai", groupId = 2,
-): Promise<void> {
-  if (!baseUrl || !apiKey) return;
-  const token = await getOrRefreshSub2ApiToken();
-  if (!token) return;
-  const base = SUB2API_ADMIN_BASE_URL;
-  const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
-  // 幂等检查：同 base_url + platform 已存在则跳过
-  try {
-    const list = await fetch(`${base}/api/v1/admin/accounts?page=1&page_size=200&platform=${platform}`, { headers, signal: AbortSignal.timeout(8000) });
-    if (list.ok) {
-      const ld = await list.json() as { data?: { items?: Array<{ credentials?: Record<string, unknown> }> } };
-      const already = (ld.data?.items ?? []).some(
-        (a) => (a.credentials?.["base_url"] as string | undefined) === baseUrl
-      );
-      if (already) return;
-    }
-  } catch { /* ignore */ }
-  try {
-    await fetch(`${base}/api/v1/admin/accounts`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        name: `Replit-${platform}-${nodeName}`,
-        platform,
-        type: "apikey",
-        credentials: { base_url: baseUrl, api_key: apiKey },
-        concurrency: 5,
-        priority: 2,
-        // B23 关键：绑定到正确分组，否则 sub2api 选不到该账号
-        group_ids: [groupId],
-        confirm_mixed_channel_risk: true,
-      }),
-      signal: AbortSignal.timeout(10_000),
-    });
-  } catch { /* fire-and-forget */ }
-}
-
-// 把一个子节点的所有 Replit AI integration 凭证全部推入 sub2api
-// 对应分组: openai→2 (openai-default), anthropic→6 (anthropic-default), gemini→3 (gemini-default)
-async function pushAllIntegrationsToSub2Api(
-  nodeName: string,
-  openaiBaseUrl?: string, openaiApiKey?: string,
-  anthropicBaseUrl?: string, anthropicApiKey?: string,
-  geminiBaseUrl?: string, geminiApiKey?: string,
-): Promise<void> {
-  await Promise.allSettled([
-    openaiBaseUrl && openaiApiKey ? pushToSub2Api(nodeName, openaiBaseUrl, openaiApiKey, "openai", 2) : Promise.resolve(),
-    anthropicBaseUrl && anthropicApiKey ? pushToSub2Api(nodeName, anthropicBaseUrl, anthropicApiKey, "anthropic", 6) : Promise.resolve(),
-    geminiBaseUrl && geminiApiKey ? pushToSub2Api(nodeName, geminiBaseUrl, geminiApiKey, "gemini", 3) : Promise.resolve(),
-  ]);
-}
-
-// ═══ 后台健康探测循环 ═══════════════════════════════════════════════════════════
-// 每 5 分钟主动探测所有 friend-openai 节点，自动标记 idle/down 节点
-// 避免长期持有无效的 ready 状态（Replit 工作区停止后会返回 HTML 空闲页面）
-
-async function backgroundProbeOnce(): Promise<void> {
-  const targets = allNodes().filter(
-    (n) => n.type === "friend-openai" && n.enabled
-  );
-  for (const node of targets) {
-    const started = Date.now();
-    const result = await probeNodeUrl(node.baseUrl, node.apiKey, 10_000);
-    if (result.ok) {
-      // 探测成功：如果之前因网络故障被标为 down，现在恢复
-      if (node.downUntil > 0 && !node.creditExhaustedAt) {
-        node.downUntil = 0;
-        node.lastError = undefined;
-      }
-      node.lastLatencyMs = result.latencyMs;
-    } else {
-      // 探测失败：按指数退避更新 downUntil
-      recordFailure(node, undefined, result.error || "probe-fail", started);
-    }
-  }
-}
-
-// 延迟 30s 后首次探测（给节点注册留时间），之后每 5 分钟一次
-setTimeout(() => {
-  void backgroundProbeOnce();
-  setInterval(() => { void backgroundProbeOnce(); }, 5 * 60 * 1000);
-}, 8_000); // B25: 8s 启动探测，尽快标记死节点
-
-
 // ═══ 持久化存储 ══════════════════════════════════════════════════════════════
 // 运行时动态注册的节点写到 JSON 文件，服务重启后自动恢复
 const DATA_DIR = (process.env["DATA_DIR"] || join(process.cwd(), "data")).replace(/\/$/, "");
@@ -267,7 +165,7 @@ function loadPersistedNodes(): GatewayNode[] {
         downUntil: 0,
         successes: 0,
         failures: 0,
-        source: "runtime" as const,
+        source: (n.source as GatewayNode["source"]) || "runtime",
       }));
   } catch {
     return [];
@@ -278,7 +176,7 @@ function savePersistedNodes(nodes: GatewayNode[]) {
   try {
     if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
     writeFileSync(NODES_FILE, JSON.stringify(nodes.map((n) => ({
-      id: n.id, name: n.name, type: n.type, baseUrl: n.baseUrl,
+      id: n.id, name: n.name, type: n.type, baseUrl: n.baseUrl, source: n.source,
       apiKey: n.apiKey, model: n.model, priority: n.priority, enabled: n.enabled,
     })), null, 2), "utf8");
   } catch {}
@@ -328,15 +226,13 @@ function parseReplitSubnodes(): GatewayNode[] {
 
   return urls.map((url, i) => ({
     id: stableId("replit", url),
-    name: `Replit 子节点 #${i + 1}`,
+    name: `Reseek 子节点 #${i + 1}`,
     type: "friend-openai" as const,
     baseUrl: url,
     model: "gpt-5-mini",
     priority: 2,
     enabled: true,
-    // B25: 冷启动标为"待探测"（downUntil=1 ms 已过期），后台探测会立即纠正状态
-    // 防止未探测就路由到停止的工作区
-    downUntil: 1,
+    downUntil: 0,
     successes: 0,
     failures: 0,
     source: "env" as const,
@@ -523,17 +419,11 @@ function recordFailure(node: GatewayNode, status: number | undefined, error: str
     // 节点过载/限流/不可用：NODE_DOWN_MS 冷却（默认 60s）
     node.downUntil = Date.now() + NODE_DOWN_MS;
   } else if (
-    /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|network.*error|fetch.*failed|aborted|HTML.*工作区/i.test(error)
-    || status === undefined || status === 502
+    /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|network.*error|fetch.*failed|aborted/i.test(error)
+    || status === undefined
   ) {
-    // B20: 指数退避：连续失败越多，冷却越长（1min→5min→30min→2h→次日零点）
-    const consecutiveFails = node.failures;
-    const backoff = consecutiveFails <= 1 ? NODE_DOWN_MS
-      : consecutiveFails <= 3 ? NODE_DOWN_MS * 5
-      : consecutiveFails <= 6 ? NODE_DOWN_MS * 30
-      : consecutiveFails <= 12 ? NODE_DOWN_MS * 120
-      : msUntilUtcMidnight();
-    node.downUntil = Date.now() + backoff;
+    // 网络中断/节点宕机：NODE_DOWN_MS 冷却（之前没退避，会无限重试）
+    node.downUntil = Date.now() + NODE_DOWN_MS;
   }
 }
 
@@ -565,14 +455,19 @@ function propagateFailureToSiblings(failedNode: GatewayNode) {
 }
 
 function nodeMatchesRequestedModel(node: GatewayNode, model: string) {
-  if (!model) return true;
-  // B16 Fix: strip provider prefix e.g. "anthropic/claude-sonnet-4-6" -> "claude-sonnet-4-6"
-  const bare = model.includes("/") ? model.split("/").pop()! : model;
-  if (node.model === model || node.model === bare) return true;
-  if (node.type === "reseek-openai" && (OPENAI_MODELS.includes(model) || OPENAI_MODELS.includes(bare))) return true;
-  if (node.type === "reseek-anthropic" && (ANTHROPIC_MODELS.includes(model) || ANTHROPIC_MODELS.includes(bare))) return true;
-  if (node.type === "reseek-gemini" && (GEMINI_MODELS.includes(model) || GEMINI_MODELS.includes(bare))) return true;
+  const normalized = normalizeRequestedModel(model);
+  if (!normalized) return true;
+  if (normalizeRequestedModel(node.model) === normalized) return true;
+  if (node.type === "reseek-openai" && OPENAI_MODELS.includes(normalized)) return true;
+  if (node.type === "reseek-anthropic" && ANTHROPIC_MODELS.includes(normalized)) return true;
+  if (node.type === "reseek-gemini" && GEMINI_MODELS.includes(normalized)) return true;
   return node.type === "remote-sub2api" || node.type === "friend-openai";
+}
+
+function normalizeRequestedModel(model: string) {
+  const value = String(model || "").trim();
+  if (!value) return "";
+  return value.includes("/") ? value.split("/").pop() || value : value;
 }
 
 function orderedCandidates(model = "") {
@@ -617,12 +512,13 @@ function maxTokens(body: ChatBody, fallback = 8192) {
 }
 
 function requestedModel(body: ChatBody, node: GatewayNode, allowed: string[]) {
-  const model = typeof body.model === "string" ? body.model : "";
+  const model = normalizeRequestedModel(typeof body.model === "string" ? body.model : "");
   return allowed.includes(model) ? model : node.model;
 }
 
 function openAiCompatibleBody(body: ChatBody, node: GatewayNode) {
   const next: ChatBody = { ...body };
+  if (typeof next.model === "string") next.model = normalizeRequestedModel(next.model);
   if (!next.model || next.model === "upstream") next.model = node.model;
   if (typeof next.max_tokens === "number" && typeof next.max_completion_tokens !== "number")
     next.max_completion_tokens = next.max_tokens;
@@ -689,7 +585,7 @@ async function fetchTextWithTimeout(url: string, init: RequestInit, timeoutMs = 
 async function callOpenAiCompatibleNode(node: GatewayNode, req: Request, body: ChatBody) {
   const requestBody = openAiCompatibleBody(body, node);
   const authorization = node.apiKey ? `Bearer ${node.apiKey}` : req.header("authorization");
-  const result = await fetchTextWithTimeout(`${node.baseUrl}/v1/chat/completions`, {
+  return await fetchTextWithTimeout(`${node.baseUrl}/v1/chat/completions`, {
     method: "POST",
     headers: {
       ...(authorization ? { Authorization: authorization } : {}),
@@ -697,15 +593,39 @@ async function callOpenAiCompatibleNode(node: GatewayNode, req: Request, body: C
     },
     body: JSON.stringify(requestBody),
   });
-  // B21: 工作区停止时返回 200+HTML，需检测并伪造 502
-  if (result.response.ok) {
-    const ct = result.response.headers.get("content-type") || "";
-    if (ct.includes("text/html")) {
-      const fakeResp = new Response("上游返回 HTML（工作区已停止）", { status: 502 });
-      return { response: fakeResp, text: "上游返回 HTML（工作区已停止）" };
-    }
+}
+
+function inheritedAuthHeaders(req: Request, extraHeaders: Record<string, string> = {}) {
+  const headers: Record<string, string> = { ...extraHeaders };
+  for (const name of [
+    "authorization",
+    "x-api-key",
+    "x-goog-api-key",
+    "anthropic-version",
+    "anthropic-beta",
+    "openai-organization",
+    "openai-project",
+  ]) {
+    const value = req.header(name);
+    if (value && !headers[name] && !headers[name.toLowerCase()]) headers[name] = value;
   }
-  return result;
+  return headers;
+}
+
+function sseChunk(id: string, model: string, delta: Record<string, unknown>, finishReason: string | null = null) {
+  return {
+    id,
+    object: "chat.completion.chunk",
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [{ index: 0, delta, finish_reason: finishReason }],
+  };
+}
+
+function isSub2ApiEmptyAccount(node: GatewayNode, status: number, text: string) {
+  return node.type === "remote-sub2api"
+    && status === 503
+    && /no available.*account|temporarily unavailable|Service temporarily unavailable/i.test(text);
 }
 
 async function callOpenAiResponsesNode(node: GatewayNode, body: ChatBody) {
@@ -808,6 +728,10 @@ async function callNode(node: GatewayNode, req: Request, body: ChatBody) {
             : await callOpenAiCompatibleNode(node, req, body);
     if (result.response.ok) {
       recordSuccess(node, result.response.status, started);
+    } else if (isSub2ApiEmptyAccount(node, result.response.status, result.text)) {
+      node.lastStatus = result.response.status;
+      node.lastError = result.text || result.response.statusText;
+      node.lastLatencyMs = Date.now() - started;
     } else {
       recordFailure(node, result.response.status, result.text || result.response.statusText, started);
       // B7 修复：认证/额度失败立即传播到所有同源节点，避免逐一重试浪费请求
@@ -841,16 +765,15 @@ async function streamNode(node: GatewayNode, req: Request, res: Response, body: 
       });
       if (!response.ok || !response.body) {
         const text = await response.text();
-        recordFailure(node, response.status, text || response.statusText, started);
-        propagateFailureToSiblings(node);
+        if (isSub2ApiEmptyAccount(node, response.status, text)) {
+          node.lastStatus = response.status;
+          node.lastError = text || response.statusText;
+          node.lastLatencyMs = Date.now() - started;
+        } else {
+          recordFailure(node, response.status, text || response.statusText, started);
+          propagateFailureToSiblings(node);
+        }
         clearTimeout(streamTimeout);
-        return false;
-      }
-      // B18: 若上游返回 HTML（Replit idle）而非 SSE/JSON，视为失败
-      const streamCT = response.headers.get("content-type") || "";
-      if (streamCT.includes("text/html")) {
-        clearTimeout(streamTimeout);
-        recordFailure(node, 200, "上游返回 HTML（工作区可能已停止）", started);
         return false;
       }
       recordSuccess(node, response.status, started);
@@ -882,13 +805,12 @@ async function streamNode(node: GatewayNode, req: Request, res: Response, body: 
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("x-gateway-node", node.id);
-  const sseId = `chatcmpl-${Date.now()}`;
-  const sseModel = typeof body.model === "string" ? body.model : node.model;
-  const sseCreated = Math.floor(Date.now() / 1000);
-  res.write(`data: ${JSON.stringify({ id: sseId, object: "chat.completion.chunk", created: sseCreated, model: sseModel, choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] })}\n\n`);
+  const streamId = `chatcmpl-${Date.now()}`;
+  const model = requestedModel(body, node, [...OPENAI_MODELS, ...ANTHROPIC_MODELS, ...GEMINI_MODELS]);
+  res.write(`data: ${JSON.stringify(sseChunk(streamId, model, { role: "assistant" }))}\n\n`);
   if (content)
-    res.write(`data: ${JSON.stringify({ id: sseId, object: "chat.completion.chunk", created: sseCreated, model: sseModel, choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`);
-  res.write(`data: ${JSON.stringify({ id: sseId, object: "chat.completion.chunk", created: sseCreated, model: sseModel, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`);
+    res.write(`data: ${JSON.stringify(sseChunk(streamId, model, { content }))}\n\n`);
+  res.write(`data: ${JSON.stringify(sseChunk(streamId, model, {}, "stop"))}\n\n`);
   res.write("data: [DONE]\n\n");
   res.end();
   return true;
@@ -908,11 +830,10 @@ async function probeNodeUrl(rawUrl: string, apiKey?: string, timeoutMs = 10_000)
       const res = await fetch(`${baseUrl}${path}`, { headers, signal: ctrl.signal });
       clearTimeout(timer);
       if (res.ok) {
-        // B17: 验证响应是真实 JSON（Replit idle 页面返回 200+HTML，必须排除）
-        const ct = res.headers.get("content-type") || "";
-        if (!ct.includes("json") && !ct.includes("text/plain")) continue; // HTML → 跳过
-        const data = await res.json().catch(() => null) as { data?: Array<{ id: string }>; success?: boolean } | null;
-        if (data === null) continue; // JSON 解析失败 → 跳过
+        const contentType = res.headers.get("content-type") || "";
+        const text = await res.text();
+        if (/text\/html/i.test(contentType) || /^\s*<!doctype html/i.test(text) || /id=["']root["']|You need to enable JavaScript/i.test(text)) continue;
+        const data = JSON.parse(text || "{}") as { data?: Array<{ id: string }>; success?: boolean; status?: string };
         const models = Array.isArray(data.data) ? data.data.map((m) => m.id).slice(0, 5) : [];
         return { ok: true, latencyMs: Date.now() - started, models };
       }
@@ -1170,6 +1091,62 @@ router.post("/nodes/probe", async (req, res) => {
   res.json({ success: result.ok, baseUrl, ...result });
 });
 
+async function pushSub2ApiAccount(provider: "openai" | "anthropic" | "gemini", baseUrl?: string, apiKey?: string, nodeBaseUrl?: string, name?: string) {
+  if (!REMOTE_SUB2API_URL || !SUB2API_API_KEY || !baseUrl || !apiKey) return { ok: false, skipped: true };
+  const label = `${name || "Reseek 子节点"} ${provider}`;
+  const payloads = [
+    {
+      name: label,
+      type: "api_key",
+      provider,
+      api_key: apiKey,
+      apiKey,
+      base_url: baseUrl.replace(/\/$/, ""),
+      baseUrl: baseUrl.replace(/\/$/, ""),
+      group_id: SUB2API_GROUP_IDS[provider],
+      groupId: SUB2API_GROUP_IDS[provider],
+      enabled: true,
+      metadata: { source: "self-register", gatewayUrl: nodeBaseUrl },
+    },
+    {
+      name: label,
+      provider,
+      key: apiKey,
+      base_url: baseUrl.replace(/\/$/, ""),
+      group_id: SUB2API_GROUP_IDS[provider],
+      status: "active",
+    },
+  ];
+  for (const payload of payloads) {
+    try {
+      const response = await fetch(`${REMOTE_SUB2API_URL}/api/v1/admin/accounts`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${SUB2API_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(12_000),
+      });
+      const text = await response.text();
+      if (response.ok || response.status === 409) return { ok: true, status: response.status };
+      if (response.status !== 400 && response.status !== 422) return { ok: false, status: response.status, error: text.slice(0, 300) };
+    } catch (error) {
+      return { ok: false, error: String(error) };
+    }
+  }
+  return { ok: false, error: "sub2api account schema rejected baseUrl/apiKey payloads" };
+}
+
+async function pushSelfRegisterCredentialsToSub2Api(body: SelfRegisterBody, nodeBaseUrl: string, name?: string) {
+  const results = await Promise.allSettled([
+    pushSub2ApiAccount("openai", body.openaiBaseUrl, body.openaiApiKey, nodeBaseUrl, name),
+    pushSub2ApiAccount("anthropic", body.anthropicBaseUrl, body.anthropicApiKey, nodeBaseUrl, name),
+    pushSub2ApiAccount("gemini", body.geminiBaseUrl, body.geminiApiKey, nodeBaseUrl, name),
+  ]);
+  return results.map((result) => result.status === "fulfilled" ? result.value : { ok: false, error: String(result.reason) });
+}
+
 // ── 批量探测 + 自动注册 ──────────────────────────────────────────────────────
 router.post("/nodes/batch-probe", async (req, res) => {
   const { urls, apiKey, model, autoRegister = true, priority = 3 } = req.body as {
@@ -1191,7 +1168,7 @@ router.post("/nodes/batch-probe", async (req, res) => {
         try {
           const hostname = new URL(baseUrl).hostname.split(".")[0];
           const node: GatewayNode = {
-            id, name: `Replit(${hostname})`, type: "friend-openai",
+            id, name: `Reseek(${hostname})`, type: "friend-openai",
             baseUrl, apiKey, model: model || "gpt-5-mini",
             priority: Number(priority) || 3, enabled: true,
             downUntil: 0, successes: 0, failures: 0, source: "runtime",
@@ -1211,7 +1188,6 @@ router.post("/nodes/batch-probe", async (req, res) => {
   const rows = results.map((r) => r.status === "fulfilled" ? r.value : { url: "", ok: false, error: String((r as PromiseRejectedResult).reason), registered: false });
   const succeeded = rows.filter((r) => r.ok).length;
   const registered = rows.filter((r) => r.registered).length;
-  // B16 Fix: persist newly registered nodes so they survive server restarts
   if (registered > 0) savePersistedNodes(runtimeNodes);
   res.json({ success: succeeded > 0, summary: { total: rows.length, succeeded, failed: rows.length - succeeded, registered }, rows, nodes: allNodes().map(nodeSnapshot) });
 });
@@ -1275,7 +1251,8 @@ router.get("/v1/models", async (req, res) => {
         recordSuccess(node, result.response.status, started);
       } else {
         errors.push({ node: node.id, status: result.response.status, error: result.text });
-        recordFailure(node, result.response.status, result.text || result.response.statusText, started);
+        if (!isSub2ApiEmptyAccount(node, result.response.status, result.text))
+          recordFailure(node, result.response.status, result.text || result.response.statusText, started);
       }
     } catch (error) {
       errors.push({ node: node.id, error: String(error) });
@@ -1339,8 +1316,8 @@ router.post("/v1/chat/completions", async (req, res) => {
   res.status(503).json({ error: { message: "所有网关节点都暂时不可用", type: "gateway_unavailable", details: errors } });
 });
 
-// ── HTTP Exec（SSH 替代：远端控制 Replit 工作区）────────────────────────────
-// 远端服务器无法 SSH 进 Replit（防火墙封闭），用此端点代替
+// ── HTTP Exec（SSH 替代：远端控制 Reseek 工作区）────────────────────────────
+// 远端服务器无法 SSH 进 Reseek（防火墙封闭），用此端点代替
 // 安全：必须设置 EXEC_SECRET 环境变量，且请求头携带 X-Exec-Secret 匹配
 router.post("/exec", async (req, res) => {
   if (!EXEC_SECRET) {
@@ -1404,15 +1381,11 @@ router.post("/nodes/:id/recover", (req, res) => {
 });
 
 // ── 子节点自注册 (self-register) ──────────────────────────────────────────────
-// 新 Replit 工作区启动后调用远端服务器的此接口自动加入节点池
+// 新 Reseek 工作区启动后调用远端服务器的此接口自动加入节点池
 // POST /api/gateway/self-register  body: { gatewayUrl, name? }
 router.post("/self-register", async (req, res) => {
-  const { gatewayUrl, name, openaiBaseUrl, openaiApiKey, anthropicBaseUrl, anthropicApiKey, geminiBaseUrl, geminiApiKey } = req.body as {
-    gatewayUrl?: string; name?: string; execSecret?: string;
-    openaiBaseUrl?: string; openaiApiKey?: string;
-    anthropicBaseUrl?: string; anthropicApiKey?: string;
-    geminiBaseUrl?: string; geminiApiKey?: string;
-  };
+  const body = req.body as SelfRegisterBody;
+  const { gatewayUrl, name } = body;
   if (!gatewayUrl || !gatewayUrl.startsWith("http")) {
     res.status(400).json({ ok: false, error: "gatewayUrl 必须是 http(s) URL" });
     return;
@@ -1424,17 +1397,12 @@ router.post("/self-register", async (req, res) => {
     res.status(422).json({ ok: false, error: "探测失败，URL 不可达", detail: probe.error });
     return;
   }
-  // 已存在：心跳模式——不重探测，直接更新状态后返回
+  // 已存在则更新名称，否则新建
   const existing = allNodes().find((n) => n.baseUrl === baseUrl);
   if (existing) {
     if (name) existing.name = name;
-    // 心跳恢复：若节点因短暂故障被标记 down，重注册时清空（节点声明自己活着）
-    if (existing.downUntil > 0 && !existing.creditExhaustedAt) {
-      existing.downUntil = 0;
-    }
-    existing.lastUsedAt = new Date().toISOString();
-    void pushAllIntegrationsToSub2Api(existing.name, openaiBaseUrl, openaiApiKey, anthropicBaseUrl, anthropicApiKey, geminiBaseUrl, geminiApiKey);
-    res.json({ ok: true, action: "heartbeat", node: nodeSnapshot(existing) });
+    const credentialPush = await pushSelfRegisterCredentialsToSub2Api(body, baseUrl, name);
+    res.json({ ok: true, action: "already-registered", node: nodeSnapshot(existing), credentialPush });
     return;
   }
   let hostname = baseUrl;
@@ -1452,12 +1420,12 @@ router.post("/self-register", async (req, res) => {
     downUntil: 0,
     successes: 0,
     failures: 0,
-    source: "runtime",
+    source: "register",
   };
   runtimeNodes.push(node);
   savePersistedNodes(runtimeNodes);
-  void pushAllIntegrationsToSub2Api(node.name, openaiBaseUrl, openaiApiKey, anthropicBaseUrl, anthropicApiKey, geminiBaseUrl, geminiApiKey);
-  res.json({ ok: true, action: "registered", nodeId: id, node: nodeSnapshot(node), latencyMs: probe.latencyMs });
+  const credentialPush = await pushSelfRegisterCredentialsToSub2Api(body, baseUrl, name);
+  res.json({ ok: true, action: "registered", nodeId: id, node: nodeSnapshot(node), latencyMs: probe.latencyMs, credentialPush });
 });
 
 // ── 对等节点列表 (peers) ───────────────────────────────────────────────────────
@@ -1507,16 +1475,10 @@ router.post(["/relay/:nodeId", "/relay"], async (req, res) => {
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 60_000);
-    // B16 Fix: forward original request Authorization header unless caller overrides it
-    const reqAuth = req.header("authorization");
-    const relayHeaders: Record<string, string> = { "Content-Type": "application/json" };
-    if (reqAuth && !extraHeaders["Authorization"] && !extraHeaders["authorization"]) {
-      relayHeaders["Authorization"] = reqAuth;
-    }
-    Object.assign(relayHeaders, extraHeaders);
+    const headers = inheritedAuthHeaders(req, { "Content-Type": "application/json", ...extraHeaders });
     const r = await fetch(url, {
       method: method.toUpperCase(),
-      headers: relayHeaders,
+      headers,
       ...(relayBody ? { body: JSON.stringify(relayBody) } : {}),
       signal: ctrl.signal,
     });
