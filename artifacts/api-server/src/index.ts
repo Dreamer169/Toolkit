@@ -1,61 +1,79 @@
-import { createServer } from "http";
-import { WebSocketServer } from "ws";
-import type { IncomingMessage } from "http";
 import app from "./app";
-import { initNotifier } from "./lib/notifier.js";
-import { startLiveVerifyPoller } from "./lib/live-verify-poller.js";
-import { startCfPoolMaintainer } from "./lib/cf-pool-maintainer.js";
-import { handleClientConnection, handlePlaywrightConnection } from "./lib/cdp_relay_ws.js";
 import { logger } from "./lib/logger";
-import { initDatabase } from "./db.js";
 
 const rawPort = process.env["PORT"];
-if (!rawPort) throw new Error("PORT environment variable is required but was not provided.");
-const port = Number(rawPort);
-if (Number.isNaN(port) || port <= 0) throw new Error(`Invalid PORT value: "${rawPort}"`);
 
-async function startServer() {
-  await initDatabase();
-  initNotifier();
-  startLiveVerifyPoller(10_000);
-  startCfPoolMaintainer();
-  server.listen(port, (err?: Error) => {
-    if (err) {
-      logger.error({ err }, "Error listening on port");
-      process.exit(1);
-    }
-    logger.info({ port }, "Server listening (with CDP relay WS)");
-  });
+if (!rawPort) {
+  throw new Error(
+    "PORT environment variable is required but was not provided.",
+  );
 }
 
-// 创建 HTTP server（用于挂载 WebSocket）
-const server = createServer(app);
+const port = Number(rawPort);
 
-// WebSocket 服务器（不自动绑定路由，通过 upgrade 事件手动路由）
-const wss = new WebSocketServer({ noServer: true });
+if (Number.isNaN(port) || port <= 0) {
+  throw new Error(`Invalid PORT value: "${rawPort}"`);
+}
 
-server.on("upgrade", (req: IncomingMessage, socket, head) => {
-  const url = req.url ?? "";
+// ── 启动自注册 ────────────────────────────────────────────────────────────────
+// 新 Replit 工作区启动后向主节点（远端服务器 gateway）报告自己的 URL，自动加入节点池
+// 配置：在新工作区设置以下两个 env var 即可：
+//   SELF_REGISTER_URL  = 主节点 gateway 地址，例如 https://ngrok地址.ngrok-free.app
+//                        或 https://f38ac22e-xxxx.spock.replit.dev/api/gateway
+//   SELF_GATEWAY_URL   = 本工作区自己的 gateway 地址，例如 https://新工作区URL.replit.dev/api/gateway
+//   SELF_REGISTER_NAME = 可选，节点显示名称，例如 "账号B-OpenAI"
+const SELF_REGISTER_URL = (process.env["SELF_REGISTER_URL"] || "").trim().replace(/\/$/, "");
+const SELF_GATEWAY_URL = (process.env["SELF_GATEWAY_URL"] || "").trim().replace(/\/$/, "");
+const SELF_REGISTER_NAME = (process.env["SELF_REGISTER_NAME"] || "").trim();
 
-  if (url === "/api/cdp-relay/client") {
-    // 本地桥接客户端连接
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      handleClientConnection(ws, req);
+async function doSelfRegister(attempt = 1): Promise<void> {
+  if (!SELF_REGISTER_URL || !SELF_GATEWAY_URL) return;
+  try {
+    const resp = await fetch(`${SELF_REGISTER_URL}/self-register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        gatewayUrl: SELF_GATEWAY_URL,
+        name: SELF_REGISTER_NAME || undefined,
+      }),
+      signal: AbortSignal.timeout(12_000),
     });
-  } else {
-    // Playwright CDP WebSocket: /api/cdp-relay/:sessionId/playwright
-    const m = url.match(/^\/api\/cdp-relay\/([^/]+)\/playwright$/);
-    if (m && m[1]) {
-      wss.handleUpgrade(req, socket, head, (ws) => {
-        handlePlaywrightConnection(ws, m[1]!);
-      });
+    const data = await resp.json() as { ok?: boolean; action?: string; node?: { id?: string } };
+    if (data.ok) {
+      logger.info(
+        { action: data.action, nodeId: data.node?.id, target: SELF_REGISTER_URL },
+        "Self-register: 已加入主节点",
+      );
     } else {
-      socket.destroy();
+      logger.warn({ data, target: SELF_REGISTER_URL }, "Self-register: 返回失败");
+      // 非致命，不重试
+    }
+  } catch (e) {
+    if (attempt <= 3) {
+      // 最多重试 3 次，每次间隔 30s（服务器可能还没完全就绪）
+      const delayMs = attempt * 30_000;
+      logger.warn({ error: String(e), attempt, retryInMs: delayMs }, "Self-register 失败，将重试");
+      setTimeout(() => { void doSelfRegister(attempt + 1); }, delayMs);
+    } else {
+      logger.warn({ error: String(e) }, "Self-register 已达最大重试次数，跳过");
     }
   }
-});
+}
 
-startServer().catch((err) => {
-  logger.error({ err }, "Failed to start server");
-  process.exit(1);
+app.listen(port, (err) => {
+  if (err) {
+    logger.error({ err }, "Error listening on port");
+    process.exit(1);
+  }
+
+  logger.info({ port }, "Server listening");
+
+  // 延迟 5s 再自注册：确保服务本身已完全就绪，可以被主节点探测
+  if (SELF_REGISTER_URL && SELF_GATEWAY_URL) {
+    logger.info(
+      { selfGateway: SELF_GATEWAY_URL, masterGateway: SELF_REGISTER_URL },
+      "Self-register: 5s 后向主节点注册",
+    );
+    setTimeout(() => { void doSelfRegister(); }, 5_000);
+  }
 });
