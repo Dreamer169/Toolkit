@@ -82,6 +82,28 @@ const OPENAI_REASONING_MODELS = ["o4-mini", "o3", "o3-mini", "o1", "o1-mini"]; /
 const ANTHROPIC_MODELS = ["claude-sonnet-4-6", "claude-haiku-4-5"];
 const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-3-flash-preview"];
 
+// B15 修复：额外凭据组——聚合多套 Replit AI integration / 第三方 OpenAI 兼容端点
+// EXTRA_OPENAI_NODES=[{"baseUrl":"https://...","apiKey":"sk-...","name":"slot2","count":4}]
+// EXTRA_ANTHROPIC_NODES=[{"baseUrl":"https://...","apiKey":"sk-ant-..."}]
+// EXTRA_GEMINI_NODES=[{"baseUrl":"https://...","apiKey":"AIza..."}]
+type ExtraNodeSlot = { baseUrl: string; apiKey: string; name?: string; count?: number };
+function parseExtraSlots(envKey: string): ExtraNodeSlot[] {
+  const raw = process.env[envKey] || "";
+  if (!raw.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw) as Array<Partial<ExtraNodeSlot>>;
+    return parsed.filter((s) => s.baseUrl && s.apiKey).map((s) => ({
+      baseUrl: String(s.baseUrl).replace(/\/$/, ""),
+      apiKey: String(s.apiKey),
+      name: s.name,
+      count: Math.min(12, Math.max(1, Number(s.count || 2))),
+    }));
+  } catch { return []; }
+}
+const EXTRA_OPENAI_SLOTS = parseExtraSlots("EXTRA_OPENAI_NODES");
+const EXTRA_ANTHROPIC_SLOTS = parseExtraSlots("EXTRA_ANTHROPIC_NODES");
+const EXTRA_GEMINI_SLOTS = parseExtraSlots("EXTRA_GEMINI_NODES");
+
 // 额度耗尽识别
 const CREDIT_PATTERNS = [
   /out of credits/i, /insufficient_quota/i, /billing/i, /payment required/i,
@@ -258,6 +280,57 @@ function createBuiltInNodes(): GatewayNode[] {
       failures: 0,
       source: "built-in" as const,
     })),
+    // B15: 额外 OpenAI 凭据组（每组独立 baseUrl+apiKey，避免单点限流）
+    ...EXTRA_OPENAI_SLOTS.flatMap((slot, si) =>
+      Array.from({ length: slot.count ?? 2 }, (_, ni) => ({
+        id: `extra-openai-s${si + 1}-n${ni + 1}`,
+        name: `${slot.name || `Extra OpenAI S${si + 1}`} 节点${ni + 1}`,
+        type: "reseek-openai" as const,
+        baseUrl: slot.baseUrl,
+        apiKey: slot.apiKey,
+        model: OPENAI_MODELS[ni % OPENAI_MODELS.length],
+        priority: 2,
+        enabled: true,
+        downUntil: 0,
+        successes: 0,
+        failures: 0,
+        source: "built-in" as const,
+      }))
+    ),
+    // B15: 额外 Anthropic 凭据组
+    ...EXTRA_ANTHROPIC_SLOTS.flatMap((slot, si) =>
+      ANTHROPIC_MODELS.map((model, ni) => ({
+        id: `extra-anthropic-s${si + 1}-n${ni + 1}`,
+        name: `${slot.name || `Extra Anthropic S${si + 1}`} ${model}`,
+        type: "reseek-anthropic" as const,
+        baseUrl: slot.baseUrl,
+        apiKey: slot.apiKey,
+        model,
+        priority: 2,
+        enabled: true,
+        downUntil: 0,
+        successes: 0,
+        failures: 0,
+        source: "built-in" as const,
+      }))
+    ),
+    // B15: 额外 Gemini 凭据组
+    ...EXTRA_GEMINI_SLOTS.flatMap((slot, si) =>
+      GEMINI_MODELS.map((model, ni) => ({
+        id: `extra-gemini-s${si + 1}-n${ni + 1}`,
+        name: `${slot.name || `Extra Gemini S${si + 1}`} ${model}`,
+        type: "reseek-gemini" as const,
+        baseUrl: slot.baseUrl,
+        apiKey: slot.apiKey,
+        model,
+        priority: 2,
+        enabled: true,
+        downUntil: 0,
+        successes: 0,
+        failures: 0,
+        source: "built-in" as const,
+      }))
+    ),
   ];
 }
 
@@ -1022,12 +1095,20 @@ router.post("/nodes/:id/test", async (req, res) => {
 router.get("/v1/models", async (req, res) => {
   const data: Array<Record<string, unknown>> = [];
   const errors: Array<Record<string, unknown>> = [];
-  for (const model of OPENAI_MODELS)
-    data.push({ id: model, object: "model", created: 0, owned_by: "reseek-openai", gateway_node: "reseek-openai-pool" });
-  for (const model of ANTHROPIC_MODELS)
-    data.push({ id: model, object: "model", created: 0, owned_by: "reseek-anthropic", gateway_node: "reseek-anthropic-pool" });
-  for (const model of GEMINI_MODELS)
-    data.push({ id: model, object: "model", created: 0, owned_by: "reseek-gemini", gateway_node: "reseek-gemini-pool" });
+  const nodes = allNodes();
+  // B12 修复：只列出有至少一个 enabled 节点的模型（integration 未配置时不暴露该模型）
+  const hasOpenAI = nodes.some((n) => n.type === "reseek-openai" && n.enabled);
+  const hasAnthropic = nodes.some((n) => n.type === "reseek-anthropic" && n.enabled);
+  const hasGemini = nodes.some((n) => n.type === "reseek-gemini" && n.enabled);
+  if (hasOpenAI)
+    for (const model of OPENAI_MODELS)
+      data.push({ id: model, object: "model", created: 0, owned_by: "reseek-openai", gateway_node: "reseek-openai-pool" });
+  if (hasAnthropic)
+    for (const model of ANTHROPIC_MODELS)
+      data.push({ id: model, object: "model", created: 0, owned_by: "reseek-anthropic", gateway_node: "reseek-anthropic-pool" });
+  if (hasGemini)
+    for (const model of GEMINI_MODELS)
+      data.push({ id: model, object: "model", created: 0, owned_by: "reseek-gemini", gateway_node: "reseek-gemini-pool" });
   for (const node of allNodes().filter((n) => n.type === "remote-sub2api" || n.type === "friend-openai")) {
     if (!node.enabled || node.downUntil > Date.now()) continue;
     const started = Date.now();
@@ -1140,12 +1221,40 @@ router.post("/exec", async (req, res) => {
   }
 });
 
+// ── 节点强制恢复 (B14 修复) ───────────────────────────────────────────────────
+// 当所有节点都处于 down/credit-exhausted 状态时，可调此接口手动清除冷却
+// POST /api/gateway/nodes/recover-all → 清除所有节点 downUntil（不含永久 disabled）
+router.post("/nodes/recover-all", (_req, res) => {
+  const recovered: string[] = [];
+  for (const node of allNodes()) {
+    if (!node.enabled) continue;
+    if (node.downUntil > 0) {
+      node.downUntil = 0;
+      node.creditExhaustedAt = undefined;
+      recovered.push(node.id);
+    }
+  }
+  res.json({ ok: true, recovered, count: recovered.length, nodes: allNodes().map(nodeSnapshot) });
+});
+
+// POST /api/gateway/nodes/:id/recover → 恢复单个节点
+router.post("/nodes/:id/recover", (req, res) => {
+  const node = allNodes().find((n) => n.id === req.params.id);
+  if (!node) {
+    res.status(404).json({ ok: false, error: "节点不存在" });
+    return;
+  }
+  node.downUntil = 0;
+  node.creditExhaustedAt = undefined;
+  res.json({ ok: true, node: nodeSnapshot(node) });
+});
+
 // ── 子节点自注册 (self-register) ──────────────────────────────────────────────
 // 新 Replit 工作区启动后调用远端服务器的此接口自动加入节点池
-// POST /api/gateway/self-register  body: { gatewayUrl, name?, execSecret? }
+// POST /api/gateway/self-register  body: { gatewayUrl, name? }
 router.post("/self-register", async (req, res) => {
-  const { gatewayUrl, name, execSecret } = req.body as {
-    gatewayUrl?: string; name?: string; execSecret?: string;
+  const { gatewayUrl, name } = req.body as {
+    gatewayUrl?: string; name?: string; execSecret?: string; // execSecret 保留字段但不再存为 apiKey
   };
   if (!gatewayUrl || !gatewayUrl.startsWith("http")) {
     res.status(400).json({ ok: false, error: "gatewayUrl 必须是 http(s) URL" });
@@ -1158,7 +1267,7 @@ router.post("/self-register", async (req, res) => {
     res.status(422).json({ ok: false, error: "探测失败，URL 不可达", detail: probe.error });
     return;
   }
-  // 已存在则更新 name/execSecret，否则新建
+  // 已存在则更新名称，否则新建
   const existing = allNodes().find((n) => n.baseUrl === baseUrl);
   if (existing) {
     if (name) existing.name = name;
@@ -1173,7 +1282,7 @@ router.post("/self-register", async (req, res) => {
     name: name || `子节点(${hostname})`,
     type: "friend-openai",
     baseUrl,
-    apiKey: execSecret,  // 存为 apiKey，调用时作为 Authorization
+    apiKey: undefined, // B13 修复：子节点网关不需要 apiKey，调用时用请求方的原始 auth
     model: "gpt-5-mini",
     priority: 3,
     enabled: true,
