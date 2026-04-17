@@ -2982,7 +2982,7 @@ router.post("/tools/outlook/click-verify-link", async (req, res) => {
   try {
     const { query: dbQ } = await import("../db.js");
     const rows = await dbQ<{ id: number; email: string; token: string | null; refresh_token: string | null }>(
-      "SELECT id, email, token, refresh_token FROM accounts WHERE id= AND platform='outlook'",
+      "SELECT id, email, token, refresh_token FROM accounts WHERE id=$1 AND platform='outlook'",
       [accountId]
     );
     if (!rows.length) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
@@ -3006,7 +3006,7 @@ router.post("/tools/outlook/click-verify-link", async (req, res) => {
         accessToken = td.access_token;
         const { execute: dbE } = await import("../db.js");
         await dbE(
-          "UPDATE accounts SET token=, refresh_token=, updated_at=NOW() WHERE id=",
+          "UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
           [accessToken, td.refresh_token ?? acc.refresh_token, acc.id]
         );
       }
@@ -3125,6 +3125,169 @@ router.post("/tools/outlook/live-verify/toggle", (req, res) => {
   setLiveVerifyEnabled(!!enabled);
   res.json({ success: true, ...getLiveVerifyStatus() });
 });
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// sub2api 子节点管理：同步 Outlook 账号到 sub2api upstream_accounts
+// 连接使用 sub2api PostgreSQL DB（独立于 toolkit DB）
+// ═══════════════════════════════════════════════════════════════════════════
+
+const SUB2API_DB_CONFIG = {
+  host: "127.0.0.1",
+  port: 5432,
+  user: "postgres",
+  password: "postgres",
+  database: "sub2api",
+};
+const OAUTH_CLIENT_ID_FOR_SUB2API = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
+
+async function getSub2apiPool() {
+  const { Pool } = await import("pg");
+  return new Pool({ ...SUB2API_DB_CONFIG, max: 5 });
+}
+
+// ── GET /tools/sub2api/list ────────────────────────────────────────────────
+router.get("/tools/sub2api/list", async (_req, res) => {
+  let pool: import("pg").Pool | null = null;
+  try {
+    pool = await getSub2apiPool();
+    const result = await pool.query(
+      `SELECT id, name, platform, type,
+              LEFT(credentials::text, 80) AS creds_preview,
+              status, concurrency, priority,
+              last_used_at, created_at, error_message
+       FROM accounts
+       WHERE deleted_at IS NULL
+       ORDER BY created_at DESC
+       LIMIT 200`
+    );
+    res.json({ success: true, total: result.rows.length, accounts: result.rows });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  } finally {
+    await pool?.end();
+  }
+});
+
+// ── POST /tools/sub2api/sync ───────────────────────────────────────────────
+// 把 toolkit accounts 表中有 refresh_token 的 Outlook 账号推送为 sub2api 子节点
+router.post("/tools/sub2api/sync", async (req, res) => {
+  const { dryRun = false, concurrency = 3, priority = 50 } = req.body as {
+    dryRun?: boolean; concurrency?: number; priority?: number;
+  };
+  let sub2apiPool: import("pg").Pool | null = null;
+  try {
+    const { query: tkQ } = await import("../db.js");
+    // 读取所有有 refresh_token 的 Outlook 账号
+    const accounts = await tkQ<{ id: number; email: string; token: string | null; refresh_token: string | null }>(
+      "SELECT id, email, token, refresh_token FROM accounts WHERE (platform='cursor' AND token IS NOT NULL AND token != '') OR (platform='outlook' AND refresh_token IS NOT NULL AND refresh_token != '') "
+    );
+    if (!accounts.length) {
+      res.json({ success: true, pushed: 0, skipped: 0, message: "没有可用的 refresh_token 账号" });
+      return;
+    }
+
+    if (dryRun) {
+      res.json({ success: true, dryRun: true, total: accounts.length, accounts: accounts.map(a => a.email) });
+      return;
+    }
+
+    sub2apiPool = await getSub2apiPool();
+
+    let pushed = 0, skipped = 0;
+    const details: { email: string; action: string; error?: string }[] = [];
+
+    for (const acc of accounts) {
+      try {
+        // 检查是否已存在（按 name = email 匹配）
+        const exists = await sub2apiPool.query(
+          "SELECT id FROM accounts WHERE name=$1 AND deleted_at IS NULL LIMIT 1",
+          [acc.email]
+        );
+        if (exists.rows.length > 0) {
+          // 更新 refresh_token（token 可能轮换）
+          await sub2apiPool.query(
+            "UPDATE accounts SET credentials=credentials || $1::jsonb, updated_at=NOW() WHERE name=$2 AND deleted_at IS NULL",
+            [JSON.stringify({ refresh_token: acc.refresh_token, client_id: OAUTH_CLIENT_ID_FOR_SUB2API }), acc.email]
+          );
+          skipped++;
+          details.push({ email: acc.email, action: "updated" });
+        } else {
+          // 新增
+          const insertRes = await sub2apiPool.query(
+            `INSERT INTO accounts (name, platform, type, credentials, extra, concurrency, priority, status, schedulable, auto_pause_on_expired, rate_multiplier, created_at, updated_at)
+             VALUES ($1, 'cursor', 'oauth', $2::jsonb, '{}', $3, $4, 'active', true, true, 1.0, NOW(), NOW())
+             RETURNING id`,
+            [
+              acc.email,
+              acc.token ? JSON.stringify({ session_token: acc.token }) : JSON.stringify({ refresh_token: acc.refresh_token, client_id: OAUTH_CLIENT_ID_FOR_SUB2API }),
+              concurrency,
+              priority,
+            ]
+          );
+          // 自动关联到 cursor-default group
+          const newId = insertRes.rows[0]?.id;
+          if (newId) {
+            await sub2apiPool.query(
+              'INSERT INTO account_groups (account_id, group_id, priority, created_at) VALUES ($1, 8, 50, NOW()) ON CONFLICT DO NOTHING',
+              [newId]
+            );
+          }
+          pushed++;
+          details.push({ email: acc.email, action: "inserted" });
+        }
+      } catch (e) {
+        details.push({ email: acc.email, action: "error", error: String(e) });
+      }
+    }
+
+    res.json({ success: true, total: accounts.length, pushed, updated: skipped, details });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  } finally {
+    await sub2apiPool?.end();
+  }
+});
+
+// ── DELETE /tools/sub2api/accounts/:id ────────────────────────────────────
+router.delete("/tools/sub2api/accounts/:id", async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) { res.status(400).json({ success: false, error: "无效 id" }); return; }
+  let pool: import("pg").Pool | null = null;
+  try {
+    pool = await getSub2apiPool();
+    await pool.query("UPDATE accounts SET deleted_at=NOW() WHERE id=$1", [id]);
+    res.json({ success: true, deleted: id });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  } finally {
+    await pool?.end();
+  }
+});
+
+// ── POST /tools/sub2api/enable/:id  /  /tools/sub2api/disable/:id ─────────
+router.post("/tools/sub2api/enable/:id", async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  let pool: import("pg").Pool | null = null;
+  try {
+    pool = await getSub2apiPool();
+    await pool.query("UPDATE accounts SET status='active', schedulable=true, error_message=NULL, updated_at=NOW() WHERE id=$1", [id]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
+  finally { await pool?.end(); }
+});
+
+router.post("/tools/sub2api/disable/:id", async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  let pool: import("pg").Pool | null = null;
+  try {
+    pool = await getSub2apiPool();
+    await pool.query("UPDATE accounts SET status='disabled', schedulable=false, updated_at=NOW() WHERE id=$1", [id]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
+  finally { await pool?.end(); }
+});
+
 
 export default router;
 
