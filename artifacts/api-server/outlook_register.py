@@ -1620,50 +1620,10 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
         page.wait_for_timeout(3000)
 
         # ── 检测并处理 OAuth 流程中出现的 CAPTCHA ──────────────────────────────
-        # 微软对新账号触发 OAuth 时可能再次要求 CAPTCHA
-        # 检测条件：URL 含 captcha 相关域，或页面中存在 CAPTCHA 元素
-        def _oauth_has_captcha(pg) -> bool:
-            try:
-                u = pg.url or ''
-                url_match = ('signup.live.com' in u or
-                             'login.live.com/oauth' in u or
-                             'account.live.com/Consent' in u)
-                elem_match = pg.locator(
-                    '#px-captcha, iframe[src*="hsprotect"], iframe[src*="arkoselabs"]'
-                ).count() > 0
-                return url_match or elem_match
-            except Exception:
-                return False
-
-        for _oauth_captcha_attempt in range(3):
-            if not captcha_handler or not _oauth_has_captcha(page):
-                break  # 无 CAPTCHA 或无处理器，进入正常同意按钮流程
-            _cur_url = page.url or ''
-            print(f'[oauth] ⚠ 检测到 CAPTCHA（{_cur_url[:80]}），调用验证码处理器... (第{_oauth_captcha_attempt+1}次)', flush=True)
-            try:
-                captcha_handler(page)
-                page.wait_for_timeout(4000)
-            except Exception as _ce:
-                print(f'[oauth] CAPTCHA 处理异常: {_ce}', flush=True)
-            # 检查是否已跳转到 nativeclient / code
-            _after_url = page.url or ''
-            if 'nativeclient' in _after_url or 'code=' in _after_url or 'error=' in _after_url:
-                break
-            # 否则重新导航到 OAuth URL
-            print(f'[oauth] CAPTCHA 处理后重新导航授权页...', flush=True)
-            try:
-                page.goto(auth_url, timeout=20000, wait_until='domcontentloaded')
-            except Exception:
-                pass
-            page.wait_for_timeout(3000)
-        # ────────────────────────────────────────────────────────────────────────
-
-        # Dismiss any interrupt pages that appeared after navigation
-        _skip_ms_interrupts(page, label='post-goto-oauth')
-        page.wait_for_timeout(1000)
-
-        # 自动点击同意按钮（consent 页面）
-        _consent_selectors = [
+        # 两类页面需要区分处理：
+        # 1. signup.live.com / login.live.com/oauth  → 真实重 CAPTCHA，需要 handler 后重导航
+        # 2. account.live.com/Consent               → 同意页上的轻 CAPTCHA，原地解决后点 Accept
+        _CONSENT_ACCEPT_SELS = [
             '[data-testid="appConsentPrimaryButton"]',
             'input[type="submit"][value*="Accept"]',
             'input[type="submit"][value*="Approve"]',
@@ -1674,16 +1634,69 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
             'button:has-text("继续")',
             'input[value="Continue"]',
         ]
-        for sel in _consent_selectors:
-            try:
-                btn = page.locator(sel).first
-                if btn.is_visible(timeout=2000):
-                    btn.click()
-                    print(f'[oauth] ✅ 点击同意按钮: {sel}', flush=True)
-                    page.wait_for_timeout(3000)
+
+        def _try_click_accept() -> bool:
+            """尝试点击 OAuth 同意按钮，成功返回 True。"""
+            for _sel in _CONSENT_ACCEPT_SELS:
+                try:
+                    btn = page.locator(_sel).first
+                    if btn.is_visible(timeout=2000):
+                        btn.click()
+                        print(f'[oauth] ✅ 点击同意按钮: {_sel}', flush=True)
+                        page.wait_for_timeout(3000)
+                        return True
+                except Exception:
+                    continue
+            return False
+
+        _cur_url = page.url or ''
+        _on_consent = 'account.live.com/Consent' in _cur_url
+
+        if _on_consent:
+            # 同意页：CAPTCHA 轻量，原地解决，不重导航（重导航会重置验证状态）
+            print(f'[oauth] consent页面，等待PX验证自动通过并尝试点击Accept...', flush=True)
+            page.wait_for_timeout(5000)  # 给 PX 自动验证时间
+            for _consent_try in range(3):
+                if _try_click_accept():
                     break
-            except Exception:
-                continue
+                # Accept 按钮未出现：调用 CAPTCHA 处理器（原地，不重导航）
+                if captcha_handler and _consent_try < 2:
+                    print(f'[oauth] ⚠ Accept未出现，调用验证码处理器（第{_consent_try+1}次，原地）...', flush=True)
+                    try:
+                        captcha_handler(page)
+                        page.wait_for_timeout(3000)
+                    except Exception as _ce:
+                        print(f'[oauth] consent CAPTCHA处理异常: {_ce}', flush=True)
+                else:
+                    page.wait_for_timeout(5000)
+        else:
+            # signup.live.com 等重 CAPTCHA 页：需要 handler 后重导航到 OAuth URL
+            for _oauth_captcha_attempt in range(2):
+                _cur_url2 = page.url or ''
+                _is_hard_captcha = ('signup.live.com' in _cur_url2 or
+                                    'login.live.com/oauth' in _cur_url2)
+                if not _is_hard_captcha or not captcha_handler:
+                    break
+                print(f'[oauth] ⚠ 检测到重CAPTCHA（{_cur_url2[:80]}），调用处理器... (第{_oauth_captcha_attempt+1}次)', flush=True)
+                try:
+                    captcha_handler(page)
+                    page.wait_for_timeout(4000)
+                except Exception as _ce:
+                    print(f'[oauth] CAPTCHA处理异常: {_ce}', flush=True)
+                _after_url = page.url or ''
+                if 'nativeclient' in _after_url or 'code=' in _after_url or 'error=' in _after_url:
+                    break
+                print(f'[oauth] 重新导航授权页...', flush=True)
+                try:
+                    page.goto(auth_url, timeout=20000, wait_until='domcontentloaded')
+                except Exception:
+                    pass
+                page.wait_for_timeout(3000)
+            # 非同意页面，最后尝试点击 Accept
+            _skip_ms_interrupts(page, label='post-goto-oauth')
+            page.wait_for_timeout(1000)
+            _try_click_accept()
+        # ────────────────────────────────────────────────────────────────────────
 
         # 使用 wait_for_url 等待 nativeclient 重定向（最多30s）
         if not captured['code'] and not captured['error']:
