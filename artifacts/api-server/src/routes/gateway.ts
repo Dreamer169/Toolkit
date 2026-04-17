@@ -615,29 +615,42 @@ async function streamNode(node: GatewayNode, req: Request, res: Response, body: 
     const started = Date.now();
     const requestBody = openAiCompatibleBody(body, node);
     const authorization = node.apiKey ? `Bearer ${node.apiKey}` : req.header("authorization");
-    const response = await fetch(`${node.baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        ...(authorization ? { Authorization: authorization } : {}),
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ ...requestBody, stream: true }),
-    });
-    if (!response.ok || !response.body) {
-      const text = await response.text();
-      recordFailure(node, response.status, text || response.statusText, started);
-      propagateFailureToSiblings(node);
+    // B11 修复：加超时控制，避免上游挂起时永久占用连接（默认 120s）
+    const ctrl = new AbortController();
+    const streamTimeout = setTimeout(() => ctrl.abort(), 120_000);
+    try {
+      const response = await fetch(`${node.baseUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          ...(authorization ? { Authorization: authorization } : {}),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ ...requestBody, stream: true }),
+        signal: ctrl.signal,
+      });
+      if (!response.ok || !response.body) {
+        const text = await response.text();
+        recordFailure(node, response.status, text || response.statusText, started);
+        propagateFailureToSiblings(node);
+        clearTimeout(streamTimeout);
+        return false;
+      }
+      recordSuccess(node, response.status, started);
+      res.status(200);
+      res.setHeader("Content-Type", response.headers.get("content-type") || "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("x-gateway-node", node.id);
+      for await (const chunk of response.body) res.write(chunk);
+      res.end();
+      clearTimeout(streamTimeout);
+      return true;
+    } catch (error) {
+      // B9 修复：fetch() 本身抛异常（网络断开、超时 abort）时补充 recordFailure
+      clearTimeout(streamTimeout);
+      recordFailure(node, undefined, String(error), started);
       return false;
     }
-    recordSuccess(node, response.status, started);
-    res.status(200);
-    res.setHeader("Content-Type", response.headers.get("content-type") || "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-    res.setHeader("x-gateway-node", node.id);
-    for await (const chunk of response.body) res.write(chunk);
-    res.end();
-    return true;
   }
   const result = await callNode(node, req, { ...body, stream: false });
   if (!result.response.ok) return false;
@@ -1049,6 +1062,11 @@ router.post("/v1/chat/completions", async (req, res) => {
 
   if (body.stream) {
     for (const node of candidates) {
+      // B10 修复：兄弟传播后节点可能在循环进行中被标记为 down，必须重新检查
+      if (!node.enabled || node.downUntil > Date.now()) {
+        errors.push({ node: node.id, status: node.lastStatus, error: node.lastError || "[传播跳过]" });
+        continue;
+      }
       try {
         const done = await streamNode(node, req, res, body);
         if (done) return;
@@ -1063,6 +1081,11 @@ router.post("/v1/chat/completions", async (req, res) => {
   }
 
   for (const node of candidates) {
+    // B10 修复：循环中重新检查 downUntil，跳过已被传播标记为 down 的兄弟节点
+    if (!node.enabled || node.downUntil > Date.now()) {
+      errors.push({ node: node.id, status: node.lastStatus, error: node.lastError || "[传播跳过]" });
+      continue;
+    }
     try {
       const result = await callNode(node, req, body);
       if (result.response.ok) {
