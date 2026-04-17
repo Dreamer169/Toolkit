@@ -61,7 +61,10 @@ type GeminiResult = {
 // ═══ 配置 ═══════════════════════════════════════════════════════════════════
 
 const router = Router();
-const REMOTE_SUB2API_URL = (process.env["REMOTE_GATEWAY_BASE_URL"] || "http://45.205.27.69:9090").replace(/\/$/, "");
+// REMOTE_GATEWAY_BASE_URL: 远端 Sub2API 地址。
+// 留空 = 禁用 remote-sub2api 节点（Replit 子节点模式，不需要再路由回 Sub2API）
+// 设为 http://localhost:9090 = 远端主节点模式（PM2 ecosystem 显式配置）
+const REMOTE_SUB2API_URL = (process.env["REMOTE_GATEWAY_BASE_URL"] || "").replace(/\/$/, "");
 const SUB2API_ENABLED = REMOTE_SUB2API_URL.length > 0 && REMOTE_SUB2API_URL !== "disabled";
 const SUB2API_API_KEY = process.env["SUB2API_API_KEY"] || process.env["SUB2API_ADMIN_KEY"] || "";
 const OPENAI_BASE_URL = (process.env["AI_INTEGRATIONS_OPENAI_BASE_URL"] || "").replace(/\/$/, "");
@@ -71,6 +74,8 @@ const ANTHROPIC_API_KEY = process.env["AI_INTEGRATIONS_ANTHROPIC_API_KEY"] || ""
 const GEMINI_BASE_URL = (process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"] || "").replace(/\/$/, "");
 const GEMINI_API_KEY = process.env["AI_INTEGRATIONS_GEMINI_API_KEY"] || "";
 const RESEEK_OPENAI_NODE_COUNT = Math.min(24, Math.max(1, Number(process.env["RESEEK_AI_NODE_COUNT"] || 6)));
+// NODE_DOWN_MS: 节点失败后的冷却时间（默认 60s）。
+// 调低至 60s 是为了让 Sub2API 在添加账号后更快恢复。
 const NODE_DOWN_MS = Math.max(30_000, Number(process.env["GATEWAY_NODE_DOWN_MS"] || 60_000));
 const OPENAI_MODELS = ["gpt-5.2", "gpt-5-mini", "gpt-5-nano", "o4-mini"];
 const OPENAI_REASONING_MODELS = ["o4-mini", "o3", "o3-mini", "o1", "o1-mini"]; // 只有这些支持 reasoning 参数
@@ -201,7 +206,7 @@ function createBuiltInNodes(): GatewayNode[] {
       id: "remote-sub2api",
       name: "45.205.27.69 Sub2API",
       type: "remote-sub2api",
-      baseUrl: REMOTE_SUB2API_URL,
+      baseUrl: REMOTE_SUB2API_URL || "http://disabled.invalid",
       apiKey: SUB2API_API_KEY || undefined,
       model: "upstream",
       priority: 1,
@@ -307,15 +312,55 @@ function recordFailure(node: GatewayNode, status: number | undefined, error: str
   node.lastLatencyMs = Date.now() - started;
   node.lastUsedAt = new Date().toISOString();
   if (isCreditExhausted(error) || status === 402) {
+    // 额度耗尽：冷却到 UTC 次日零点
     node.downUntil = Date.now() + msUntilUtcMidnight();
     node.creditExhaustedAt = Date.now();
   } else if (/no available.*account|ErrNoAvailableAccounts/i.test(error)) {
+    // Sub2API 无可用账号（未配置订阅账号）：30s 短冷却，账号添加后快速恢复
     node.downUntil = Date.now() + 30_000;
+  } else if (status === 401 || status === 403) {
+    // 认证失败（账号被禁、密钥失效、工作区下线）：冷却 NODE_DOWN_MS
+    // 关键：不能无限重试一个已失效的 key
+    node.downUntil = Date.now() + NODE_DOWN_MS;
   } else if (
     /temporarily unavailable|invalid_endpoint|rate limit|quota|overloaded/i.test(error)
     || status === 503 || status === 429
   ) {
+    // 节点过载/限流/不可用：NODE_DOWN_MS 冷却（默认 60s）
     node.downUntil = Date.now() + NODE_DOWN_MS;
+  } else if (
+    /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|network.*error|fetch.*failed|aborted/i.test(error)
+    || status === undefined
+  ) {
+    // 网络中断/节点宕机：NODE_DOWN_MS 冷却（之前没退避，会无限重试）
+    node.downUntil = Date.now() + NODE_DOWN_MS;
+  }
+}
+
+// B7 修复：当一个节点因认证/额度问题失败时，同源节点（相同 baseUrl+apiKey）
+// 会遭遇完全相同的错误——批量标记为 down，避免逐一重试浪费请求
+function propagateFailureToSiblings(failedNode: GatewayNode) {
+  const now = Date.now();
+  // 只对认证/额度类失败传播（这些是"整个 key 失效"，非偶发超时）
+  if (!failedNode.downUntil || failedNode.downUntil <= now) return;
+  const isAuthOrCredit = (
+    failedNode.lastStatus === 401
+    || failedNode.lastStatus === 403
+    || failedNode.lastStatus === 402
+    || Boolean(failedNode.creditExhaustedAt)
+  );
+  if (!isAuthOrCredit) return;
+  for (const sibling of allNodes()) {
+    if (sibling === failedNode) continue;
+    if (sibling.baseUrl !== failedNode.baseUrl) continue;
+    if (sibling.apiKey !== failedNode.apiKey) continue;
+    // 用相同的 downUntil（信用额度耗尽到零点，或认证失败 NODE_DOWN_MS）
+    if (sibling.downUntil < failedNode.downUntil) {
+      sibling.downUntil = failedNode.downUntil;
+      sibling.lastError = `[同源传播] ${failedNode.id}: ${failedNode.lastError || ""}`;
+      sibling.lastStatus = failedNode.lastStatus;
+      if (failedNode.creditExhaustedAt) sibling.creditExhaustedAt = failedNode.creditExhaustedAt;
+    }
   }
 }
 
@@ -550,11 +595,17 @@ async function callNode(node: GatewayNode, req: Request, body: ChatBody) {
           : node.type === "reseek-gemini"
             ? await callGeminiNode(node, body)
             : await callOpenAiCompatibleNode(node, req, body);
-    if (result.response.ok) recordSuccess(node, result.response.status, started);
-    else recordFailure(node, result.response.status, result.text || result.response.statusText, started);
+    if (result.response.ok) {
+      recordSuccess(node, result.response.status, started);
+    } else {
+      recordFailure(node, result.response.status, result.text || result.response.statusText, started);
+      // B7 修复：认证/额度失败立即传播到所有同源节点，避免逐一重试浪费请求
+      propagateFailureToSiblings(node);
+    }
     return result;
   } catch (error) {
     recordFailure(node, undefined, String(error), started);
+    // 网络异常不传播：可能只是当前请求超时，兄弟节点可能正常
     throw error;
   }
 }
@@ -575,6 +626,7 @@ async function streamNode(node: GatewayNode, req: Request, res: Response, body: 
     if (!response.ok || !response.body) {
       const text = await response.text();
       recordFailure(node, response.status, text || response.statusText, started);
+      propagateFailureToSiblings(node);
       return false;
     }
     recordSuccess(node, response.status, started);
