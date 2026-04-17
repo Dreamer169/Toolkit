@@ -1576,11 +1576,12 @@ def _skip_ms_interrupts(page, label="") -> bool:
     return clicked
 
 
-def get_oauth_token_in_browser(page, email: str) -> dict:
+def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
     """
     在已登录的浏览器 session 中做 OAuth2 authorization_code 授权。
     使用 prompt=consent（新账号首次授权必须经过 consent，prompt=none 会返回 consent_required）。
     自动捕获同意页面并点击 Accept 按钮，无需人工介入。
+    captcha_handler: 可选，接受 (page) 参数的函数，在检测到 CAPTCHA 时调用。
     """
     import urllib.parse as _up, urllib.request as _ur, json as _json
 
@@ -1600,8 +1601,6 @@ def get_oauth_token_in_browser(page, email: str) -> dict:
         # Dismiss passkey/interrupt pages before navigating to OAuth consent
         _skip_ms_interrupts(page, label='pre-oauth')
         scope_encoded = '%20'.join(_up.quote(s, safe=':/') for s in SCOPES)
-        # 修复：用 prompt=consent 代替 prompt=none
-        # prompt=none 对新账号必然返回 consent_required 错误
         auth_url = (
             'https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize'
             f'?client_id={CLIENT_ID}'
@@ -1619,6 +1618,40 @@ def get_oauth_token_in_browser(page, email: str) -> dict:
 
         # 等待页面加载
         page.wait_for_timeout(3000)
+
+        # ── 检测并处理 OAuth 流程中出现的 CAPTCHA ──────────────────────────────
+        # 微软对新账号触发 OAuth 时可能再次要求 CAPTCHA（redirect 到 signup.live.com）
+        for _oauth_captcha_attempt in range(2):
+            _cur_url = page.url or ''
+            _is_signup_page = 'signup.live.com' in _cur_url or 'login.live.com/oauth' in _cur_url
+            _has_captcha = False
+            if _is_signup_page:
+                try:
+                    _has_captcha = page.locator('#px-captcha, iframe[src*="hsprotect"]').count() > 0
+                except Exception:
+                    _has_captcha = _is_signup_page  # 保守估计
+            if _is_signup_page and captcha_handler:
+                print(f'[oauth] ⚠ 检测到 CAPTCHA 重定向（{_cur_url[:80]}），调用验证码处理器... (第{_oauth_captcha_attempt+1}次)', flush=True)
+                try:
+                    captcha_handler(page)
+                    page.wait_for_timeout(4000)
+                except Exception as _ce:
+                    print(f'[oauth] CAPTCHA 处理异常: {_ce}', flush=True)
+                # 检查是否已跳转到 nativeclient / code
+                _after_url = page.url or ''
+                if 'nativeclient' in _after_url or 'code=' in _after_url or 'error=' in _after_url:
+                    break
+                # 否则重新导航到 OAuth URL
+                print(f'[oauth] CAPTCHA 处理后重新导航授权页...', flush=True)
+                try:
+                    page.goto(auth_url, timeout=20000, wait_until='domcontentloaded')
+                except Exception:
+                    pass
+                page.wait_for_timeout(3000)
+            else:
+                break  # 非 signup 页，正常 OAuth 流程
+        # ────────────────────────────────────────────────────────────────────────
+
         # Dismiss any interrupt pages that appeared after navigation
         _skip_ms_interrupts(page, label='post-goto-oauth')
         page.wait_for_timeout(1000)
@@ -1749,7 +1782,10 @@ def register_one(ctrl, engine_name: str, headless: bool) -> dict:
             _skip_ms_interrupts(page, label='post-register')
             # ── in-browser OAuth2 authorization_code 授权 ──────────────
             try:
-                _tokens = get_oauth_token_in_browser(page, f"{actual_email}@outlook.com")
+                _tokens = get_oauth_token_in_browser(
+                    page, f"{actual_email}@outlook.com",
+                    captcha_handler=ctrl.handle_captcha,
+                )
                 result["access_token"]  = _tokens.get("access_token", "")
                 result["refresh_token"] = _tokens.get("refresh_token", "")
             except Exception as _oe:
