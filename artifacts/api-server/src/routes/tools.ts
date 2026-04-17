@@ -1149,6 +1149,72 @@ router.post("/tools/outlook/batch-oauth/poll", async (req, res) => {
   });
 });
 
+
+
+// POST /tools/outlook/batch-oauth/auto-complete
+// 对指定账号（或所有无 token 账号）自动用浏览器完成设备码授权
+router.post("/tools/outlook/batch-oauth/auto-complete", async (req, res) => {
+  const { accountIds } = req.body as { accountIds?: number[] };
+  try {
+    cleanOldBatchSessions();
+    const { query: dbQAc } = await import("../db.js");
+    let rows: { id: number; email: string; password: string }[];
+    if (accountIds?.length) {
+      rows = await dbQAc<{ id: number; email: string; password: string }>(
+        "SELECT id, email, COALESCE(password,'') AS password FROM accounts WHERE platform='outlook' AND id = ANY($1::int[]) AND (token IS NULL OR token='') AND (refresh_token IS NULL OR refresh_token='')",
+        [accountIds]
+      );
+    } else {
+      rows = await dbQAc<{ id: number; email: string; password: string }>(
+        "SELECT id, email, COALESCE(password,'') AS password FROM accounts WHERE platform='outlook' AND (token IS NULL OR token='') AND (refresh_token IS NULL OR refresh_token='')"
+      );
+    }
+    if (!rows.length) { res.json({ success: false, error: "没有需要授权的账号" }); return; }
+
+    const { sessionId, sessionList } = await createBatchOAuthSessions(rows);
+    const autoPayload = sessionList
+      .filter((s: BatchOAuthSession) => s.status === "pending")
+      .map((s: BatchOAuthSession) => {
+        const row = rows.find(r => r.id === s.accountId);
+        return { accountId: s.accountId, email: s.email, password: row?.password || "", userCode: s.userCode };
+      })
+      .filter((x: { password: string }) => x.password);
+
+    if (!autoPayload.length) { res.json({ success: false, error: "设备码申请失败或无密码", sessionId }); return; }
+
+    const { spawn: spawnAc } = await import("child_process");
+    const acScript = new URL("../auto_device_code.py", import.meta.url).pathname;
+    const acProc = spawnAc(
+      "python3", [acScript, JSON.stringify(autoPayload), "http://127.0.0.1:10809"],
+      { detached: true, stdio: ["ignore", "pipe", "pipe"], env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: "1" } }
+    );
+    acProc.unref();
+    res.json({ success: true, sessionId, accounts: autoPayload.map((x: {accountId:number;email:string;userCode:string}) => ({ accountId: x.accountId, email: x.email, userCode: x.userCode })) });
+
+    acProc.on("close", async (exitCode: number | null) => {
+      try {
+        const { execute: dbAc } = await import("../db.js");
+        const CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
+        const ps = batchOAuthSessions.get(sessionId) || [];
+        for (const s of ps.filter((x: BatchOAuthSession) => x.status === "pending")) {
+          const r2 = await fetch("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", {
+            method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:device_code", client_id: CLIENT_ID, device_code: s.deviceCode }).toString(),
+          });
+          const td = await r2.json() as { access_token?: string; refresh_token?: string };
+          if (td.access_token) {
+            s.status = "done"; s.accessToken = td.access_token; s.refreshToken = td.refresh_token ?? "";
+            await dbAc("UPDATE accounts SET token=$1, refresh_token=$2, status='active', updated_at=NOW() WHERE id=$3", [td.access_token, td.refresh_token ?? "", s.accountId]);
+          }
+        }
+      } catch {}
+      console.log(`[auto-complete] sessionId=${sessionId} exit=${exitCode}`);
+    });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
 // ── Outlook 注册：后台任务 + 轮询 ─────────────────────────
 // 避免代理/浏览器 12s 断连问题，改为异步任务模式
 
@@ -1335,7 +1401,7 @@ router.post("/tools/outlook/register", async (req, res) => {
     // ── 持久化到数据库 + 立即 ROPC 自动授权 ────────────────────────────────
     if (okCount > 0) {
       await (async () => {
-        const pendingOAuthRows: { id: number; email: string }[] = [];
+        const pendingOAuthRows: { id: number; email: string; password: string }[] = [];
         for (const acc of job.accounts) {
           let accountRow: { id: number } | null = null;
           // 1. 保存到账号库（失败则跳过该账号）
@@ -1399,7 +1465,7 @@ router.post("/tools/outlook/register", async (req, res) => {
               );
               job.logs.push({ type: "success", message: `[key] ${acc.email} in-browser OAuth 授权成功` });
             } else if (accountRow?.id) {
-              pendingOAuthRows.push({ id: accountRow.id, email: acc.email });
+              pendingOAuthRows.push({ id: accountRow.id, email: acc.email, password: (acc as {email:string;password?:string}).password || '' });
               job.logs.push({ type: "warn", message: `[warn] ${acc.email} 未内联到 token，正在自动申请设备码` });
             } else {
               job.logs.push({ type: "warn", message: `[warn] ${acc.email} 未内联到 token，需手动设备码授权` });
@@ -1418,6 +1484,51 @@ router.post("/tools/outlook/register", async (req, res) => {
               } else {
                 job.logs.push({ type: "warn", message: `🔐 ${s.email} 设备码申请失败: ${s.errorMsg ?? "未知错误"}` });
               }
+            }
+            // 自动完成设备码授权：用浏览器登录账号并批准，无需人工干预
+            try {
+              const autoPayload = sessionList
+                .filter((s: BatchOAuthSession) => s.status === "pending")
+                .map((s: BatchOAuthSession) => {
+                  const row = pendingOAuthRows.find(r => r.email === s.email);
+                  return { accountId: s.accountId, email: s.email, password: row?.password || '', userCode: s.userCode };
+                })
+                .filter((x: { password: string }) => x.password);
+              if (autoPayload.length > 0) {
+                const { spawn: spawnAuto } = await import('child_process');
+                const autoScript = new URL('../auto_device_code.py', import.meta.url).pathname;
+                const autoProc = spawnAuto(
+                  'python3', [autoScript, JSON.stringify(autoPayload), 'http://127.0.0.1:10809'],
+                  { detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: '1' } }
+                );
+                job.logs.push({ type: 'log', message: `🤖 自动完成 ${autoPayload.length} 个账号的设备码授权…` });
+                autoProc.stdout?.on('data', (d: Buffer) => {
+                  for (const line of d.toString().split('\n').filter(Boolean))
+                    job.logs.push({ type: 'log', message: `[auto-auth] ${line}` });
+                });
+                autoProc.on('close', async (code: number | null) => {
+                  job.logs.push({ type: code === 0 ? 'success' : 'warn', message: `🤖 自动授权脚本退出 (code=${code})` });
+                  const { execute: dbAuto } = await import('../db.js');
+                  const CLIENT_ID = '9e5f94bc-e8a4-4e73-b8be-63364c29d753';
+                  const ps = batchOAuthSessions.get(sessionId) || [];
+                  for (const s2 of ps.filter((x2: BatchOAuthSession) => x2.status === 'pending')) {
+                    try {
+                      const r2 = await fetch('https://login.microsoftonline.com/consumers/oauth2/v2.0/token', {
+                        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:device_code', client_id: CLIENT_ID, device_code: s2.deviceCode }).toString(),
+                      });
+                      const td = await r2.json() as { access_token?: string; refresh_token?: string };
+                      if (td.access_token) {
+                        s2.status = 'done'; s2.accessToken = td.access_token; s2.refreshToken = td.refresh_token ?? '';
+                        await dbAuto('UPDATE accounts SET token=$1, refresh_token=$2, status=\'active\', updated_at=NOW() WHERE id=$3', [td.access_token, td.refresh_token ?? '', s2.accountId]);
+                        job.logs.push({ type: 'success', message: `✅ [auto-auth] ${s2.email} token 已入库` });
+                      }
+                    } catch {}
+                  }
+                });
+              }
+            } catch (autoErr) {
+              job.logs.push({ type: 'warn', message: `⚠ 启动自动设备码完成失败: ${autoErr}` });
             }
           } catch (oauthErr) {
             job.logs.push({ type: "warn", message: `⚠ 自动申请设备码失败: ${oauthErr}` });
