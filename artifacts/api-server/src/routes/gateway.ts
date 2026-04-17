@@ -1494,5 +1494,41 @@ router.post(["/relay/:nodeId", "/relay"], async (req, res) => {
   }
 });
 
+// ═══ B21：后台周期探测 friend-openai / register 节点 ══════════════════════════
+// 每 5 分钟对所有 register/runtime source 的 friend-openai 节点做一次健康探测
+// 探测失败时用指数退避：1m → 5m → 30m → 2h → UTC 凌晨
+const PROBE_INTERVAL_MS = 5 * 60_000;
+const probeFailCounts = new Map<string, number>();
+
+function probeBackoffMs(failCount: number): number {
+  const steps = [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000];
+  if (failCount - 1 < steps.length) return steps[failCount - 1]!;
+  return msUntilUtcMidnight();
+}
+
+async function backgroundProbeLoop(): Promise<void> {
+  const targets = allNodes().filter(
+    (n) => n.enabled && (n.source === "register" || n.source === "runtime") && n.type === "friend-openai",
+  );
+  for (const node of targets) {
+    try {
+      const result = await probeNodeUrl(node.baseUrl, node.apiKey, 12_000);
+      if (result.ok) {
+        probeFailCounts.delete(node.id);
+        if (node.downUntil > 0 && node.downUntil <= Date.now()) node.downUntil = 0;
+      } else {
+        const fails = (probeFailCounts.get(node.id) ?? 0) + 1;
+        probeFailCounts.set(node.id, fails);
+        node.downUntil = Date.now() + probeBackoffMs(fails);
+        node.lastError = `B21探测失败(${fails}次): ${result.error ?? "无响应"}`;
+      }
+    } catch { /* 单个节点探测异常不影响其他 */ }
+  }
+}
+
+setInterval(() => { void backgroundProbeLoop(); }, PROBE_INTERVAL_MS);
+setTimeout(() => { void backgroundProbeLoop(); }, 30_000); // 启动 30s 后先探测一次
+
+
 export default router;
 
