@@ -9,6 +9,7 @@ module.exports = {
       "env": {
         "DATABASE_URL": "postgresql://postgres:postgres@localhost/toolkit",
         "PORT": "8080",
+        "REMOTE_GATEWAY_BASE_URL": "http://localhost:9090",
         "NODE_ENV": "production",
         "SUB2API_ADMIN_KEY": "sk-06cf1c8b2ff7a09a1f11d7909a6d7cb7dee97e38793d630f25a3bddf2bf0ec16",
         "SUB2API_API_KEY": "sk-06cf1c8b2ff7a09a1f11d7909a6d7cb7dee97e38793d630f25a3bddf2bf0ec16",
