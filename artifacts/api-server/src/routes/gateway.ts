@@ -24,6 +24,7 @@ type GatewayNode = {
   lastLatencyMs?: number;
   lastUsedAt?: string;
   persistent?: boolean;
+  creditExhaustedAt?: number;
 };
 
 type ChatBody = {
@@ -67,7 +68,10 @@ const REMOTE_GATEWAY_BASE_URL = (process.env["REMOTE_GATEWAY_BASE_URL"] || "http
 const RESEEK_AI_BASE_URL = (process.env["AI_INTEGRATIONS_OPENAI_BASE_URL"] || "").replace(/\/$/, "");
 const RESEEK_AI_API_KEY = process.env["AI_INTEGRATIONS_OPENAI_API_KEY"] || "";
 const RESEEK_NODE_COUNT = Math.min(12, Math.max(1, Number(process.env["RESEEK_AI_NODE_COUNT"] || 4)));
-const NODE_DOWN_MS = Math.max(30_000, Number(process.env["GATEWAY_NODE_DOWN_MS"] || 180_000));
+const NODE_DOWN_MS    = Math.max(30_000, Number(process.env["GATEWAY_NODE_DOWN_MS"] || 180_000));
+const CREDIT_DOWN_MS  = 23 * 3600_000;
+const CREDIT_PATTERNS = [/out of credits/i, /credit/i, /billing/i, /payment required/i];
+function isCreditExhausted(t: string) { return CREDIT_PATTERNS.some(p => p.test(t)); }
 const LOCAL_MODELS = ["gpt-5.2", "gpt-5-mini", "gpt-5-nano", "o4-mini"];
 const SUB2API_ADMIN_URL = "http://127.0.0.1:9090";
 const SUB2API_ADMIN_KEY = process.env["SUB2API_ADMIN_KEY"] || "";
@@ -194,6 +198,7 @@ function recordSuccess(node: GatewayNode, status: number, started: number) {
   node.successes += 1;
   node.lastStatus = status;
   node.lastError = undefined;
+  node.creditExhaustedAt = undefined;
   node.lastLatencyMs = Date.now() - started;
   node.lastUsedAt = new Date().toISOString();
   node.downUntil = 0;
@@ -210,6 +215,9 @@ function recordFailure(node: GatewayNode, status: number | undefined, error: str
     status === 503 || status === 429
   ) {
     node.downUntil = Date.now() + NODE_DOWN_MS;
+  } else if (isCreditExhausted(error) || status === 402) {
+    node.downUntil = Date.now() + CREDIT_DOWN_MS;
+    node.creditExhaustedAt = Date.now();
   }
 }
 
