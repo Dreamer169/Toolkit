@@ -1044,10 +1044,11 @@ router.post("/tools/outlook/batch-oauth/start", async (req, res) => {
     const { query: dbQ } = await import("../db.js");
 
     // 查出所有没有 token 的 Outlook 账号（或指定 ID）
+    // Bug fix: 当传入 accountIds 时同样过滤已有 token 的账号，避免重复发起设备码授权
     let rows: { id: number; email: string }[];
     if (accountIds?.length) {
       rows = await dbQ<{ id: number; email: string }>(
-        "SELECT id, email FROM accounts WHERE platform='outlook' AND id = ANY($1::int[])",
+        "SELECT id, email FROM accounts WHERE platform='outlook' AND id = ANY($1::int[]) AND (token IS NULL OR token='') AND (refresh_token IS NULL OR refresh_token='')",
         [accountIds]
       );
     } else {
@@ -1390,10 +1391,11 @@ router.post("/tools/outlook/register", async (req, res) => {
             const tok           = tokenMap.get(acc.email);
             const inlineAccess  = tok?.access_token  || undefined;
             const inlineRefresh = tok?.refresh_token || undefined;
-            if (inlineAccess) {
+            // Bug fix: inlineRefresh 存在时也应保存并跳过设备码（防止 refresh_token 被浏览器拦截但 access_token 未捕到时重复授权）
+            if (inlineAccess || inlineRefresh) {
               await execute(
                 "UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE email=$3 AND platform='outlook'",
-                [inlineAccess, inlineRefresh ?? null, acc.email],
+                [inlineAccess ?? null, inlineRefresh ?? null, acc.email],
               );
               job.logs.push({ type: "success", message: `[key] ${acc.email} in-browser OAuth 授权成功` });
             } else if (accountRow?.id) {
