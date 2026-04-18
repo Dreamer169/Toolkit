@@ -297,7 +297,9 @@ router.post("/replit/register", (req, res) => {
               lastErr.includes("cf_js_challenge_timeout")   ||  // v7.3 新增
               lastErr.includes("turnstile_unsolved")       ||
               lastErr.includes("ERR_CERT")               ||  // SSL证书损坏端口立即跳
-              lastErr.includes("ERR_CONNECTION_RESET");
+              lastErr.includes("ERR_CONNECTION_RESET")    ||
+              lastErr.includes("ERR_CONNECTION_CLOSED")  ||  // 连接被关闭→立即换IP
+              lastErr.includes("ERR_EMPTY_RESPONSE");    // 空响应→换IP
 
             const retryable =
               isInstantSwitch ||
