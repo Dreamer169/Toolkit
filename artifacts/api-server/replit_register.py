@@ -426,7 +426,14 @@ async def fill_step1(page) -> str | None:
     if not ok:
         return "signup_email_field_not_found"
 
-    await page.wait_for_timeout(_random.randint(300, 500))
+    # v7.27b：等待 email 异步验证完成（显示 "Email is available"），避免 button 被 disabled
+    await page.wait_for_timeout(_random.randint(1800, 2800))
+    try:
+        await page.wait_for_selector('[role="alert"]:has-text("available"), .success, [class*="success"]',
+                                     timeout=3000)
+        log("[email] 邮箱可用提示出现")
+    except Exception:
+        pass
 
     # 填 password
     await _fast_fill(
@@ -435,7 +442,7 @@ async def fill_step1(page) -> str | None:
         PASSWORD, "password"
     )
 
-    await page.wait_for_timeout(_random.randint(600, 1000))
+    await page.wait_for_timeout(_random.randint(1500, 2500))
     await page.screenshot(path=f"/tmp/replit_step1_{USERNAME}.png")
 
     # 探针：检测验证码类型
@@ -530,14 +537,16 @@ async def fill_step1(page) -> str | None:
             pass
     page.on("response", _on_response)
 
-    # 提交 Step1（hover → click 模拟真实点击）
+    # 提交 Step1：先尝试正常 click（5s），若 disabled 则 force=True 强制点击
     submitted = False
-    for sel in [
+    _submit_sels = [
+        '[data-cy="signup-create-account"]',
         'button:has-text("Create Account")', 'button:has-text("Create account")',
         'button[type="submit"]', 'button:has-text("Continue")',
         'button:has-text("Next")', 'button:has-text("Sign up")',
         'button:has-text("Create")',
-    ]:
+    ]
+    for sel in _submit_sels:
         btn = page.locator(sel)
         if await btn.count():
             try:
@@ -545,10 +554,35 @@ async def fill_step1(page) -> str | None:
                 await page.wait_for_timeout(_random.randint(300, 600))
             except Exception:
                 pass
-            await btn.first.click()
-            log(f"[step1] 提交: {sel}")
+            try:
+                await btn.first.click(timeout=6000)
+                log(f"[step1] 提交(normal): {sel}")
+                submitted = True
+                break
+            except Exception:
+                # button disabled → force-click to bypass Enterprise front-end gating
+                try:
+                    await btn.first.click(force=True, timeout=3000)
+                    log(f"[step1] 提交(force): {sel}")
+                    submitted = True
+                    break
+                except Exception as fe:
+                    log(f"[step1] force click 失败 ({sel}): {fe}")
+    if not submitted:
+        # 最后手段：JS 直接提交表单
+        try:
+            await page.evaluate("""
+                () => {
+                    const btn = document.querySelector('[data-cy="signup-create-account"]');
+                    if (btn) { btn.removeAttribute('disabled'); btn.click(); return; }
+                    const form = document.querySelector('form');
+                    if (form) form.submit();
+                }
+            """)
+            log("[step1] JS 强制提交")
             submitted = True
-            break
+        except Exception as e:
+            log(f"[step1] JS 提交失败: {e}")
     if not submitted:
         await page.keyboard.press("Enter")
         log("[step1] 回车提交")
@@ -897,7 +931,7 @@ async def run() -> dict:
     final = {"ok": False, "phase": "init", "error": "", "exit_ip": ""}
     proxy_cfg = {"server": PROXY} if PROXY else None
 
-    log("v7.27 — 恢复 auto-token | pre-nav 浏览历史 | 40-55s 行为 warmup | 排除 Stripe 拦截器")
+    log("v7.27b — 恢复 auto-token | pre-nav 浏览历史 | 40-55s 行为 warmup | 排除Stripe | force提交 | email等待")
 
     stealth_fn = None
     pw_ctx_fn  = None
