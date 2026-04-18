@@ -575,16 +575,26 @@ async def fill_step1(page) -> str | None:
         await page.keyboard.press("Enter")
         log("Step1 回车提交")
 
-    await page.wait_for_timeout(5000)
-
-    # 等待 React 渲染 captcha 错误元素（固定 5s 可能不够）
-    try:
-        await page.wait_for_selector(
-            '[class*="error" i],[data-cy*="error"],[role="alert"]',
-            timeout=3000
-        )
-    except Exception:
-        pass
+    # 等待页面响应：导航离开 signup 页面 或 出现 error/success 提示（最多30s）
+    for _w in range(15):
+        await page.wait_for_timeout(2000)
+        cur_url_w = page.url
+        if "signup" not in cur_url_w.lower():
+            log(f"[step1-wait] 页面已跳转: {cur_url_w[:80]}")
+            break
+        try:
+            body_w = (await page.locator("body").inner_text())[:400].lower()
+        except Exception:
+            body_w = ""
+        err_present = await page.locator('[class*="error" i],[data-cy*="error"],[role="alert"]').count()
+        success_hint = any(h in body_w for h in ("check your email","we sent","verify your email","sent you","sent an email"))
+        if err_present or success_hint:
+            log(f"[step1-wait] 检测到 error/success (round {_w+1})")
+            break
+        if _w % 5 == 0:
+            log(f"[step1-wait] 等待页面响应 {(_w+1)*2}s…")
+    else:
+        log("[step1-wait] 30s 超时，页面仍在 signup（Turnstile/网络问题）")
 
     await page.screenshot(path=f"/tmp/replit_after_step1_{USERNAME}.png")
 
@@ -850,7 +860,7 @@ async def attempt_register(pw_module, proxy_cfg, use_patchright: bool, stealth_f
         try:
             await page.wait_for_selector(
                 'input[name="username"], input[placeholder*="username" i], #username',
-                timeout=12000
+                timeout=35000
             )
             log("Step2 username 字段出现")
         except Exception:
