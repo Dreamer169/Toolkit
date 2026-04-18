@@ -61,8 +61,18 @@ def main():
     banned = args.banned_ip.strip()
 
     new_ip, err = pop_ip_from_pool()
-    if err:
-        print(json.dumps({"success": False, "error": err})); return
+    if err == "pool_empty":
+        # 池空了 → 自动重建（后台快速测速 40 个候选，取前 15 个）
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import cf_ip_pool
+            cf_ip_pool.refresh_pool(generate_count=40, target_valid=15,
+                                    threads=8, port=443, max_latency=600.0)
+            new_ip, err = pop_ip_from_pool()
+        except Exception as ex:
+            err = f"auto-refresh failed: {ex}"
+    if err or not new_ip:
+        print(json.dumps({"success": False, "error": err or "no_ip_after_refresh"})); return
 
     changed = patch_xray_json(banned, new_ip)
     if not changed:
