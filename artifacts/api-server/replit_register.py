@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-replit_register.py — Replit 注册表单自动化 v7.1
+replit_register.py — Replit 注册表单自动化 v7.3
 核心升级：音频挑战绕过 reCAPTCHA（完全免费，无需任何付费 API key）
 策略：
   Layer 1: patchright 指纹伪装 + checkbox 自动通过（无挑战最优情况）
@@ -406,20 +406,25 @@ async def get_exit_ip(pw_module, proxy_cfg) -> str:
 
 # ── wait_cf ───────────────────────────────────────────────────────────────────
 async def wait_cf(page, use_patchright: bool) -> str | None:
-    """等待 Cloudflare challenge 通过（Turnstile）。"""
+    """等待 Cloudflare JS challenge 自动通过（最多 90s）。"""
     log("检测 CF challenge…")
-    for _r in range(20):
+    for _r in range(15):   # 2s × 15 = 30s，超时则报错让外层换代理端口
         title = await page.title()
-        body  = (await page.locator("body").inner_text())[:300]
+        body  = (await page.locator("body").inner_text())[:400]
         if is_cf_blocked(title, body):
             return "signup_cf_ip_banned"
-        # CF challenge page 特征
-        if "just a moment" in title.lower() or "checking your browser" in body.lower():
-            log(f"  CF challenge 第 {_r+1} 次等待…")
+        if "just a moment" in title.lower() or "checking your browser" in body.lower()                 or "enable javascript" in body.lower():
+            if _r % 5 == 0:
+                log(f"  CF JS challenge 等待 {(_r+1)*2}s…")
             await page.wait_for_timeout(2000)
             continue
-        # 正常页面
         break
+    else:
+        # 90s 后仍在 CF 页面 → 该代理 IP 被 CF 硬封
+        title2 = await page.title()
+        if "just a moment" in title2.lower():
+            log("CF JS challenge 30s 超时，代理 IP 可能被 CF 硬封")
+            return "signup_cf_js_challenge_timeout"
     return None
 
 # ── Step 1：填写 email + password + 解 captcha ────────────────────────────────
@@ -826,7 +831,7 @@ async def run() -> dict:
     final = {"ok": False, "phase": "init", "error": "", "exit_ip": ""}
     proxy_cfg = {"server": PROXY} if PROXY else None
 
-    log("v7.1 — 音频挑战 + playwright/stealth 优先（通过 integrity check）（完全免费：ffmpeg + Google STT / Whisper）")
+    log("v7.3 — 音频挑战 + playwright/stealth 优先（通过 integrity check）（完全免费：ffmpeg + Google STT / Whisper）")
     log(f"CapSolver 后备: {'已配置（仅在音频失败时使用）' if CAPSOLVER_KEY else '未配置（不影响音频方案）'}")
 
     stealth_fn = None
@@ -871,19 +876,25 @@ async def run() -> dict:
         "integrity_check_failed_after_step1", "integrity_check_failed_at_step2",
         "integrity_check_failed_after_step2",
     }
-
+    # 注意：CF JS challenge 超时时直接返回错误，由外层（accounts.ts）换端口重试
+    # 不在脚本内降级为直连（避免 VPS 主 IP 被 Replit rate-limit）
     for attempt in range(1, 4):
-        log(f"browser attempt {attempt}/3")
+        proxy_tag = f"proxy={proxy_cfg['server']}" if proxy_cfg else "直连"
+        log(f"browser attempt {attempt}/3 [{proxy_tag}]")
         async with pw_ctx_fn() as pw:
             res = await attempt_register(pw, proxy_cfg, use_patchright, stealth_fn, final["exit_ip"])
         res["exit_ip"] = final["exit_ip"]
         final = res
         if res["ok"]:
             break
+        # CF 超时 / IP 封禁：立即返回，让外层换代理端口
+        if res["error"] in ("signup_cf_js_challenge_timeout", "signup_cf_ip_banned"):
+            log(f"CF 失败({res['error']}) → 返回外层换端口，不在本脚本内重试")
+            break
         if res["error"] not in INTEGRITY_ERRORS:
             break
-        log(f"integrity 失败({res['error']}) → 新 browser 重试")
-        await asyncio.sleep(1)
+        log(f"integrity 失败({res['error']}) → 新 browser 重试（同代理）")
+        await asyncio.sleep(2)
 
     return final
 
