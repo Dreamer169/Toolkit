@@ -354,6 +354,7 @@ router.post("/replit/register", (req, res) => {
 
   (async () => {
     const results: unknown[] = [];
+    const { query: dbQ, execute: dbE } = await import("../db.js");
 
     for (let i = 0; i < count; i++) {
       log(`\n== Account ${i + 1}/${count} ==`);
@@ -361,7 +362,6 @@ router.post("/replit/register", (req, res) => {
       try {
         // ── Step 1: 取最多 5 个可用 Outlook 账号候选 ─────────────────────
         log("Step1: Fetching Outlook candidates from DB...");
-        const { query: dbQ, execute: dbE } = await import("../db.js");
 
         const candidates = await dbQ<{
           id: number; email: string; password: string; username: string;
