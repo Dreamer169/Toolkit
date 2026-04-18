@@ -120,6 +120,56 @@ function sortedByReputation(ports: number[]): number[] {
 }
 function shuffled(arr: number[]): number[] { return [...arr].sort(() => Math.random() - 0.5); }
 
+const MIN_REPLIT_POOL = 5; // 账号池最低水位，低于此值自动触发补充
+
+let autoRefillRunning = false;
+
+// 记录 XRAY CF IP 代理使用情况到 proxies 表（used_count + last_used）
+async function recordXrayProxyUsage(port: number, dbE: (sql: string, params?: unknown[]) => Promise<unknown>) {
+  try {
+    const cfIp = xrayPortCfIp.get(port) ?? "127.0.0.1";
+    const formatted = `socks5://127.0.0.1:${port}`;
+    await dbE(
+      `INSERT INTO proxies (formatted, host, port, status, used_count, last_used)
+       VALUES ($1, $2, $3, 'active', 1, NOW())
+       ON CONFLICT (formatted) DO UPDATE
+         SET used_count = proxies.used_count + 1,
+             host       = EXCLUDED.host,
+             last_used  = NOW()`,
+      [formatted, cfIp, port]
+    );
+  } catch { /* 静默，不影响主流程 */ }
+}
+
+// 检查 replit 账号池水位，若不足则自动触发补充注册
+async function checkAndRefillReplitPool(
+  dbQ: (sql: string, params?: unknown[]) => Promise<Array<Record<string,unknown>>>,
+  log: (s: string) => void
+) {
+  if (autoRefillRunning) return;
+  try {
+    const rows = await dbQ(
+      "SELECT COUNT(*) AS count FROM accounts WHERE platform='replit' AND status IN ('active','registered','unverified')",
+      []
+    );
+    const cur = parseInt(String(rows?.[0]?.count ?? "0"), 10);
+    if (cur < MIN_REPLIT_POOL) {
+      const need = MIN_REPLIT_POOL - cur;
+      log(`[pool-check] replit 账号数 ${cur} < ${MIN_REPLIT_POOL}，自动触发补充 ${need} 个`);
+      autoRefillRunning = true;
+      const port = process.env.PORT ?? "8080";
+      fetch(`http://127.0.0.1:${port}/api/replit/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ count: need, headless: true }),
+      }).catch(() => {}).finally(() => { autoRefillRunning = false; });
+    } else {
+      log(`[pool-check] replit 账号数 ${cur} ✅ (>= ${MIN_REPLIT_POOL})`);
+    }
+  } catch (e) { log(`[pool-check] 查询失败: ${e}`); }
+}
+
+
 interface Job {
   id: string;
   status: "running" | "done" | "error";
@@ -383,6 +433,9 @@ router.post("/replit/register", (req, res) => {
               capsolver_key: process.env.CAPSOLVER_KEY ?? "",
             });
 
+            // 记录代理使用（成功/失败均记录）
+            await recordXrayProxyUsage(tryPort, dbE as unknown as (sql: string, params?: unknown[]) => Promise<unknown>);
+
             exitIp  = String(parsed.exit_ip ?? "");
             lastErr = String(parsed.error ?? "");
 
@@ -551,6 +604,7 @@ router.post("/replit/register", (req, res) => {
     job.status = okCount > 0 ? "done" : "error";
     job.result = { results, summary: `${okCount}/${count} succeeded` };
     log(`\nAll done: ${okCount}/${count} succeeded`);
+    await checkAndRefillReplitPool(dbQ, log);
   })().catch(err => {
     job.status = "error";
     job.logs.push(`FATAL: ${String(err)}`);
