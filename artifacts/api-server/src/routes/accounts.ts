@@ -10,6 +10,13 @@ const PYTHON = process.env.PYTHON_BIN || "/usr/bin/python3";
 const LOCAL_API_BASE = (process.env.LOCAL_API_BASE_URL || "http://127.0.0.1:" + (process.env.PORT || "8080")).replace(/\/$/, "");
 const VPS_GATEWAY = process.env.VPS_GATEWAY_URL || "http://45.205.27.69:8080/api/gateway";
 const XRAY_PORTS  = Array.from({ length: 26 }, (_, i) => 10820 + i);
+// CF-banned port cooldown: port → timestamp when cooldown expires (5 min)
+const cfBannedUntil = new Map<number, number>();
+function availablePorts(): number[] {
+  const now = Date.now();
+  return XRAY_PORTS.filter(p => (cfBannedUntil.get(p) ?? 0) < now);
+}
+function shuffled(arr: number[]): number[] { return [...arr].sort(() => Math.random() - 0.5); }
 
 interface Job {
   id: string;
@@ -121,14 +128,18 @@ router.post("/replit/register", (req, res) => {
 
           log(`  Trying Outlook id=${outlook.id} email=${outlook.email} => Replit user=${username}`);
 
-          // ── Step 2a: 最多 4 次不同代理端口重试 ───────────────────────
+          // ── Step 2a: 最多 6 次不同代理端口重试（shuffle不重复）───────
           const regScript = path.join(API_DIR, "replit_register.py");
           let regOk  = false;
           let exitIp = "";
           let lastErr = "";
 
+          // 每个Outlook账号：shuffle可用端口，顺序用，避免重复
+          const portQueue = shuffled(availablePorts());
+          if (portQueue.length < 6) portQueue.push(...shuffled(XRAY_PORTS)); // 兜底
+
           for (let attempt = 1; attempt <= 6; attempt++) {
-            const tryPort = pick(XRAY_PORTS);
+            const tryPort = portQueue[(attempt - 1) % portQueue.length];
             log(`    Attempt ${attempt}/6 via SOCKS5:${tryPort}`);
 
             const { parsed } = await runPython(regScript, {
@@ -189,7 +200,12 @@ router.post("/replit/register", (req, res) => {
             if (!retryable) break;
 
             if (isInstantSwitch) {
+              // CF封禁端口 → 记录5分钟冷却
+              if (lastErr.includes("cf_ip_banned") || lastErr.includes("cf_hard_block")) {
+                cfBannedUntil.set(tryPort, Date.now() + 5 * 60 * 1000);
+              }
               log(`    → instant port switch`);
+              // 从queue剩余中找下一个未用端口
               continue;
             }
             const delayMs = lastErr.includes("integrity") ? 1000 :
