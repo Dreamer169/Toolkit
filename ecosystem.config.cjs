@@ -16,7 +16,7 @@ module.exports = {
         "NODE_ENV": "production",
         "SUB2API_ADMIN_KEY": "sk-06cf1c8b2ff7a09a1f11d7909a6d7cb7dee97e38793d630f25a3bddf2bf0ec16",
         "SUB2API_API_KEY": "sk-06cf1c8b2ff7a09a1f11d7909a6d7cb7dee97e38793d630f25a3bddf2bf0ec16",
-        "LOCAL_GATEWAY_BASE_URL": "https://ad3ee4fb-56d9-418f-8ed1-f8f7aa23e9b6-00-2qzxmc8i3vbp5.worf.replit.dev/api/gateway", // B24: cleared - set to actual active workspace URL when available
+        "LOCAL_GATEWAY_BASE_URL": "", // 已清理 - 通过 self-register 动态加入，勿硬编码 // B24: cleared - set to actual active workspace URL when available
         "REPLIT_SUBNODES": "" // B24: cleared - populated dynamically via self-register
       },
       "restart_delay": 3000,
