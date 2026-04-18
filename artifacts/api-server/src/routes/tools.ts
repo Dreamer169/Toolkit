@@ -2240,7 +2240,7 @@ async function imapCheckLogin(email: string, password: string, accessToken?: str
     const paramObj: Record<string, unknown> = { email, password, limit: 1, folder: "INBOX", search: "", check_only: true };
     if (accessToken) paramObj["access_token"] = accessToken;
     const params = JSON.stringify(paramObj);
-    const child = spawn("python3", [scriptPath, params], { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+    const child = spawn(process.env.PYTHON_BIN || "/usr/bin/python3", [scriptPath, params], { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
     let out = "";
     child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
     child.on("close", () => {
@@ -2476,7 +2476,7 @@ async function fetchViaImap(
     };
     if (accessToken) paramObj["access_token"] = accessToken;
     const params = JSON.stringify(paramObj);
-    const child = spawn("python3", [scriptPath, params], { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+    const child = spawn(process.env.PYTHON_BIN || "/usr/bin/python3", [scriptPath, params], { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
     let out = "";
     child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
     child.on("close", () => {
@@ -3105,7 +3105,7 @@ router.post("/tools/outlook/click-verify-link", async (req, res) => {
     const params = JSON.stringify({ token: accessToken, message_id: messageId ?? "", verify_url: verifyUrl ?? "" });
     const { spawn } = await import("child_process");
     const result = await new Promise<{ success: boolean; verify_url?: string; final_url?: string; title?: string; error?: string }>((resolve) => {
-      const child = spawn("python3", [scriptPath, params], { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+      const child = spawn(process.env.PYTHON_BIN || "/usr/bin/python3", [scriptPath, params], { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
       let out = "";
       child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
       child.stderr.on("data", (d: Buffer) => { process.stderr.write(d); });
@@ -3171,7 +3171,7 @@ router.post("/tools/outlook/auto-verify-emails", async (req, res) => {
           const params = JSON.stringify({ token: accessToken, message_id: msg.id, verify_url: "" });
           const { spawn } = await import("child_process");
           const clickResult = await new Promise<{ success: boolean; verify_url?: string; error?: string }>((resolve) => {
-            const child = spawn("python3", [scriptPath, params], { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+            const child = spawn(process.env.PYTHON_BIN || "/usr/bin/python3", [scriptPath, params], { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
             let out = "";
             child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
             child.on("close", () => {

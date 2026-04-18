@@ -1,4 +1,5 @@
 import app from "./app";
+import { initDatabase } from "./db.js";
 import { logger } from "./lib/logger";
 
 const rawPort = process.env["PORT"];
@@ -90,22 +91,34 @@ async function doSelfRegister(attempt = 1): Promise<void> {
   }
 }
 
-app.listen(port, (err) => {
-  if (err) {
-    logger.error({ err }, "Error listening on port");
+async function main() {
+  try {
+    await initDatabase();
+    logger.info("Database initialized");
+  } catch (err) {
+    logger.error({ err }, "Database initialization failed");
     process.exit(1);
   }
 
-  logger.info({ port }, "Server listening");
+  app.listen(port, (err) => {
+    if (err) {
+      logger.error({ err }, "Error listening on port");
+      process.exit(1);
+    }
 
-  if (SELF_REGISTER_URL && SELF_GATEWAY_URL) {
-    logger.info(
-      { selfGateway: SELF_GATEWAY_URL, masterGateway: SELF_REGISTER_URL, name: SELF_REGISTER_NAME || "(auto)" },
-      "Self-register: 5s 后向主节点注册",
-    );
-    setTimeout(() => { void doSelfRegister(); }, 5_000);
-    setInterval(() => { void doSelfRegister(); }, SELF_REGISTER_INTERVAL_MS);
-  } else if (!SELF_REGISTER_URL) {
-    logger.info("Self-register: 未设置 SELF_REGISTER_URL，跳过（以独立模式运行）");
-  }
-});
+    logger.info({ port }, "Server listening");
+
+    if (SELF_REGISTER_URL && SELF_GATEWAY_URL) {
+      logger.info(
+        { selfGateway: SELF_GATEWAY_URL, masterGateway: SELF_REGISTER_URL, name: SELF_REGISTER_NAME || "(auto)" },
+        "Self-register: 5s 后向主节点注册",
+      );
+      setTimeout(() => { void doSelfRegister(); }, 5_000);
+      setInterval(() => { void doSelfRegister(); }, SELF_REGISTER_INTERVAL_MS);
+    } else if (!SELF_REGISTER_URL) {
+      logger.info("Self-register: 未设置 SELF_REGISTER_URL，跳过（以独立模式运行）");
+    }
+  });
+}
+
+void main();

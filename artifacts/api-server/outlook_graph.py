@@ -5,7 +5,7 @@ outlook_graph.py — Microsoft Graph API 邮件读取工具
   1. wait_for_cursor_otp(timeout)        — 从 /tmp/ms_tokens.json 读取 Cursor OTP
   2. wait_for_replit_verify(refresh_token, timeout) — 按账号 refresh_token 读取 Replit 验证链接
 """
-import json, time, re, urllib.request, urllib.parse
+import json, time, re, urllib.request, urllib.parse, urllib.error
 
 CLIENT_ID  = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
 TENANT     = "common"

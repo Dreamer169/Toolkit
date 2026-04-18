@@ -3,9 +3,11 @@ import { spawn } from "child_process";
 import path from "path";
 
 const router = Router();
-const API_DIR     = path.resolve(process.cwd(), "artifacts/api-server");
-const SCRIPTS_DIR = path.resolve(process.cwd(), "scripts");
-const PYTHON      = "/usr/bin/python3";
+const WORKSPACE_DIR = process.cwd().endsWith("/artifacts/api-server") ? path.resolve(process.cwd(), "../..") : process.cwd();
+const API_DIR = path.resolve(WORKSPACE_DIR, "artifacts/api-server");
+const SCRIPTS_DIR = path.resolve(WORKSPACE_DIR, "scripts");
+const PYTHON = process.env.PYTHON_BIN || "/usr/bin/python3";
+const LOCAL_API_BASE = (process.env.LOCAL_API_BASE_URL || "http://127.0.0.1:" + (process.env.PORT || "8080")).replace(/\/$/, "");
 const VPS_GATEWAY = process.env.VPS_GATEWAY_URL || "http://45.205.27.69:8080/api/gateway";
 const XRAY_PORTS  = Array.from({ length: 26 }, (_, i) => 10820 + i);
 
@@ -22,12 +24,23 @@ function makeJobId() { return `rpl_${Date.now().toString(36)}_${Math.random().to
 function pick<T>(arr: T[]): T { return arr[Math.floor(Math.random() * arr.length)]; }
 
 async function localPost(p: string, body: unknown) {
-  const r = await fetch(`http://localhost:8080${p}`, {
+  const r = await fetch(`${LOCAL_API_BASE}${p}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   return r.json() as Promise<Record<string, unknown>>;
+}
+
+async function localGet(p: string) {
+  const r = await fetch(`${LOCAL_API_BASE}${p}`);
+  return r.json() as Promise<Record<string, unknown>>;
+}
+
+function normalizeUrls(input: unknown): string[] {
+  if (Array.isArray(input)) return input.map(String).map((s) => s.trim()).filter(Boolean);
+  if (typeof input === "string") return input.split(/[\n,;\s]+/).map((s) => s.trim()).filter(Boolean);
+  return [];
 }
 
 function runPython(script: string, arg: unknown, timeoutMs = 130_000): Promise<{
@@ -53,7 +66,8 @@ function runPython(script: string, arg: unknown, timeoutMs = 130_000): Promise<{
 
 // ── POST /api/replit/register ─────────────────────────────────────────────────
 router.post("/replit/register", (req, res) => {
-  const count    = Math.min(parseInt(String(req.body?.count ?? "1")), 3);
+  const parsedCount = Number.parseInt(String(req.body?.count ?? "1"), 10);
+  const count = Math.min(Math.max(Number.isFinite(parsedCount) ? parsedCount : 1, 1), 3);
   const headless = req.body?.headless !== false;
   const jobId    = makeJobId();
   const job: Job = { id: jobId, status: "running", started: Date.now(), logs: [], result: null };
@@ -255,6 +269,49 @@ router.post("/replit/gateway-register", async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
 });
 
+// ── POST /api/replit/subnodes/register ─────────────────────────────────────────
+router.post("/replit/subnodes/register", async (req, res) => {
+  const urls = normalizeUrls(req.body?.urls ?? req.body?.url ?? req.body?.gatewayUrl);
+  if (!urls.length) {
+    res.status(400).json({ success: false, error: "urls 不能为空，可传数组或按行/逗号分隔的字符串" });
+    return;
+  }
+  const model = String(req.body?.model || "gpt-5-mini");
+  const priority = Math.min(Math.max(Number(req.body?.priority || 3), 1), 20);
+  const apiKey = req.body?.apiKey ? String(req.body.apiKey) : undefined;
+  try {
+    const result = await localPost("/api/gateway/nodes/batch-probe", {
+      urls,
+      apiKey,
+      model,
+      priority,
+      autoRegister: true,
+    });
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+// ── GET /api/replit/subnodes ──────────────────────────────────────────────────
+router.get("/replit/subnodes", async (_req, res) => {
+  try {
+    const result = await localGet("/api/gateway/nodes") as {
+      success?: boolean;
+      nodes?: Array<Record<string, unknown>>;
+      totals?: Record<string, unknown>;
+    };
+    const nodes = (result.nodes || []).filter((n) => {
+      const source = String(n.source || "");
+      const type = String(n.type || "");
+      return type === "friend-openai" || source === "register" || source === "runtime" || source === "env";
+    });
+    res.json({ success: result.success !== false, total: nodes.length, totals: result.totals, nodes });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
 // ── GET /api/replit/accounts ──────────────────────────────────────────────────
 router.get("/replit/accounts", async (_req, res) => {
   try {
@@ -280,7 +337,8 @@ router.get("/replit-accounts", async (_req, res) => {
 
 // ── POST /api/signup (旧接口) ─────────────────────────────────────────────────
 router.post("/signup", (req, res) => {
-  const count = Math.min(parseInt(String(req.body?.count ?? "1")), 5);
+  const parsedCount = Number.parseInt(String(req.body?.count ?? "1"), 10);
+  const count = Math.min(Math.max(Number.isFinite(parsedCount) ? parsedCount : 1, 1), 5);
   const jobId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   const job: Job = { id: jobId, status: "running", started: Date.now(), logs: [], result: null };
   jobs.set(jobId, job);
@@ -289,7 +347,7 @@ router.post("/signup", (req, res) => {
     "--count", String(count),
   ], {
     cwd: SCRIPTS_DIR,
-    env: { ...process.env, GATEWAY_API: "http://localhost:8080/api/gateway", VPS_GATEWAY_URL },
+    env: { ...process.env, GATEWAY_API: LOCAL_API_BASE + "/api/gateway", VPS_GATEWAY_URL: VPS_GATEWAY },
   });
   proc.stdout.on("data", (d: Buffer) => { job.logs.push(...d.toString().split("\n").filter(Boolean)); });
   proc.stderr.on("data", (d: Buffer) => { job.logs.push("ERR: " + d.toString().trim()); });

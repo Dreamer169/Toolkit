@@ -49,6 +49,8 @@ export async function initDatabase(): Promise<void> {
       status VARCHAR(64) NOT NULL DEFAULT 'active',
       notes TEXT,
       tags TEXT,
+      exit_ip VARCHAR(255),
+      proxy_port INTEGER,
       name VARCHAR(255),
       type VARCHAR(64),
       credentials JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -63,7 +65,8 @@ export async function initDatabase(): Promise<void> {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
-  await execute(`DROP INDEX IF EXISTS accounts_platform_email_unique`);
+  await execute(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS exit_ip VARCHAR(255)`);
+  await execute(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS proxy_port INTEGER`);
   await execute(`CREATE UNIQUE INDEX IF NOT EXISTS accounts_platform_email_unique ON accounts(platform, email)`);
   await execute(`CREATE INDEX IF NOT EXISTS accounts_platform_status_idx ON accounts(platform, status)`);
 
