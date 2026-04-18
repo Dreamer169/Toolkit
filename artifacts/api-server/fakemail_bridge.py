@@ -29,13 +29,40 @@ _inbox_lock = threading.Lock()
 def _s(v):
     return str(v).strip() if v is not None else ""
 
+
+# ── 内建身份生成器（fng_api 不可用时的降级方案）────────────────────────────
+import random as _rand, secrets as _sec, string as _str
+
+_FIRST = ['james','john','robert','michael','william','david','richard',
+          'emma','olivia','sophia','isabella','ava','mia','emily','sarah',
+          'alex','jordan','taylor','morgan','casey','riley','quinn']
+_LAST  = ['smith','jones','chen','kim','lee','wang','patel','garcia',
+          'miller','davis','wilson','anderson','clark','lewis','hall']
+
+def _gen_identity_builtin():
+    first = _rand.choice(_FIRST)
+    last  = _rand.choice(_LAST)
+    num   = _rand.randint(10, 9999)
+    domain = _rand.choice(FMG_DOMAINS)
+    login = f"{first}{last[:3]}{num}".lower()[:20]
+    email = f"{login}@{domain}"
+    pw_chars = _str.ascii_letters + _str.digits + "!@#$"
+    password = _sec.token_hex(3).upper() + _sec.token_hex(3) + _sec.token_urlsafe(4)
+    return {
+        "email": email, "login": login, "domain": domain,
+        "username": login, "password": password,
+        "name": f"{first.capitalize()} {last.capitalize()}",
+        "first_name": first.capitalize(), "last_name": last.capitalize(),
+        "guid": _sec.token_hex(8),
+    }
+
 def get_identity():
     try:
         from fng_api import getIdentity
         i = getIdentity(country=["us"])
         email = i.email.strip() if i.email else None
         if not email or "@" not in email:
-            return None, "No email in identity"
+            raise ImportError("No valid email from fng_api")
         login, domain = email.lower().split("@", 1)
         return {
             # 基本账号信息
@@ -85,8 +112,10 @@ def get_identity():
             # 技术信息
             "useragent": _s(i.useragent),
         }, None
-    except Exception as e:
-        return None, str(e)
+    except Exception:
+        # fng_api 不可用，使用内建生成器
+        ident = _gen_identity_builtin()
+        return ident, None
 
 
 def start_watching(login: str, domain: str):
