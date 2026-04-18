@@ -788,26 +788,10 @@ async def attempt_register(pw_module, proxy_cfg, use_patchright: bool, stealth_f
         _captured_reqs.clear()
 
         if step1_err == "captcha_token_invalid":
-            log("captcha_token_invalid → reload，重新音频解算…")
-            try:
-                await page.reload(wait_until="domcontentloaded", timeout=35000)
-                await page.wait_for_timeout(3000)
-                for sel2 in ['button:has-text("Email & password")', 'button:has-text("Continue with email")', 'button:has-text("Email")']:
-                    btn2 = page.locator(sel2)
-                    if await btn2.count():
-                        await btn2.first.click()
-                        await page.wait_for_timeout(2000)
-                        break
-                step1_err2 = await fill_step1(page)
-                for _req in _captured_reqs[-5:]:
-                    log(f"[intercept-retry] {_req}")
-                _captured_reqs.clear()
-                if step1_err2:
-                    result["error"] = step1_err2
-                    await browser.close(); return result
-            except Exception as e2:
-                result["error"] = f"captcha_token_invalid_reload_failed:{e2}"
-                await browser.close(); return result
+            # 不在这里 reload——代理在 captcha 失败后经常已断。
+            # 直接返回让 accounts.ts 用新端口重试（最多6次）。
+            result["error"] = "captcha_token_invalid"
+            await browser.close(); return result
 
         if step1_err:
             result["error"] = step1_err

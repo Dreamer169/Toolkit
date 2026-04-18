@@ -359,6 +359,7 @@ router.post("/replit/register", (req, res) => {
           log(`  Trying Outlook id=${outlook.id} email=${outlook.email} => Replit user=${username}`);
 
           // ── Step 2a: 最多 6 次不同代理端口重试（shuffle不重复）───────
+          let captchaFailCount = 0; // 同一 Outlook 账号的 captcha_token_invalid 次数
           const regScript = path.join(API_DIR, "replit_register.py");
           let regOk  = false;
           let exitIp = "";
@@ -420,8 +421,21 @@ router.post("/replit/register", (req, res) => {
             }
             // captcha_token_invalid → Replit server拒绝token → 立即rate-limit该email → 跳下一个Outlook
             if (lastErr.includes("captcha_token_invalid")) {
-              log(`    captcha_token_invalid → skip Outlook (next attempt would be rate-limited)`);
-              break;
+              captchaFailCount++;
+              if (captchaFailCount >= 3) {
+                log(`    captcha_token_invalid x${captchaFailCount} → skip Outlook (rate-limit risk)`);
+                break;
+              }
+              // 换个 CF CDN IP 再试——captcha 失败通常是 IP 信誉问题
+              const cfIpC = xrayPortCfIp.get(tryPort);
+              if (cfIpC) {
+                log(`    captcha_token_invalid (${captchaFailCount}/2) → rotate CF IP ${cfIpC} + retry`);
+                rotateCfIpInXray(cfIpC);
+                await new Promise(r => setTimeout(r, 2000));
+              } else {
+                log(`    captcha_token_invalid (${captchaFailCount}/2) → instant port switch`);
+              }
+              continue;
             }
             const isInstantSwitch =
               lastErr.includes("cf_ip_banned")              ||
