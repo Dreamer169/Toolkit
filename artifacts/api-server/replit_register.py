@@ -536,28 +536,98 @@ async def wait_cf(page, use_patchright: bool) -> str | None:
 # ── Step 1：填写 email + password + 解 captcha ────────────────────────────────
 _last_token: dict = {"rc": None, "cf": None}
 
+# ── 人类行为模拟（提升 reCAPTCHA Enterprise score）──────────────────────────────
+import random as _random
+import math as _math
+
+async def _human_mouse_warmup(page):
+    """在 signup 页上做 30s 自然鼠标轨迹 + 滚动，让 reCAPTCHA 积累行为信号。"""
+    try:
+        w, h = 1280, 800
+        # Bezier 控制点轨迹
+        async def _bezier_move(x0, y0, x1, y1, steps=25):
+            cx = x0 + (x1 - x0) * 0.3 + _random.randint(-80, 80)
+            cy = y0 + (y1 - y0) * 0.3 + _random.randint(-80, 80)
+            for i in range(steps + 1):
+                t = i / steps
+                bx = (1-t)**2*x0 + 2*(1-t)*t*cx + t**2*x1
+                by = (1-t)**2*y0 + 2*(1-t)*t*cy + t**2*y1
+                await page.mouse.move(bx, by)
+                await page.wait_for_timeout(_random.randint(8, 20))
+
+        x, y = _random.randint(200, 900), _random.randint(100, 600)
+        for _ in range(_random.randint(6, 9)):
+            nx = _random.randint(50, w - 50)
+            ny = _random.randint(50, h - 50)
+            await _bezier_move(x, y, nx, ny, steps=_random.randint(15, 35))
+            await page.wait_for_timeout(_random.randint(80, 300))
+            x, y = nx, ny
+
+        # 随机滚动
+        for _ in range(_random.randint(2, 4)):
+            dy = _random.randint(40, 200) * (_random.choice([-1, 1]))
+            await page.evaluate(f"window.scrollBy(0, {dy})")
+            await page.wait_for_timeout(_random.randint(200, 500))
+        await page.evaluate("window.scrollTo(0, 0)")
+
+        log("[human] 鼠标轨迹 + 滚动完成")
+    except Exception as e:
+        log(f"[human] warmup 异常（忽略）: {e}")
+
+
+async def _human_type(field, text: str):
+    """逐字符输入，加入随机节奏（模拟真实打字）。"""
+    import random as _r
+    await field.click()
+    await field.fill("")          # 先清空
+    for i, ch in enumerate(text):
+        await field.type(ch)
+        delay = _r.randint(60, 160)
+        if i > 0 and i % _r.randint(4, 8) == 0:
+            delay += _r.randint(150, 400)   # 偶尔停顿（思考/修正）
+        await field.page.wait_for_timeout(delay)
+
+
 async def fill_step1(page) -> str | None:
+    # ── 鼠标 warmup（先让 reCAPTCHA 积累行为信号再填表）─────────────────────
+    await _human_mouse_warmup(page)
+    await page.wait_for_timeout(1200)
+
     for sel in ['input[name="email"]', 'input[type="email"]', 'input[placeholder*="email" i]']:
         f = page.locator(sel)
         if await f.count():
-            await f.first.click()
-            await f.first.fill(EMAIL)
-            await page.wait_for_timeout(300)
-            log(f"填 email via {sel}")
+            # 悬停 → 移动到输入框 → 逐字符输入
+            bb = await f.first.bounding_box()
+            if bb:
+                await page.mouse.move(bb["x"] + bb["width"]/2 + 15,
+                                      bb["y"] + bb["height"]/2 - 5)
+                await page.wait_for_timeout(150)
+            await _human_type(f.first, EMAIL)
+            await page.wait_for_timeout(400)
+            log(f"填 email via {sel} (逐字符)")
             break
     else:
         return "signup_email_field_not_found"
 
+    # 填密码前先挪一下鼠标、停顿
+    await page.mouse.move(600 + _random.randint(-50,50), 500 + _random.randint(-30,30))
+    await page.wait_for_timeout(_random.randint(400, 800))
+
     for sel in ['input[type="password"]', 'input[name="password"]']:
         f = page.locator(sel)
         if await f.count():
-            await f.first.click()
-            await f.first.fill(PASSWORD)
-            await page.wait_for_timeout(300)
-            log("填 password")
+            bb = await f.first.bounding_box()
+            if bb:
+                await page.mouse.move(bb["x"] + bb["width"]/2,
+                                      bb["y"] + bb["height"]/2)
+                await page.wait_for_timeout(120)
+            await _human_type(f.first, PASSWORD)
+            await page.wait_for_timeout(500)
+            log("填 password (逐字符)")
             break
 
-    await page.wait_for_timeout(800)
+    # 停顿 1-2s 后才截图+探针（reCAPTCHA 需要时间评估行为）
+    await page.wait_for_timeout(_random.randint(1000, 2000))
     await page.screenshot(path=f"/tmp/replit_step1_{USERNAME}.png")
 
     # ── 探针：检测验证码类型 ─────────────────────────────────────────────────────
@@ -1022,7 +1092,7 @@ async def run() -> dict:
     final = {"ok": False, "phase": "init", "error": "", "exit_ip": ""}
     proxy_cfg = {"server": PROXY} if PROXY else None
 
-    log("v7.21 — 音频挑战优先(checkbox→bframe→ffmpeg/STT)，忽略低分自动评分token，Turnstile条件等待")
+    log("v7.22 — 鼠标warmup+逐字符输入提升reCAPTCHA Enterprise score, 音频挑战忽略低分auto-token")
     log(f"CapSolver 后备: {'已配置（仅在音频失败时使用）' if CAPSOLVER_KEY else '未配置（不影响音频方案）'}")
 
     stealth_fn = None
