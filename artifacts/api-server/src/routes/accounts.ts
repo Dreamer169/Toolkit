@@ -161,27 +161,29 @@ router.post("/replit/register", (req, res) => {
               break; // 跳出 attempt 循环，尝试下一个 Outlook
             }
 
-            // 可重试错误：Turnstile/CF封禁/integrity/timeout → 换端口继续
+            // 立即换端口：CF封禁 / Turnstile超时 / captcha token失效
+            const isInstantSwitch =
+              lastErr.includes("cf_ip_banned")        ||
+              lastErr.includes("cf_hard_block")       ||
+              lastErr.includes("turnstile_unsolved")  ||
+              lastErr.includes("captcha_token_invalid");
+
             const retryable =
+              isInstantSwitch ||
               lastErr.includes("integrity") ||
               lastErr.includes("timeout")   ||
               lastErr.includes("Timeout")   ||
               lastErr.includes("signup")    ||
-              lastErr.includes("moment")    ||
-              lastErr.includes("Turnstile") ||
-              lastErr.includes("cf_ip_banned") ||
-              lastErr.includes("cf_hard_block");
+              lastErr.includes("moment");
             if (!retryable) break;
 
-            // CF IP 封禁 → 立即换端口（无需等待，12s 已浪费在脚本内部）
-            if (lastErr.includes("cf_ip_banned") || lastErr.includes("cf_hard_block")) {
-              log(`    CF banned → switching port immediately`);
+            if (isInstantSwitch) {
+              log(`    → instant port switch`);
               continue;
             }
-            // integrity 失败 → stealth 内部已重试 3 次，外层短暂等待换端口
-            const delayMs = lastErr.includes("integrity") ? 1500 :
-                            lastErr.includes("signup_form_input_missing") ? 3000 :
-                            4000 + attempt * 1500;
+            const delayMs = lastErr.includes("integrity") ? 1000 :
+                            lastErr.includes("signup_form_input_missing") ? 2000 :
+                            3000 + attempt * 1000;
             await new Promise(r => setTimeout(r, delayMs));
           }
 
