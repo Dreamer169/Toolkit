@@ -1532,7 +1532,7 @@ router.post("/self-register", async (req, res) => {
     const byName = allNodes().find((n) => n.name === name);
     if (byName) {
       byName.baseUrl = baseUrl;
-      byName.id = stableId(friend, baseUrl);
+      byName.id = stableId("friend", baseUrl);
       if (!runtimeNodes.includes(byName)) runtimeNodes.push(byName);
       savePersistedNodes(runtimeNodes);
       existing = byName;
