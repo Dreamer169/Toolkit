@@ -443,15 +443,24 @@ router.post("/replit/register", (req, res) => {
             if (!retryable) break;
 
             if (isInstantSwitch) {
-              // CF封禁端口 → 记录5分钟冷却
-              if (lastErr.includes("cf_ip_banned") || lastErr.includes("cf_hard_block") || lastErr.includes("cf_js_challenge_timeout")) {
-                cfBannedUntil.set(tryPort, Date.now() + 5 * 60 * 1000);
-                // 同步通知 CF 池封禁该 IP
+              // CF封禁/连接失败 → 轮换该端口的 CF CDN IP
+              const needsCfRotate =
+                lastErr.includes("cf_ip_banned")             ||
+                lastErr.includes("cf_hard_block")            ||
+                lastErr.includes("cf_js_challenge_timeout")  ||
+                lastErr.includes("ERR_CONNECTION_CLOSED")    ||
+                lastErr.includes("ERR_EMPTY_RESPONSE")       ||
+                lastErr.includes("ERR_CERT");
+              if (needsCfRotate) {
+                // CF超时/封禁类 → 额外记录5分钟冷却
+                if (lastErr.includes("cf_ip_banned") || lastErr.includes("cf_hard_block") || lastErr.includes("cf_js_challenge_timeout")) {
+                  cfBannedUntil.set(tryPort, Date.now() + 5 * 60 * 1000);
+                }
                 const cfIp = xrayPortCfIp.get(tryPort);
                 if (cfIp) {
                   log(`    → rotate CF IP ${cfIp} in xray (pool → new IP)`);
                   rotateCfIpInXray(cfIp);
-                  await new Promise(r => setTimeout(r, 3000));  // wait xray reload
+                  await new Promise(r => setTimeout(r, 2000));  // wait xray reload
                 }
               }
               log(`    → instant port switch`);
