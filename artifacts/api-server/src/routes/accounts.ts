@@ -10,6 +10,10 @@ const PYTHON = process.env.PYTHON_BIN || "/usr/bin/python3";
 const LOCAL_API_BASE = (process.env.LOCAL_API_BASE_URL || "http://127.0.0.1:" + (process.env.PORT || "8080")).replace(/\/$/, "");
 const VPS_GATEWAY = process.env.VPS_GATEWAY_URL || "http://45.205.27.69:8080/api/gateway";
 const XRAY_PORTS  = Array.from({ length: 26 }, (_, i) => 10820 + i);
+
+// Outlook OAuth (Thunderbird client_id)
+const OUTLOOK_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
+const OUTLOOK_SCOPE     = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access";
 // CF-banned port cooldown: port → timestamp when cooldown expires (5 min)
 const cfBannedUntil = new Map<number, number>();
 // Port reputation: last time port returned a real form response (not cf_ban/captcha_invalid)
@@ -170,6 +174,86 @@ function runPython(script: string, arg: unknown, timeoutMs = 130_000): Promise<{
 }
 
 // ── POST /api/replit/register ─────────────────────────────────────────────────
+// ── 注册前预检：刷新 token + 验证收件箱可用性 ────────────────────────────────
+async function verifyOutlookInbox(
+  acc: { id: number; email: string; refresh_token: string | null },
+  dbE: (sql: string, params?: unknown[]) => Promise<unknown>,
+  log: (msg: string) => void
+): Promise<string | null> {
+  if (!acc.refresh_token) {
+    log(`    [inbox✗] id=${acc.id} 无refresh_token → 标token_invalid`);
+    await dbE(
+      "UPDATE accounts SET tags = COALESCE(tags || ',', '') || 'token_invalid', status='suspended', updated_at=NOW() WHERE id=$1",
+      [acc.id]
+    );
+    return null;
+  }
+
+  // 1) 刷新 OAuth token
+  let accessToken = "";
+  try {
+    const tr = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        client_id: OUTLOOK_CLIENT_ID,
+        refresh_token: acc.refresh_token,
+        scope: OUTLOOK_SCOPE,
+      }).toString(),
+    });
+    const td = await tr.json() as { access_token?: string; refresh_token?: string; error?: string; error_description?: string };
+    if (!td.access_token) {
+      const errMsg = (td.error_description ?? td.error ?? "刷新失败").slice(0, 120);
+      log(`    [inbox✗] id=${acc.id} token刷新失败: ${errMsg} → 标token_invalid`);
+      await dbE(
+        "UPDATE accounts SET tags = COALESCE(tags || ',', '') || ',token_invalid', status='suspended', updated_at=NOW() WHERE id=$1",
+        [acc.id]
+      );
+      return null;
+    }
+    accessToken = td.access_token;
+    // 顺带更新DB里的token
+    await dbE(
+      "UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
+      [accessToken, td.refresh_token ?? acc.refresh_token, acc.id]
+    );
+  } catch (e) {
+    log(`    [inbox✗] id=${acc.id} token刷新异常: ${String(e).slice(0, 80)} → skip`);
+    return null;
+  }
+
+  // 2) 测试收件箱可读性（Graph API）
+  try {
+    const ir = await fetch(
+      "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=1&$select=id,receivedDateTime",
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (!ir.ok) {
+      const ie = await ir.json() as { error?: { message?: string; code?: string } };
+      const errMsg = ie?.error?.message ?? `HTTP ${ir.status}`;
+      log(`    [inbox✗] id=${acc.id} 收件箱访问失败(${ir.status}): ${errMsg} → 标inbox_error`);
+      await dbE(
+        "UPDATE accounts SET tags = COALESCE(tags || ',', '') || ',inbox_error', updated_at=NOW() WHERE id=$1",
+        [acc.id]
+      );
+      return null;
+    }
+    const msgData = await ir.json() as { value?: unknown[] };
+    const msgCount = msgData.value?.length ?? 0;
+    log(`    [inbox✓] id=${acc.id} ${acc.email} token有效，收件箱可读 (${msgCount}封可见)`);
+    // 清除旧的 inbox_error 标记（如果有）
+    await dbE(
+      "UPDATE accounts SET tags = NULLIF(TRIM(BOTH ',' FROM REPLACE(COALESCE(tags,''), 'inbox_error', '')), ''), updated_at=NOW() WHERE id=$1",
+      [acc.id]
+    );
+    return accessToken;
+  } catch (e) {
+    log(`    [inbox✗] id=${acc.id} 收件箱检查异常: ${String(e).slice(0, 80)} → skip`);
+    return null;
+  }
+}
+
 router.post("/replit/register", (req, res) => {
   const parsedCount = Number.parseInt(String(req.body?.count ?? "1"), 10);
   const count = Math.min(Math.max(Number.isFinite(parsedCount) ? parsedCount : 1, 1), 3);
@@ -205,8 +289,12 @@ router.post("/replit/register", (req, res) => {
              AND status = 'active'
              AND refresh_token IS NOT NULL
              AND COALESCE(tags, '') NOT LIKE '%replit_used%'
-           ORDER BY RANDOM()
-           LIMIT 5`
+             AND COALESCE(tags, '') NOT LIKE '%token_invalid%'
+             AND COALESCE(tags, '') NOT LIKE '%inbox_error%'
+           ORDER BY
+             CASE WHEN COALESCE(tags,'') LIKE '%inbox_verified%' THEN 0 ELSE 1 END,
+             RANDOM()
+           LIMIT 10`
         );
 
         if (!candidates.length) {
@@ -223,6 +311,16 @@ router.post("/replit/register", (req, res) => {
           const NONS = ["bear","fox","wolf","hawk","dove","lion","star","moon"];
           const username = `${pick(ADJS)}${pick(NONS)}${Math.floor(Math.random() * 900) + 100}`;
           const password = outlook.password || `Rpl${Math.random().toString(36).slice(2, 8)}!A1`;
+
+          // ── 预检：确认 Outlook 账号 token 有效且能收件 ────────────────────────
+          const freshToken = await verifyOutlookInbox(
+            { id: outlook.id, email: outlook.email, refresh_token: outlook.refresh_token },
+            dbE, log
+          );
+          if (!freshToken) {
+            log(`  [skip] Outlook id=${outlook.id} 无法收件 → 换下一个候选`);
+            continue;
+          }
 
           log(`  Trying Outlook id=${outlook.id} email=${outlook.email} => Replit user=${username}`);
 
