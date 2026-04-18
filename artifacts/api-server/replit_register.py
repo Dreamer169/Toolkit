@@ -440,6 +440,49 @@ def capsolver_solve_recaptcha_v2(api_key: str, site_key: str, page_url: str) -> 
     except Exception as e:
         log(f"CapSolver 异常: {e}"); return None
 
+
+def capsolver_solve_turnstile(api_key: str, site_key: str, page_url: str) -> str | None:
+    """CapSolver AntiTurnstileTaskProxyless (Cloudflare Turnstile)."""
+    try:
+        payload = json.dumps({
+            "clientKey": api_key,
+            "task": {
+                "type": "AntiTurnstileTaskProxyless",
+                "websiteURL": page_url,
+                "websiteKey": site_key,
+            }
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.capsolver.com/createTask", data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        r = urllib.request.urlopen(req, timeout=15)
+        resp = json.loads(r.read())
+        task_id = resp.get("taskId")
+        if not task_id:
+            log(f"[TS-CapSolver] createTask failed: {resp.get('errorDescription','unknown')}")
+            return None
+        log(f"[TS-CapSolver] taskId={task_id}, polling...")
+        for _ in range(30):
+            time.sleep(3)
+            req2 = urllib.request.Request(
+                "https://api.capsolver.com/getTaskResult",
+                data=json.dumps({"clientKey": api_key, "taskId": task_id}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            r2 = urllib.request.urlopen(req2, timeout=10)
+            resp2 = json.loads(r2.read())
+            if resp2.get("status") == "ready":
+                token = resp2.get("solution", {}).get("token", "")
+                log(f"[TS-CapSolver] solved token={len(token)}chars")
+                return token
+            if resp2.get("status") == "failed":
+                log(f"[TS-CapSolver] failed: {resp2.get('errorDescription','')}")
+                return None
+        log("[TS-CapSolver] polling timeout"); return None
+    except Exception as e:
+        log(f"[TS-CapSolver] exception: {e}"); return None
+
 # ── 出口 IP ───────────────────────────────────────────────────────────────────
 async def get_exit_ip(pw_module, proxy_cfg) -> str:
     try:
@@ -503,61 +546,98 @@ async def fill_step1(page) -> str | None:
     await page.wait_for_timeout(800)
     await page.screenshot(path=f"/tmp/replit_step1_{USERNAME}.png")
 
-    # 探针：检测验证码类型
+    # ── 探针：检测验证码类型 ─────────────────────────────────────────────────────
     probe = {}
     rc_sitekey = None
+    ts_sitekey = None
+    cf_token = ""
+    rc_token = ""
+    iframes = []
     try:
         probe = await page.evaluate(_JS_FULL_PROBE)
         iframes = probe.get("iframes", [])
         cf_token = probe.get("cfToken") or ""
         rc_token = probe.get("rcToken") or ""
-        log(f"[探针] iframes={len(iframes)} cfToken={len(cf_token)}chars rcToken={len(rc_token)}chars")
+        log(f"[probe] iframes={len(iframes)} cfToken={len(cf_token)}chars rcToken={len(rc_token)}chars")
         for fr in iframes:
             log(f"  iframe: {fr.get('src','')[:120]}")
-
         rc_sitekey = extract_recaptcha_sitekey(iframes)
+        ts_sitekey = extract_turnstile_sitekey(iframes)
         any_rc = bool(rc_sitekey) or any("recaptcha" in fr.get("src","") for fr in iframes)
-        any_ts = any("challenges.cloudflare.com" in fr.get("src","") for fr in iframes)
-        log(f"[探针] reCAPTCHA={any_rc} Turnstile={any_ts}")
+        any_ts = bool(ts_sitekey) or any("challenges.cloudflare.com" in fr.get("src","") for fr in iframes)
+        log(f"[probe] reCAPTCHA={any_rc} Turnstile={any_ts} cfToken={bool(cf_token)} rcToken={bool(rc_token)}")
     except Exception as e:
-        log(f"DOM探针异常: {e}")
+        log(f"[probe] DOM probe error: {e}")
         any_rc = False
+        any_ts = False
 
-    rc_token = probe.get("rcToken") or ""
+    # ── 统一等待 token 自动生成 (reCAPTCHA Enterprise / Turnstile, max 15s) ──────
+    # reCAPTCHA Enterprise: playwright+stealth 下自动生成 2000+ char token（无需挑战）
+    # Turnstile:            playwright+stealth chrome_runtime=True 自动通过
+    # 两种 token 谁先出现用谁；15s 超时才走回退路径。
+    log('[captcha] 等待 token 自动生成 (reCAPTCHA Enterprise / Turnstile, max 15s)...')
+    for _tw in range(15):
+        await page.wait_for_timeout(1000)
+        try:
+            p2 = await page.evaluate(_JS_FULL_PROBE)
+            rc_token = p2.get('rcToken') or ''
+            cf_token = p2.get('cfToken') or ''
+            iframes2  = p2.get('iframes', [])
+            if rc_token:
+                log(f'[captcha] ✅ reCAPTCHA token 自动生成 at {_tw+1}s, len={len(rc_token)}')
+                break
+            if cf_token:
+                log(f'[captcha] ✅ Turnstile token 自动生成 at {_tw+1}s, len={len(cf_token)}')
+                break
+            # 动态更新探测（某些 iframe 延迟注入）
+            any_rc = any_rc or bool(extract_recaptcha_sitekey(iframes2)) or any('recaptcha' in fr.get('src','') for fr in iframes2)
+            any_ts = any_ts or bool(extract_turnstile_sitekey(iframes2)) or any('challenges.cloudflare.com' in fr.get('src','') for fr in iframes2)
+        except Exception:
+            pass
+    else:
+        log(f'[captcha] 15s 内未自动生成 token (rc={bool(rc_token)} ts={bool(cf_token)} any_rc={any_rc} any_ts={any_ts})')
 
-    # ── Layer 2: 音频挑战（免费，IN-browser，token 100% 有效）────────────────
-    if not rc_token:
-        log("[captcha] 尝试音频挑战（Layer 2 — 免费）")
-        rc_token = await solve_recaptcha_audio(page) or ""
+    # ── reCAPTCHA 回退：音频挑战（token 没自动出现时）——————————————————
+    if any_rc and not rc_token:
+        log('[reCAPTCHA] token 未自动生成，尝试音频挑战...')
+        rc_token = await solve_recaptcha_audio(page) or ''
         if rc_token:
-            log(f"[captcha] ✅ 音频挑战成功，token 长度={len(rc_token)}")
-        else:
-            log("[captcha] 音频挑战未获得 token")
+            log(f'[reCAPTCHA] ✅ 音频挑战解算成功 token={len(rc_token)}chars')
+        elif rc_sitekey and CAPSOLVER_KEY:
+            log('[reCAPTCHA] 音频失败，CapSolver fallback...')
+            solved_rc = capsolver_solve_recaptcha_v2(CAPSOLVER_KEY, rc_sitekey, 'https://replit.com/signup')
+            if solved_rc:
+                _JS_INJECT_RC = '(tok) => { var els = document.querySelectorAll("[name=\\"g-recaptcha-response\\"], #g-recaptcha-response, [name=\\"recaptchaToken\\"]"); els.forEach(el => { el.value = tok; }); return els.length; }'
+                n = await page.evaluate(_JS_INJECT_RC, solved_rc)
+                log(f'[reCAPTCHA] CapSolver token injected {n} fields')
+                rc_token = solved_rc
 
-    # ── Layer 3: CapSolver 后备（仅当有 key 且前两层失败）───────────────────
-    if not rc_token and rc_sitekey and CAPSOLVER_KEY:
-        log("[captcha] Layer 3: CapSolver 后备解算")
-        solved = capsolver_solve_recaptcha_v2(CAPSOLVER_KEY, rc_sitekey, "https://replit.com/signup")
-        if solved:
-            # 注入 token（外部生成，成功率较低）
-            _JS_INJECT = f"""() => {{
-                var els = document.querySelectorAll('[name="g-recaptcha-response"], #g-recaptcha-response, [name="recaptchaToken"]');
-                els.forEach(el => {{ el.value = {json.dumps(solved)}; }});
-                try {{
-                    var cb = window.__recaptchaCallback || window.__onCaptchaToken;
-                    if (typeof cb === 'function') cb({json.dumps(solved)});
-                }} catch(e) {{}}
-                return els.length;
-            }}"""
-            n = await page.evaluate(_JS_INJECT)
-            log(f"[captcha] CapSolver token 注入 {n} 个字段")
-            rc_token = solved
-
-    # token 对比日志
-    prev_rc = _last_token["rc"]
-    if rc_token:
-        log(f"[token] 本次={rc_token[:40]}… 上次={prev_rc[:40] if prev_rc else 'None'} 相同={rc_token==prev_rc}")
-        _last_token["rc"] = rc_token
+    # ── Turnstile 回退（仅在探测到 Turnstile 且 token 还没出现时）——————————
+    if any_ts and not cf_token:
+        log('[Turnstile] token 未自动生成，额外等待10s...')
+        for _tw in range(10):
+            await page.wait_for_timeout(1000)
+            try:
+                p3 = await page.evaluate(_JS_FULL_PROBE)
+                cf_token = p3.get('cfToken') or ''
+                if cf_token:
+                    log(f'[Turnstile] ✅ auto-solved at +{_tw+1}s, token={len(cf_token)}chars')
+                    break
+            except Exception:
+                pass
+        if not cf_token and CAPSOLVER_KEY:
+            try:
+                p3 = await page.evaluate(_JS_FULL_PROBE)
+                ts_sitekey = ts_sitekey or extract_turnstile_sitekey(p3.get('iframes', []))
+            except Exception:
+                pass
+            if ts_sitekey:
+                log(f'[Turnstile] CapSolver fallback sitekey={ts_sitekey[:40]}...')
+                cf_token = capsolver_solve_turnstile(CAPSOLVER_KEY, ts_sitekey, 'https://replit.com/signup') or ''
+                if cf_token:
+                    _js_inject_ts = '(tok) => { var el = document.querySelector("[name=\\"cf-turnstile-response\\"]"); if (el) { el.value = tok; } try { if (typeof window.turnstileCallback==="function") window.turnstileCallback(tok); } catch(e) {} }'
+                    await page.evaluate(_js_inject_ts, cf_token)
+                    log(f'[Turnstile] CapSolver token injected {len(cf_token)}chars')
 
     # 提交 Step1
     for sel in [
@@ -928,7 +1008,7 @@ async def run() -> dict:
     final = {"ok": False, "phase": "init", "error": "", "exit_ip": ""}
     proxy_cfg = {"server": PROXY} if PROXY else None
 
-    log("v7.3 — 音频挑战 + playwright/stealth 优先（通过 integrity check）（完全免费：ffmpeg + Google STT / Whisper）")
+    log("v7.20 — reCAPTCHA Enterprise优先(auto-token 15s) + Turnstile条件等待 + 音频/CapSolver回退")
     log(f"CapSolver 后备: {'已配置（仅在音频失败时使用）' if CAPSOLVER_KEY else '未配置（不影响音频方案）'}")
 
     stealth_fn = None
@@ -942,10 +1022,9 @@ async def run() -> dict:
         try:
             from playwright_stealth import Stealth
             stealth_fn = Stealth(
-                chrome_runtime=True,   # 必须开启，否则 Replit 检测到缺失 chrome.runtime
-                webgl_vendor=True,     # WebGL 指纹伪装
+                chrome_runtime=True,   # must enable, Replit checks chrome.runtime
             ).apply_stealth_async
-            log("使用 playwright + stealth（chrome_runtime=True / WebGL — 通过 integrity check）")
+            log("使用 playwright + stealth (chrome_runtime=True + Canvas噪声注入)")
         except ImportError:
             stealth_fn = None
             log("playwright（无 stealth，integrity check 可能失败）")
