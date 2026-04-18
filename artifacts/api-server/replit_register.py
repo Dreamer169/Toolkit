@@ -527,6 +527,16 @@ async def fill_step1(page) -> str | None:
         log("Step1 回车提交")
 
     await page.wait_for_timeout(5000)
+
+    # 等待 React 渲染 captcha 错误元素（固定 5s 可能不够）
+    try:
+        await page.wait_for_selector(
+            '[class*="error" i],[data-cy*="error"],[role="alert"]',
+            timeout=3000
+        )
+    except Exception:
+        pass
+
     await page.screenshot(path=f"/tmp/replit_after_step1_{USERNAME}.png")
 
     body = (await page.locator("body").inner_text())[:500]
@@ -569,6 +579,25 @@ async def fill_step2(page) -> str | None:
         return "signup_username_field_not_found"
 
     await page.wait_for_timeout(600)
+
+    # ── Step2 reCAPTCHA 检测与音频解算 ───────────────────────────────────────
+    try:
+        probe2 = await page.evaluate(_JS_FULL_PROBE)
+        rc_token2 = probe2.get("rcToken") or ""
+        iframes2  = probe2.get("iframes", [])
+        any_rc2   = bool(extract_recaptcha_sitekey(iframes2)) or any(
+            "recaptcha" in fr.get("src", "") for fr in iframes2
+        )
+        if any_rc2 and not rc_token2:
+            log("[step2] 检测到 reCAPTCHA → 尝试音频解算")
+            rc_token2 = await solve_recaptcha_audio(page) or ""
+            if rc_token2:
+                log(f"[step2] ✅ reCAPTCHA 音频解算成功 token={len(rc_token2)}chars")
+            else:
+                log("[step2] 音频解算失败，继续尝试提交")
+    except Exception as e2rc:
+        log(f"[step2] reCAPTCHA 探针异常: {e2rc}")
+
     await page.screenshot(path=f"/tmp/replit_step2_{USERNAME}.png")
 
     for sel in [
@@ -587,7 +616,17 @@ async def fill_step2(page) -> str | None:
 
     await page.wait_for_timeout(6000)
 
-    body = (await page.locator("body").inner_text())[:300]
+    # 额外等 React 渲染验证码错误
+    try:
+        await page.wait_for_selector(
+            '[class*="error" i],[data-cy*="error"],[role="alert"]',
+            timeout=3000
+        )
+    except Exception:
+        pass
+
+    body = (await page.locator("body").inner_text())[:500]
+    log(f"Step2_body[0:200]: {body[:200].replace(chr(10),' ')}")
     if is_integrity_error(body):
         return "integrity_check_failed_after_step2"
     if is_captcha_invalid(body):
@@ -795,6 +834,21 @@ async def attempt_register(pw_module, proxy_cfg, use_patchright: bool, stealth_f
                 if any(h in body_chk for h in email_sent_hints):
                     result["ok"] = True; result["phase"] = "email_verify_pending"
                     log("✅ 无 Step2，body 检测邮件已发送")
+                    await browser.close(); return result
+            except Exception:
+                pass
+            # signup_username_field_missing 前检测 captcha 错误，避免误判为成功
+            try:
+                body_cap = (await page.locator("body").inner_text())[:500]
+                if is_captcha_invalid(body_cap):
+                    log("Step2-wait body 检测到 captcha 错误 → captcha_token_invalid")
+                    result["error"] = "captcha_token_invalid"
+                    await browser.close(); return result
+                await page.wait_for_timeout(3000)
+                body_cap2 = (await page.locator("body").inner_text())[:500]
+                if is_captcha_invalid(body_cap2):
+                    log("Step2-wait 延迟检测到 captcha 错误 → captcha_token_invalid")
+                    result["error"] = "captcha_token_invalid"
                     await browser.close(); return result
             except Exception:
                 pass
