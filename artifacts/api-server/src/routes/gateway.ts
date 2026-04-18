@@ -99,6 +99,60 @@ const SUB2API_GROUP_IDS = {
   gemini: 3,
 };
 
+// ── Sub2API 管理员 JWT 缓存（避免每次 login）──────────────────────────────────
+let _sub2apiJwtToken: string | null = null;
+let _sub2apiJwtExpiry = 0;
+
+async function getSub2ApiAdminJWT(): Promise<string | null> {
+  if (_sub2apiJwtToken && _sub2apiJwtExpiry > Date.now() + 120_000) return _sub2apiJwtToken;
+  if (!REMOTE_SUB2API_URL) return null;
+  const email = process.env["SUB2API_ADMIN_EMAIL"] || "admin@proxy.local";
+  const password = process.env["SUB2API_ADMIN_PASSWORD"] || "Proxy2024";
+  try {
+    const resp = await fetch(`${REMOTE_SUB2API_URL}/api/v1/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const data = await resp.json() as { data?: { access_token?: string; expires_in?: number } };
+    if (data?.data?.access_token) {
+      _sub2apiJwtToken = data.data.access_token;
+      _sub2apiJwtExpiry = Date.now() + (data.data.expires_in ?? 86400) * 1000;
+      return _sub2apiJwtToken;
+    }
+  } catch (e) { /* login failed */ }
+  return null;
+}
+
+async function ensureSub2ApiSetup(): Promise<void> {
+  if (!REMOTE_SUB2API_URL) return;
+  const jwt = await getSub2ApiAdminJWT();
+  if (!jwt) return;
+  const h = { "Authorization": `Bearer ${jwt}`, "Content-Type": "application/json" };
+  // 1. 确保渠道 1 绑定到三个 provider 组（2=openai 3=gemini 6=anthropic）
+  try {
+    const chResp = await fetch(`${REMOTE_SUB2API_URL}/api/v1/admin/channels?page=1&page_size=1`, { headers: h, signal: AbortSignal.timeout(8_000) });
+    const chData = await chResp.json() as { data?: { items?: Array<{ id: number }> } };
+    const existingChannel = chData?.data?.items?.[0];
+    if (existingChannel) {
+      await fetch(`${REMOTE_SUB2API_URL}/api/v1/admin/channels/${existingChannel.id}`, {
+        method: "PUT", headers: h,
+        body: JSON.stringify({ name: existingChannel.id === 1 ? "AI Gateway" : "AI Gateway", status: "active", group_ids: [SUB2API_GROUP_IDS.openai, SUB2API_GROUP_IDS.gemini, SUB2API_GROUP_IDS.anthropic] }),
+        signal: AbortSignal.timeout(8_000),
+      });
+    } else {
+      await fetch(`${REMOTE_SUB2API_URL}/api/v1/admin/channels`, {
+        method: "POST", headers: h,
+        body: JSON.stringify({ name: "AI Gateway", status: "active", group_ids: [SUB2API_GROUP_IDS.openai, SUB2API_GROUP_IDS.gemini, SUB2API_GROUP_IDS.anthropic] }),
+        signal: AbortSignal.timeout(8_000),
+      });
+    }
+  } catch { /* ignore */ }
+  // 2. 确保 admin user 在三个组里（通过直接 SQL 不行，用 API 试一试用户组接口）
+  // 这已在部署时通过 psql 直接插入，此处跳过
+}
+
 // B15 修复：额外凭据组——聚合多套 Reseek AI integration / 第三方 OpenAI 兼容端点
 // EXTRA_OPENAI_NODES=[{"baseUrl":"https://...","apiKey":"sk-...","name":"slot2","count":4}]
 // EXTRA_ANTHROPIC_NODES=[{"baseUrl":"https://...","apiKey":"sk-ant-..."}]
@@ -1091,64 +1145,74 @@ router.post("/nodes/probe", async (req, res) => {
   res.json({ success: result.ok, baseUrl, ...result });
 });
 
-async function pushSub2ApiAccount(provider: "openai" | "anthropic" | "gemini", baseUrl?: string, apiKey?: string, nodeBaseUrl?: string, name?: string) {
-  if (!REMOTE_SUB2API_URL || !SUB2API_API_KEY || !baseUrl || !apiKey) return { ok: false, skipped: true };
-  const label = `${name || "Reseek 子节点"} ${provider}`;
-  // B25: openai provider 使用子节点 gateway URL 作为 base_url
-  // sub2api 调 {base_url}/v1/responses → 子节点 gateway → Reseek /responses（无 /v1/ 前缀）
-  const effectiveBaseUrl = (provider === "openai" && nodeBaseUrl
-    ? nodeBaseUrl
-    : baseUrl
-  ).replace(/\/$/, "");
-  const payloads = [
-    {
-      name: label,
-      type: "api_key",
-      provider,
-      api_key: apiKey,
-      apiKey,
-      base_url: effectiveBaseUrl,
-      baseUrl: effectiveBaseUrl,
-      group_id: SUB2API_GROUP_IDS[provider],
-      groupId: SUB2API_GROUP_IDS[provider],
-      enabled: true,
-      metadata: { source: "self-register", gatewayUrl: nodeBaseUrl, integrationBaseUrl: baseUrl },
-    },
-    {
-      name: label,
-      provider,
-      key: apiKey,
-      base_url: effectiveBaseUrl,
-      group_id: SUB2API_GROUP_IDS[provider],
-      status: "active",
-    },
-  ];
-  for (const payload of payloads) {
-    try {
-      const response = await fetch(`${REMOTE_SUB2API_URL}/api/v1/admin/accounts`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${SUB2API_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
+// B26: 修复 pushSub2ApiAccount
+// - 使用 JWT admin 认证（/api/v1/auth/login）而非 API key
+// - 正确 payload 格式：platform, type:"apikey", credentials:{api_key,base_url}, group_ids:[X]
+// - 如同名账号已存在则更新而非重复创建
+async function pushSub2ApiAccount(
+  provider: "openai" | "anthropic" | "gemini",
+  baseUrl?: string, apiKey?: string, nodeBaseUrl?: string, name?: string,
+): Promise<{ ok: boolean; skipped?: boolean; accountId?: number; error?: string }> {
+  if (!REMOTE_SUB2API_URL || !baseUrl || !apiKey) return { ok: false, skipped: true };
+  const jwt = await getSub2ApiAdminJWT();
+  if (!jwt) return { ok: false, error: "sub2api admin JWT 获取失败" };
+
+  const label = `${name || "子节点"}-${provider}`;
+  
+  // B27: 所有平台都使用子节点公开 gateway URL
+  const effectiveBaseUrl = (nodeBaseUrl
+    ? nodeBaseUrl : baseUrl).replace(/\/$/, "");
+
+  const headers = { "Authorization": `Bearer ${jwt}`, "Content-Type": "application/json" };
+  const groupId = SUB2API_GROUP_IDS[provider];
+
+  // 查重：同名账号已存在则更新
+  try {
+    const listResp = await fetch(
+      `${REMOTE_SUB2API_URL}/api/v1/admin/accounts?page=1&page_size=100`,
+      { headers, signal: AbortSignal.timeout(8_000) },
+    );
+    const listData = await listResp.json() as { data?: { items?: Array<{ id: number; name: string }> } };
+    const existing = listData?.data?.items?.find((a) => a.name === label);
+    if (existing) {
+      const updResp = await fetch(`${REMOTE_SUB2API_URL}/api/v1/admin/accounts/${existing.id}`, {
+        method: "PUT", headers,
+        body: JSON.stringify({
+          name: label, platform: provider, type: "apikey", status: "active",
+          credentials: { api_key: apiKey, base_url: effectiveBaseUrl },
+          group_ids: [groupId], concurrency: 10, priority: 1,
+        }),
         signal: AbortSignal.timeout(12_000),
       });
-      const text = await response.text();
-      if (response.ok || response.status === 409) return { ok: true, status: response.status };
-      if (response.status !== 400 && response.status !== 422) return { ok: false, status: response.status, error: text.slice(0, 300) };
-    } catch (error) {
-      return { ok: false, error: String(error) };
+      const updData = await updResp.json() as { code?: number };
+      return { ok: updData?.code === 0, accountId: existing.id };
     }
+  } catch { /* 查重失败则继续创建 */ }
+
+  // 创建新账号
+  try {
+    const resp = await fetch(`${REMOTE_SUB2API_URL}/api/v1/admin/accounts`, {
+      method: "POST", headers,
+      body: JSON.stringify({
+        name: label, platform: provider, type: "apikey", status: "active",
+        credentials: { api_key: apiKey, base_url: effectiveBaseUrl },
+        group_ids: [groupId], concurrency: 10, priority: 1,
+      }),
+      signal: AbortSignal.timeout(12_000),
+    });
+    const data = await resp.json() as { code?: number; data?: { id?: number } };
+    if (data?.code === 0) return { ok: true, accountId: data?.data?.id };
+    return { ok: false, error: JSON.stringify(data).slice(0, 300) };
+  } catch (error) {
+    return { ok: false, error: String(error) };
   }
-  return { ok: false, error: "sub2api account schema rejected baseUrl/apiKey payloads" };
 }
 
 async function pushSelfRegisterCredentialsToSub2Api(body: SelfRegisterBody, nodeBaseUrl: string, name?: string) {
   const results = await Promise.allSettled([
-    pushSub2ApiAccount("openai", body.openaiBaseUrl, body.openaiApiKey, nodeBaseUrl, name),
-    pushSub2ApiAccount("anthropic", body.anthropicBaseUrl, body.anthropicApiKey, nodeBaseUrl, name),
-    pushSub2ApiAccount("gemini", body.geminiBaseUrl, body.geminiApiKey, nodeBaseUrl, name),
+    body.openaiApiKey ? pushSub2ApiAccount("openai", body.openaiBaseUrl, body.openaiApiKey, nodeBaseUrl, name) : Promise.resolve({ ok: false, skipped: true }),
+    body.anthropicApiKey ? pushSub2ApiAccount("anthropic", body.anthropicBaseUrl, body.anthropicApiKey, nodeBaseUrl, name) : Promise.resolve({ ok: false, skipped: true }),
+    body.geminiApiKey ? pushSub2ApiAccount("gemini", body.geminiBaseUrl, body.geminiApiKey, nodeBaseUrl, name) : Promise.resolve({ ok: false, skipped: true }),
   ]);
   return results.map((result) => result.status === "fulfilled" ? result.value : { ok: false, error: String(result.reason) });
 }
@@ -1602,6 +1666,10 @@ async function backgroundProbeLoop(): Promise<void> {
 
 setInterval(() => { void backgroundProbeLoop(); }, PROBE_INTERVAL_MS);
 setTimeout(() => { void backgroundProbeLoop(); }, 30_000); // 启动 30s 后先探测一次
+
+
+// B26: 启动时确认 sub2api channel+group 绑定
+setTimeout(() => { void ensureSub2ApiSetup(); }, 10_000);
 
 
 export default router;
