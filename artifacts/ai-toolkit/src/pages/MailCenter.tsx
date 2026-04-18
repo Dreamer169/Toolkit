@@ -106,6 +106,9 @@ export default function MailCenter() {
   const [batchOAuth, setBatchOAuth]       = useState<BatchOAuthState | null>(null);
   const [batchOAuthBusy, setBatchOAuthBusy] = useState(false);
   const pollRef                           = useRef<ReturnType<typeof setInterval> | null>(null);
+  const autoRefreshRef                    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const cdTimerRef                        = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [refreshCountdown, setRefreshCountdown] = useState<number>(30);
   const [retokenJobId,  setRetokenJobId]  = useState<string | null>(null);
   const [retokenBusy,   setRetokenBusy]   = useState(false);
   const [retokenLog,    setRetokenLog]     = useState<string[]>([]);
@@ -154,6 +157,34 @@ export default function MailCenter() {
     const iv = setInterval(loadLiveVerifyStatus, 15_000);
     return () => clearInterval(iv);
   }, [loadLiveVerifyStatus]);
+
+  // 30s 自动轮询新邮件
+  const silentRefresh = useCallback(async (acc: Account, fld: string, q: string) => {
+    const d = await fetch(`${API}/tools/outlook/fetch-messages-by-id`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accountId: acc.id, folder: fld, top: 50, search: q || undefined }),
+    }).then(r => r.json()).catch(() => null);
+    if (d?.success) setMessages(d.messages ?? []);
+  }, []);
+
+  useEffect(() => {
+    if (autoRefreshRef.current) { clearInterval(autoRefreshRef.current); autoRefreshRef.current = null; }
+    if (cdTimerRef.current)     { clearInterval(cdTimerRef.current);     cdTimerRef.current = null; }
+    if (!selAccount) return;
+    const ACC = selAccount;
+    setRefreshCountdown(30);
+    cdTimerRef.current = setInterval(() => setRefreshCountdown(c => (c <= 1 ? 30 : c - 1)), 1000);
+    autoRefreshRef.current = setInterval(() => {
+      setRefreshCountdown(30);
+      silentRefresh(ACC, folder, search);
+    }, 30_000);
+    return () => {
+      if (autoRefreshRef.current) { clearInterval(autoRefreshRef.current); autoRefreshRef.current = null; }
+      if (cdTimerRef.current)     { clearInterval(cdTimerRef.current);     cdTimerRef.current = null; }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selAccount, folder, silentRefresh]);
 
   const fetchMessages = useCallback(async (acc: Account, fld: string, q: string) => {
     setBusy(true); setError(""); setNeedsAuth(false); setMessages([]); setSelMsg(null);
@@ -433,8 +464,10 @@ export default function MailCenter() {
   };
 
   useEffect(() => () => {
-    if (pollRef.current) clearInterval(pollRef.current);
-    if (batchPollRef.current) clearInterval(batchPollRef.current);
+    if (pollRef.current)        clearInterval(pollRef.current);
+    if (batchPollRef.current)   clearInterval(batchPollRef.current);
+    if (autoRefreshRef.current) clearInterval(autoRefreshRef.current);
+    if (cdTimerRef.current)     clearInterval(cdTimerRef.current);
   }, []);
 
   // ── 批量设备码 OAuth 授权 ─────────────────────────────────────────────────
@@ -879,7 +912,10 @@ export default function MailCenter() {
           })}
 
           {!busy && selAccount && !needsAuth && !error && messages.length === 0 && (
-            <p className="text-xs text-gray-600 text-center mt-10 px-4">该文件夹暂无邮件</p>
+            <div className="flex flex-col items-center mt-10 px-4 gap-1">
+              <p className="text-xs text-gray-600 text-center">该文件夹暂无邮件</p>
+              <p className="text-xs text-gray-700 text-center">{refreshCountdown}s 后自动刷新</p>
+            </div>
           )}
         </div>
       </section>
