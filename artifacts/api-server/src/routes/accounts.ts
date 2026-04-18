@@ -12,9 +12,17 @@ const VPS_GATEWAY = process.env.VPS_GATEWAY_URL || "http://45.205.27.69:8080/api
 const XRAY_PORTS  = Array.from({ length: 26 }, (_, i) => 10820 + i);
 // CF-banned port cooldown: port → timestamp when cooldown expires (5 min)
 const cfBannedUntil = new Map<number, number>();
+// Port reputation: last time port returned a real form response (not cf_ban/captcha_invalid)
+const portLastGood = new Map<number, number>();
 function availablePorts(): number[] {
   const now = Date.now();
   return XRAY_PORTS.filter(p => (cfBannedUntil.get(p) ?? 0) < now);
+}
+function sortedByReputation(ports: number[]): number[] {
+  // Good ports (recently had form response) first, then others
+  const good = ports.filter(p => portLastGood.has(p)).sort((a, b) => (portLastGood.get(b)!) - (portLastGood.get(a)!));
+  const other = ports.filter(p => !portLastGood.has(p));
+  return [...shuffled(good), ...shuffled(other)];
 }
 function shuffled(arr: number[]): number[] { return [...arr].sort(() => Math.random() - 0.5); }
 
@@ -134,8 +142,8 @@ router.post("/replit/register", (req, res) => {
           let exitIp = "";
           let lastErr = "";
 
-          // 每个Outlook账号：shuffle可用端口，顺序用，避免重复
-          const portQueue = shuffled(availablePorts());
+          // 每个Outlook账号：信誉好的端口优先，避免重复
+          const portQueue = sortedByReputation(availablePorts());
           if (portQueue.length < 6) portQueue.push(...shuffled(XRAY_PORTS)); // 兜底
 
           for (let attempt = 1; attempt <= 6; attempt++) {
@@ -155,6 +163,7 @@ router.post("/replit/register", (req, res) => {
             lastErr = String(parsed.error ?? "");
 
             if (parsed.ok) {
+              portLastGood.set(tryPort, Date.now()); // successful registration
               log(`    ✅ Registered! phase=${parsed.phase} exit_ip=${exitIp}`);
               regOk = true;
               break;
@@ -164,6 +173,7 @@ router.post("/replit/register", (req, res) => {
 
             // 邮箱已被用 → 标记并换下一个 Outlook 账号
             if (lastErr.toLowerCase().includes("already") && lastErr.toLowerCase().includes("use")) {
+              portLastGood.set(tryPort, Date.now()); // port got form response → mark good
               log(`    Email already on Replit → marking replit_used`);
               await dbE(
                 "UPDATE accounts SET tags = COALESCE(tags || ',', '') || 'replit_used', updated_at = NOW() WHERE id = $1",
@@ -175,6 +185,7 @@ router.post("/replit/register", (req, res) => {
             // 立即换端口：CF封禁 / Turnstile超时 / captcha token失效
             // "too quickly" → 该邮箱/用户名被限速，非可重试（直接下一个Outlook）
             if (lastErr.toLowerCase().includes("too quickly") || lastErr.toLowerCase().includes("doing this too")) {
+              portLastGood.set(tryPort, Date.now()); // port got form response → mark good
               log(`    Rate-limited (too quickly) → skip this Outlook`);
               break;
             }
