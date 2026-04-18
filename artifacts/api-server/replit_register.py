@@ -35,7 +35,7 @@ def is_integrity_error(body: str) -> bool:
 
 def is_captcha_invalid(text: str) -> bool:
     t = text.lower()
-    return "captcha token is invalid" in t or "captcha" in t and "invalid" in t
+    return "captcha token is invalid" in t or "invalid captcha" in t or "captcha validation failed" in t or "captcha expired" in t
 
 async def get_exit_ip(pw_module, proxy_cfg) -> str:
     try:
@@ -133,6 +133,7 @@ async def fill_step1(page) -> str | None:
 
     # 检查 Step1 错误
     body = (await page.locator("body").inner_text())[:300]
+    log(f"Step1_body[0:120]: {body[:120].replace(chr(10),' ')}")
     if is_integrity_error(body):
         return "integrity_check_failed_after_step1"
     if is_captcha_invalid(body):
