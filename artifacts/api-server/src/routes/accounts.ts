@@ -127,9 +127,9 @@ router.post("/replit/register", (req, res) => {
           let exitIp = "";
           let lastErr = "";
 
-          for (let attempt = 1; attempt <= 4; attempt++) {
+          for (let attempt = 1; attempt <= 6; attempt++) {
             const tryPort = pick(XRAY_PORTS);
-            log(`    Attempt ${attempt}/4 via SOCKS5:${tryPort}`);
+            log(`    Attempt ${attempt}/6 via SOCKS5:${tryPort}`);
 
             const { parsed } = await runPython(regScript, {
               email: outlook.email,
@@ -161,17 +161,28 @@ router.post("/replit/register", (req, res) => {
               break; // 跳出 attempt 循环，尝试下一个 Outlook
             }
 
-            // 可重试错误：Turnstile("signup"/"moment")、integrity、timeout → 换端口继续
+            // 可重试错误：Turnstile/CF封禁/integrity/timeout → 换端口继续
             const retryable =
               lastErr.includes("integrity") ||
               lastErr.includes("timeout")   ||
               lastErr.includes("Timeout")   ||
               lastErr.includes("signup")    ||
               lastErr.includes("moment")    ||
-              lastErr.includes("Turnstile") || lastErr.includes("cf_ip_banned");
+              lastErr.includes("Turnstile") ||
+              lastErr.includes("cf_ip_banned") ||
+              lastErr.includes("cf_hard_block");
             if (!retryable) break;
 
-            await new Promise(r => setTimeout(r, 5000 + attempt * 2000));
+            // CF IP 封禁 → 立即换端口（无需等待，12s 已浪费在脚本内部）
+            if (lastErr.includes("cf_ip_banned") || lastErr.includes("cf_hard_block")) {
+              log(`    CF banned → switching port immediately`);
+              continue;
+            }
+            // integrity 失败 → stealth 内部已重试 3 次，外层短暂等待换端口
+            const delayMs = lastErr.includes("integrity") ? 1500 :
+                            lastErr.includes("signup_form_input_missing") ? 3000 :
+                            4000 + attempt * 1500;
+            await new Promise(r => setTimeout(r, delayMs));
           }
 
           if (!regOk) continue; // 换下一个 Outlook 账号
