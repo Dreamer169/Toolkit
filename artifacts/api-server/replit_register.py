@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-replit_register.py — Replit 注册表单自动化 v7.27
+replit_register.py — Replit 注册表单自动化 v7.28
 策略（全免费，无付费服务）：
   Layer 1: playwright + stealth (chrome_runtime=True, webgl_vendor=True)
            + Canvas 2D 噪声注入 → reCAPTCHA Enterprise 自动评分 token（无需挑战）
@@ -62,6 +62,9 @@ _JS_FULL_PROBE = """() => {
     };
 }"""
 
+def is_rate_limited(t: str) -> bool:
+    t = t.lower()
+    return any(p in t for p in ("too quickly","doing this too quickly","please wait a bit","rate limit","too many requests","wait a bit"))
 def extract_recaptcha_sitekey(iframes: list) -> str | None:
     import urllib.parse
     for fr in iframes:
@@ -622,6 +625,17 @@ async def fill_step1(page) -> str | None:
 
     await page.screenshot(path=f"/tmp/replit_after_step1_{USERNAME}.png")
 
+    # CF 403 API 拦截检测
+    _api_status = _api_resp.get("status", 0)
+    _api_body_r = _api_resp.get("body", "")
+    log(f"[cf-check] status={_api_status} body_has_moment={'just a moment' in _api_body_r.lower()} body50={repr(_api_body_r[:50])}")
+    if _api_status in (403, 429, 503) and ("just a moment" in _api_body_r.lower() or "challenge" in _api_body_r.lower() or "cloudflare" in _api_body_r.lower()):
+        log(f"[step1] CF API 拦截 ({_api_status}) → cf_api_blocked")
+        return "cf_api_blocked"
+    if _api_status == 400 and "captcha" in _api_body_r.lower():
+        log(f"[step1] API captcha 400 → captcha_token_invalid")
+        return "captcha_token_invalid"
+
     body = (await page.locator("body").inner_text())[:1000]
     url  = page.url
     log(f"[step1] body[0:400]: {body[:400].replace(chr(10),' ')}")
@@ -631,6 +645,9 @@ async def fill_step1(page) -> str | None:
         return "integrity_check_failed_after_step1"
     if is_captcha_invalid(body):
         return "captcha_token_invalid"
+    if is_rate_limited(body):
+        log("[step1] ⏳ rate limited → account_rate_limited")
+        return "account_rate_limited"
 
     SUCCESS_HINTS = ("verify your email","check your email","we sent","sent you",
                      "verification email","confirm your email","check for an email","sent an email")
@@ -751,6 +768,89 @@ _CANVAS_NOISE_JS = """
 })();
 """
 
+
+# ── Canvas 2D + WebGL 完整指纹注入 ───────────────────────────────────────────
+_CANVAS_WEBGL_NOISE_JS = """
+(() => {
+    /* Canvas 2D 像素噪声 */
+    const _oGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+    CanvasRenderingContext2D.prototype.getImageData = function(x, y, w, h) {
+        const d = _oGetImageData.call(this, x, y, w, h);
+        for (let i = 0; i < d.data.length; i += 4) {
+            d.data[i]   = Math.min(255, Math.max(0, d.data[i]   + (Math.random() > .5 ? 1 : -1)));
+            d.data[i+1] = Math.min(255, Math.max(0, d.data[i+1] + (Math.random() > .5 ? 1 : -1)));
+            d.data[i+2] = Math.min(255, Math.max(0, d.data[i+2] + (Math.random() > .5 ? 1 : -1)));
+        }
+        return d;
+    };
+    const _oToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = function(type, q) {
+        const ctx2 = this.getContext('2d');
+        if (ctx2 && this.width && this.height) {
+            try {
+                const img = ctx2.getImageData(0, 0, this.width, this.height);
+                for (let i = 0; i < img.data.length; i += 4)
+                    img.data[i] = Math.min(255, Math.max(0, img.data[i] + (Math.random() > .5 ? 1 : -1)));
+                ctx2.putImageData(img, 0, 0);
+            } catch(e) {}
+        }
+        return _oToDataURL.call(this, type, q);
+    };
+    /* WebGL 完整指纹伪装 */
+    function patchWebGL(ctx) {
+        if (!ctx) return;
+        const _getParam = ctx.getParameter.bind(ctx);
+        ctx.getParameter = function(p) {
+            if (p === 37445) return 'Intel Inc.';
+            if (p === 37446) return 'Intel Iris OpenGL Engine';
+            if (p === 7936)  return 'WebKit';
+            if (p === 7937)  return 'WebKit WebGL';
+            if (p === 7938)  return 'WebGL 1.0 (OpenGL ES 2.0 Chromium)';
+            return _getParam(p);
+        };
+        const _getSupportedExt = ctx.getSupportedExtensions.bind(ctx);
+        ctx.getSupportedExtensions = function() {
+            const exts = _getSupportedExt() || [];
+            if (!exts.includes('WEBGL_debug_renderer_info')) exts.push('WEBGL_debug_renderer_info');
+            return exts;
+        };
+        const _getExt = ctx.getExtension.bind(ctx);
+        ctx.getExtension = function(name) {
+            if (name === 'WEBGL_debug_renderer_info') return {
+                UNMASKED_VENDOR_WEBGL: 37445, UNMASKED_RENDERER_WEBGL: 37446
+            };
+            return _getExt(name);
+        };
+        const _readPx = ctx.readPixels.bind(ctx);
+        ctx.readPixels = function(x, y, w, h, fmt, type, pixels) {
+            _readPx(x, y, w, h, fmt, type, pixels);
+            if (pixels && pixels.length > 0)
+                for (let i = 0; i < Math.min(pixels.length, 4); i++)
+                    pixels[i] = Math.min(255, Math.max(0, pixels[i] + (Math.random() > .5 ? 1 : -1)));
+        };
+    }
+    const _origGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function(type, attrs) {
+        const ctx = _origGetContext.call(this, type, attrs);
+        if (ctx && (type === 'webgl' || type === 'experimental-webgl' || type === 'webgl2'))
+            patchWebGL(ctx);
+        return ctx;
+    };
+    /* AudioContext 噪声 */
+    if (typeof OfflineAudioContext !== 'undefined') {
+        const _origStart = OfflineAudioContext.prototype.startRendering;
+        OfflineAudioContext.prototype.startRendering = function() {
+            return _origStart.call(this).then(buf => {
+                const ch = buf.getChannelData(0);
+                for (let i = 0; i < Math.min(ch.length, 100); i++)
+                    ch[i] += (Math.random() - 0.5) * 1e-7;
+                return buf;
+            });
+        };
+    }
+})();
+"""
+
 # ── 单次 browser attempt ──────────────────────────────────────────────────────
 async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> dict:
     result = {"ok": False, "phase": "init", "error": "", "exit_ip": exit_ip}
@@ -772,8 +872,8 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
 
     # Canvas 2D 噪声（独立注入，stealth 不覆盖）
     try:
-        await page.add_init_script(_CANVAS_NOISE_JS)
-        log("Canvas 2D 噪声注入 ✓")
+        await page.add_init_script(_CANVAS_WEBGL_NOISE_JS)
+        log("Canvas 2D + WebGL 完整注入 ✓")
     except Exception as e:
         log(f"Canvas 噪声注入失败: {e}")
 
@@ -800,6 +900,11 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
         t0 = await page.title()
         b0 = (await page.locator("body").inner_text())[:400]
         log(f"页面标题: {t0!r}")
+        try:
+            wd_val = await page.evaluate("() => navigator.webdriver")
+            log(f"[detect] navigator.webdriver={wd_val}")
+        except Exception as _wd_e:
+            log(f"[detect] webdriver check err: {_wd_e}")
         if is_cf_blocked(t0, b0):
             result["error"] = "signup_cf_ip_banned"
             warmup_task.cancel()
@@ -850,6 +955,88 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
 
         result["phase"] = "fill_step1"
         err1 = await fill_step1(page)
+        # captcha_token_invalid → 在当前页面直接触发音频挑战（bypass auto-token）
+        if err1 == "captcha_token_invalid":
+            log("[retry] captcha_token_invalid → 尝试音频挑战 (Layer 2)...")
+            try:
+                # 当前页面仍在 signup，直接触发音频解算
+                audio_token = await solve_recaptcha_audio(page)
+                if audio_token:
+                    log(f"[retry] ✅ 音频 token={len(audio_token)}chars → 注入并重新提交")
+                    # 注入 audio token 到 DOM
+                    await page.evaluate(
+                        """(tok) => {
+                            var els = document.querySelectorAll('[name="g-recaptcha-response"],#g-recaptcha-response,[name="recaptchaToken"]');
+                            els.forEach(el => { el.value = tok; Object.defineProperty(el,'value',{get:()=>tok,configurable:true}); });
+                            return els.length;
+                        }""",
+                        audio_token
+                    )
+                    await page.wait_for_timeout(800)
+                    # 重新提交
+                    _submitted2 = False
+                    for sel_s in ['[data-cy="signup-create-account"]', 'button:has-text("Create Account")', 'button[type="submit"]']:
+                        btn_s = page.locator(sel_s)
+                        if await btn_s.count():
+                            try:
+                                await btn_s.first.click(timeout=5000)
+                            except Exception:
+                                await btn_s.first.click(force=True, timeout=3000)
+                            _submitted2 = True
+                            log(f"[retry] 音频token提交: {sel_s}")
+                            break
+                    if not _submitted2:
+                        await page.keyboard.press("Enter")
+                    await page.wait_for_timeout(4000)
+                    body_r = (await page.locator("body").inner_text())[:400]
+                    if is_captcha_invalid(body_r):
+                        log("[retry] 音频token仍然无效")
+                        err1 = "captcha_token_invalid"
+                    elif is_rate_limited(body_r):
+                        log("[retry] ⏳ IP 速率限制 → account_rate_limited")
+                        err1 = "account_rate_limited"
+                    elif is_integrity_error(body_r):
+                        err1 = "integrity_check_failed_after_step1"
+                    else:
+                        # 检查是否成功（步骤2出现 or URL跳转）
+                        cur_url_r = page.url
+                        if "signup" not in cur_url_r.lower():
+                            log(f"[retry] 音频提交后跳转: {cur_url_r[:60]}")
+                            err1 = None  # 成功
+                        else:
+                            # 看 step2 字段
+                            try:
+                                await page.wait_for_selector('input[name="username"]', timeout=5000)
+                                err1 = None  # step2 appeared
+                                log("[retry] 音频提交 → step2 出现 ✅")
+                            except Exception:
+                                # 没有 step2 字段，且不是成功跳转 → 检查 body 是否有错误
+                                body_assume = (await page.locator("body").inner_text())[:400]
+                                if is_rate_limited(body_assume):
+                                    log("[retry] else假设: rate limited")
+                                    err1 = "account_rate_limited"
+                                elif is_captcha_invalid(body_assume):
+                                    err1 = "captcha_token_invalid"
+                                else:
+                                    err1 = None  # 假设 step1 成功，等 step2_wait
+                else:
+                    log("[retry] 音频挑战失败 → reload 重试表单...")
+                    try:
+                        await page.reload(wait_until="domcontentloaded", timeout=25000)
+                        await page.wait_for_timeout(4000)
+                        for sel_r in ['button:has-text("Email & password")', '[data-cy="email-signup"]']:
+                            b_r = page.locator(sel_r)
+                            if await b_r.count():
+                                await b_r.first.click()
+                                await page.wait_for_timeout(3000)
+                                break
+                        await page.wait_for_selector('input[name="email"], input[type="email"]', timeout=10000)
+                        err1 = await fill_step1(page)
+                        log(f"[retry] reload重试结果: {err1 or 'ok'}")
+                    except Exception as e_reload:
+                        log(f"[retry] reload失败: {e_reload}")
+            except Exception as e_retry:
+                log(f"[retry] 音频挑战异常: {e_retry}")
         if err1:
             result["error"] = err1
             await browser.close(); return result
@@ -880,6 +1067,15 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 log("[step2-miss] 实际是单步表单，已发送验证邮件 ✅")
                 result["ok"] = True
                 result["phase"] = "verify_email_sent"
+                await browser.close(); return result
+            log(f"[step2-miss][rl-debug] body_check len={len(body_check)} has_tq={'too quickly' in body_check.lower()} has_wait={'please wait a bit' in body_check.lower()}")
+            if is_rate_limited(body_check):
+                log("[step2-miss] ⏳ IP 速率限制 → account_rate_limited")
+                result["error"] = "account_rate_limited"
+                await browser.close(); return result
+            if is_captcha_invalid(body_check):
+                log("[step2-miss] captcha token invalid → captcha_token_invalid")
+                result["error"] = "captcha_token_invalid"
                 await browser.close(); return result
             result["error"] = "signup_username_field_missing"
             await browser.close(); return result
@@ -931,28 +1127,41 @@ async def run() -> dict:
     final = {"ok": False, "phase": "init", "error": "", "exit_ip": ""}
     proxy_cfg = {"server": PROXY} if PROXY else None
 
-    log("v7.27b — 恢复 auto-token | pre-nav 浏览历史 | 40-55s 行为 warmup | 排除Stripe | force提交 | email等待")
 
     stealth_fn = None
     pw_ctx_fn  = None
 
-    # playwright + stealth ONLY（patchright 不通过 integrity check，已弃用）
+    # Layer 0: rebrowser-playwright (CDP级 Runtime.enable 隐藏)
+    use_rebrowser = False
+    log("v7.28 starting: rebrowser + stealth + Canvas/WebGL injection + captcha retry")
     try:
-        from playwright.async_api import async_playwright as _apw
-        pw_ctx_fn = _apw
-        try:
-            from playwright_stealth import Stealth
-            stealth_fn = Stealth(
-                chrome_runtime=True,
-                webgl_vendor=True,
-            ).apply_stealth_async
-            log("playwright + stealth (chrome_runtime=True, webgl_vendor=True)")
-        except ImportError:
-            stealth_fn = None
-            log("playwright（无 stealth 库，integrity check 风险高）")
+        from rebrowser_playwright.async_api import async_playwright as _rapw
+        pw_ctx_fn = _rapw
+        use_rebrowser = True
+        log("✅ rebrowser-playwright active (Runtime.enable hidden)")
     except ImportError:
-        final["error"] = "playwright 未安装"
-        return final
+        log("⚠ rebrowser-playwright 未安装 → fallback playwright")
+
+    # Layer 1: playwright fallback
+    if not use_rebrowser:
+        try:
+            from playwright.async_api import async_playwright as _apw
+            pw_ctx_fn = _apw
+        except ImportError:
+            final["error"] = "playwright/rebrowser 均未安装"
+            return final
+
+    # playwright-stealth（JS层，与rebrowser互补）
+    try:
+        from playwright_stealth import Stealth
+        stealth_fn = Stealth(
+            chrome_runtime=True,
+            webgl_vendor=True,
+        ).apply_stealth_async
+        log("playwright-stealth (chrome_runtime=True, webgl_vendor=True)")
+    except ImportError:
+        stealth_fn = None
+        log("⚠ playwright-stealth 未安装")
 
     # 获取出口 IP
     try:
