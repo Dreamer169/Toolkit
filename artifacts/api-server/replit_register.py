@@ -576,23 +576,24 @@ async def _human_mouse_warmup(page):
 
 
 async def _human_type(field, text: str):
-    """逐字符输入，加入随机节奏（模拟真实打字）。"""
+    """逐字符输入，加入随机节奏（模拟真实打字）。用键盘事件清空，不用 fill()。"""
     import random as _r
     await field.click()
-    await field.fill("")          # 先清空
+    await field.page.wait_for_timeout(_r.randint(80, 150))
+    # Ctrl+A → Delete（键盘事件，比 fill('') 更自然）
+    await field.page.keyboard.press("Control+a")
+    await field.page.wait_for_timeout(_r.randint(40, 80))
+    await field.page.keyboard.press("Delete")
+    await field.page.wait_for_timeout(_r.randint(60, 120))
     for i, ch in enumerate(text):
         await field.type(ch)
-        delay = _r.randint(60, 160)
+        delay = _r.randint(70, 170)
         if i > 0 and i % _r.randint(4, 8) == 0:
-            delay += _r.randint(150, 400)   # 偶尔停顿（思考/修正）
+            delay += _r.randint(200, 500)   # 偶尔停顿（思考/修正）
         await field.page.wait_for_timeout(delay)
 
 
 async def fill_step1(page) -> str | None:
-    # ── 鼠标 warmup（先让 reCAPTCHA 积累行为信号再填表）─────────────────────
-    await _human_mouse_warmup(page)
-    await page.wait_for_timeout(1200)
-
     for sel in ['input[name="email"]', 'input[type="email"]', 'input[placeholder*="email" i]']:
         f = page.locator(sel)
         if await f.count():
@@ -978,7 +979,9 @@ async def attempt_register(pw_module, proxy_cfg, use_patchright: bool, stealth_f
             if await btn.count():
                 await btn.first.click()
                 log(f"点击 Email 按钮: {sel}")
-                await page.wait_for_timeout(5000)
+                # reCAPTCHA Enterprise 在表单展开时开始初始化评分
+                # 此时做鼠标 warmup，行为信号最能被 reCAPTCHA 采集
+                await _human_mouse_warmup(page)
                 break
         else:
             log("未找到 Email 按钮 → 表单可能已直接展示")
@@ -1092,7 +1095,7 @@ async def run() -> dict:
     final = {"ok": False, "phase": "init", "error": "", "exit_ip": ""}
     proxy_cfg = {"server": PROXY} if PROXY else None
 
-    log("v7.22 — 鼠标warmup+逐字符输入提升reCAPTCHA Enterprise score, 音频挑战忽略低分auto-token")
+    log("v7.23 — warmup在reCAPTCHA初始化期执行，Ctrl+A逐字输入，忽略低分token")
     log(f"CapSolver 后备: {'已配置（仅在音频失败时使用）' if CAPSOLVER_KEY else '未配置（不影响音频方案）'}")
 
     stealth_fn = None
