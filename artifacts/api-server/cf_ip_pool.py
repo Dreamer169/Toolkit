@@ -35,12 +35,16 @@ _available    = []   # [{"ip":..., "latency":..., "proxy":...}]
 _in_use       = {}   # job_id -> ip_info
 _used_history = []   # 已用过的 IP（本次会话内不重用）
 
-def _save_state():
+def _save_state(extra_banned: list = []):
     try:
+        global _banned_ips
+        if extra_banned:
+            _banned_ips.update(extra_banned)
         with open(POOL_STATE_FILE, 'w') as f:
             json.dump({
                 'available': _available,
-                'used_history': _used_history[-500:],  # 保留最近 500 条避免文件过大
+                'used_history': _used_history[-500:],
+                'banned': list(_banned_ips)[-1000:],
             }, f)
     except Exception:
         pass
@@ -60,10 +64,14 @@ def _load_state():
         if valid:
             _available = valid
             _used_history = list(loaded_hist)
+        banned = data.get('banned', [])
+        if banned:
+            _banned_ips.update(banned)
     except Exception:
         pass
 
 # ── 启动时加载持久化状态 ───────────────────────────────────────
+_banned_ips: set = set()
 _load_state()
 
 def get_pool_status() -> dict:
@@ -185,3 +193,58 @@ def release_ip(job_id: str):
     """注册完成后释放（已用 IP 不放回池，由 history 记录）"""
     with _pool_lock:
         _in_use.pop(job_id, None)
+
+
+# ── ban_ip：立即从 available 里移除，写入 banned 黑名单 ─────────────────
+def ban_ip(ip: str):
+    """把 IP 从 available 里踢出并加入 banned 集合（持久化到磁盘）"""
+    with _pool_lock:
+        before = len(_available)
+        _available[:] = [x for x in _available if x["ip"] != ip]
+        removed = before - len(_available)
+    _save_state(extra_banned=[ip])
+    return removed
+
+# ── retest_pool：对 available 里所有 IP 重跑延迟测试，移除死链 ──────────
+def retest_pool(
+    max_latency: float = 800.0,
+    threads:     int   = 8,
+    port:        int   = 443,
+    log_cb=None,
+) -> dict:
+    """重测 _available 里所有 IP，删掉超时或不通的。返回 {kept, removed}"""
+    with _pool_lock:
+        candidates = list(_available)
+    if not candidates:
+        return {"kept": 0, "removed": 0}
+
+    if log_cb:
+        log_cb(f"🔍 重测 {len(candidates)} 个 CF IP（port {port}，延迟≤{max_latency}ms）…")
+
+    results  = []
+    lock     = threading.Lock()
+    sem      = threading.Semaphore(threads)
+
+    def worker(entry):
+        with sem:
+            lat = test_ip_latency(entry["ip"], port)
+            with lock:
+                if lat is not None and lat <= max_latency:
+                    results.append({**entry, "latency": lat})
+
+    ts = [threading.Thread(target=worker, args=(e,), daemon=True) for e in candidates]
+    for t in ts: t.start()
+    for t in ts: t.join(timeout=15)
+
+    results.sort(key=lambda x: x["latency"])
+    removed = len(candidates) - len(results)
+
+    with _pool_lock:
+        _available.clear()
+        _available.extend(results)
+    _save_state()
+
+    if log_cb:
+        log_cb(f"✅ 重测完成：保留 {len(results)} 个，移除 {removed} 个无效 IP")
+
+    return {"kept": len(results), "removed": removed}
