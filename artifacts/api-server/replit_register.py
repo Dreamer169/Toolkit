@@ -160,33 +160,35 @@ def _google_stt_free(wav_bytes: bytes) -> str | None:
 
 def _whisper_stt_fallback(mp3_bytes: bytes) -> str | None:
     """
-    Whisper tiny 本地推理（Google STT 失败时的后备，完全离线免费）。
-    首次调用会自动下载 ~75MB tiny 模型。
+    Whisper 本地推理 (faster-whisper 优先，自动安装，完全离线)。
     """
     import tempfile, os as _os
+    # 优先 faster_whisper（已安装，更快）
+    try:
+        from faster_whisper import WhisperModel
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+            f.write(mp3_bytes); fname = f.name
+        model = WhisperModel("tiny", device="cpu", compute_type="int8")
+        segments, _ = model.transcribe(fname, language="en", beam_size=1)
+        _os.unlink(fname)
+        text = " ".join(s.text for s in segments).strip().lower()
+        log(f"[audio] faster-whisper 识别: '{text}'")
+        return text if text else None
+    except Exception as e:
+        log(f"[audio] faster-whisper 异常: {e}")
+    # fallback: openai-whisper
     try:
         import whisper as _whisper
-    except ImportError:
-        try:
-            log("[audio] 安装 openai-whisper…")
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-q", "openai-whisper"],
-                timeout=120,
-            )
-            import whisper as _whisper
-        except Exception as e:
-            log(f"[audio] whisper 安装失败: {e}"); return None
-    try:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
             f.write(mp3_bytes); fname = f.name
         model = _whisper.load_model("tiny")
         result = model.transcribe(fname, language="en")
         _os.unlink(fname)
         text = result.get("text", "").strip().lower()
-        log(f"[audio] Whisper 识别结果: '{text}'")
+        log(f"[audio] openai-whisper 识别: '{text}'")
         return text if text else None
-    except Exception as e:
-        log(f"[audio] Whisper 推理异常: {e}"); return None
+    except Exception as e2:
+        log(f"[audio] openai-whisper 异常: {e2}"); return None
 
 
 async def solve_recaptcha_audio(page) -> str | None:
@@ -307,11 +309,11 @@ async def solve_recaptcha_audio(page) -> str | None:
     # ── 8. 语音识别（Google 免费 STT 优先，Whisper 离线备用）───────────────────
     wav_bytes = _mp3_to_wav(mp3_bytes)
     transcript: str | None = None
-    if wav_bytes:
+    # Whisper 离线推理优先（更准确），Google STT 作后备
+    transcript = _whisper_stt_fallback(mp3_bytes)
+    if not transcript and wav_bytes:
+        log("[audio] Whisper 失败，尝试 Google STT")
         transcript = _google_stt_free(wav_bytes)
-    if not transcript:
-        log("[audio] Google STT 失败，尝试 Whisper 离线推理")
-        transcript = _whisper_stt_fallback(mp3_bytes)
     if not transcript:
         log("[audio] 所有 STT 方案均失败"); return None
     log(f"[audio] 最终识别结果: '{transcript}'")
@@ -335,13 +337,60 @@ async def solve_recaptcha_audio(page) -> str | None:
     await page.wait_for_timeout(3500)
 
     # ── 11. 读取 token ──────────────────────────────────────────────────────────
-    token = await _read_token()
-    if token:
-        log(f"[audio] 🎉 解算成功！token 长度={len(token)}")
-        return token
+    # ── 12. 读取 token，如答案错误则换一道题重试（最多3次）──────────────────
+    for _retry in range(3):
+        token = await _read_token()
+        if token:
+            log(f"[audio] 🎉 解算成功 (round {_retry+1})！token 长度={len(token)}")
+            return token
+        log(f"[audio] 答案可能错误，尝试换题 (round {_retry+1}/3)…")
+        await page.screenshot(path=f"/tmp/replit_audio_fail_{USERNAME}_r{_retry}.png")
+        # 点击"换一道题"
+        try:
+            reload_btn = challenge_frame.locator("#recaptcha-reload-button, .rc-audiochallenge-tabloop-begin, button[title*='new challenge' i], button[title*='get a new' i]")
+            if await reload_btn.count():
+                await reload_btn.first.click()
+                log(f"[audio] 换题成功")
+                await page.wait_for_timeout(2500)
+            else:
+                break  # 没有换题按钮，放弃
+        except Exception as e_r:
+            log(f"[audio] 换题异常: {e_r}"); break
+        # 重新获取音频URL
+        audio_url_r = None
+        for _w in range(10):
+            try:
+                el = challenge_frame.locator("#audio-source")
+                if await el.count():
+                    u = await el.get_attribute("src")
+                    if u and u != audio_url: audio_url_r = u; break
+            except Exception: pass
+            await page.wait_for_timeout(500)
+        if not audio_url_r:
+            break
+        audio_url = audio_url_r
+        # 重新下载+识别
+        try:
+            mp3_bytes_r = urllib.request.urlopen(
+                urllib.request.Request(audio_url, headers={"User-Agent": UA}), timeout=30).read()
+            transcript_r = _whisper_stt_fallback(mp3_bytes_r)
+            if not transcript_r:
+                wav_r = _mp3_to_wav(mp3_bytes_r)
+                transcript_r = _google_stt_free(wav_r) if wav_r else None
+            if not transcript_r:
+                log(f"[audio] 换题后识别失败"); break
+            log(f"[audio] 换题识别结果: '{transcript_r}'")
+            await answer_input.fill(transcript_r)
+            await page.wait_for_timeout(300)
+            if await verify_btn.count():
+                await verify_btn.first.click()
+            else:
+                await answer_input.press("Enter")
+            await page.wait_for_timeout(3500)
+        except Exception as e_r2:
+            log(f"[audio] 换题重试异常: {e_r2}"); break
 
-    log("[audio] Verify 后未读到 token（答案可能错误），截图诊断")
-    await page.screenshot(path=f"/tmp/replit_audio_fail_{USERNAME}.png")
+    log("[audio] 三轮挑战均未成功")
     return None
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -408,7 +457,7 @@ async def get_exit_ip(pw_module, proxy_cfg) -> str:
 async def wait_cf(page, use_patchright: bool) -> str | None:
     """等待 Cloudflare JS challenge 自动通过（最多 90s）。"""
     log("检测 CF challenge…")
-    for _r in range(15):   # 2s × 15 = 30s，超时则报错让外层换代理端口
+    for _r in range(45):   # 2s × 45 = 90s
         title = await page.title()
         body  = (await page.locator("body").inner_text())[:400]
         if is_cf_blocked(title, body):
@@ -755,7 +804,7 @@ async def attempt_register(pw_module, proxy_cfg, use_patchright: bool, stealth_f
             if await btn.count():
                 await btn.first.click()
                 log(f"点击 Email 按钮: {sel}")
-                await page.wait_for_timeout(3500)
+                await page.wait_for_timeout(5000)
                 break
         else:
             log("未找到 Email 按钮 → 表单可能已直接展示")
@@ -764,7 +813,7 @@ async def attempt_register(pw_module, proxy_cfg, use_patchright: bool, stealth_f
         try:
             await page.wait_for_selector(
                 'input[name="email"], input[type="email"], input[placeholder*="email" i]',
-                timeout=8000
+                timeout=15000
             )
         except Exception:
             t2 = await page.title()
