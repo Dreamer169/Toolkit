@@ -49,16 +49,59 @@ const xrayPortCfIp = new Map<number, string>();
   } catch { /* 静默 */ }
 })();
 
-// 异步调 cf_pool_api ban（fire-and-forget）
-function banCfPoolIp(ip: string) {
+// 从 CF IP 池取新 IP 替换 xray.json 中被封禁的 IP，然后 reload xray（fire-and-forget）
+const ROTATE_SCRIPT = [
+  path.join(WORKSPACE_DIR, "artifacts/api-server/rotate_xray_ip.py"),
+  "/root/Toolkit/artifacts/api-server/rotate_xray_ip.py",
+].find((p) => { try { require("fs").accessSync(p); return true; } catch { return false; } }) ?? "";
+
+function rotateCfIpInXray(bannedIp: string) {
+  if (!ROTATE_SCRIPT) { console.warn("[cf-rotate] rotate_xray_ip.py 未找到"); return; }
   try {
     const { spawnSync } = require("child_process");
-    const script = [
-      path.join(WORKSPACE_DIR, "artifacts/api-server/cf_pool_api.py"),
-      "/root/Toolkit/artifacts/api-server/cf_pool_api.py",
-    ].find((p) => { try { require("fs").accessSync(p); return true; } catch { return false; } });
-    if (!script) return;
-    spawnSync("python3", [script, "ban", "--ip", ip], { timeout: 5000, encoding: "utf8" });
+    const r = spawnSync("python3", [ROTATE_SCRIPT, "--banned-ip", bannedIp],
+      { timeout: 12000, encoding: "utf8" });
+    const result = r.stdout ? JSON.parse(r.stdout) : {};
+    if (result.success) {
+      console.log(`[cf-rotate] ${bannedIp} → ${result.new_ip}  outbounds=${result.changed_outbounds} reload=${result.reload}`);
+      // xray 已 reload，重建 port→IP 映射
+      rebuildXrayPortMap().catch(() => {});
+    } else {
+      console.warn(`[cf-rotate] 失败: ${result.error}`);
+    }
+  } catch (e) { console.warn("[cf-rotate] exception:", e); }
+}
+
+async function rebuildXrayPortMap() {
+  try {
+    const { readFileSync, existsSync } = await import("fs");
+    const candidates = [
+      path.join(WORKSPACE_DIR, "xray.json"),
+      "/root/Toolkit/xray.json",
+    ];
+    const xrayPath = candidates.find(existsSync);
+    if (!xrayPath) return;
+    const xray = JSON.parse(readFileSync(xrayPath, "utf8")) as {
+      inbounds:  Array<{ tag: string; port: number }>;
+      outbounds: Array<{ tag: string; settings?: { vnext?: Array<{ address: string }> } }>;
+      routing:   { rules: Array<{ inboundTag?: string[]; outboundTag?: string }> };
+    };
+    const obMap = new Map<string, string>();
+    for (const ob of xray.outbounds ?? []) {
+      const ip = ob.settings?.vnext?.[0]?.address;
+      if (ip) obMap.set(ob.tag, ip);
+    }
+    xrayPortCfIp.clear();
+    for (const rule of xray.routing?.rules ?? []) {
+      if (!rule.inboundTag || !rule.outboundTag) continue;
+      const cfIp = obMap.get(rule.outboundTag);
+      if (!cfIp) continue;
+      for (const tag of rule.inboundTag) {
+        const m = tag.match(/in-socks-(\d+)/);
+        if (m) xrayPortCfIp.set(10820 + Number(m[1]), cfIp);
+      }
+    }
+    console.log(`[cf-rotate] xray port→IP 映射已重建: ${xrayPortCfIp.size} 条`);
   } catch { /* 静默 */ }
 }
 function availablePorts(): number[] {
@@ -268,8 +311,8 @@ router.post("/replit/register", (req, res) => {
                 // 同步通知 CF 池封禁该 IP
                 const cfIp = xrayPortCfIp.get(tryPort);
                 if (cfIp) {
-                  log(`    → ban CF IP ${cfIp} from pool`);
-                  banCfPoolIp(cfIp);
+                  log(`    → rotate CF IP ${cfIp} in xray (pool → new IP)`);
+                  rotateCfIpInXray(cfIp);
                 }
               }
               log(`    → instant port switch`);
