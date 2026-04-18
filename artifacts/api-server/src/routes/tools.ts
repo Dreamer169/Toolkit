@@ -2142,6 +2142,51 @@ router.post("/tools/cf-pool/refresh", async (req, res) => {
   }
 });
 
+// ── CF IP 池：封禁单个 IP ──────────────────────────────────────────────────
+router.post("/tools/cf-pool/ban", async (req, res) => {
+  const { ip } = req.body as { ip?: string };
+  if (!ip) { res.status(400).json({ success: false, error: "ip 不能为空" }); return; }
+  try {
+    const { spawnSync } = await import("child_process");
+    const r = spawnSync("python3", [CF_POOL_SCRIPT, "ban", "--ip", ip], {
+      timeout: 8000, encoding: "utf8",
+      env: { ...process.env, PYTHONUNBUFFERED: "1" },
+    });
+    if (r.error || r.status !== 0) {
+      res.status(500).json({ success: false, error: r.error?.message || r.stderr || "ban failed" });
+      return;
+    }
+    const data = r.stdout ? JSON.parse(r.stdout) : {};
+    res.json({ success: true, ...data });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+// ── CF IP 池：重测存活（手动触发 / 定时任务复用）─────────────────────────
+router.post("/tools/cf-pool/retest", async (req, res) => {
+  try {
+    const { maxLatency = 800, threads = 8, port = 443 } = req.body as {
+      maxLatency?: number; threads?: number; port?: number;
+    };
+    const { spawnSync } = await import("child_process");
+    const r = spawnSync("python3", [
+      CF_POOL_SCRIPT, "retest",
+      "--max-latency", String(maxLatency),
+      "--threads",     String(threads),
+      "--port",        String(port),
+    ], { timeout: 60000, encoding: "utf8", env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+    if (r.error || r.status !== 0) {
+      res.status(500).json({ success: false, error: r.error?.message || r.stderr || "retest failed" });
+      return;
+    }
+    const data = r.stdout ? JSON.parse(r.stdout) : {};
+    res.json({ success: true, ...data });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
 // ── Outlook IMAP 收件箱（密码方式，无需 OAuth token）──────────────────────
 router.post("/tools/outlook/imap-inbox", async (req, res) => {
   const { email, password, limit } = req.body as { email?: string; password?: string; limit?: number };
@@ -3375,6 +3420,32 @@ router.post("/tools/sub2api/disable/:id", async (req, res) => {
   finally { await pool?.end(); }
 });
 
+
+// ── CF IP 池：定时存活检验（每 5 分钟重测一次，移除死链节点）──────────────
+(async () => {
+  const { spawnSync } = await import("child_process");
+  const runRetest = () => {
+    try {
+      const r = spawnSync("python3", [
+        CF_POOL_SCRIPT, "retest",
+        "--max-latency", "800",
+        "--threads",     "8",
+        "--port",        "443",
+      ], { timeout: 55000, encoding: "utf8", env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+      const result = r.stdout ? JSON.parse(r.stdout) : {};
+      if (result.removed > 0 || result.kept !== undefined) {
+        console.log(`[cf-pool retest] kept=${result.kept ?? "?"} removed=${result.removed ?? 0}`);
+      }
+    } catch (e) {
+      // 静默：池为空时 retest 快速退出
+    }
+  };
+  // 启动后 30s 首次运行，之后每 5 分钟
+  setTimeout(() => {
+    runRetest();
+    setInterval(runRetest, 5 * 60 * 1000);
+  }, 30_000);
+})();
 
 export default router;
 
