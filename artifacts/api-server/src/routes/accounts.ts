@@ -14,6 +14,53 @@ const XRAY_PORTS  = Array.from({ length: 26 }, (_, i) => 10820 + i);
 const cfBannedUntil = new Map<number, number>();
 // Port reputation: last time port returned a real form response (not cf_ban/captcha_invalid)
 const portLastGood = new Map<number, number>();
+
+// ── 启动时从 xray.json 建立 port → CF IP 映射表 ─────────────────────────────
+const xrayPortCfIp = new Map<number, string>();
+(async () => {
+  try {
+    const { readFileSync, existsSync } = await import("fs");
+    const candidates = [
+      path.join(WORKSPACE_DIR, "xray.json"),
+      "/root/Toolkit/xray.json",
+    ];
+    const xrayPath = candidates.find(existsSync);
+    if (!xrayPath) return;
+    const xray = JSON.parse(readFileSync(xrayPath, "utf8")) as {
+      inbounds:  Array<{ tag: string; port: number }>;
+      outbounds: Array<{ tag: string; settings?: { vnext?: Array<{ address: string }> } }>;
+      routing:   { rules: Array<{ inboundTag?: string[]; outboundTag?: string }> };
+    };
+    const obMap = new Map<string, string>(); // outbound tag → CF IP
+    for (const ob of xray.outbounds ?? []) {
+      const ip = ob.settings?.vnext?.[0]?.address;
+      if (ip) obMap.set(ob.tag, ip);
+    }
+    for (const rule of xray.routing?.rules ?? []) {
+      if (!rule.inboundTag || !rule.outboundTag) continue;
+      const cfIp = obMap.get(rule.outboundTag);
+      if (!cfIp) continue;
+      for (const tag of rule.inboundTag) {
+        const m = tag.match(/in-socks-(\d+)/);
+        if (m) xrayPortCfIp.set(10820 + Number(m[1]), cfIp);
+      }
+    }
+    console.log(`[accounts] xray port→CF IP map: ${xrayPortCfIp.size} entries`);
+  } catch { /* 静默 */ }
+})();
+
+// 异步调 cf_pool_api ban（fire-and-forget）
+function banCfPoolIp(ip: string) {
+  try {
+    const { spawnSync } = require("child_process");
+    const script = [
+      path.join(WORKSPACE_DIR, "artifacts/api-server/cf_pool_api.py"),
+      "/root/Toolkit/artifacts/api-server/cf_pool_api.py",
+    ].find((p) => { try { require("fs").accessSync(p); return true; } catch { return false; } });
+    if (!script) return;
+    spawnSync("python3", [script, "ban", "--ip", ip], { timeout: 5000, encoding: "utf8" });
+  } catch { /* 静默 */ }
+}
 function availablePorts(): number[] {
   const now = Date.now();
   return XRAY_PORTS.filter(p => (cfBannedUntil.get(p) ?? 0) < now);
@@ -218,6 +265,12 @@ router.post("/replit/register", (req, res) => {
               // CF封禁端口 → 记录5分钟冷却
               if (lastErr.includes("cf_ip_banned") || lastErr.includes("cf_hard_block")) {
                 cfBannedUntil.set(tryPort, Date.now() + 5 * 60 * 1000);
+                // 同步通知 CF 池封禁该 IP
+                const cfIp = xrayPortCfIp.get(tryPort);
+                if (cfIp) {
+                  log(`    → ban CF IP ${cfIp} from pool`);
+                  banCfPoolIp(cfIp);
+                }
               }
               log(`    → instant port switch`);
               // 从queue剩余中找下一个未用端口
