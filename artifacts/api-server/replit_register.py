@@ -114,8 +114,32 @@ async def fill_step1(page) -> str | None:
     await page.wait_for_timeout(600)
     await page.screenshot(path=f"/tmp/replit_step1_{USERNAME}.png")
 
+    # Turnstile 诊断 + 尝试从 iframe 内读取 token
+    _JS_PROBE = """() => {
+        var hidden = Array.from(document.querySelectorAll('input[type="hidden"]')).map(e=>({n:e.name,v:(e.value||'').slice(0,30)}));
+        var iframes = Array.from(document.querySelectorAll('iframe')).map(e=>e.src.slice(0,80));
+        var cfEl = document.querySelector('[name="cf-turnstile-response"]');
+        return {hidden, iframes, cfToken: cfEl ? cfEl.value.slice(0,30) : null};
+    }"""
+    try:
+        probe = await page.evaluate(_JS_PROBE)
+        log(f"DOM探针 hidden={probe.get('hidden',[])} iframes={len(probe.get('iframes',[]))} cfToken={probe.get('cfToken')}")
+        if probe.get("cfToken"):
+            log(f"Turnstile token 立即就绪: {probe['cfToken'][:20]}…")
+        else:
+            # patchright 会在 iframe 内自动解算，token 通过 postMessage 回传到 React state
+            # 直接等待 5s（Turnstile 一般 2-4s 解算）再提交
+            log("Turnstile 在 iframe 中，等待 5s patchright 自解算…")
+            await page.wait_for_timeout(5000)
+            probe2 = await page.evaluate(_JS_PROBE)
+            cf2 = probe2.get("cfToken")
+            log(f"5s 后 cfToken={cf2!r} hidden={probe2.get('hidden',[])} iframes={len(probe2.get('iframes',[]))}")
+    except Exception as _pe:
+        log(f"DOM探针异常: {_pe}")
+
     # 提交 Step1
     for sel in [
+        'button:has-text("Create Account")', 'button:has-text("Create account")',
         'button[type="submit"]', 'button:has-text("Continue")',
         'button:has-text("Next")', 'button:has-text("Sign up")',
         'button:has-text("Create")',
@@ -129,19 +153,28 @@ async def fill_step1(page) -> str | None:
         await page.keyboard.press("Enter")
         log("Step1 回车提交")
 
-    await page.wait_for_timeout(3000)
+    await page.wait_for_timeout(5000)
+    await page.screenshot(path=f"/tmp/replit_after_step1_{USERNAME}.png")
 
     # 检查 Step1 错误
-    body = (await page.locator("body").inner_text())[:300]
-    log(f"Step1_body[0:120]: {body[:120].replace(chr(10),' ')}")
+    body = (await page.locator("body").inner_text())[:500]
+    log(f"Step1_body[0:200]: {body[:200].replace(chr(10),' ')}")
+    log(f"Step1_url: {page.url[:100]}")
     if is_integrity_error(body):
         return "integrity_check_failed_after_step1"
     if is_captcha_invalid(body):
         return "captcha_token_invalid"
 
+    # 检查是否已成功提交（单步表单：无 username 字段，直接验邮箱）
+    SUCCESS_HINTS = ("verify your email", "check your email", "we sent", "sent you",
+                     "verification email", "confirm your email", "check for an email")
+    if any(h in body.lower() for h in SUCCESS_HINTS):
+        log("Step1 成功：服务器已发送验证邮件（单步表单）")
+        return None  # 成功
+
     if "signup" in page.url.lower():
         err_els = await page.locator(
-            '[class*="error" i],[data-cy*="error"],[role="alert"]'
+            '[class*="error" i],[data-cy*="error"],[role="alert"],[class*="invalid" i]'
         ).all_text_contents()
         errs = [e.strip() for e in err_els if e.strip()]
         if errs:
@@ -227,6 +260,18 @@ async def attempt_register(pw_module, proxy_cfg, use_patchright: bool, stealth_f
         except Exception as e:
             log(f"stealth 注入失败: {e}")
 
+    # 监听注册 API 请求（捕获 captcha token 内容）
+    _captured_reqs: list = []
+    def _on_request(req):
+        try:
+            if "replit.com" in req.url and req.method == "POST":
+                body = req.post_data or ""
+                if any(k in body for k in ("email","captcha","turnstile","token")):
+                    _captured_reqs.append(f"POST {req.url[:80]} body={body[:300]}")
+        except Exception:
+            pass
+    page.on("request", _on_request)
+
     try:
         # 1. 导航
         result["phase"] = "navigate"
@@ -262,7 +307,7 @@ async def attempt_register(pw_module, proxy_cfg, use_patchright: bool, stealth_f
             if await btn.count():
                 await btn.first.click()
                 log(f"已点击 Email 按钮: {sel}")
-                await page.wait_for_timeout(1200)
+                await page.wait_for_timeout(3000)  # 等表单+Turnstile iframe 初始化
                 break
         else:
             log("未找到 Email 按钮 → 表单可能已直接展示")
@@ -292,10 +337,40 @@ async def attempt_register(pw_module, proxy_cfg, use_patchright: bool, stealth_f
         # 6. 填写 + 提交 Step1（captcha_token_invalid → reload重试1次）
         result["phase"] = "step1_fill"
         step1_err = await fill_step1(page)
+        # 打印拦截到的 API 请求（含 captcha 字段）
+        for _req in _captured_reqs[-3:]:
+            log(f"[intercept] {_req}")
+        _captured_reqs.clear()
         if step1_err == "captcha_token_invalid":
-            log("captcha token invalid → 立即返回换端口（无reload，快速切换）")
-            result["error"] = "captcha_token_invalid"
-            await browser.close(); return result
+            log("captcha token invalid → reload 一次，重新等待 Turnstile …")
+            try:
+                await page.reload(wait_until="domcontentloaded", timeout=20000)
+                await page.wait_for_timeout(3000)
+                # 等 Turnstile 重新解析
+                _JS_GET2 = "() => { var e=document.querySelector('[name=\"cf-turnstile-response\"]'); return e?e.value:''; }"
+                for _t in range(15):
+                    try:
+                        token_val = await page.evaluate(_JS_GET2)
+                        if token_val:
+                            log(f"reload 后 Turnstile token 就绪 ({_t+1}s)")
+                            break
+                        await page.wait_for_timeout(1000)
+                    except Exception:
+                        break
+                # 重新点 Email 按钮
+                for sel2 in ['button:has-text("Email & password")', 'button:has-text("Continue with email")', 'button:has-text("Email")']:
+                    btn2 = page.locator(sel2)
+                    if await btn2.count():
+                        await btn2.first.click()
+                        await page.wait_for_timeout(1200)
+                        break
+                step1_err2 = await fill_step1(page)
+                if step1_err2:
+                    result["error"] = step1_err2
+                    await browser.close(); return result
+            except Exception as e2:
+                result["error"] = f"captcha_token_invalid_reload_failed:{e2}"
+                await browser.close(); return result
 
         if step1_err:
             result["error"] = step1_err
@@ -364,26 +439,26 @@ async def run() -> dict:
     final = {"ok": False, "phase": "init", "error": "", "exit_ip": ""}
     proxy_cfg = {"server": PROXY} if PROXY else None
 
-    # 加载库：playwright+stealth 优先，patchright 备用
+    # 加载库：patchright 优先（Turnstile 自解算），playwright+stealth 备用
     stealth_fn = None
     use_patchright = False
     pw_ctx_fn = None
 
     try:
-        from playwright.async_api import async_playwright as _apw
+        from patchright.async_api import async_playwright as _apw
         pw_ctx_fn = _apw
-        try:
-            from playwright_stealth import Stealth
-            stealth_fn = Stealth().apply_stealth_async
-            log("使用 playwright + stealth（优先）")
-        except ImportError:
-            log("playwright（无 stealth）")
+        use_patchright = True
+        log("使用 patchright（优先，Turnstile 自解算）")
     except ImportError:
         try:
-            from patchright.async_api import async_playwright as _apw
+            from playwright.async_api import async_playwright as _apw
             pw_ctx_fn = _apw
-            use_patchright = True
-            log("fallback: patchright")
+            try:
+                from playwright_stealth import Stealth
+                stealth_fn = Stealth().apply_stealth_async
+                log("fallback: playwright + stealth")
+            except ImportError:
+                log("fallback: playwright（无 stealth）")
         except ImportError:
             final["error"] = "playwright/patchright 未安装"
             return final
