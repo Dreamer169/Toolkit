@@ -547,8 +547,8 @@ router.post("/replit/register", (req, res) => {
           await new Promise(r => setTimeout(r, 12000));
 
           let verified = false;
-          for (let t = 0; t < 15; t++) {
-            log(`    Poll ${t + 1}/15 (accountId=${outlook.id})...`);
+          for (let t = 0; t < 30; t++) {
+            log(`    Poll ${t + 1}/30 (accountId=${outlook.id})...`);
             const vr = await localPost("/api/tools/outlook/click-verify-link", {
               accountId: outlook.id,
             }) as { success?: boolean; final_url?: string; error?: string };
@@ -732,5 +732,181 @@ router.get("/signup/status/:jobId", (req, res) => {
     result: job.result,
   });
 });
+
+// ── POST /api/replit/retry-verify ─────────────────────────────────────────────
+// 对所有 unverified 的 Reseek 账号重试邮箱验证（用对应 Outlook 账号的 token）
+router.post("/replit/retry-verify", async (_req, res) => {
+  try {
+    const { query: dbQ, execute: dbE } = await import("../db.js");
+    const unverified = await dbQ<{ id: number; email: string; username: string }>(
+      "SELECT id, email, username FROM accounts WHERE platform='replit' AND status='unverified'"
+    );
+    if (!unverified.length) { res.json({ success: true, message: "没有待验证账号", results: [] }); return; }
+    const results: Array<{ replitId: number; email: string; status: string; error?: string }> = [];
+    for (const acc of unverified) {
+      // 找对应 Outlook 账号
+      const ol = await dbQ<{ id: number; email: string; token: string | null; refresh_token: string | null }>(
+        "SELECT id, email, token, refresh_token FROM accounts WHERE platform='outlook' AND email=$1 AND status='active'",
+        [acc.email]
+      );
+      if (!ol.length) {
+        results.push({ replitId: acc.id, email: acc.email, status: "no_outlook", error: "无对应 Outlook 账号" });
+        continue;
+      }
+      const outlook = ol[0];
+      // 尝试点击验证链接
+      let accessToken = outlook.token || "";
+      if (outlook.refresh_token) {
+        try {
+          const tr = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+            method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              grant_type: "refresh_token",
+              client_id: "9e5f94bc-e8a4-4e73-b8be-63364c29d753",
+              refresh_token: outlook.refresh_token,
+              scope: "https://graph.microsoft.com/Mail.Read offline_access",
+            }).toString(),
+          });
+          const td = await tr.json() as { access_token?: string; refresh_token?: string };
+          if (td.access_token) {
+            accessToken = td.access_token;
+            await dbE("UPDATE accounts SET token=$1, updated_at=NOW() WHERE id=$2", [accessToken, outlook.id]);
+          }
+        } catch { /* 忽略刷新错误 */ }
+      }
+      if (!accessToken) {
+        results.push({ replitId: acc.id, email: acc.email, status: "no_token", error: "无 access token" });
+        continue;
+      }
+      // 调用 click-verify-link
+      const verifyResult = await localPost("/api/tools/outlook/click-verify-link", {
+        accountId: outlook.id,
+      }) as { success?: boolean; final_url?: string; error?: string };
+      if (verifyResult.success) {
+        await dbE("UPDATE accounts SET status='registered', updated_at=NOW() WHERE id=$1", [acc.id]);
+        results.push({ replitId: acc.id, email: acc.email, status: "verified" });
+      } else {
+        results.push({ replitId: acc.id, email: acc.email, status: "failed", error: String(verifyResult.error ?? "未找到验证链接") });
+      }
+    }
+    res.json({ success: true, results });
+  } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
+// ── POST /api/pipeline/full ────────────────────────────────────────────────────
+// 全自动流水线：Outlook 注册 → Reseek 注册 + 验证 → 子节点部署
+// body: { target?: number, skipOutlook?: boolean, skipReseek?: boolean }
+router.post("/pipeline/full", async (req, res) => {
+  const {
+    target = 3,           // 目标 Reseek 子节点数量
+    skipOutlook  = false, // 跳过 Outlook 注册步骤（已有足够账号时）
+    skipReseek   = false, // 跳过 Reseek 注册步骤
+  } = req.body as { target?: number; skipOutlook?: boolean; skipReseek?: boolean };
+
+  const jobId = `pipe_${Date.now().toString(36)}`;
+  const job: Job = { id: jobId, status: "running", started: Date.now(), logs: [], result: null };
+  jobs.set(jobId, job);
+  function log(msg: string) {
+    const line = `[${new Date().toISOString().slice(11,19)}] ${msg}`;
+    job.logs.push(line);
+    console.log(`[pipeline][${jobId}] ${msg}`);
+  }
+
+  res.json({ success: true, jobId, message: `全自动流水线已启动 (目标${target}个子节点)` });
+
+  (async () => {
+    try {
+      const { query: dbQ } = await import("../db.js");
+
+      // ── Step 1: 检查 Outlook 账号供应 ────────────────────────────────────
+      log("=== Step1: 检查 Outlook 账号池 ===");
+      const avail = await dbQ<{ count: string }>(
+        "SELECT COUNT(*) AS count FROM accounts WHERE platform='outlook' AND status='active' AND (token IS NOT NULL OR refresh_token IS NOT NULL) AND COALESCE(tags,'') NOT LIKE '%replit_used%'"
+      );
+      const availCount = parseInt(avail[0]?.count ?? "0", 10);
+      log(`  可用 Outlook 账号: ${availCount}`);
+
+      if (!skipOutlook && availCount < target) {
+        const need = target - availCount;
+        log(`  不足 ${target} 个，启动 Outlook 注册 ${need} 个...`);
+        try {
+          const r = await localPost("/api/tools/outlook/register", {
+            count: need, headless: true, engine: "patchright",
+            wait: 11, retries: 2, proxyMode: "cf", cfPort: 443, delay: 3,
+          }) as { jobId?: string };
+          if (r.jobId) {
+            // 等待最多 30 分钟
+            for (let w = 0; w < 180; w++) {
+              await new Promise(r => setTimeout(r, 10000));
+              const status = await localGet(`/api/tools/outlook/register/${r.jobId}`) as { status?: string };
+              log(`  Outlook注册状态: ${status.status ?? "?"}`);
+              if (status.status === "done" || status.status === "stopped") break;
+            }
+          }
+        } catch (e) { log(`  Outlook注册失败: ${e}`); }
+      }
+
+      // ── Step 2: Reseek 注册 ───────────────────────────────────────────────
+      if (!skipReseek) {
+        log("=== Step2: 启动 Reseek 注册 ===");
+        const existing = await dbQ<{ count: string }>(
+          "SELECT COUNT(*) AS count FROM accounts WHERE platform='replit' AND status IN ('active','registered','unverified')"
+        );
+        const existCount = parseInt(existing[0]?.count ?? "0", 10);
+        const toReg = Math.max(0, target - existCount);
+        if (toReg > 0) {
+          log(`  当前 Reseek 账号 ${existCount}，需再注册 ${toReg} 个`);
+          const r = await localPost("/api/replit/register", { count: toReg, headless: true }) as { jobId?: string };
+          if (r.jobId) {
+            for (let w = 0; w < 120; w++) {
+              await new Promise(r => setTimeout(r, 10000));
+              const status = await localGet(`/api/replit/register/${r.jobId}`) as { status?: string; result?: Record<string,unknown> };
+              log(`  Reseek注册状态: ${status.status ?? "?"}`);
+              if (status.status === "done" || status.status === "error") {
+                log(`  注册结果: ${JSON.stringify(status.result ?? {}).slice(0, 100)}`);
+                break;
+              }
+            }
+          }
+        } else {
+          log(`  已有 ${existCount} 个 Reseek 账号，跳过注册`);
+        }
+      }
+
+      // ── Step 3: 重试验证 unverified 账号 ─────────────────────────────────
+      log("=== Step3: 重试 unverified 账号验证 ===");
+      try {
+        const vr = await localPost("/api/replit/retry-verify", {}) as { results?: Array<Record<string,unknown>> };
+        log(`  验证结果: ${JSON.stringify(vr.results ?? []).slice(0, 200)}`);
+      } catch (e) { log(`  重试验证失败: ${e}`); }
+
+      // ── Step 4: 子节点登录部署（可选，需有密码） ──────────────────────────
+      log("=== Step4: 检查子节点状态 ===");
+      const active = await dbQ<{ count: string }>(
+        "SELECT COUNT(*) AS count FROM accounts WHERE platform='replit' AND status IN ('active','registered')"
+      );
+      log(`  已激活 Reseek 账号: ${active[0]?.count ?? 0}`);
+      // 部署步骤将在 replit_login.py + replit_create_repl.py 可用后激活
+
+      const final = await dbQ<{ count: string }>(
+        "SELECT COUNT(*) AS count FROM accounts WHERE platform='replit' AND status IN ('active','registered','unverified')"
+      );
+      log(`\n=== 流水线完成 === 总 Reseek 账号: ${final[0]?.count ?? 0}/${target}`);
+      job.status = "done";
+      job.result = { total: parseInt(final[0]?.count ?? "0", 10), target };
+    } catch (e) {
+      log(`FATAL: ${e}`);
+      job.status = "error";
+    }
+  })().catch((e) => { job.status = "error"; job.logs.push(`FATAL: ${e}`); });
+});
+
+// ── GET /api/pipeline/full/:jobId ─────────────────────────────────────────────
+router.get("/pipeline/full/:jobId", (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ success: false, error: "job not found" });
+  res.json({ jobId: job.id, status: job.status, elapsed: Math.round((Date.now() - job.started) / 1000), logs: job.logs, result: job.result });
+});
+
 
 export default router;
