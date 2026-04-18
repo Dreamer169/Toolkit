@@ -1526,8 +1526,18 @@ router.post("/self-register", async (req, res) => {
     res.status(422).json({ ok: false, error: "探测失败，URL 不可达", detail: probe.error });
     return;
   }
-  // 已存在则更新名称，否则新建
-  const existing = allNodes().find((n) => n.baseUrl === baseUrl);
+  // B27: 先按 baseUrl 查，再按 name 查（处理 URL 变化的情况）
+  let existing = allNodes().find((n) => n.baseUrl === baseUrl);
+  if (!existing && name) {
+    const byName = allNodes().find((n) => n.name === name);
+    if (byName) {
+      byName.baseUrl = baseUrl;
+      byName.id = stableId(friend, baseUrl);
+      if (!runtimeNodes.includes(byName)) runtimeNodes.push(byName);
+      savePersistedNodes(runtimeNodes);
+      existing = byName;
+    }
+  }
   if (existing) {
     if (name) existing.name = name;
     // 更新存活时间：重置 downUntil（探测通过说明节点仍存活）
