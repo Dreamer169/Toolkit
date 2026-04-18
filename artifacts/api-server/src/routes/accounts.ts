@@ -184,11 +184,15 @@ router.post("/replit/register", (req, res) => {
               regOk = true;
               break;
             }
+            // captcha_token_invalid → Replit server拒绝token → 立即rate-limit该email → 跳下一个Outlook
+            if (lastErr.includes("captcha_token_invalid")) {
+              log(`    captcha_token_invalid → skip Outlook (next attempt would be rate-limited)`);
+              break;
+            }
             const isInstantSwitch =
               lastErr.includes("cf_ip_banned")        ||
               lastErr.includes("cf_hard_block")       ||
-              lastErr.includes("turnstile_unsolved")  ||
-              lastErr.includes("captcha_token_invalid");
+              lastErr.includes("turnstile_unsolved");
 
             const retryable =
               isInstantSwitch ||
