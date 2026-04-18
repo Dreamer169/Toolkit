@@ -295,7 +295,9 @@ router.post("/replit/register", (req, res) => {
               lastErr.includes("cf_ip_banned")              ||
               lastErr.includes("cf_hard_block")             ||
               lastErr.includes("cf_js_challenge_timeout")   ||  // v7.3 新增
-              lastErr.includes("turnstile_unsolved");
+              lastErr.includes("turnstile_unsolved")       ||
+              lastErr.includes("ERR_CERT")               ||  // SSL证书损坏端口立即跳
+              lastErr.includes("ERR_CONNECTION_RESET");
 
             const retryable =
               isInstantSwitch ||

@@ -790,7 +790,7 @@ async def attempt_register(pw_module, proxy_cfg, use_patchright: bool, stealth_f
         if step1_err == "captcha_token_invalid":
             log("captcha_token_invalid → reload，重新音频解算…")
             try:
-                await page.reload(wait_until="domcontentloaded", timeout=20000)
+                await page.reload(wait_until="domcontentloaded", timeout=35000)
                 await page.wait_for_timeout(3000)
                 for sel2 in ['button:has-text("Email & password")', 'button:has-text("Continue with email")', 'button:has-text("Email")']:
                     btn2 = page.locator(sel2)
