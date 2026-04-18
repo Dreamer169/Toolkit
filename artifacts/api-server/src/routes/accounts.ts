@@ -319,6 +319,7 @@ router.post("/replit/register", (req, res) => {
                 if (cfIp) {
                   log(`    → rotate CF IP ${cfIp} in xray (pool → new IP)`);
                   rotateCfIpInXray(cfIp);
+                  await new Promise(r => setTimeout(r, 3000));  // wait xray reload
                 }
               }
               log(`    → instant port switch`);
