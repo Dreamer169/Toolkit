@@ -880,13 +880,47 @@ router.post("/pipeline/full", async (req, res) => {
         log(`  验证结果: ${JSON.stringify(vr.results ?? []).slice(0, 200)}`);
       } catch (e) { log(`  重试验证失败: ${e}`); }
 
-      // ── Step 4: 子节点登录部署（可选，需有密码） ──────────────────────────
-      log("=== Step4: 检查子节点状态 ===");
-      const active = await dbQ<{ count: string }>(
-        "SELECT COUNT(*) AS count FROM accounts WHERE platform='replit' AND status IN ('active','registered')"
+      // ── Step 4: 子节点登录部署 ─────────────────────────────────────────────
+      log("=== Step4: 子节点登录部署 ===");
+      const toDeploy = await dbQ<{ id: number; email: string; password: string; username: string }>(
+        "SELECT id, email, password, COALESCE(username,'') AS username FROM accounts WHERE platform='replit' AND status IN ('active','registered') AND COALESCE(tags,'') NOT LIKE '%subnode_deployed%' LIMIT 3"
       );
-      log(`  已激活 Reseek 账号: ${active[0]?.count ?? 0}`);
-      // 部署步骤将在 replit_login.py + replit_create_repl.py 可用后激活
+      log(`  待部署账号: ${toDeploy.length}`);
+      for (const acc of toDeploy) {
+        if (!acc.password) { log(`  ${acc.email} 无密码，跳过`); continue; }
+        // 找对应 outlook token
+        const ol = await dbQ<{ token: string | null; refresh_token: string | null }>(
+          "SELECT token, refresh_token FROM accounts WHERE platform='outlook' AND email=$1", [acc.email]
+        );
+        const outlookTok = ol[0]?.token ?? "";
+        log(`  部署 ${acc.email} (${acc.username})...`);
+        const deployR = await runPython(
+          path.join(API_DIR, "replit_deploy_agent.py"),
+          { email: acc.email, password: acc.password, outlook_token: outlookTok,
+            gateway_url: "http://45.205.27.69:8080", headless: true },
+          300_000
+        );
+        if (deployR.parsed.ok) {
+          const webUrl = String(deployR.parsed.webview_url ?? "");
+          log(`  ✓ 部署成功 webview=${webUrl}`);
+          // 标记已部署 + 保存 webview URL
+          await dbE(
+            "UPDATE accounts SET tags=COALESCE(tags||\',\',\'\') || \'subnode_deployed\', notes=$1, updated_at=NOW() WHERE id=$2",
+            [webUrl, acc.id]
+          );
+          // 注册为网关子节点
+          if (webUrl) {
+            try {
+              await localPost("/api/gateway/self-register", {
+                gatewayUrl: webUrl, name: acc.username || acc.email.split("@")[0],
+              });
+              log(`  ✓ 已注册子节点 ${webUrl}`);
+            } catch (e) { log(`  子节点注册失败: ${e}`); }
+          }
+        } else {
+          log(`  ✗ 部署失败: ${String(deployR.parsed.error ?? "").slice(0, 120)}`);
+        }
+      }
 
       const final = await dbQ<{ count: string }>(
         "SELECT COUNT(*) AS count FROM accounts WHERE platform='replit' AND status IN ('active','registered','unverified')"
@@ -903,6 +937,94 @@ router.post("/pipeline/full", async (req, res) => {
 
 // ── GET /api/pipeline/full/:jobId ─────────────────────────────────────────────
 router.get("/pipeline/full/:jobId", (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ success: false, error: "job not found" });
+  res.json({ jobId: job.id, status: job.status, elapsed: Math.round((Date.now() - job.started) / 1000), logs: job.logs, result: job.result });
+});
+
+
+// ── POST /api/replit/deploy-subnode ──────────────────────────────────────────
+// 对单个 Reseek 账号部署 agent 子节点 (浏览器自动化)
+// body: { replitId?: number, email?: string }
+router.post("/replit/deploy-subnode", async (req, res) => {
+  const { replitId, email } = req.body as { replitId?: number; email?: string };
+  const jobId = makeJobId();
+  const job: Job = { id: jobId, status: "running", started: Date.now(), logs: [], result: null };
+  jobs.set(jobId, job);
+  function log(msg: string) {
+    const line = `[${new Date().toISOString().slice(11,19)}] ${msg}`;
+    job.logs.push(line);
+    console.log(`[deploy-sub][${jobId}] ${msg}`);
+  }
+  res.json({ success: true, jobId, message: "子节点部署任务已启动" });
+
+  (async () => {
+    try {
+      const { query: dbQ, execute: dbE } = await import("../db.js");
+      let acc: { id: number; email: string; password: string; username: string } | undefined;
+      if (replitId) {
+        const rows = await dbQ<typeof acc>("SELECT id,email,COALESCE(password,\'\') AS password,COALESCE(username,\'\') AS username FROM accounts WHERE id=$1 AND platform=\'replit\'", [replitId]);
+        acc = rows[0];
+      } else if (email) {
+        const rows = await dbQ<typeof acc>("SELECT id,email,COALESCE(password,\'\') AS password,COALESCE(username,\'\') AS username FROM accounts WHERE email=$1 AND platform=\'replit\'", [email]);
+        acc = rows[0];
+      } else {
+        // 找第一个未部署的 registered/active 账号
+        const rows = await dbQ<typeof acc>(
+          "SELECT id,email,COALESCE(password,\'\') AS password,COALESCE(username,\'\') AS username FROM accounts WHERE platform=\'replit\' AND status IN (\'active\',\'registered\') AND COALESCE(tags,\'\') NOT LIKE \'%subnode_deployed%\' LIMIT 1"
+        );
+        acc = rows[0];
+      }
+      if (!acc) { job.status = "error"; job.result = { error: "账号未找到" }; return; }
+      if (!acc.password) { job.status = "error"; job.result = { error: "无密码，无法登录" }; return; }
+      log(`开始部署 ${acc.email} (id=${acc.id}, username=${acc.username})...`);
+
+      // 获取 outlook token
+      const ol = await dbQ<{ token: string | null }>(
+        "SELECT token FROM accounts WHERE platform=\'outlook\' AND email=$1", [acc.email]
+      );
+      const outlookTok = ol[0]?.token ?? "";
+
+      const deployR = await runPython(
+        path.join(API_DIR, "replit_deploy_agent.py"),
+        { email: acc.email, password: acc.password, outlook_token: outlookTok,
+          gateway_url: "http://45.205.27.69:8080", headless: true },
+        300_000
+      );
+      log(`部署脚本输出: ${deployR.raw.slice(-400)}`);
+      if (deployR.parsed.ok) {
+        const webUrl = String(deployR.parsed.webview_url ?? "");
+        const replUrl = String(deployR.parsed.repl_url ?? "");
+        log(`✓ 部署成功 webview=${webUrl}`);
+        await dbE(
+          "UPDATE accounts SET tags=NULLIF(TRIM(BOTH \',\' FROM COALESCE(tags,\'\') || \',subnode_deployed\'),\',\'), notes=$1, updated_at=NOW() WHERE id=$2",
+          [webUrl || replUrl, acc.id]
+        );
+        if (webUrl) {
+          try {
+            const sr = await localPost("/api/gateway/self-register",
+              { gatewayUrl: webUrl, name: acc.username || acc.email.split("@")[0] });
+            log(`✓ 网关注册: ${JSON.stringify(sr).slice(0,80)}`);
+          } catch (e) { log(`网关注册异常: ${e}`); }
+        }
+        job.status = "done";
+        job.result = { ok: true, webview_url: webUrl, repl_url: replUrl, email: acc.email };
+      } else {
+        const errMsg = String(deployR.parsed.error ?? deployR.raw.slice(-300) ?? "未知错误");
+        log(`✗ 部署失败: ${errMsg.slice(0, 200)}`);
+        job.status = "error";
+        job.result = { ok: false, error: errMsg.slice(0, 200) };
+      }
+    } catch (e) {
+      log(`FATAL: ${e}`);
+      job.status = "error";
+      job.result = { error: String(e) };
+    }
+  })();
+});
+
+// ── GET /api/replit/deploy-subnode/:jobId ─────────────────────────────────────
+router.get("/replit/deploy-subnode/:jobId", (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ success: false, error: "job not found" });
   res.json({ jobId: job.id, status: job.status, elapsed: Math.round((Date.now() - job.started) / 1000), logs: job.logs, result: job.result });
