@@ -292,23 +292,9 @@ async def attempt_register(pw_module, proxy_cfg, use_patchright: bool, stealth_f
         result["phase"] = "step1_fill"
         step1_err = await fill_step1(page)
         if step1_err == "captcha_token_invalid":
-            log("captcha token invalid → reload重试 Step1")
-            await page.reload(wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_timeout(1500)
-            # 重新点击 Email 按钮
-            for sel in ['button:has-text("Email & password")', 'button:has-text("Continue with email")',
-                        'button:has-text("Email")']:
-                btn = page.locator(sel)
-                if await btn.count():
-                    await btn.first.click()
-                    await page.wait_for_timeout(1000)
-                    break
-            try:
-                await page.wait_for_selector('input[name="email"], input[type="email"]', timeout=6000)
-            except Exception:
-                result["error"] = "captcha_token_invalid"
-                await browser.close(); return result
-            step1_err = await fill_step1(page)
+            log("captcha token invalid → 立即返回换端口（无reload，快速切换）")
+            result["error"] = "captcha_token_invalid"
+            await browser.close(); return result
 
         if step1_err:
             result["error"] = step1_err
