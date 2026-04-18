@@ -319,16 +319,31 @@ async def attempt_register(pw_module, proxy_cfg, use_patchright: bool, stealth_f
         try:
             await page.wait_for_selector(
                 'input[name="username"], input[placeholder*="username" i], #username',
-                timeout=8000
+                timeout=12000
             )
             log("Step2 username 字段已出现")
         except Exception:
             cur = page.url
-            if any(x in cur.lower() for x in ("verify", "confirm", "dashboard", "home", "@")):
+            # 检查 URL 包含成功/验证关键词
+            SUCCESS_URL_HINTS = ("verify", "confirm", "dashboard", "home", "@", "check-email", "check_email", "email", "account")
+            if any(x in cur.lower() for x in SUCCESS_URL_HINTS) and "signup" not in cur.lower():
                 result["ok"] = True; result["phase"] = "email_verify_pending"
-                log(f"✅ 直接成功（无 Step2）: {cur[:60]}")
+                log(f"✅ 无 Step2，URL 跳转成功: {cur[:80]}")
                 await browser.close(); return result
+            # 检查 body 是否有邮件已发送提示（even if URL still has 'signup'）
+            try:
+                body_chk = (await page.locator("body").inner_text())[:500].lower()
+                email_sent_hints = ("check your email", "we sent", "verify your email",
+                                    "verification email", "sent you", "check for an email",
+                                    "sent an email", "confirm your email")
+                if any(hint in body_chk for hint in email_sent_hints):
+                    result["ok"] = True; result["phase"] = "email_verify_pending"
+                    log(f"✅ 无 Step2，body 检测邮件已发送: {cur[:60]}")
+                    await browser.close(); return result
+            except Exception:
+                pass
             await page.screenshot(path=f"/tmp/replit_step2_missing_{USERNAME}.png")
+            log(f"step2 缺失，URL={cur[:80]}")
             result["error"] = "signup_username_field_missing"
             await browser.close(); return result
 

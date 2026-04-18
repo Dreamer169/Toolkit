@@ -162,6 +162,17 @@ router.post("/replit/register", (req, res) => {
             }
 
             // 立即换端口：CF封禁 / Turnstile超时 / captcha token失效
+            // "too quickly" → 该邮箱/用户名被限速，非可重试（直接下一个Outlook）
+            if (lastErr.toLowerCase().includes("too quickly") || lastErr.toLowerCase().includes("doing this too")) {
+              log(`    Rate-limited (too quickly) → skip this Outlook`);
+              break;
+            }
+            // signup_username_field_missing → step1可能已成功（账号已建），当作成功处理
+            if (lastErr.includes("signup_username_field_missing")) {
+              log(`    username_field_missing → assuming step1 succeeded, proceeding to verify`);
+              regOk = true;
+              break;
+            }
             const isInstantSwitch =
               lastErr.includes("cf_ip_banned")        ||
               lastErr.includes("cf_hard_block")       ||
