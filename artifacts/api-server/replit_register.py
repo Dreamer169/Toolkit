@@ -241,12 +241,25 @@ async def solve_recaptcha_audio(page) -> str | None:
         except Exception: pass
         return ""
 
-    token = await _read_token()
-    if token:
-        log(f"[audio] ✅ checkbox 直接通过，token 长度={len(token)}")
-        return token
+    # ── checkbox 点击前先记录已有 token（自动评分低分 token）──────────────────
+    _pre_token = await _read_token()
+    if _pre_token:
+        log(f"[audio] 注意: checkbox 点击前已有 token 长度={len(_pre_token)}（自动评分，分数可能低，不直接用）")
 
-    # ── 4. 等待 challenge iframe (bframe) ──────────────────────────────────────
+    # ── 3b. 等待 checkbox 点击后出现「新」token（真实交互产生的高分 token）──
+    _new_token = ""
+    for _tw3 in range(8):   # 最多等 4s
+        await page.wait_for_timeout(500)
+        _t = await _read_token()
+        if _t and _t != _pre_token:
+            _new_token = _t
+            break
+
+    if _new_token:
+        log(f"[audio] ✅ checkbox 点击后新 token 出现（真实交互），长度={len(_new_token)}")
+        return _new_token
+
+    # ── 4. 等待 challenge iframe (bframe)（自动评分低分时出现挑战）───────────
     challenge_frame = None
     for _w in range(20):
         for f in page.frames:
@@ -256,11 +269,12 @@ async def solve_recaptcha_audio(page) -> str | None:
         await page.wait_for_timeout(500)
 
     if not challenge_frame:
-        token = await _read_token()
-        if token:
-            log(f"[audio] ✅ 无 bframe，已有 token 长度={len(token)}")
-            return token
-        log("[audio] 未找到 challenge iframe (bframe)")
+        # bframe 没出现，看看是否有新 token
+        _t2 = await _read_token()
+        if _t2 and _t2 != _pre_token:
+            log(f"[audio] ✅ 无 bframe，新 token 出现 长度={len(_t2)}")
+            return _t2
+        log("[audio] 未找到 challenge iframe (bframe)，且无新 token")
         return None
 
     # ── 5. 点击音频按钮 ────────────────────────────────────────────────────────
@@ -598,8 +612,8 @@ async def fill_step1(page) -> str | None:
         log(f'[captcha] 15s 内未自动生成 token (rc={bool(rc_token)} ts={bool(cf_token)} any_rc={any_rc} any_ts={any_ts})')
 
     # ── reCAPTCHA 回退：音频挑战（token 没自动出现时）——————————————————
-    if any_rc and not rc_token:
-        log('[reCAPTCHA] token 未自动生成，尝试音频挑战...')
+    if any_rc:
+        log('[reCAPTCHA] 检测到 reCAPTCHA Enterprise，不使用自动评分 token，尝试音频挑战获取高分 token...')
         rc_token = await solve_recaptcha_audio(page) or ''
         if rc_token:
             log(f'[reCAPTCHA] ✅ 音频挑战解算成功 token={len(rc_token)}chars')
@@ -1008,7 +1022,7 @@ async def run() -> dict:
     final = {"ok": False, "phase": "init", "error": "", "exit_ip": ""}
     proxy_cfg = {"server": PROXY} if PROXY else None
 
-    log("v7.20 — reCAPTCHA Enterprise优先(auto-token 15s) + Turnstile条件等待 + 音频/CapSolver回退")
+    log("v7.21 — 音频挑战优先(checkbox→bframe→ffmpeg/STT)，忽略低分自动评分token，Turnstile条件等待")
     log(f"CapSolver 后备: {'已配置（仅在音频失败时使用）' if CAPSOLVER_KEY else '未配置（不影响音频方案）'}")
 
     stealth_fn = None
