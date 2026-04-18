@@ -9,34 +9,57 @@ JSON 入参:
 
 输出 (最后一行 JSON):
   { "ok": bool, "phase": str, "error": str, "exit_ip": str }
+
+BUG-FIX v2:
+  - patchright 优先（比 playwright-stealth 更稳定通过 CF）
+  - CF IP 封禁（Attention Required）在 Turnstile 循环内快速识别
+  - page.content() 检测 cf-turnstile（inner_text 只含文本，不含 HTML attr）
+  - IP 封禁立即返回 signup_cf_ip_banned（accounts.ts 遇此错误换端口重试）
 """
-import sys, json, re, time, asyncio
+import sys, json, asyncio
 
 params    = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
 EMAIL     = params.get("email", "")
 USERNAME  = params.get("username", "")
 PASSWORD  = params.get("password", "")
-PROXY     = params.get("proxy", "")        # socks5://127.0.0.1:10820
+PROXY     = params.get("proxy", "")
 UA        = params.get("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 HEADLESS  = params.get("headless", True)
-MAX_WAIT  = params.get("max_wait", 90)     # 表单超时秒数
+MAX_WAIT  = params.get("max_wait", 90)
 
 def log(msg): print(f"[replit_reg] {msg}", flush=True)
+
+def is_cf_blocked(title: str, body_text: str) -> bool:
+    t = title.lower()
+    b = body_text.lower()
+    return (
+        "attention required" in t or
+        "have been blocked" in b or
+        "sorry, you have been blocked" in b or
+        "you are unable to access" in b or
+        "error 1020" in b or
+        "error 1010" in b
+    )
 
 async def run() -> dict:
     result = {"ok": False, "phase": "init", "error": "", "exit_ip": ""}
 
-    # playwright + stealth（经验证可通过 CF Turnstile）
+    # ── 优先 patchright（CF bypass 最佳），playwright-stealth 为备选 ─────────
     stealth_fn = None
+    use_patchright = False
     try:
-        from playwright.async_api import async_playwright
-        from playwright_stealth import Stealth
-        stealth_fn = Stealth().apply_stealth_async
-        log("使用 playwright + stealth")
+        from patchright.async_api import async_playwright
+        use_patchright = True
+        log("使用 patchright（优先）")
     except ImportError:
         try:
-            from patchright.async_api import async_playwright
-            log("fallback: patchright")
+            from playwright.async_api import async_playwright
+            try:
+                from playwright_stealth import Stealth
+                stealth_fn = Stealth().apply_stealth_async
+                log("fallback: playwright + stealth")
+            except ImportError:
+                log("fallback: playwright（无 stealth）")
         except ImportError:
             result["error"] = "playwright/patchright 未安装"
             return result
@@ -44,11 +67,12 @@ async def run() -> dict:
     proxy_cfg = {"server": PROXY} if PROXY else None
 
     async with async_playwright() as pw:
+        launch_args = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+                       "--disable-blink-features=AutomationControlled"]
         browser = await pw.chromium.launch(
             headless=HEADLESS,
             proxy=proxy_cfg,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-                  "--disable-blink-features=AutomationControlled"],
+            args=launch_args,
         )
         ctx = await browser.new_context(
             viewport={"width": 1280, "height": 800},
@@ -64,85 +88,119 @@ async def run() -> dict:
                 log(f"stealth 注入失败（忽略）: {e}")
 
         try:
-            # ── 0. 获取出口 IP ───────────────────────────────────────────────
+            # ── 0. 获取出口 IP ────────────────────────────────────────────────
             result["phase"] = "get_exit_ip"
             try:
                 await page.goto("https://api.ipify.org?format=json",
-                                wait_until="domcontentloaded", timeout=15000)
+                                wait_until="domcontentloaded", timeout=12000)
                 ip_data = json.loads(await page.locator("body").inner_text())
                 result["exit_ip"] = ip_data.get("ip", "")
                 log(f"出口 IP: {result['exit_ip']}")
             except Exception:
                 log("获取出口 IP 失败（继续）")
 
-            # ── 1. 打开注册页 ────────────────────────────────────────────────
+            # ── 1. 打开注册页 ─────────────────────────────────────────────────
             result["phase"] = "navigate"
             log("打开 replit.com/signup …")
-            await page.goto("https://replit.com/signup", wait_until="load", timeout=60000)
-            await page.wait_for_timeout(3000)
+            await page.goto("https://replit.com/signup",
+                            wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(2000)
 
-            body = await page.locator("body").inner_text()
-            if "failed to evaluate" in body.lower() or "browser integrity" in body.lower():
-                result["error"] = "integrity_check_failed_on_load"
-                await browser.close()
-                return result
-            log("页面加载完成，无 integrity 错误")
-            # CF hard IP ban → 立即放弃换端口
+            # ── 2. 快速 CF 封禁检测（在 Turnstile 等待之前）─────────────────
             _title_init = await page.title()
-            _body_init  = (await page.locator("body").inner_text())[:300]
-            if "attention required" in _title_init.lower() or "have been blocked" in _body_init.lower():
+            _body_init  = (await page.locator("body").inner_text())[:500]
+            if is_cf_blocked(_title_init, _body_init):
+                log(f"CF IP 封禁（立即）: {_title_init}")
                 result["error"] = "signup_cf_ip_banned"
                 await browser.close()
                 return result
 
-            # Wait for Cloudflare Turnstile to auto-solve (up to 30s)
-            for _tw in range(15):
-                _t = await page.title()
-                _b = await page.locator("body").inner_text()
-                if "just a moment" not in _t.lower() and "cf-turnstile" not in _b:
-                    break
-                log(f"CF Turnstile waiting ({_tw+1}/15)...")
-                await page.wait_for_timeout(2000)
-            else:
-                result["error"] = "signup_turnstile_unsolved"
+            # integrity 检查
+            if "failed to evaluate" in _body_init.lower() or "browser integrity" in _body_init.lower():
+                result["error"] = "integrity_check_failed_on_load"
                 await browser.close()
                 return result
-            # Wait for actual form inputs
+
+            log(f"初始标题: {_title_init} — 继续等待 CF 验证通过…")
+
+            # ── 3. 等待 CF Turnstile 自动解除（最多 20s）────────────────────
+            # 注意：用 page.content()（HTML 源码）检测 cf-turnstile 属性
+            # inner_text() 只含可见文本，不含 HTML 标签属性
+            for _tw in range(10):
+                _t    = await page.title()
+                _html = await page.content()
+                _body = (await page.locator("body").inner_text())[:400]
+
+                # CF 封禁可能在 Turnstile 循环中才出现
+                if is_cf_blocked(_t, _body):
+                    log(f"CF IP 封禁（Turnstile 循环中）: {_t}")
+                    result["error"] = "signup_cf_ip_banned"
+                    await browser.close()
+                    return result
+
+                still_turnstile = (
+                    "just a moment" in _t.lower() or
+                    "cf-turnstile" in _html or
+                    "challenge" in _t.lower()
+                )
+                if not still_turnstile:
+                    log(f"Turnstile 已通过，标题: {_t}")
+                    break
+                log(f"CF Turnstile waiting ({_tw+1}/10) title={_t!r}…")
+                await page.wait_for_timeout(2000)
+            else:
+                # 10 次仍在 Turnstile — 可能是封禁或极慢网络
+                _final_t = await page.title()
+                _final_b = (await page.locator("body").inner_text())[:400]
+                if is_cf_blocked(_final_t, _final_b):
+                    result["error"] = "signup_cf_ip_banned"
+                else:
+                    result["error"] = "signup_turnstile_unsolved"
+                log(f"Turnstile 超时: {result['error']}")
+                await browser.close()
+                return result
+
+            # ── 4. 等待实际表单输入框出现 ────────────────────────────────────
             try:
                 await page.wait_for_selector("input:not([type=hidden])", timeout=10000)
             except Exception:
-                result["error"] = "signup_form_input_missing"
+                # 再检查一次是否被封禁
+                _t2 = await page.title()
+                _b2 = (await page.locator("body").inner_text())[:300]
+                if is_cf_blocked(_t2, _b2):
+                    result["error"] = "signup_cf_ip_banned"
+                else:
+                    result["error"] = "signup_form_input_missing"
                 await browser.close()
                 return result
-            log("Turnstile passed, form ready")
+            log("表单就绪")
 
-
-            # ── 2. 点 "Email & password" ─────────────────────────────────────
+            # ── 5. 点 "Email & password" 按钮 ────────────────────────────────
             result["phase"] = "click_email_btn"
             for sel in [
-                'button:has-text("Email")',
+                'button:has-text("Email & password")',
                 'button:has-text("Continue with email")',
+                'button:has-text("Email")',
                 '[data-cy="email-signup"]',
                 'a:has-text("Email")',
-                'button:has-text("Email & password")',
             ]:
                 btn = page.locator(sel)
                 if await btn.count():
                     await btn.first.click()
                     log(f"已点击: {sel}")
-                    await page.wait_for_timeout(2000)
+                    await page.wait_for_timeout(1500)
                     break
             else:
-                log("未找到 Email 按钮，继续尝试直接填表")
+                log("未找到 Email 按钮，直接填表")
 
-            # ── 3. 检查 integrity（按钮点击后）─────────────────────────────
-            body2 = await page.locator("body").inner_text()
-            if "failed to evaluate" in body2.lower() or "browser integrity" in body2.lower():
+            # integrity 再检查
+            _body2 = (await page.locator("body").inner_text())[:300]
+            if "failed to evaluate" in _body2.lower() or "browser integrity" in _body2.lower():
                 result["error"] = "integrity_check_failed_after_click"
                 await browser.close()
                 return result
 
-            # ── 4. 填写表单 ─────────────────────────────────────────────────
+            # ── 6. 填写表单 ──────────────────────────────────────────────────
             result["phase"] = "fill_form"
             log(f"填表: user={USERNAME} email={EMAIL}")
 
@@ -153,7 +211,7 @@ async def run() -> dict:
                     await page.wait_for_timeout(400)
                     break
 
-            await page.wait_for_timeout(600)
+            await page.wait_for_timeout(500)
 
             for sel in ['input[type="email"]', 'input[name="email"]', 'input[placeholder*="email" i]']:
                 f = page.locator(sel)
@@ -162,7 +220,7 @@ async def run() -> dict:
                     await page.wait_for_timeout(400)
                     break
 
-            await page.wait_for_timeout(500)
+            await page.wait_for_timeout(400)
 
             for sel in ['input[type="password"]', 'input[name="password"]']:
                 f = page.locator(sel)
@@ -171,11 +229,11 @@ async def run() -> dict:
                     await page.wait_for_timeout(400)
                     break
 
-            await page.wait_for_timeout(1500)
+            await page.wait_for_timeout(1200)
             await page.screenshot(path=f"/tmp/replit_form_{USERNAME}.png")
             log("表单截图已保存")
 
-            # ── 5. 提交 ─────────────────────────────────────────────────────
+            # ── 7. 提交 ──────────────────────────────────────────────────────
             result["phase"] = "submit"
             clicked = False
             for sel in [
@@ -199,7 +257,7 @@ async def run() -> dict:
             log(f"提交后 URL: {cur_url[:80]}")
 
             # integrity 再检查
-            body3 = await page.locator("body").inner_text()
+            body3 = (await page.locator("body").inner_text())[:300]
             if "failed to evaluate" in body3.lower() or "browser integrity" in body3.lower():
                 result["error"] = "integrity_check_failed_after_submit"
                 await browser.close()
@@ -207,20 +265,19 @@ async def run() -> dict:
 
             await page.screenshot(path=f"/tmp/replit_after_{USERNAME}.png")
 
-            # 判断是否跳转到验证等待页
-            if any(x in cur_url.lower() for x in ("verify", "confirm", "check-email", "dashboard", "home", "@")):
+            # ── 8. 判断注册结果 ──────────────────────────────────────────────
+            if any(x in cur_url.lower() for x in
+                   ("verify", "confirm", "check-email", "dashboard", "home", "@")):
                 log(f"✅ 注册成功，进入验证阶段: {cur_url[:60]}")
                 result["ok"]    = True
                 result["phase"] = "email_verify_pending"
             elif "signup" in cur_url.lower():
-                # 可能有 form 错误，截图检查
                 err_els = await page.locator('[class*="error"],[class*="Error"],[data-cy*="error"]').all_text_contents()
                 errs = [e.strip() for e in err_els if e.strip()]
                 if errs:
                     result["error"] = "; ".join(errs[:3])
                     log(f"表单错误: {result['error']}")
                 else:
-                    # 仍在 signup 页但无错误 — 可能 JS 慢，等一下
                     await page.wait_for_timeout(5000)
                     cur_url2 = page.url
                     if "signup" not in cur_url2.lower():
@@ -228,7 +285,7 @@ async def run() -> dict:
                         result["phase"] = "email_verify_pending"
                         log(f"✅ 延迟跳转成功: {cur_url2[:60]}")
                     else:
-                        result["error"] = f"仍在 signup 页 (可能提交失败或需人工验证)"
+                        result["error"] = "signup_still_on_form_no_redirect"
                         log(result["error"])
             else:
                 result["ok"]    = True
