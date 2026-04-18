@@ -1094,6 +1094,12 @@ router.post("/nodes/probe", async (req, res) => {
 async function pushSub2ApiAccount(provider: "openai" | "anthropic" | "gemini", baseUrl?: string, apiKey?: string, nodeBaseUrl?: string, name?: string) {
   if (!REMOTE_SUB2API_URL || !SUB2API_API_KEY || !baseUrl || !apiKey) return { ok: false, skipped: true };
   const label = `${name || "Reseek 子节点"} ${provider}`;
+  // B25: openai provider 使用子节点 gateway URL 作为 base_url
+  // sub2api 调 {base_url}/v1/responses → 子节点 gateway → Reseek /responses（无 /v1/ 前缀）
+  const effectiveBaseUrl = (provider === "openai" && nodeBaseUrl
+    ? nodeBaseUrl
+    : baseUrl
+  ).replace(/\/$/, "");
   const payloads = [
     {
       name: label,
@@ -1101,18 +1107,18 @@ async function pushSub2ApiAccount(provider: "openai" | "anthropic" | "gemini", b
       provider,
       api_key: apiKey,
       apiKey,
-      base_url: baseUrl.replace(/\/$/, ""),
-      baseUrl: baseUrl.replace(/\/$/, ""),
+      base_url: effectiveBaseUrl,
+      baseUrl: effectiveBaseUrl,
       group_id: SUB2API_GROUP_IDS[provider],
       groupId: SUB2API_GROUP_IDS[provider],
       enabled: true,
-      metadata: { source: "self-register", gatewayUrl: nodeBaseUrl },
+      metadata: { source: "self-register", gatewayUrl: nodeBaseUrl, integrationBaseUrl: baseUrl },
     },
     {
       name: label,
       provider,
       key: apiKey,
-      base_url: baseUrl.replace(/\/$/, ""),
+      base_url: effectiveBaseUrl,
       group_id: SUB2API_GROUP_IDS[provider],
       status: "active",
     },
@@ -1260,6 +1266,65 @@ router.get("/v1/models", async (req, res) => {
     }
   }
   res.json({ object: "list", data, gateway: { nodes: allNodes().map(nodeSnapshot), errors } });
+});
+
+
+// ── Responses API 代理（B25）──────────────────────────────────────────────────
+// sub2api 注册账号后会调 POST {nodeBaseUrl}/v1/responses
+// 子节点（有 integration）：直接代理到 Reseek /responses（不加 /v1/）
+// VPS（无 integration）：经 pool 路由调 callOpenAINode（内部也走 /responses）
+router.post("/v1/responses", async (req, res) => {
+  // ── 子节点：有本地 integration → 直接代理 ──
+  if (OPENAI_BASE_URL && OPENAI_API_KEY) {
+    try {
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      };
+      const oaiBeta = req.headers["openai-beta"];
+      if (oaiBeta) headers["OpenAI-Beta"] = String(oaiBeta);
+      const r = await fetch(`${OPENAI_BASE_URL}/responses`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(req.body),
+        signal: AbortSignal.timeout(90_000),
+      });
+      const text = await r.text();
+      res.status(r.status);
+      res.setHeader("content-type", r.headers.get("content-type") || "application/json");
+      res.setHeader("x-gateway-node", "local-integration");
+      res.send(text);
+    } catch (e) {
+      res.status(502).json({ error: { message: "responses proxy failed", detail: String(e) } });
+    }
+    return;
+  }
+
+  // ── VPS / 无 integration：通过 pool 路由（callOpenAINode 内部调 /responses）──
+  const body = req.body as ChatBody;
+  const candidates = orderedCandidates(typeof body.model === "string" ? body.model : "")
+    .filter((n) => n.type === "friend-openai");
+  const errors: Array<Record<string, unknown>> = [];
+  for (const node of candidates) {
+    if (!node.enabled || node.downUntil > Date.now()) {
+      errors.push({ node: node.id, error: "[跳过]" });
+      continue;
+    }
+    try {
+      const result = await callOpenAINode(node, body);
+      if (result.response.ok) {
+        res.status(result.response.status);
+        res.setHeader("x-gateway-node", node.id);
+        res.setHeader("content-type", result.response.headers.get("content-type") || "application/json");
+        res.send(result.text);
+        return;
+      }
+      errors.push({ node: node.id, status: result.response.status, error: result.text?.slice(0, 200) });
+    } catch (error) {
+      errors.push({ node: node.id, error: String(error) });
+    }
+  }
+  res.status(503).json({ error: { message: "所有节点不可用", type: "gateway_unavailable", details: errors } });
 });
 
 // ── 聊天补全 ──────────────────────────────────────────────────────────────────
