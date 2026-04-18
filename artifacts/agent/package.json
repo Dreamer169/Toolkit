@@ -1,0 +1,9 @@
+{
+  "name": "reseek-agent",
+  "version": "1.0.0",
+  "description": "Reseek hidden subnode agent",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "engines": { "node": ">=18" },
+  "license": "MIT"
+}
