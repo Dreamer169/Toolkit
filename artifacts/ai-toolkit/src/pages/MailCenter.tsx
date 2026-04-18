@@ -108,7 +108,7 @@ export default function MailCenter() {
   const pollRef                           = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoRefreshRef                    = useRef<ReturnType<typeof setInterval> | null>(null);
   const cdTimerRef                        = useRef<ReturnType<typeof setInterval> | null>(null);
-  const [refreshCountdown, setRefreshCountdown] = useState<number>(30);
+  const [refreshCountdown, setRefreshCountdown] = useState<number>(6);
   const [retokenJobId,  setRetokenJobId]  = useState<string | null>(null);
   const [retokenBusy,   setRetokenBusy]   = useState(false);
   const [retokenLog,    setRetokenLog]     = useState<string[]>([]);
@@ -154,7 +154,7 @@ export default function MailCenter() {
 
   useEffect(() => {
     loadLiveVerifyStatus();
-    const iv = setInterval(loadLiveVerifyStatus, 15_000);
+    const iv = setInterval(loadLiveVerifyStatus, 6_000);
     return () => clearInterval(iv);
   }, [loadLiveVerifyStatus]);
 
@@ -173,12 +173,12 @@ export default function MailCenter() {
     if (cdTimerRef.current)     { clearInterval(cdTimerRef.current);     cdTimerRef.current = null; }
     if (!selAccount) return;
     const ACC = selAccount;
-    setRefreshCountdown(30);
-    cdTimerRef.current = setInterval(() => setRefreshCountdown(c => (c <= 1 ? 30 : c - 1)), 1000);
+    setRefreshCountdown(6);
+    cdTimerRef.current = setInterval(() => setRefreshCountdown(c => (c <= 1 ? 6 : c - 1)), 1000);
     autoRefreshRef.current = setInterval(() => {
-      setRefreshCountdown(30);
+      setRefreshCountdown(6);
       silentRefresh(ACC, folder, search);
-    }, 30_000);
+    }, 6_000);
     return () => {
       if (autoRefreshRef.current) { clearInterval(autoRefreshRef.current); autoRefreshRef.current = null; }
       if (cdTimerRef.current)     { clearInterval(cdTimerRef.current);     cdTimerRef.current = null; }
