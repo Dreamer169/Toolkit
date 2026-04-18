@@ -101,6 +101,26 @@ def cmd_release(args):
     _persist_history()
     print(json.dumps({'success': True}))
 
+def cmd_ban(args):
+    """从 available 池中移除指定 IP，写入 banned 黑名单"""
+    _load_pool_from_disk()
+    removed = cf_ip_pool.ban_ip(args.ip)
+    _persist_history()
+    print(json.dumps({'success': True, 'removed': removed, 'ip': args.ip}))
+
+def cmd_retest(args):
+    """重测 available 里所有 IP 的延迟，移除死链和高延迟节点"""
+    _load_pool_from_disk()
+    logs = []
+    result = cf_ip_pool.retest_pool(
+        max_latency = args.max_latency,
+        threads     = args.threads,
+        port        = args.port,
+        log_cb      = lambda m: logs.append(m),
+    )
+    _persist_history()
+    print(json.dumps({**result, 'logs': logs}))
+
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest='cmd')
@@ -115,9 +135,17 @@ if __name__ == '__main__':
     acq.add_argument('--job-id', required=True, dest='job_id')
     rel = sub.add_parser('release')
     rel.add_argument('--job-id', required=True, dest='job_id')
+    ban = sub.add_parser('ban')
+    ban.add_argument('--ip', required=True)
+    ret = sub.add_parser('retest')
+    ret.add_argument('--max-latency', type=float, default=800.0, dest='max_latency')
+    ret.add_argument('--threads',     type=int,   default=8)
+    ret.add_argument('--port',        type=int,   default=443)
     args = p.parse_args()
     if   args.cmd == 'status':  cmd_status(args)
     elif args.cmd == 'refresh': cmd_refresh(args)
     elif args.cmd == 'acquire': cmd_acquire(args)
     elif args.cmd == 'release': cmd_release(args)
+    elif args.cmd == 'ban':     cmd_ban(args)
+    elif args.cmd == 'retest':  cmd_retest(args)
     else: print(json.dumps({'error': 'unknown command'}))
