@@ -114,5 +114,25 @@ module.exports = {
       "watch": false,
       "autorestart": true
     },
+    {
+      "name": "ngrok-gateway",
+      "script": "/root/Toolkit/start-ngrok-gateway.sh",
+      "interpreter": "bash",
+      "cwd": "/root/Toolkit",
+      "restart_delay": 5000,
+      "max_restarts": 20,
+      "watch": false,
+      "autorestart": true
+    },
+    {
+      "name": "sub2api",
+      "script": "/opt/sub2api/sub2api",
+      "interpreter": "none",
+      "cwd": "/opt/sub2api",
+      "restart_delay": 5000,
+      "max_restarts": 20,
+      "watch": false,
+      "autorestart": true
+    }
   ]
 };
