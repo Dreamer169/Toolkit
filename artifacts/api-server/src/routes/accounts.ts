@@ -174,23 +174,55 @@ function runPython(script: string, arg: unknown, timeoutMs = 130_000): Promise<{
 }
 
 // ── POST /api/replit/register ─────────────────────────────────────────────────
-// ── 注册前预检：刷新 token + 验证收件箱可用性 ────────────────────────────────
+// ── 注册前预检：验证 Outlook 收件箱可用性（优先复用现有 token，只在过期时才刷新）──
 async function verifyOutlookInbox(
-  acc: { id: number; email: string; refresh_token: string | null },
+  acc: { id: number; email: string; token: string | null; refresh_token: string | null },
   dbE: (sql: string, params?: unknown[]) => Promise<unknown>,
   log: (msg: string) => void
 ): Promise<string | null> {
-  if (!acc.refresh_token) {
-    log(`    [inbox✗] id=${acc.id} 无refresh_token → 标token_invalid`);
+
+  // ── 辅助：用 access_token 测试收件箱 ─────────────────────────────────────
+  async function tryInbox(tok: string): Promise<{ ok: boolean; count?: number; status?: number }> {
+    try {
+      const r = await fetch(
+        "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=1&$select=id,receivedDateTime",
+        { headers: { Authorization: `Bearer ${tok}` } }
+      );
+      if (r.ok) {
+        const d = await r.json() as { value?: unknown[] };
+        return { ok: true, count: d.value?.length ?? 0 };
+      }
+      return { ok: false, status: r.status };
+    } catch { return { ok: false, status: 0 }; }
+  }
+
+  // ── 1. 如果 DB 里已有实际 access token（非占位符），先直接验证 ──────────────
+  const stored = acc.token && acc.token.length > 50 && acc.token !== "ok" ? acc.token : null;
+  if (stored) {
+    const res = await tryInbox(stored);
+    if (res.ok) {
+      log(`    [inbox✓] id=${acc.id} ${acc.email} 现有token有效，收件箱可读 (${res.count}封)`);
+      return stored;
+    }
+    // 401 → 过期，继续走刷新流程；其它错误同样走刷新
+    log(`    [inbox] id=${acc.id} 现有token无效(${res.status}) → 尝试刷新`);
+  }
+
+  // ── 2. 无可用 refresh_token 时直接放弃 ────────────────────────────────────
+  const rt = acc.refresh_token && acc.refresh_token.length > 20 && acc.refresh_token !== "ok"
+    ? acc.refresh_token : null;
+  if (!rt) {
+    log(`    [inbox✗] id=${acc.id} 无可用refresh_token → 标token_invalid`);
     await dbE(
-      "UPDATE accounts SET tags = COALESCE(tags || ',', '') || 'token_invalid', status='suspended', updated_at=NOW() WHERE id=$1",
+      "UPDATE accounts SET tags = COALESCE(tags || ',', '') || ',token_invalid', status='suspended', updated_at=NOW() WHERE id=$1",
       [acc.id]
     );
     return null;
   }
 
-  // 1) 刷新 OAuth token
-  let accessToken = "";
+  // ── 3. OAuth refresh_token 换新 access_token ─────────────────────────────
+  let newAccessToken = "";
+  let newRefreshToken = rt;
   try {
     const tr = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
       method: "POST",
@@ -198,11 +230,14 @@ async function verifyOutlookInbox(
       body: new URLSearchParams({
         grant_type: "refresh_token",
         client_id: OUTLOOK_CLIENT_ID,
-        refresh_token: acc.refresh_token,
+        refresh_token: rt,
         scope: OUTLOOK_SCOPE,
       }).toString(),
     });
-    const td = await tr.json() as { access_token?: string; refresh_token?: string; error?: string; error_description?: string };
+    const td = await tr.json() as {
+      access_token?: string; refresh_token?: string;
+      error?: string; error_description?: string;
+    };
     if (!td.access_token) {
       const errMsg = (td.error_description ?? td.error ?? "刷新失败").slice(0, 120);
       log(`    [inbox✗] id=${acc.id} token刷新失败: ${errMsg} → 标token_invalid`);
@@ -212,46 +247,45 @@ async function verifyOutlookInbox(
       );
       return null;
     }
-    accessToken = td.access_token;
-    // 顺带更新DB里的token
-    await dbE(
-      "UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
-      [accessToken, td.refresh_token ?? acc.refresh_token, acc.id]
-    );
+    newAccessToken  = td.access_token;
+    newRefreshToken = td.refresh_token ?? rt;   // 微软可能轮换 refresh_token
+    // 仅当 refresh_token 被轮换时才更新 DB（保持"最小写入"原则）
+    if (newRefreshToken !== rt) {
+      await dbE(
+        "UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
+        [newAccessToken, newRefreshToken, acc.id]
+      );
+    } else {
+      // refresh_token 未变，只更新 access_token
+      await dbE(
+        "UPDATE accounts SET token=$1, updated_at=NOW() WHERE id=$2",
+        [newAccessToken, acc.id]
+      );
+    }
   } catch (e) {
     log(`    [inbox✗] id=${acc.id} token刷新异常: ${String(e).slice(0, 80)} → skip`);
     return null;
   }
 
-  // 2) 测试收件箱可读性（Graph API）
-  try {
-    const ir = await fetch(
-      "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=1&$select=id,receivedDateTime",
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-    if (!ir.ok) {
-      const ie = await ir.json() as { error?: { message?: string; code?: string } };
-      const errMsg = ie?.error?.message ?? `HTTP ${ir.status}`;
-      log(`    [inbox✗] id=${acc.id} 收件箱访问失败(${ir.status}): ${errMsg} → 标inbox_error`);
-      await dbE(
-        "UPDATE accounts SET tags = COALESCE(tags || ',', '') || ',inbox_error', updated_at=NOW() WHERE id=$1",
-        [acc.id]
-      );
-      return null;
-    }
-    const msgData = await ir.json() as { value?: unknown[] };
-    const msgCount = msgData.value?.length ?? 0;
-    log(`    [inbox✓] id=${acc.id} ${acc.email} token有效，收件箱可读 (${msgCount}封可见)`);
-    // 清除旧的 inbox_error 标记（如果有）
+  // ── 4. 用新 token 验证收件箱 ──────────────────────────────────────────────
+  const res2 = await tryInbox(newAccessToken);
+  if (!res2.ok) {
+    const errMsg = `收件箱访问失败 HTTP ${res2.status}`;
+    log(`    [inbox✗] id=${acc.id} ${errMsg} → 标inbox_error`);
     await dbE(
-      "UPDATE accounts SET tags = NULLIF(TRIM(BOTH ',' FROM REPLACE(COALESCE(tags,''), 'inbox_error', '')), ''), updated_at=NOW() WHERE id=$1",
+      "UPDATE accounts SET tags = COALESCE(tags || ',', '') || ',inbox_error', updated_at=NOW() WHERE id=$1",
       [acc.id]
     );
-    return accessToken;
-  } catch (e) {
-    log(`    [inbox✗] id=${acc.id} 收件箱检查异常: ${String(e).slice(0, 80)} → skip`);
     return null;
   }
+
+  log(`    [inbox✓] id=${acc.id} ${acc.email} token刷新成功，收件箱可读 (${res2.count}封)`);
+  // 清除旧的 inbox_error 标记
+  await dbE(
+    "UPDATE accounts SET tags = NULLIF(TRIM(BOTH ',' FROM REPLACE(COALESCE(tags,''), 'inbox_error', '')), ''), updated_at=NOW() WHERE id=$1",
+    [acc.id]
+  );
+  return newAccessToken;
 }
 
 router.post("/replit/register", (req, res) => {
@@ -314,7 +348,7 @@ router.post("/replit/register", (req, res) => {
 
           // ── 预检：确认 Outlook 账号 token 有效且能收件 ────────────────────────
           const freshToken = await verifyOutlookInbox(
-            { id: outlook.id, email: outlook.email, refresh_token: outlook.refresh_token },
+            { id: outlook.id, email: outlook.email, token: outlook.token, refresh_token: outlook.refresh_token },
             dbE, log
           );
           if (!freshToken) {
