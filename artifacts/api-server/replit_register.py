@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-replit_register.py — Replit 注册表单自动化 v7.0
+replit_register.py — Replit 注册表单自动化 v7.1
 核心升级：音频挑战绕过 reCAPTCHA（完全免费，无需任何付费 API key）
 策略：
   Layer 1: patchright 指纹伪装 + checkbox 自动通过（无挑战最优情况）
@@ -630,6 +630,44 @@ async def attempt_register(pw_module, proxy_cfg, use_patchright: bool, stealth_f
         except Exception as e:
             log(f"stealth 注入失败: {e}")
 
+    # Canvas 2D 指纹噪声注入（独立于 stealth，防止 Replit integrity canvas 探针）
+    _CANVAS_NOISE_JS = """
+    (() => {
+        const _oGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+        CanvasRenderingContext2D.prototype.getImageData = function(x, y, w, h) {
+            const d = _oGetImageData.call(this, x, y, w, h);
+            for (let i = 0; i < d.data.length; i += 4) {
+                d.data[i]   = Math.min(255, Math.max(0, d.data[i]   + (Math.random() > .5 ? 1 : -1)));
+                d.data[i+1] = Math.min(255, Math.max(0, d.data[i+1] + (Math.random() > .5 ? 1 : -1)));
+                d.data[i+2] = Math.min(255, Math.max(0, d.data[i+2] + (Math.random() > .5 ? 1 : -1)));
+            }
+            return d;
+        };
+        const _oToDataURL = HTMLCanvasElement.prototype.toDataURL;
+        HTMLCanvasElement.prototype.toDataURL = function(type, q) {
+            const ctx = this.getContext('2d');
+            if (ctx && this.width && this.height) {
+                try {
+                    const img = ctx.getImageData(0, 0, this.width, this.height);
+                    for (let i = 0; i < img.data.length; i += 4)
+                        img.data[i] = Math.min(255, Math.max(0, img.data[i] + (Math.random() > .5 ? 1 : -1)));
+                    ctx.putImageData(img, 0, 0);
+                } catch(e) {}
+            }
+            return _oToDataURL.call(this, type, q);
+        };
+        const _oToBlob = HTMLCanvasElement.prototype.toBlob;
+        HTMLCanvasElement.prototype.toBlob = function(cb, type, q) {
+            _oToBlob.call(this, cb, type, q);
+        };
+    })();
+    """
+    try:
+        await page.add_init_script(_CANVAS_NOISE_JS)
+        log("Canvas 2D 噪声脚本注入完成")
+    except Exception as e:
+        log(f"Canvas 噪声注入失败: {e}")
+
     _captured_reqs: list = []
     def _on_request(req):
         try:
@@ -788,30 +826,35 @@ async def run() -> dict:
     final = {"ok": False, "phase": "init", "error": "", "exit_ip": ""}
     proxy_cfg = {"server": PROXY} if PROXY else None
 
-    log("v7.0 — 音频挑战模式（完全免费：ffmpeg + Google STT / Whisper）")
+    log("v7.1 — 音频挑战 + playwright/stealth 优先（通过 integrity check）（完全免费：ffmpeg + Google STT / Whisper）")
     log(f"CapSolver 后备: {'已配置（仅在音频失败时使用）' if CAPSOLVER_KEY else '未配置（不影响音频方案）'}")
 
     stealth_fn = None
     use_patchright = False
     pw_ctx_fn = None
 
+    # playwright+stealth 优先（通过 integrity check）；patchright 作后备
     try:
-        from patchright.async_api import async_playwright as _apw
+        from playwright.async_api import async_playwright as _apw
         pw_ctx_fn = _apw
-        use_patchright = True
-        log("使用 patchright（Turnstile 自解 + 音频挑战）")
+        try:
+            from playwright_stealth import Stealth
+            stealth_fn = Stealth(
+                chrome_runtime=True,   # 必须开启，否则 Replit 检测到缺失 chrome.runtime
+                webgl_vendor=True,     # WebGL 指纹伪装
+            ).apply_stealth_async
+            log("使用 playwright + stealth（chrome_runtime=True / WebGL — 通过 integrity check）")
+        except ImportError:
+            stealth_fn = None
+            log("playwright（无 stealth，integrity check 可能失败）")
     except ImportError:
         try:
-            from playwright.async_api import async_playwright as _apw
+            from patchright.async_api import async_playwright as _apw
             pw_ctx_fn = _apw
-            try:
-                from playwright_stealth import Stealth
-                stealth_fn = Stealth().apply_stealth_async
-                log("fallback: playwright + stealth")
-            except ImportError:
-                log("fallback: playwright（无 stealth）")
+            use_patchright = True
+            log("后备: patchright（注意 integrity check 可能不过）")
         except ImportError:
-            final["error"] = "playwright/patchright 未安装"
+            final["error"] = "playwright/patchright 均未安装"
             return final
 
     try:
