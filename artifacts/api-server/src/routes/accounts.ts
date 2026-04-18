@@ -247,6 +247,7 @@ router.post("/replit/register", (req, res) => {
               proxy: `socks5://127.0.0.1:${tryPort}`,
               headless,
               max_wait: 90,
+              capsolver_key: process.env.CAPSOLVER_KEY ?? "",
             });
 
             exitIp  = String(parsed.exit_ip ?? "");
