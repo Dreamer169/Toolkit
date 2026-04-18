@@ -292,8 +292,9 @@ router.post("/replit/register", (req, res) => {
               break;
             }
             const isInstantSwitch =
-              lastErr.includes("cf_ip_banned")        ||
-              lastErr.includes("cf_hard_block")       ||
+              lastErr.includes("cf_ip_banned")              ||
+              lastErr.includes("cf_hard_block")             ||
+              lastErr.includes("cf_js_challenge_timeout")   ||  // v7.3 新增
               lastErr.includes("turnstile_unsolved");
 
             const retryable =
@@ -307,7 +308,7 @@ router.post("/replit/register", (req, res) => {
 
             if (isInstantSwitch) {
               // CF封禁端口 → 记录5分钟冷却
-              if (lastErr.includes("cf_ip_banned") || lastErr.includes("cf_hard_block")) {
+              if (lastErr.includes("cf_ip_banned") || lastErr.includes("cf_hard_block") || lastErr.includes("cf_js_challenge_timeout")) {
                 cfBannedUntil.set(tryPort, Date.now() + 5 * 60 * 1000);
                 // 同步通知 CF 池封禁该 IP
                 const cfIp = xrayPortCfIp.get(tryPort);
