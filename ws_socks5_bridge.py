@@ -7,7 +7,7 @@ Each SOCKS5 CONNECT tunnels through the Replit WS server (Replit's exit IP).
 import socket, threading, struct, select, sys, os, ssl, json
 import urllib.request, urllib.parse
 
-WS_SERVER   = os.environ.get("WS_SERVER",  "wss://409aae3f-b215-4b9f-8e19-2065ea8cf7ba-00-pqdg4bl7sgun.worf.replit.dev/ws/tunnel")
+WS_SERVER   = os.environ.get("WS_SERVER",  "wss://4810fff0-32b6-424d-a20b-6a96c29a8a0d-00-mv8mjhwuqdxx.riker.replit.dev/ws/tunnel")
 WS_TOKEN    = os.environ.get("WS_TOKEN",   "CHANGEME")
 SOCKS_PORT  = int(os.environ.get("SOCKS_PORT", "1090"))
 
