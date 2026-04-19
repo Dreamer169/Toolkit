@@ -24,6 +24,8 @@ import secrets
 import string
 import sys
 import time
+import os
+import subprocess
 from pathlib import Path
 
 from faker import Faker
@@ -2024,6 +2026,40 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
     return result
 
 
+def start_cf_pool_refill(reason: str, count: int = 240, target: int = 80, port: int = 443):
+    script = Path(__file__).with_name("cf_pool_api.py")
+    if not script.exists():
+        return False
+    try:
+        with open(os.devnull, "wb") as devnull:
+            subprocess.Popen([
+                sys.executable, str(script), "refresh",
+                "--count", str(count),
+                "--target", str(target),
+                "--threads", "12",
+                "--port", str(port),
+                "--max-latency", "900",
+            ], stdout=devnull, stderr=devnull, stdin=devnull, close_fds=True, start_new_session=True,
+               env={**os.environ, "PYTHONUNBUFFERED": "1", "CF_POOL_REFILL_REASON": reason})
+        return True
+    except Exception:
+        return False
+
+
+def make_pool_skip_result(i: int, args, engine_name: str, error: str) -> dict:
+    username = args.username.split("@")[0].strip() if i == 0 and args.username else gen_email_username()[0]
+    password = args.password.strip() if i == 0 and args.password else gen_password()
+    return {
+        "email": f"{username}@outlook.com",
+        "username": username,
+        "password": password,
+        "success": False,
+        "error": error,
+        "elapsed": "0.0s",
+        "engine": engine_name,
+    }
+
+
 # ─── 入口 ─────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Outlook 批量注册 (参考 outlook-batch-manager)")
@@ -2067,21 +2103,20 @@ def main():
 
     # CF 代理池模式
     use_cf_pool = getattr(args, 'proxy_mode', '') == 'cf'
+    _cf_pool = None
     if use_cf_pool:
         import sys as _sys, os as _os
         _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
         import cf_ip_pool as _cf_pool
         print(f"   CF代理池模式已启用 (port={args.cf_port})")
-        # 预加载一批 IP：低于本次账号数时主动补池，避免只剩少量旧节点导致连续失败
         _pool_status = _cf_pool.get_pool_status()
-        _need_ips = max(3, min(20, args.count + 2))
+        _need_ips = max(5, min(40, args.count + 5))
         if _pool_status['available'] < _need_ips:
-            print(f"   CF池可用仅 {_pool_status['available']} 个，补充到至少 {_need_ips} 个…", flush=True)
-            _cf_pool.refresh_pool(
-                generate_count=100, target_valid=25, threads=10,
-                port=args.cf_port, max_latency=900.0,
-                log_cb=lambda m: print(f"   {m}", flush=True)
-            )
+            started = start_cf_pool_refill("outlook_low_watermark", count=240, target=80, port=args.cf_port)
+            state = "启动" if started else "尝试启动"
+            print(f"   CF池可用 {_pool_status['available']} 个，低于 {_need_ips}，已{state}后台补池；本轮只使用现有已验证节点", flush=True)
+        else:
+            print(f"   CF池可用 {_pool_status['available']} 个，满足本轮需求", flush=True)
 
     svc_hint = f"  打码服务={captcha_service}" if solver else ""
     print(f"\n🚀 Outlook 批量注册  引擎={args.engine}  headless={headless}  count={args.count}{svc_hint}")
@@ -2098,26 +2133,31 @@ def main():
 
     results = []
     for i in range(args.count):
-        # 代理选择：CF池模式 > 轮换列表 > 无
         xray_relay_inst = None
+        ip_info = None
+        job_id = ""
         if use_cf_pool:
             job_id = f"reg_{i}_{int(time.time())}"
-            ip_info = _cf_pool.acquire_ip(job_id, auto_refresh=True,
+            ip_info = _cf_pool.acquire_ip(job_id, auto_refresh=False,
                                           log_cb=lambda m: print(f"   {m}", flush=True))
-            if ip_info:
-                # 启动 xray 中继：CF IP → VLESS/WS/TLS → jimhacker Worker → 目标
-                from xray_relay import XrayRelay as _XrayRelay
-                xray_relay_inst = _XrayRelay(ip_info['ip'])
-                if xray_relay_inst.start(timeout=8.0):
-                    cur_proxy = xray_relay_inst.socks5_url
-                    print(f"\n[{i+1}/{args.count}] 开始注册… CF节点: {ip_info['ip']} 延迟{ip_info['latency']}ms → SOCKS5:{xray_relay_inst.socks_port}", flush=True)
-                else:
-                    xray_relay_inst = None
-                    cur_proxy = ""
-                    print(f"\n[{i+1}/{args.count}] 开始注册… ⚠ xray 启动超时，无代理模式", flush=True)
+            if not ip_info:
+                start_cf_pool_refill("outlook_pool_empty", count=240, target=80, port=args.cf_port)
+                r = make_pool_skip_result(i, args, args.engine, "CF池无可用预验证IP，已后台补池，请稍后重试")
+                results.append(r)
+                print(f"\n[{i+1}/{args.count}] 跳过注册… ⚠ CF池无可用预验证IP（已后台补池，禁止无代理裸连）", flush=True)
+                continue
+            from xray_relay import XrayRelay as _XrayRelay
+            xray_relay_inst = _XrayRelay(ip_info['ip'])
+            if xray_relay_inst.start(timeout=8.0):
+                cur_proxy = xray_relay_inst.socks5_url
+                print(f"\n[{i+1}/{args.count}] 开始注册… CF节点: {ip_info['ip']} 延迟{ip_info['latency']}ms → SOCKS5:{xray_relay_inst.socks_port}", flush=True)
             else:
-                cur_proxy = ""
-                print(f"\n[{i+1}/{args.count}] 开始注册… ⚠ CF池无可用IP，无代理模式", flush=True)
+                _cf_pool.ban_ip(ip_info['ip'])
+                _cf_pool.release_ip(job_id)
+                r = make_pool_skip_result(i, args, args.engine, f"xray中继启动超时，已丢弃CF节点 {ip_info['ip']}")
+                results.append(r)
+                print(f"\n[{i+1}/{args.count}] 跳过注册… ⚠ xray 启动超时，已丢弃节点 {ip_info['ip']}（禁止无代理裸连）", flush=True)
+                continue
         elif proxy_list:
             # 严格 1IP1账号：每个账号独占一个代理节点，不允许复用
             if i >= len(proxy_list):
@@ -2154,6 +2194,10 @@ def main():
         if xray_relay_inst:
             xray_relay_inst.stop()
             xray_relay_inst = None
+        if use_cf_pool and ip_info and _cf_pool:
+            _cf_pool.release_ip(job_id)
+            if _cf_pool.get_pool_status().get('available', 0) < 25:
+                start_cf_pool_refill("outlook_after_consume", count=240, target=80, port=args.cf_port)
 
         status = "✅ 注册成功" if r["success"] else f"❌ {r['error']}"
         print(f"  {status}  |  {r['email']}  密码: {r['password']}  耗时: {r['elapsed']}")

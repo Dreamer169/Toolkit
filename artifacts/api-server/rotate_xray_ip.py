@@ -1,35 +1,162 @@
 #!/usr/bin/env python3
-"""
-rotate_xray_ip.py — 从 CF IP 池取新 IP 替换 xray.json 中被封禁的 CF IP，然后 reload xray
-用法：python3 rotate_xray_ip.py --banned-ip 172.67.199.22
-"""
-import sys, json, os, subprocess, argparse, threading, time
+import sys, json, os, subprocess, argparse, tempfile
 
-XRAY_JSON   = "/root/Toolkit/xray.json"
-POOL_STATE  = "/tmp/cf_pool_state.json"
-POOL_LOCK   = threading.Lock()
+XRAY_JSON = "/root/Toolkit/xray.json"
+POOL_STATE = "/tmp/cf_pool_state.json"
+API_DIR = os.path.dirname(os.path.abspath(__file__))
+CF_POOL_API = os.path.join(API_DIR, "cf_pool_api.py")
+REFILL_MIN = int(os.environ.get("CF_POOL_REFILL_MIN", "25"))
+REFILL_TARGET = int(os.environ.get("CF_POOL_REFILL_TARGET", "80"))
+REFILL_COUNT = int(os.environ.get("CF_POOL_REFILL_COUNT", "240"))
 
-# ── 从磁盘池取一个未用 IP ──────────────────────────────────────────────────
-def pop_ip_from_pool():
+
+def _lock_file(f):
     try:
-        with open(POOL_STATE) as f:
-            state = json.load(f)
-        available = state.get("available", [])
-        if not available:
-            return None, "pool_empty"
-        entry = available.pop(0)
-        state["available"] = available
-        with open(POOL_STATE, "w") as f:
-            json.dump(state, f)
-        return entry.get("ip"), None
-    except Exception as e:
-        return None, str(e)
+        import fcntl
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        pass
 
-# ── 修改 xray.json：把旧 IP 全部替换为新 IP ─────────────────────────────
+
+def _unlock_file(f):
+    try:
+        import fcntl
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+
+
+def _default_state():
+    return {"available": [], "used_history": [], "history": [], "banned": []}
+
+
+def _clean_state(state):
+    if not isinstance(state, dict):
+        state = {}
+    available = state.get("available") or []
+    history = state.get("used_history") or state.get("history") or []
+    banned = state.get("banned") or []
+    history = [x for x in history if isinstance(x, str)]
+    banned = [x for x in banned if isinstance(x, str)]
+    blocked = set(history) | set(banned)
+    clean = []
+    seen = set()
+    for item in available:
+        if not isinstance(item, dict):
+            continue
+        ip = item.get("ip")
+        lat = item.get("latency")
+        if not isinstance(ip, str) or not isinstance(lat, (int, float)):
+            continue
+        if ip in blocked or ip in seen:
+            continue
+        seen.add(ip)
+        clean.append({"ip": ip, "latency": lat, "proxy": item.get("proxy") or f"http://{ip}:443"})
+    clean.sort(key=lambda x: x["latency"])
+    hist = history[-2000:]
+    return {"available": clean, "used_history": hist, "history": hist, "history_count": len(hist), "banned": banned[-2000:]}
+
+
+def _atomic_write_state(state):
+    d = os.path.dirname(POOL_STATE) or "."
+    fd, tmp = tempfile.mkstemp(prefix="cf_pool_", suffix=".json", dir=d)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, POOL_STATE)
+    finally:
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+
+
+def _write_state_locked(mutator):
+    os.makedirs(os.path.dirname(POOL_STATE) or ".", exist_ok=True)
+    if not os.path.exists(POOL_STATE):
+        _atomic_write_state(_default_state())
+    with open(POOL_STATE, "r+") as f:
+        _lock_file(f)
+        try:
+            try:
+                state = json.load(f)
+            except Exception:
+                state = _default_state()
+            state = _clean_state(state)
+            result = mutator(state)
+            state = _clean_state(state)
+            _atomic_write_state(state)
+            return result, state
+        finally:
+            _unlock_file(f)
+
+
+def trigger_background_refill(reason: str) -> bool:
+    if not os.path.exists(CF_POOL_API):
+        return False
+    try:
+        with open(os.devnull, "wb") as devnull:
+            subprocess.Popen([
+                sys.executable, CF_POOL_API, "refresh",
+                "--count", str(REFILL_COUNT),
+                "--target", str(REFILL_TARGET),
+                "--threads", "12",
+                "--port", "443",
+                "--max-latency", "800",
+            ], stdout=devnull, stderr=devnull, stdin=devnull, close_fds=True, start_new_session=True,
+               env={**os.environ, "PYTHONUNBUFFERED": "1", "CF_POOL_REFILL_REASON": reason})
+        return True
+    except Exception:
+        return False
+
+
+def pop_ip_from_pool(banned_ip: str):
+    def mutate(state):
+        banned = state.setdefault("banned", [])
+        history = state.setdefault("used_history", state.get("history", []))
+        if banned_ip and banned_ip not in banned:
+            banned.append(banned_ip)
+        state["available"] = [x for x in state.get("available", []) if x.get("ip") != banned_ip]
+        if not state["available"]:
+            return None
+        entry = state["available"].pop(0)
+        ip = entry.get("ip")
+        if ip and ip not in history:
+            history.append(ip)
+        state["history"] = history
+        state["history_count"] = len(history)
+        return entry
+    entry, state = _write_state_locked(mutate)
+    remaining = len(state.get("available", []))
+    refill_started = False
+    if remaining < REFILL_MIN:
+        refill_started = trigger_background_refill("low_watermark")
+    if not entry:
+        refill_started = trigger_background_refill("pool_empty") or refill_started
+        return None, "pool_empty", remaining, refill_started
+    return entry, None, remaining, refill_started
+
+
+def push_ip_back(entry):
+    if not entry or not isinstance(entry, dict):
+        return
+    ip = entry.get("ip")
+    if not ip:
+        return
+    def mutate(state):
+        history = state.setdefault("used_history", state.get("history", []))
+        state["used_history"] = [x for x in history if x != ip]
+        state["history"] = state["used_history"]
+        present = {x.get("ip") for x in state.get("available", []) if isinstance(x, dict)}
+        if ip not in present:
+            state.setdefault("available", []).insert(0, entry)
+        state["history_count"] = len(state["used_history"])
+    _write_state_locked(mutate)
+
+
 def patch_xray_json(banned_ip: str, new_ip: str) -> int:
     with open(XRAY_JSON) as f:
         cfg = json.load(f)
-
     changed = 0
     for ob in cfg.get("outbounds", []):
         vnext = ob.get("settings", {}).get("vnext", [])
@@ -37,55 +164,43 @@ def patch_xray_json(banned_ip: str, new_ip: str) -> int:
             if v.get("address") == banned_ip:
                 v["address"] = new_ip
                 changed += 1
-
     if changed:
         with open(XRAY_JSON, "w") as f:
             json.dump(cfg, f, indent=2)
-
     return changed
 
-# ── Reload xray（先试 pm2，失败则 SIGHUP pid）─────────────────────────────
-def reload_xray() -> str:
-    r = subprocess.run(["pm2", "reload", "xray"], capture_output=True, text=True, timeout=10)
-    if r.returncode == 0:
-        return "pm2_reload_ok"
-    # fallback: SIGHUP
-    r2 = subprocess.run(["pkill", "-HUP", "-x", "xray"], capture_output=True, text=True)
-    return "sighup_ok" if r2.returncode == 0 else "reload_failed"
 
-# ── main ──────────────────────────────────────────────────────────────────
+def reload_xray() -> str:
+    try:
+        r = subprocess.run(["pm2", "reload", "xray"], capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            return "pm2_reload_ok"
+    except Exception:
+        pass
+    try:
+        r2 = subprocess.run(["pkill", "-HUP", "-x", "xray"], capture_output=True, text=True, timeout=5)
+        return "sighup_ok" if r2.returncode == 0 else "reload_failed"
+    except Exception:
+        return "reload_failed"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--banned-ip", required=True)
     args = ap.parse_args()
     banned = args.banned_ip.strip()
 
-    new_ip, err = pop_ip_from_pool()
-    if err == "pool_empty":
-        # 池空了 → 自动重建（后台快速测速 40 个候选，取前 15 个）
-        try:
-            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            import cf_ip_pool
-            cf_ip_pool.refresh_pool(generate_count=40, target_valid=15,
-                                    threads=8, port=443, max_latency=600.0)
-            new_ip, err = pop_ip_from_pool()
-        except Exception as ex:
-            err = f"auto-refresh failed: {ex}"
-    if err or not new_ip:
-        print(json.dumps({"success": False, "error": err or "no_ip_after_refresh"})); return
+    entry, err, remaining, refill_started = pop_ip_from_pool(banned)
+    if err or not entry:
+        print(json.dumps({"success": False, "error": err or "pool_empty", "refill_started": refill_started, "remaining": remaining}))
+        return
 
+    new_ip = entry["ip"]
     changed = patch_xray_json(banned, new_ip)
     if not changed:
-        # 把 IP 放回池（没有实际用到）
-        try:
-            with open(POOL_STATE) as f:
-                s = json.load(f)
-            s["available"].insert(0, {"ip": new_ip, "latency": 1.5, "proxy": f"http://{new_ip}:443"})
-            with open(POOL_STATE, "w") as f:
-                json.dump(s, f)
-        except Exception:
-            pass
-        print(json.dumps({"success": False, "error": f"banned_ip {banned} not found in xray.json"})); return
+        push_ip_back(entry)
+        print(json.dumps({"success": False, "error": f"banned_ip {banned} not found in xray.json", "refill_started": refill_started, "remaining": remaining}))
+        return
 
     reload_status = reload_xray()
     print(json.dumps({
@@ -94,7 +209,10 @@ def main():
         "new_ip": new_ip,
         "changed_outbounds": changed,
         "reload": reload_status,
+        "remaining": remaining,
+        "refill_started": refill_started,
     }))
+
 
 if __name__ == "__main__":
     main()

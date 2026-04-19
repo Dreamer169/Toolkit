@@ -3,6 +3,7 @@ import { logger } from "./lib/logger";
 import { selfRegister } from "./routes/tunnel";
 import { startLiveVerifyPoller } from "./lib/live-verify-poller.js";
 import { startAccountHealthcheck } from "./lib/account-healthcheck.js";
+import { startCfPoolMaintainer } from "./lib/cf-pool-maintainer.js";
 
 const rawPort = process.env["PORT"];
 if (!rawPort) throw new Error("PORT environment variable is required but was not provided.");
@@ -19,6 +20,7 @@ const server = app.listen(port, (err) => {
   startLiveVerifyPoller(10_000);
   // 账号健康检查：自动补 OAuth + 打标签（每5分钟）
   startAccountHealthcheck(5 * 60 * 1000);
+  startCfPoolMaintainer();
 });
 
 server.on("error", (err) => { logger.error({ err }, "Server error"); });

@@ -1,5 +1,5 @@
 import { logger } from "./logger.js";
-import { spawnSync } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { existsSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -7,18 +7,22 @@ import { fileURLToPath } from "url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const CF_POOL_SCRIPT =
-  ["/workspaces/Toolkit/artifacts/api-server/cf_pool_api.py",
+  ["/root/Toolkit/artifacts/api-server/cf_pool_api.py",
+   "/workspaces/Toolkit/artifacts/api-server/cf_pool_api.py",
    "/home/runner/workspace/artifacts/api-server/cf_pool_api.py",
+   path.resolve(process.cwd(), "artifacts/api-server/cf_pool_api.py"),
+   path.resolve(__dirname, "../../cf_pool_api.py"),
    path.resolve(__dirname, "../../../artifacts/api-server/cf_pool_api.py"),
   ].find((p) => existsSync(p))
-  ?? "/workspaces/Toolkit/artifacts/api-server/cf_pool_api.py";
+  ?? "/root/Toolkit/artifacts/api-server/cf_pool_api.py";
 
-const MIN_POOL_SIZE   = 40;   // 低于此值触发补充
-const TARGET_POOL_SIZE = 50;  // 每次补充目标数量
-const GENERATE_COUNT   = 150;  // 每次生成候选 IP 数量
-const CHECK_INTERVAL_MS = 10 * 60 * 1000; // 每10分钟检查一次
+const MIN_POOL_SIZE = 80;
+const TARGET_POOL_SIZE = 100;
+const GENERATE_COUNT = 300;
+const CHECK_INTERVAL_MS = 60 * 1000;
 
 let _intervalId: ReturnType<typeof setInterval> | null = null;
+let _refreshRunning = false;
 
 function runPython(args: string[], timeoutMs = 60_000): { ok: boolean; data: Record<string, unknown> } {
   const r = spawnSync("python3", [CF_POOL_SCRIPT, ...args], {
@@ -45,21 +49,48 @@ function getPoolStatus(): { available: number; pool: Array<{ ip: string; latency
   };
 }
 
-function refreshPool(): { newIps: number; total: number } {
-  logger.info({ target: TARGET_POOL_SIZE, generate: GENERATE_COUNT }, "[cf-pool] 开始补充 IP 池");
-  const { ok, data } = runPython([
-    "refresh",
-    "--count", String(GENERATE_COUNT),
-    "--target", String(TARGET_POOL_SIZE),
-    "--threads", "10",
-    "--port", "443",
-    "--max-latency", "800",
-  ], 90_000);
-  if (!ok) return { newIps: 0, total: 0 };
-  const newIps = (data["new_ips"] as number) ?? 0;
-  const total  = (data["total_available"] as number) ?? 0;
-  logger.info({ newIps, total }, "[cf-pool] 补充完成");
-  return { newIps, total };
+function refreshPool(): Promise<{ newIps: number; total: number }> {
+  if (_refreshRunning) return Promise.resolve({ newIps: 0, total: 0 });
+  _refreshRunning = true;
+  logger.info({ target: TARGET_POOL_SIZE, generate: GENERATE_COUNT }, "[cf-pool] 开始后台补充 IP 池");
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    const child = spawn("python3", [
+      CF_POOL_SCRIPT,
+      "refresh",
+      "--count", String(GENERATE_COUNT),
+      "--target", String(TARGET_POOL_SIZE),
+      "--threads", "12",
+      "--port", "443",
+      "--max-latency", "800",
+    ], { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+    }, 120_000);
+    child.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
+    child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
+    child.on("close", () => {
+      clearTimeout(timer);
+      _refreshRunning = false;
+      try {
+        const data = JSON.parse(stdout || "{}");
+        const newIps = (data["new_ips"] as number) ?? 0;
+        const total = (data["total_available"] as number) ?? 0;
+        logger.info({ newIps, total }, "[cf-pool] 后台补充完成");
+        resolve({ newIps, total });
+      } catch {
+        logger.warn({ stderr: stderr.slice(0, 300) }, "[cf-pool] 后台补充解析失败");
+        resolve({ newIps: 0, total: 0 });
+      }
+    });
+    child.on("error", (err: Error) => {
+      clearTimeout(timer);
+      _refreshRunning = false;
+      logger.warn({ err: err.message }, "[cf-pool] 后台补充启动失败");
+      resolve({ newIps: 0, total: 0 });
+    });
+  });
 }
 
 async function runCheck() {
@@ -67,8 +98,8 @@ async function runCheck() {
   logger.info({ available, min: MIN_POOL_SIZE }, "[cf-pool] 维护检查");
 
   if (available < MIN_POOL_SIZE) {
-    logger.info({ available, min: MIN_POOL_SIZE }, "[cf-pool] IP 池不足，触发补充");
-    refreshPool();
+    logger.info({ available, min: MIN_POOL_SIZE }, "[cf-pool] IP 池不足，触发后台补充");
+    await refreshPool();
   } else {
     logger.info({ available }, "[cf-pool] IP 池健康，无需补充");
   }
@@ -78,7 +109,6 @@ export function startCfPoolMaintainer() {
   logger.info({ script: CF_POOL_SCRIPT, minSize: MIN_POOL_SIZE, intervalMin: CHECK_INTERVAL_MS / 60_000 },
     "[cf-pool] IP 池动态维护器启动");
 
-  // 启动时立即检查一次（稍延迟，避免阻塞启动）
   setTimeout(() => { runCheck().catch((e) => logger.error({ err: String(e) }, "[cf-pool] 初始检查出错")); }, 5_000);
 
   if (_intervalId) clearInterval(_intervalId);

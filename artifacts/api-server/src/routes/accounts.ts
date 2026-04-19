@@ -28,6 +28,7 @@ const portLastGood = new Map<number, number>();
 
 // ── 启动时从 xray.json 建立 port → CF IP 映射表 ─────────────────────────────
 const xrayPortCfIp = new Map<number, string>();
+const rotatingCfIps = new Set<string>();
 (async () => {
   try {
     const { readFileSync, existsSync } = await import("fs");
@@ -68,30 +69,35 @@ const ROTATE_SCRIPT = [
 
 function rotateCfIpInXray(bannedIp: string) {
   if (!ROTATE_SCRIPT) { console.warn("[cf-rotate] rotate_xray_ip.py 未找到"); return; }
-  // 使用 spawn（异步）避免 spawnSync 阻塞 Node.js 主线程最多 12s
+  if (rotatingCfIps.has(bannedIp)) { console.warn(`[cf-rotate] ${bannedIp} rotation already running, skip duplicate`); return; }
+  rotatingCfIps.add(bannedIp);
   try {
     let stdout = "";
+    let stderr = "";
     const proc = spawn(PYTHON, [ROTATE_SCRIPT, "--banned-ip", bannedIp]);
     proc.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
+    proc.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
     proc.on("close", () => {
       try {
         const result = stdout ? JSON.parse(stdout) : {};
         if (result.success) {
-          console.log(`[cf-rotate] ${bannedIp} → ${result.new_ip}  outbounds=${result.changed_outbounds} reload=${result.reload}`);
+          console.log(`[cf-rotate] ${bannedIp} → ${result.new_ip} outbounds=${result.changed_outbounds} reload=${result.reload} remaining=${result.remaining ?? "?"}`);
           rebuildXrayPortMap().catch(() => {});
         } else {
-          const error = String(result.error || "unknown");
+          const error = String(result.error || stderr || "unknown");
           if (error.includes("not found in xray.json")) {
             console.warn(`[cf-rotate] stale banned IP ${bannedIp}, rebuild map and skip`);
             rebuildXrayPortMap().catch(() => {});
             return;
           }
-          console.warn(`[cf-rotate] 失败: ${error}`);
+          if (error.includes("pool_empty")) console.warn(`[cf-rotate] 失败: pool_empty，已触发后台补池`);
+          else console.warn(`[cf-rotate] 失败: ${error}`);
         }
       } catch (e) { console.warn("[cf-rotate] parse error:", e); }
+      finally { rotatingCfIps.delete(bannedIp); }
     });
-    proc.on("error", (e: Error) => console.warn("[cf-rotate] spawn error:", e.message));
-  } catch (e) { console.warn("[cf-rotate] exception:", e); }
+    proc.on("error", (e: Error) => { rotatingCfIps.delete(bannedIp); console.warn("[cf-rotate] spawn error:", e.message); });
+  } catch (e) { rotatingCfIps.delete(bannedIp); console.warn("[cf-rotate] exception:", e); }
 }
 
 async function rebuildXrayPortMap() {
@@ -201,6 +207,28 @@ const jobs = new Map<string, Job>();
 
 function makeJobId() { return `rpl_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`; }
 function pick<T>(arr: T[]): T { return arr[Math.floor(Math.random() * arr.length)]; }
+
+const REPLIT_USERNAME_ADJS = [
+  "amber","ancient","arctic","autumn","azure","binary","brave","bright","calm","cedar","clear","clever","cosmic","crimson","crystal","daily","deep","distant","drift","dusty","early","ember","fair","fast","forest","fresh","frost","gentle","golden","green","hidden","honest","ivory","jade","keen","kind","lively","lunar","maple","mellow","misty","modern","neon","nimble","noble","north","ocean","opal","polar","quiet","rapid","river","ruby","sage","silent","silver","solar","solid","spring","steady","stellar","stone","storm","summer","swift","tidal","true","urban","velvet","violet","warm","wild","winter","young","zen"
+];
+const REPLIT_USERNAME_NOUNS = [
+  "acorn","anchor","atlas","badger","beacon","bear","brook","canyon","cedar","comet","coral","dawn","dove","eagle","ember","falcon","field","finch","forest","fox","glade","harbor","hawk","heron","island","ivy","jaguar","lake","lantern","leaf","lion","maple","meadow","meteor","moon","nova","oasis","otter","panda","pearl","phoenix","pine","planet","raven","reef","river","robin","rocket","sage","shadow","sparrow","star","stone","summit","sun","tiger","trail","valley","violet","willow","wolf","zephyr"
+];
+function makeReplitUsername(): string {
+  const adj = pick(REPLIT_USERNAME_ADJS);
+  const noun = pick(REPLIT_USERNAME_NOUNS);
+  const num3 = Math.floor(Math.random() * 900) + 100;
+  const num4 = Math.floor(Math.random() * 9000) + 1000;
+  const tail = Math.random().toString(36).replace(/[^a-z]/g, "").slice(0, 2) || "xq";
+  const patterns = [
+    `${adj}${noun}${num3}`,
+    `${adj}${noun}${tail}${num3}`,
+    `${noun}${adj}${num3}`,
+    `${adj}${tail}${noun}${num4}`,
+    `${noun}${num4}${adj.slice(0, 3)}`,
+  ];
+  return pick(patterns).slice(0, 24);
+}
 
 async function localPost(p: string, body: unknown) {
   const r = await fetch(`${LOCAL_API_BASE}${p}`, {
@@ -411,9 +439,7 @@ router.post("/replit/register", (req, res) => {
         let accountDone = false;
 
         for (const outlook of candidates) {
-          const ADJS = ["cool","fast","bright","swift","calm","bold","clear","keen"];
-          const NONS = ["bear","fox","wolf","hawk","dove","lion","star","moon"];
-          const username = `${pick(ADJS)}${pick(NONS)}${Math.floor(Math.random() * 900) + 100}`;
+          const username = makeReplitUsername();
           const password = outlook.password || `Rpl${Math.random().toString(36).slice(2, 8)}!A1`;
 
           // ── 预检：确认 Outlook 账号 token 有效且能收件 ────────────────────────

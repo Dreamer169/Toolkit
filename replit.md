@@ -107,6 +107,14 @@ Critical implementation details:
 3. Python creates MailTM temp email → opens cursor.sh signup → waits for OTP email (polls MailTM) → enters OTP → saves account
 4. Supports up to 5 concurrent registrations
 
+
+### CF IP Pool / Xray Relay Stability
+- CF IP pool state is unified in `/tmp/cf_pool_state.json` with fcntl locking and atomic writes, tracking `available`, `used_history`, and persisted `banned` IPs.
+- `cf_pool_api.py acquire` is non-blocking by default and does not generate IPs inline unless explicitly passed `--auto-refresh`.
+- `rotate_xray_ip.py` performs locked atomic xray updates, releases stale xray IPs back to the pool when the banned IP is no longer present, and starts background refill when availability drops below 25.
+- API startup calls `startCfPoolMaintainer()`, which checks the pool every minute and refills in the background when available IPs drop below 80, targeting 100.
+- Outlook registration skips proxy use fast when the CF pool is empty and triggers background refill instead of blocking account workers.
+
 ### Proxy pool
 - Outlook registration no longer uses the old DB/quarkip proxy pool by default.
 - Default automatic proxy mode is CF IP pool + per-account xray relay.
