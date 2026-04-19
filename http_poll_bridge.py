@@ -52,11 +52,14 @@ def http_get_chunks(url, callback, timeout=30):
     try:
         conn.request("GET",path,headers={"Accept":"*/*","Connection":"close"})
         resp=conn.getresponse()
+        status=resp.status
         while True:
             chunk=resp.read(4096)
             if not chunk: break
             callback(chunk)
-    except Exception: pass
+        return status
+    except Exception:
+        return None
     finally: conn.close()
 
 def http_del(url, timeout=5):
@@ -105,7 +108,9 @@ def handle(client, addr):
             try:
                 while True:
                     rurl=f"{base}/api/stream/read/{sid}?token={tq}"
-                    http_get_chunks(rurl,lambda c: client.sendall(c),timeout=R_TOUT+5)
+                    st=http_get_chunks(rurl,lambda c: client.sendall(c),timeout=R_TOUT+5)
+                    if st in (404,410):
+                        break
             except Exception as e:
                 print(f"[poll-bridge] read err:{e}",flush=True)
             finally:
