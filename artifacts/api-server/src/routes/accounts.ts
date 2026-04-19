@@ -429,7 +429,7 @@ router.post("/replit/register", (req, res) => {
               email: outlook.email,
               username,
               password,
-              proxy: `socks5://127.0.0.1:${tryPort}`,
+              proxy: "socks5://127.0.0.1:1088",
               headless,
               max_wait: 90,
               capsolver_key: process.env.CAPSOLVER_KEY ?? "",
