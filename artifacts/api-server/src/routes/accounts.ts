@@ -10,6 +10,8 @@ const PYTHON = process.env.PYTHON_BIN || "/usr/bin/python3";
 const LOCAL_API_BASE = (process.env.LOCAL_API_BASE_URL || "http://127.0.0.1:" + (process.env.PORT || "8080")).replace(/\/$/, "");
 const VPS_GATEWAY = process.env.VPS_GATEWAY_URL || "http://45.205.27.69:8080/api/gateway";
 const XRAY_PORTS  = Array.from({ length: 26 }, (_, i) => 10820 + i);
+// Dead ports detected via connectivity scan (10827-10829, 10834-10841 offline)
+const DEAD_PORTS  = new Set([10827, 10828, 10829, 10834, 10835, 10836, 10837, 10838, 10839, 10840, 10841]);
 
 // Outlook OAuth (Thunderbird client_id)
 const OUTLOOK_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
@@ -110,7 +112,7 @@ async function rebuildXrayPortMap() {
 }
 function availablePorts(): number[] {
   const now = Date.now();
-  return XRAY_PORTS.filter(p => (cfBannedUntil.get(p) ?? 0) < now);
+  return XRAY_PORTS.filter(p => !DEAD_PORTS.has(p) && (cfBannedUntil.get(p) ?? 0) < now);
 }
 function sortedByReputation(ports: number[]): number[] {
   // Good ports (recently had form response) first, then others
@@ -490,6 +492,14 @@ router.post("/replit/register", (req, res) => {
               }
               continue;
             }
+            // v7.31b: account_rate_limited = IP被限速，换端口重试（最多6次）
+            if (lastErr.includes("account_rate_limited")) {
+              portLastGood.set(tryPort, Date.now()); // port got response
+              log();
+              await new Promise(r => setTimeout(r, 4000));
+              continue;
+            }
+
             const isInstantSwitch =
               lastErr.includes("cf_ip_banned")              ||
               lastErr.includes("cf_hard_block")             ||
