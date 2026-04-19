@@ -281,7 +281,7 @@ async def solve_recaptcha_audio(page) -> str | None:
 
 # ── CF Turnstile 等待 ─────────────────────────────────────────────────────────
 async def wait_cf(page) -> str | None:
-    for _w in range(120):
+    for _w in range(60):  # 30s max (0.5s*60)，成功只需 30s
         await page.wait_for_timeout(500)
         try:
             title = await page.title()
@@ -292,18 +292,17 @@ async def wait_cf(page) -> str | None:
         if "just a moment" in tl:
             if _w % 10 == 0:
                 log(f"[cf] CF challenge... ({_w//2}s)")
-            # 30s 时尝试 reload（部分 IP 需要）
-            if _w == 60:
-                log("[cf] 30s 未通过，尝试 reload...")
+            if _w == 30:
+                log("[cf] 15s 未通过，尝试 reload...")
                 try:
-                    await page.reload(wait_until="domcontentloaded", timeout=20000)
+                    await page.reload(wait_until="domcontentloaded", timeout=15000)
                 except Exception:
                     pass
             continue
         return None
     title2 = await page.title()
     if "just a moment" in title2.lower():
-        log("[cf] 60s 超时，代理 IP 被 CF 封")
+        log("[cf] 30s 超时，换端口")
         return "signup_cf_js_challenge_timeout"
     return None
 
