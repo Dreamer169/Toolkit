@@ -11,9 +11,9 @@ const LOCAL_API_BASE = (process.env.LOCAL_API_BASE_URL || "http://127.0.0.1:" + 
 const VPS_GATEWAY = process.env.VPS_GATEWAY_URL || "http://45.205.27.69:8080/api/gateway";
 // Dead ports detected via connectivity scan (10827-10829, 10834-10841 offline)
 // All quarkip 10820-10845 confirmed datacenter IPs → CF JS challenge all → removed
-// Only port 1090 (Replit sub-node via WS tunnel, exit: Replit residential-like IP) remains
+// Only port 1090 (WS-proxy bridge: VPS → http_ws_bridge.py → Replit repl WS → internet, exit: Replit cloud IP) remains
 const XRAY_PORTS_DEAD = new Set(Array.from({ length: 26 }, (_, i) => 10820 + i));  // all quarkip dead
-const XRAY_PORTS  = [1090];  // ONLY Replit sub-node: bypasses CF, best exit IP
+const XRAY_PORTS  = [1090];  // ONLY WS-proxy bridge (http_ws_bridge.py → Replit repl): bypasses CF via Replit cloud IP
 const DEAD_PORTS  = XRAY_PORTS_DEAD;
 
 // Outlook OAuth (Thunderbird client_id)
@@ -131,7 +131,7 @@ function availablePorts(): number[] {
   return XRAY_PORTS.filter(p => !DEAD_PORTS.has(p) && (cfBannedUntil.get(p) ?? 0) < now && (portDeadUntil.get(p) ?? 0) < now);
 }
 function sortedByReputation(ports: number[]): number[] {
-  // Port 1090 (Replit sub-node, best CF bypass) always first
+  // Port 1090 (WS-proxy bridge → Replit cloud IP, best CF bypass) always first
   const has1090 = ports.includes(1090);
   const rest = ports.filter(p => p !== 1090);
   const good = rest.filter(p => portLastGood.has(p)).sort((a, b) => (portLastGood.get(b)!) - (portLastGood.get(a)!));
@@ -522,14 +522,14 @@ router.post("/replit/register", (req, res) => {
               continue;
             }
             // account_rate_limited:
-            //   - port 1090 (Replit IP): Replit.com rate-limits its own cloud IPs → skip email immediately (IP OK for next email)
+            //   - port 1090 (WS-proxy bridge → Replit cloud IP): Replit.com rate-limits its own cloud IPs → skip email immediately
             //   - other ports: track unique exit IPs; 2+ different IPs rate-limited same email → email-level, skip
             if (lastErr.includes("account_rate_limited")) {
               portLastGood.set(tryPort, Date.now()); // port got response
               rateLimitedIps.add(exitIp || String(tryPort));
               if (tryPort === 1090) {
                 // Replit sub-node IP rate-limited by Replit.com → skip this email (don't mark port dead)
-                log(`    account_rate_limited on Replit sub-node (port 1090, exit: ${exitIp}) → IP rate limit by Replit.com, skip email`);
+                log(`    account_rate_limited on WS-proxy bridge (port 1090, exit: ${exitIp}) → Replit cloud IP rate-limited, skip email`);
                 break;
               }
               if (rateLimitedIps.size >= 2) {
@@ -570,7 +570,7 @@ router.post("/replit/register", (req, res) => {
             if (isInstantSwitch) {
               // CF封禁/连接失败 → 轮换该端口的 CF CDN IP
               if (lastErr.includes("ERR_CONNECTION_CLOSED") || lastErr.includes("ERR_SOCKS_CONNECTION_FAILED")) {
-                // port 1090 = Replit sub-node: short 2min cooldown (instance may restart quickly)
+                // port 1090 = WS-proxy bridge (Replit cloud IP): short 2min cooldown (repl may restart quickly)
                 const deadMs = tryPort === 1090 ? 2 * 60 * 1000 : 10 * 60 * 1000;
                 portDeadUntil.set(tryPort, Date.now() + deadMs);
                 log(`    [dead] port ${tryPort} dead ${deadMs/60000}min`);
@@ -583,7 +583,7 @@ router.post("/replit/register", (req, res) => {
                 lastErr.includes("ERR_EMPTY_RESPONSE")       ||
                 lastErr.includes("ERR_CERT");
               if (needsCfRotate) {
-                // 封禁冷却：永久封禁5min，JS challenge短暂1min（port 1090=Replit sub-node不走CF封禁）
+                // 封禁冷却：永久封禁5min，JS challenge短暂1min（port 1090=WS-proxy bridge, Replit IP不走CF封禁）
                 if (tryPort !== 1090) {
                   if (lastErr.includes("cf_ip_banned") || lastErr.includes("cf_hard_block")) {
                     cfBannedUntil.set(tryPort, Date.now() + 5 * 60 * 1000);
@@ -597,7 +597,7 @@ router.post("/replit/register", (req, res) => {
                     await new Promise(r => setTimeout(r, 2000));  // wait xray reload
                   }
                 } else {
-                  log(`    → port 1090 (Replit sub-node) CF issue → skip CF rotation, try next port`);
+                  log(`    → port 1090 (WS-proxy bridge, Replit IP) CF issue → skip CF rotation, try next port`);
                 }
               }
               log(`    → instant port switch`);

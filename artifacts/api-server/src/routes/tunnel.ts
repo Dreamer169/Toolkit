@@ -240,5 +240,77 @@ function selfRegister(): void {
   req.end();
 }
 
+
+  // ── /stream/* 别名 (stream 替代 tunnel 字眼，新子节点部署建议使用) ──────────────
+  // 与 /tunnel/* 完全等价，AI/proxy 无感知切换
+
+  router.post("/stream/open", (req, res) => {
+    const tok  = (req.query.token ?? req.query.tok) as string | undefined;
+    if (!chkTok(tok)) { res.status(403).json({ error: "forbidden" }); return; }
+    const host = String(req.query.host ?? "");
+    const port = parseInt(String(req.query.port ?? "80"), 10);
+    if (!host || !port) { res.status(400).json({ error: "host/port required" }); return; }
+    const id = makeId();
+    const sk  = net.createConnection({ host, port }, () => {
+      const session: Session = { sk, rb: [], rw: [], cl: false };
+      sessions.set(id, session);
+      sk.on("data", (d: Buffer) => {
+        const ss = sessions.get(id);
+        if (!ss) return;
+        if (ss.rw.length) { ss.rw.shift()!(d); } else { ss.rb.push(d); }
+      });
+      sk.on("close", () => { const ss = sessions.get(id); if (ss) { ss.cl = true; ss.rw.forEach(r => r(null)); } });
+      sk.on("error", () => { const ss = sessions.get(id); if (ss) { ss.cl = true; ss.rw.forEach(r => r(null)); } });
+      res.json({ ok: true, id });
+    });
+    sk.on("error", (e: Error) => { if (!sessions.has(id)) { res.status(502).json({ error: e.message }); } });
+    setTimeout(() => { if (!sessions.has(id)) sk.destroy(); }, 10_000);
+  });
+
+  router.get("/stream/read/:id", async (req, res) => {
+    const tok = (req.query.token ?? req.query.tok) as string | undefined;
+    if (!chkTok(tok)) { res.status(403).json({ error: "forbidden" }); return; }
+    const id = req.params.id;
+    const ss = sessions.get(id);
+    if (!ss) { res.status(404).json({ error: "no session" }); return; }
+    res.set({ "Transfer-Encoding": "chunked", "Content-Type": "application/octet-stream",
+      "Cache-Control": "no-store, no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive" });
+    try { (res as unknown as { socket?: { setNoDelay?: (v: boolean) => void } }).socket?.setNoDelay?.(true); } catch (_) {}
+    res.flushHeaders();
+    const write = (d: Buffer) => {
+      const hex = d.length.toString(16);
+      res.write(`${hex}\r\n`); res.write(d); res.write("\r\n");
+      try { (res as unknown as { flush?: () => void }).flush?.(); } catch (_) {}
+    };
+    while (true) {
+      if (ss.rb.length) { write(Buffer.concat(ss.rb.splice(0))); }
+      else if (ss.cl) { res.write("0\r\n\r\n"); res.end(); return; }
+      else { const d = await new Promise<Buffer | null>(r => ss.rw.push(r)); if (!d) { res.write("0\r\n\r\n"); res.end(); return; } write(d); }
+    }
+  });
+
+  router.post("/stream/write/:id", (req, res) => {
+    const tok = (req.query.token ?? req.query.tok) as string | undefined;
+    if (!chkTok(tok)) { res.status(403).json({ error: "forbidden" }); return; }
+    const id = req.params.id; const ss = sessions.get(id);
+    if (!ss) { res.status(404).json({ error: "no session" }); return; }
+    const chunks: Buffer[] = [];
+    req.on("data", (d: Buffer) => chunks.push(d));
+    req.on("end", () => { ss.sk.write(Buffer.concat(chunks)); res.json({ ok: true }); });
+  });
+
+  router.delete("/stream/:id", (req, res) => {
+    const tok = (req.query.token ?? req.query.tok) as string | undefined;
+    if (!chkTok(tok)) { res.status(403).json({ error: "forbidden" }); return; }
+    cleanSession(req.params.id); res.json({ ok: true });
+  });
+
+  router.get("/stream/health", (_req, res) => {
+    res.json({ ok: true, sessions: sessions.size, wsSessions: wsSessionCount, name: NODE_NAME, time: new Date().toISOString() });
+  });
+
+  // handleStreamWs: alias of handleTunnelWs (used in index.ts for /api/stream/ws)
+  export const handleStreamWs = handleTunnelWs;
+  
 export { selfRegister };
 export default router;
