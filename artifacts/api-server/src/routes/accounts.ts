@@ -10,10 +10,11 @@ const PYTHON = process.env.PYTHON_BIN || "/usr/bin/python3";
 const LOCAL_API_BASE = (process.env.LOCAL_API_BASE_URL || "http://127.0.0.1:" + (process.env.PORT || "8080")).replace(/\/$/, "");
 const VPS_GATEWAY = process.env.VPS_GATEWAY_URL || "http://45.205.27.69:8080/api/gateway";
 // Dead ports detected via connectivity scan (10827-10829, 10834-10841 offline)
-const XRAY_PORTS_DEAD = new Set([10827,10828,10829,10834,10835,10836,10837,10838,10839,10840,10841,10845]);
-const XRAY_PORTS  = [1090, ...Array.from({ length: 26 }, (_, i) => 10820 + i).filter(p => !XRAY_PORTS_DEAD.has(p))];  // 1090=Replit sub-node (CF bypass priority)
-// Dead ports detected via connectivity scan (10827-10829, 10834-10841 offline)
-const DEAD_PORTS  = new Set([10827, 10828, 10829, 10834, 10835, 10836, 10837, 10838, 10839, 10840, 10841]);
+// All quarkip 10820-10845 confirmed datacenter IPs → CF JS challenge all → removed
+// Only port 1090 (Replit sub-node via WS tunnel, exit: Replit residential-like IP) remains
+const XRAY_PORTS_DEAD = new Set(Array.from({ length: 26 }, (_, i) => 10820 + i));  // all quarkip dead
+const XRAY_PORTS  = [1090];  // ONLY Replit sub-node: bypasses CF, best exit IP
+const DEAD_PORTS  = XRAY_PORTS_DEAD;
 
 // Outlook OAuth (Thunderbird client_id)
 const OUTLOOK_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
