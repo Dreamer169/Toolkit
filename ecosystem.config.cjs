@@ -133,6 +133,52 @@ module.exports = {
       "max_restarts": 20,
       "watch": false,
       "autorestart": true
+    },
+    {
+      "name": "http-socks5-bridge",
+      "script": "/root/Toolkit/http_ws_bridge.py",
+      "interpreter": "python3",
+      "cwd": "/root/Toolkit",
+      "env": {
+        "SOCKS_PORT": "1090",
+        "BASE_URLS": "https://e30c0ae2-f8c5-4be1-ac08-513f36159e84-00-2mfc7zpe4ng5o.picard.replit.dev",
+        "TUNNEL_TOKEN": "1NnCcQJcNgwlTDPEnDIkWEKzWIdmZ/4+BmsOp1/jLP6ojCWsv8+xTwcLj34Mu2viWy0q5SEoDP0q2qE5xHaRRg==",
+        "WS_PATH": "/api/stream/ws"
+      },
+      "restart_delay": 5000,
+      "max_restarts": 30,
+      "watch": false,
+      "autorestart": true
+    },
+    {
+      "name": "ws-tunnel-bridge",
+      "script": "/root/Toolkit/ws_tunnel_bridge.py",
+      "interpreter": "python3",
+      "cwd": "/root/Toolkit",
+      "env": {
+        "SOCKS_PORT": "1091",
+        "WS_SERVERS": "wss://e30c0ae2-f8c5-4be1-ac08-513f36159e84-00-2mfc7zpe4ng5o.picard.replit.dev/api/stream/ws",
+        "WS_TOKEN": "1NnCcQJcNgwlTDPEnDIkWEKzWIdmZ/4+BmsOp1/jLP6ojCWsv8+xTwcLj34Mu2viWy0q5SEoDP0q2qE5xHaRRg=="
+      },
+      "restart_delay": 5000,
+      "max_restarts": 30,
+      "watch": false,
+      "autorestart": true
+    },
+    {
+      "name": "ws-socks5-bridge",
+      "script": "/root/Toolkit/ws_socks5_bridge.py",
+      "interpreter": "python3",
+      "cwd": "/root/Toolkit",
+      "env": {
+        "BRIDGE_PORT": "1089",
+        "WS_URL": "wss://e30c0ae2-f8c5-4be1-ac08-513f36159e84-00-2mfc7zpe4ng5o.picard.replit.dev/api/stream",
+        "WS_TOKEN": "1NnCcQJcNgwlTDPEnDIkWEKzWIdmZ/4+BmsOp1/jLP6ojCWsv8+xTwcLj34Mu2viWy0q5SEoDP0q2qE5xHaRRg=="
+      },
+      "restart_delay": 5000,
+      "max_restarts": 30,
+      "watch": false,
+      "autorestart": true
     }
   ]
 };
