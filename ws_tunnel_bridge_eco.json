@@ -1,0 +1,16 @@
+{
+  "apps": [
+    {
+      "name": "ws-tunnel-bridge",
+      "script": "/root/Toolkit/ws_tunnel_bridge.py",
+      "interpreter": "python3",
+      "autorestart": true,
+      "max_restarts": 50,
+      "env": {
+        "WS_SERVER": "wss://a738e112-67aa-4781-95c0-aefd7e0860c8-00-3owssjt9lfedl.janeway.replit.dev/api/tunnel/ws",
+        "SOCKS_PORT": "1091",
+        "WS_TOKEN": "oSslspa7nn7+9lQw1STTv62IKOQt0y+n94uiBwqiO/d49CLnokbbFJX+317YyzaUmUrPa0rO0maRgLB7XKhlTg=="
+      }
+    }
+  ]
+}
