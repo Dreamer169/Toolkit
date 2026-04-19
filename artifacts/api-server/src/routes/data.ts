@@ -539,7 +539,7 @@ async function syncLocalSubnodeBridgeProxies(force = false) {
 }
 
 const ELIGIBLE_PROXY_SQL = `
-  (status != 'banned' OR ${SUBNODE_BRIDGE_SQL})
+  status != 'banned'
   AND NOT (host = '127.0.0.1' AND port BETWEEN 10820 AND 10845)
   AND NOT (formatted ILIKE 'socks5://127.0.0.1:1082%' OR formatted ILIKE 'socks5://127.0.0.1:1083%' OR formatted ILIKE 'socks5://127.0.0.1:1084%')
 `;
@@ -731,6 +731,116 @@ router.post("/data/captcha-config", async (req, res) => {
     );
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
+// ── 代理池后台维护 ─────────────────────────────────────────────────────────────
+const PROXY_MAINTAIN_INTERVAL_MS = 2 * 60 * 1000;   // 2 分钟跑一次
+const STUCK_ACTIVE_TIMEOUT_MS    = 8 * 60 * 1000;   // active 超 8 分钟算卡死
+
+interface MaintenanceResult {
+  ts: number; checked: number; banned: number; recycled: number;
+}
+let lastMaintenanceResult: MaintenanceResult | null = null;
+
+/** 对任意 SOCKS5 代理 URL 做真实连通性探测（握手 + CONNECT login.live.com:443） */
+function testProxyConnectivity(proxyUrl: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (!proxyUrl.startsWith("socks5://")) { resolve(true); return; } // HTTP 代理暂跳过
+    const m = proxyUrl.match(/socks5:\/\/(?:[^@]+@)?([^:]+):(\d+)/);
+    if (!m) { resolve(false); return; }
+    const [, proxyHost, proxyPortStr] = m;
+    const proxyPort = Number(proxyPortStr);
+    const socket = new Socket();
+    let step = 0, done = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (ok: boolean) => {
+      if (done) return; done = true;
+      clearTimeout(timer); socket.destroy(); resolve(ok);
+    };
+    const armTimer = (ms: number) => { clearTimeout(timer); timer = setTimeout(() => finish(false), ms); };
+    socket.once("error", () => finish(false));
+    socket.on("data", (buf) => {
+      if (step === 0) {
+        if (buf.length < 2 || buf[0] !== 0x05 || buf[1] !== 0x00) return finish(false);
+        step = 1;
+        const hostBuf = Buffer.from(SOCKS5_PROBE_HOST, "ascii");
+        const req = Buffer.alloc(7 + hostBuf.length);
+        req[0]=0x05; req[1]=0x01; req[2]=0x00; req[3]=0x03; req[4]=hostBuf.length;
+        hostBuf.copy(req, 5); req.writeUInt16BE(SOCKS5_PROBE_PORT, 5 + hostBuf.length);
+        armTimer(SOCKS5_CONNECT_TIMEOUT_MS); socket.write(req);
+      } else if (step === 1) {
+        finish(buf.length >= 2 && buf[0] === 0x05 && buf[1] === 0x00);
+      }
+    });
+    armTimer(SOCKS5_HANDSHAKE_TIMEOUT_MS);
+    socket.connect(proxyPort, proxyHost, () => socket.write(Buffer.from([0x05, 0x01, 0x00])));
+  });
+}
+
+async function runProxyMaintenance() {
+  const t0 = Date.now();
+  let recycled = 0, banned = 0, checked = 0;
+  try {
+    // 1. 回收卡在 active 超过 8 分钟的代理 → 改回 idle
+    const stuckCutoff = new Date(Date.now() - STUCK_ACTIVE_TIMEOUT_MS).toISOString();
+    const stuck = await query<{ id: number }>(
+      `SELECT id FROM proxies WHERE status='active' AND (last_used IS NULL OR last_used < $1)`,
+      [stuckCutoff]
+    );
+    if (stuck.length > 0) {
+      await execute(`UPDATE proxies SET status='idle' WHERE id=ANY($1::int[])`, [stuck.map(r=>r.id)]);
+      recycled = stuck.length;
+    }
+
+    // 2. 已消耗代理（used_count>=1, idle, 非桥）→ 标记 banned
+    const usedRows = await query<{ id: number }>(
+      `SELECT id FROM proxies
+       WHERE status='idle' AND used_count >= 1
+         AND NOT (host='127.0.0.1' AND port BETWEEN ${SUBNODE_BRIDGE_MIN_PORT} AND ${SUBNODE_BRIDGE_MAX_PORT})`,
+      []
+    );
+    if (usedRows.length > 0) {
+      await execute(
+        `UPDATE proxies SET status='banned', last_used=NOW() WHERE id=ANY($1::int[])`,
+        [usedRows.map(r=>r.id)]
+      );
+      banned += usedRows.length;
+    }
+
+    // 3. 连通性检测：idle/used_count=0 的非桥 SOCKS5 代理，每批 5 个，最多 30 个
+    const toCheck = await query<{ id: number; formatted: string }>(
+      `SELECT id, formatted FROM proxies
+       WHERE status='idle' AND used_count=0
+         AND formatted ILIKE 'socks5://%'
+         AND NOT (host='127.0.0.1' AND port BETWEEN ${SUBNODE_BRIDGE_MIN_PORT} AND ${SUBNODE_BRIDGE_MAX_PORT})
+       LIMIT 30`, []
+    );
+    checked = toCheck.length;
+    const deadIds: number[] = [];
+    for (let i = 0; i < toCheck.length; i += 5) {
+      const batch = toCheck.slice(i, i + 5);
+      const results = await Promise.all(batch.map(async p => ({ id: p.id, ok: await testProxyConnectivity(p.formatted) })));
+      for (const r of results) if (!r.ok) deadIds.push(r.id);
+    }
+    if (deadIds.length > 0) {
+      await execute(`UPDATE proxies SET status='banned', last_used=NOW() WHERE id=ANY($1::int[])`, [deadIds]);
+      banned += deadIds.length;
+    }
+
+    lastMaintenanceResult = { ts: Date.now(), checked, banned, recycled };
+    console.log(`[proxy-maintain] 完成 recycled=${recycled} banned=${banned} checked=${checked} elapsed=${Date.now()-t0}ms`);
+  } catch (e) {
+    console.error("[proxy-maintain] 出错:", e);
+  }
+}
+
+export function startProxyMaintenance() {
+  console.log("[proxy-maintain] 启动代理池后台维护，每 2 分钟运行");
+  setTimeout(() => { runProxyMaintenance(); setInterval(runProxyMaintenance, PROXY_MAINTAIN_INTERVAL_MS); }, 20_000);
+}
+
+router.get("/data/proxies/maintenance/status", (_req, res) => {
+  res.json({ success: true, lastRun: lastMaintenanceResult });
 });
 
 export default router;

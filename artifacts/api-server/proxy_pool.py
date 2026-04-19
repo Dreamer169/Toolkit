@@ -51,7 +51,7 @@ class ProxyPool:
             cur.execute("""
                 SELECT formatted, host, port, status
                 FROM proxies
-                WHERE (status IN ('active','idle') OR ((host = '127.0.0.1' AND port BETWEEN 1089 AND 1199) OR formatted = 'socks5://127.0.0.1:1089' OR formatted LIKE 'socks5://127.0.0.1:109%' OR formatted LIKE 'socks5://127.0.0.1:11%'))
+                WHERE status IN ('active','idle')
                   AND NOT (host = '127.0.0.1' AND port BETWEEN 10820 AND 10845)
                 ORDER BY
                   CASE WHEN ((host = '127.0.0.1' AND port BETWEEN 1089 AND 1199) OR formatted = 'socks5://127.0.0.1:1089' OR formatted LIKE 'socks5://127.0.0.1:109%' OR formatted LIKE 'socks5://127.0.0.1:11%') THEN 0 ELSE 1 END,
@@ -153,13 +153,33 @@ class ProxyPool:
     # ── 有效性检测 ───────────────────────────────────────────────
 
     def _validate_proxy(self, proxy_url: str, timeout: int = VALIDATE_TIMEOUT) -> bool:
-        """测试代理是否能通 VALIDATE_TARGET_URL，返回 True/False"""
+        """真实 SOCKS5 CONNECT 探测：握手 + CONNECT login.live.com:443，保证出网可用"""
+        import socket, struct
+        from urllib.parse import urlparse
+        PROBE_HOST = "login.live.com"
+        PROBE_PORT = 443
         try:
-            proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-            opener = urllib.request.build_opener(proxy_handler)
-            opener.addheaders = [("User-Agent", "ProxyValidator/1.0")]
-            resp = opener.open(VALIDATE_TARGET_URL, timeout=timeout)
-            return resp.status < 500
+            parsed = urlparse(proxy_url)
+            if parsed.scheme not in ("socks5", "socks"):
+                # HTTP 代理：暂用直连可达性判断
+                req = urllib.request.Request(VALIDATE_TARGET_URL)
+                resp = urllib.request.urlopen(req, timeout=timeout)
+                return resp.status < 500
+            proxy_host = parsed.hostname or "127.0.0.1"
+            proxy_port = parsed.port or 1080
+            with socket.create_connection((proxy_host, proxy_port), timeout=3) as s:
+                s.settimeout(timeout)
+                # Step 1: 握手（无认证）
+                s.sendall(b"\x05\x01\x00")
+                r = s.recv(2)
+                if len(r) < 2 or r[0] != 0x05 or r[1] != 0x00:
+                    return False
+                # Step 2: CONNECT 到探测目标
+                host_b = PROBE_HOST.encode("ascii")
+                req = bytes([0x05, 0x01, 0x00, 0x03, len(host_b)]) + host_b + struct.pack(">H", PROBE_PORT)
+                s.sendall(req)
+                r2 = s.recv(10)
+                return len(r2) >= 2 and r2[0] == 0x05 and r2[1] == 0x00
         except Exception:
             return False
 

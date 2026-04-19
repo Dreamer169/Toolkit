@@ -35,6 +35,7 @@ interface ProxyStats {
     bannedTotal: number;
   };
 }
+interface MaintenanceStatus { ts: number; checked: number; banned: number; recycled: number; }
 interface DbStats { accounts: number; identities: number; temp_emails: number; proxies: number }
 interface RecentAccount { id: number; platform: string; email: string; status: string; created_at: string }
 interface ApiHealth { ok: boolean; latency: number }
@@ -84,8 +85,9 @@ export default function Monitor() {
   const [dbStats, setDbStats]         = useState<DbStats | null>(null);
   const [recentAcc, setRecentAcc]     = useState<RecentAccount[]>([]);
   const [health, setHealth]           = useState<ApiHealth | null>(null);
-  const [lastRefresh, setLastRefresh] = useState(Date.now());
-  const [paused, setPaused]           = useState(false);
+  const [lastRefresh, setLastRefresh]   = useState(Date.now());
+  const [paused, setPaused]             = useState(false);
+  const [maintainStatus, setMaintainStatus] = useState<MaintenanceStatus | null>(null);
 
   const logRef   = useRef<HTMLDivElement>(null);
   const sinceRef = useRef(0);
@@ -104,6 +106,14 @@ export default function Monitor() {
     } catch {
       setHealth({ ok: false, latency: -1 });
     }
+  }, []);
+
+  // ── 拉取维护状态 ───────────────────────────────────────────────────────────
+  const fetchMaintain = useCallback(async () => {
+    try {
+      const r = await fetch(`${API}/data/proxies/maintenance/status`).then(r => r.json());
+      if (r.success && r.lastRun) setMaintainStatus(r.lastRun);
+    } catch {}
   }, []);
 
   // ── 拉取代理池统计 ─────────────────────────────────────────────────────────
@@ -213,6 +223,7 @@ export default function Monitor() {
     fetchProxy();
     fetchStats();
     fetchJobs();
+    fetchMaintain();
   }, [checkHealth, fetchProxy, fetchStats, fetchJobs]);
 
   useEffect(() => {
@@ -230,9 +241,10 @@ export default function Monitor() {
       fetchStats();
       fetchProxy();
       checkHealth();
+      fetchMaintain();
     }, 8000);
     return () => clearInterval(t);
-  }, [paused, fetchStats, fetchProxy, checkHealth]);
+  }, [paused, fetchStats, fetchProxy, checkHealth, fetchMaintain]);
 
   // ── 停止任务 ──────────────────────────────────────────────────────────────
   async function stopJob(id: string) {
@@ -546,6 +558,35 @@ export default function Monitor() {
           </div>
         </div>
       )}
+      {/* ── 代理池维护状态 ────────────────────────────────────────────── */}
+      <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4">
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-sm font-semibold text-gray-300">代理池后台维护</h2>
+          <span className="text-xs text-gray-600">每 2 分钟自动运行 · 验证真实出网连通性</span>
+        </div>
+        {maintainStatus ? (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">上次运行</div>
+              <div className="text-white font-medium mt-1">{elapsed(maintainStatus.ts)}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">探测数量</div>
+              <div className="text-blue-400 font-bold text-lg mt-1">{maintainStatus.checked}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">封禁（无效/已用）</div>
+              <div className="text-red-400 font-bold text-lg mt-1">{maintainStatus.banned}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">回收卡死 active</div>
+              <div className="text-amber-400 font-bold text-lg mt-1">{maintainStatus.recycled}</div>
+            </div>
+          </div>
+        ) : (
+          <div className="text-gray-600 text-sm animate-pulse">等待首次维护运行（启动后 20 秒）…</div>
+        )}
+      </div>
     </div>
   );
 }
