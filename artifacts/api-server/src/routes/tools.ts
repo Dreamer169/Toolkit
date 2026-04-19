@@ -2261,10 +2261,10 @@ router.get("/tools/outlook/accounts", async (req, res) => {
   try {
     const { query } = await import("../db.js");
     const rows = await query<{
-      id: number; email: string; password: string | null; token: string | null; refresh_token: string | null;
+      id: number; email: string; password: string | null; token: string | null; refresh_token: string | null; tags: string | null;
       status: string | null; notes: string | null; created_at: string;
     }>(
-      `SELECT id, email, password, token, refresh_token, status, notes, created_at
+      `SELECT id, email, password, token, refresh_token, status, notes, tags, created_at
        FROM accounts
        WHERE platform='outlook'
        ORDER BY

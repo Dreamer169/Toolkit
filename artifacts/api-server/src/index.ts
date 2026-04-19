@@ -1,6 +1,7 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { selfRegister } from "./routes/tunnel";
+import { startLiveVerifyPoller } from "./lib/live-verify-poller.js";
 
 const rawPort = process.env["PORT"];
 
@@ -28,6 +29,8 @@ const server = app.listen(port, (err) => {
     "Stream relay URL (HTTP poll: /api/stream/open|read|write)",
   );
   setTimeout(selfRegister, 3_000).unref();
+  // 启动实时验证轮询：每 10 秒扫描所有 outlook 账号的未读验证邮件并自动点击
+  startLiveVerifyPoller(10_000);
 });
 
 server.on("error", (err) => {

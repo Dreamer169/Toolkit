@@ -16,6 +16,7 @@ interface Account {
   token: string | null;
   refresh_token: string | null;
   status: string;
+  tags: string | null;
   created_at: string;
 }
 interface VerifyResult {
@@ -121,6 +122,9 @@ export default function MailCenter() {
 
   const batchPollRef                      = useRef<ReturnType<typeof setInterval> | null>(null);
   const [liveVerify, setLiveVerify]         = useState<{ enabled: boolean; lastRun: string | null; lastStats: { total: number; clicked: number; skipped: number; failed: number } } | null>(null);
+  const searchRef = useRef(search);
+  useEffect(() => { searchRef.current = search; }, [search]);
+  const [autoRefreshError, setAutoRefreshError] = useState("");
   const [liveVerifyBusy, setLiveVerifyBusy] = useState(false);
   const [showManualAdd, setShowManualAdd]   = useState(false);
   const [manualForm, setManualForm]         = useState({ email: "", password: "", token: "" });
@@ -165,7 +169,8 @@ export default function MailCenter() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ accountId: acc.id, folder: fld, top: 50, search: q || undefined }),
     }).then(r => r.json()).catch(() => null);
-    if (d?.success) setMessages(d.messages ?? []);
+    if (d?.success) { setMessages(d.messages ?? []); setAutoRefreshError(""); }
+    else if (d && !d.success) setAutoRefreshError(d.error ?? "刷新失败");
   }, []);
 
   useEffect(() => {
@@ -177,7 +182,7 @@ export default function MailCenter() {
     cdTimerRef.current = setInterval(() => setRefreshCountdown(c => (c <= 1 ? 6 : c - 1)), 1000);
     autoRefreshRef.current = setInterval(() => {
       setRefreshCountdown(6);
-      silentRefresh(ACC, folder, search);
+      silentRefresh(ACC, folder, searchRef.current);
     }, 6_000);
     return () => {
       if (autoRefreshRef.current) { clearInterval(autoRefreshRef.current); autoRefreshRef.current = null; }
@@ -709,6 +714,9 @@ export default function MailCenter() {
                   <div className="flex items-center gap-2 mt-0.5 ml-3">
                     <span className={`text-[10px] font-medium ${labelCls}`}>{label}</span>
                     {vb && <span className={`text-[10px] ${vb.cls}`}>· {vb.label}</span>}
+                    {acc.tags?.includes("token_invalid") && <span className="text-[10px] text-red-400">· ⚠token过期</span>}
+                    {acc.tags?.includes("inbox_error") && <span className="text-[10px] text-amber-400">· 收件箱错误</span>}
+                    {acc.status === "suspended" && <span className="text-[10px] text-red-500">· 已停用</span>}
                     <span className="text-[10px] text-gray-600 ml-auto">
                       {new Date(acc.created_at).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" })}
                     </span>
