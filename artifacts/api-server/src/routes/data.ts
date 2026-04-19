@@ -430,33 +430,91 @@ const SUBNODE_BRIDGE_SQL = `
 `;
 let lastSubnodeBridgeSync = 0;
 
-function isSocks5Port(port: number): Promise<boolean> {
+// 真实外网连通性探测：SOCKS5 握手 + CONNECT 到 Outlook，250ms 内握手 + 5s 内 CONNECT 成功才算可用
+const SOCKS5_PROBE_HOST = "login.live.com";
+const SOCKS5_PROBE_PORT = 443;
+const SOCKS5_HANDSHAKE_TIMEOUT_MS = 600;
+const SOCKS5_CONNECT_TIMEOUT_MS   = 5000;
+
+function testSocks5Connectivity(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = new Socket();
+    let step = 0;   // 0=handshake, 1=connect-req
     let done = false;
+    let timer: ReturnType<typeof setTimeout>;
+
     const finish = (ok: boolean) => {
       if (done) return;
       done = true;
+      clearTimeout(timer);
       socket.destroy();
       resolve(ok);
     };
-    socket.setTimeout(250);
-    socket.once("connect", () => socket.write(Buffer.from([0x05, 0x01, 0x00])));
-    socket.once("data", (buf) => finish(buf.length >= 2 && buf[0] === 0x05 && buf[1] === 0x00));
-    socket.once("timeout", () => finish(false));
+
+    // 阶段超时：握手阶段先用短超时，CONNECT 阶段用长超时
+    const armTimer = (ms: number) => {
+      clearTimeout(timer);
+      timer = setTimeout(() => finish(false), ms);
+    };
+
     socket.once("error", () => finish(false));
-    socket.connect(port, "127.0.0.1");
+
+    socket.on("data", (buf) => {
+      if (step === 0) {
+        // 期望握手响应 0x05 0x00
+        if (buf.length < 2 || buf[0] !== 0x05 || buf[1] !== 0x00) return finish(false);
+        step = 1;
+        // 发送 CONNECT 到探测目标
+        const hostBuf = Buffer.from(SOCKS5_PROBE_HOST, "ascii");
+        const req = Buffer.alloc(7 + hostBuf.length);
+        req[0] = 0x05; req[1] = 0x01; req[2] = 0x00; req[3] = 0x03;
+        req[4] = hostBuf.length;
+        hostBuf.copy(req, 5);
+        req.writeUInt16BE(SOCKS5_PROBE_PORT, 5 + hostBuf.length);
+        armTimer(SOCKS5_CONNECT_TIMEOUT_MS);
+        socket.write(req);
+      } else if (step === 1) {
+        // 期望 CONNECT 响应 0x05 0x00
+        finish(buf.length >= 2 && buf[0] === 0x05 && buf[1] === 0x00);
+      }
+    });
+
+    armTimer(SOCKS5_HANDSHAKE_TIMEOUT_MS);
+    socket.connect(port, "127.0.0.1", () => {
+      socket.write(Buffer.from([0x05, 0x01, 0x00]));
+    });
   });
 }
 
 async function syncLocalSubnodeBridgeProxies(force = false) {
   const now = Date.now();
-  if (!force && now - lastSubnodeBridgeSync < 15000) return;
+  if (!force && now - lastSubnodeBridgeSync < 30000) return;
   lastSubnodeBridgeSync = now;
-  const ports = Array.from({ length: SUBNODE_BRIDGE_MAX_PORT - SUBNODE_BRIDGE_MIN_PORT + 1 }, (_, i) => SUBNODE_BRIDGE_MIN_PORT + i);
-  const checks = await Promise.all(ports.map(async (port) => ({ port, ok: await isSocks5Port(port) })));
-  const openPorts = checks.filter((r) => r.ok).map((r) => r.port);
-  for (const port of openPorts) {
+
+  const ports = Array.from(
+    { length: SUBNODE_BRIDGE_MAX_PORT - SUBNODE_BRIDGE_MIN_PORT + 1 },
+    (_, i) => SUBNODE_BRIDGE_MIN_PORT + i
+  );
+
+  // 并发限制：分批探测，每批 8 个（避免大量 TCP 超时时互相干扰）
+  const BATCH = 8;
+  const results: { port: number; ok: boolean }[] = [];
+  for (let i = 0; i < ports.length; i += BATCH) {
+    const batch = ports.slice(i, i + BATCH);
+    const batchResults = await Promise.all(
+      batch.map(async (port) => ({ port, ok: await testSocks5Connectivity(port) }))
+    );
+    results.push(...batchResults);
+  }
+
+  const good = results.filter((r) => r.ok).map((r) => r.port);
+  const bad  = results.filter((r) => !r.ok).map((r) => r.port);
+
+  if (good.length || bad.length)
+    console.log(`[subnode-bridge] 探测完成: 可用=${good.length} 失败=${bad.length} 端口:`, good.join(",") || "无");
+
+  // 可用桥：写入/恢复为 idle
+  for (const port of good) {
     await execute(
       `INSERT INTO proxies (formatted, host, port, status, used_count, last_used)
        VALUES ($1, '127.0.0.1', $2, 'idle', 0, NULL)
@@ -465,6 +523,17 @@ async function syncLocalSubnodeBridgeProxies(force = false) {
          port=$2,
          status=CASE WHEN proxies.status='banned' THEN 'idle' ELSE proxies.status END`,
       [`socks5://127.0.0.1:${port}`, port]
+    );
+  }
+
+  // 失败桥：若已在库中则标记 banned，防止被分配
+  if (bad.length > 0) {
+    const badFormatted = bad.map((p) => `socks5://127.0.0.1:${p}`);
+    // 用单条 SQL 批量更新，避免 N 次往返
+    await execute(
+      `UPDATE proxies SET status='banned', last_used=NOW()
+       WHERE formatted = ANY($1::text[]) AND status != 'banned'`,
+      [badFormatted]
     );
   }
 }
