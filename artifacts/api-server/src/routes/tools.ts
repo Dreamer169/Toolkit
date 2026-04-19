@@ -1265,7 +1265,7 @@ router.post("/tools/outlook/register", async (req, res) => {
 
   if (!proxy && autoProxy && proxyMode !== "cf") {
     try {
-      const picked = await pickSharedProxyPool(n);
+      const picked = await pickSharedProxyPool(n, "outlook");
       if (picked.length > 0) {
         proxyList = picked.map((p) => p.formatted);
         proxy = proxyList[0] || "";
@@ -2165,33 +2165,86 @@ const SUBNODE_BRIDGE_SQL = `
 `;
 let lastSubnodeBridgeSync = 0;
 
-function isSocks5Port(port: number): Promise<boolean> {
+const SOCKS5_PROBE_HOST = "login.live.com";
+const SOCKS5_PROBE_PORT = 443;
+const SOCKS5_HANDSHAKE_TIMEOUT_MS = 600;
+const SOCKS5_CONNECT_TIMEOUT_MS = 5000;
+
+function testSocks5Connectivity(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = new Socket();
+    let step = 0;
     let done = false;
+    let timer: ReturnType<typeof setTimeout>;
+
     const finish = (ok: boolean) => {
       if (done) return;
       done = true;
+      clearTimeout(timer);
       socket.destroy();
       resolve(ok);
     };
-    socket.setTimeout(250);
-    socket.once("connect", () => socket.write(Buffer.from([0x05, 0x01, 0x00])));
-    socket.once("data", (buf) => finish(buf.length >= 2 && buf[0] === 0x05 && buf[1] === 0x00));
-    socket.once("timeout", () => finish(false));
+
+    const armTimer = (ms: number) => {
+      clearTimeout(timer);
+      timer = setTimeout(() => finish(false), ms);
+    };
+
     socket.once("error", () => finish(false));
-    socket.connect(port, "127.0.0.1");
+    socket.on("data", (buf) => {
+      if (step === 0) {
+        if (buf.length < 2 || buf[0] !== 0x05 || buf[1] !== 0x00) return finish(false);
+        step = 1;
+        const hostBuf = Buffer.from(SOCKS5_PROBE_HOST, "ascii");
+        const req = Buffer.alloc(7 + hostBuf.length);
+        req[0] = 0x05;
+        req[1] = 0x01;
+        req[2] = 0x00;
+        req[3] = 0x03;
+        req[4] = hostBuf.length;
+        hostBuf.copy(req, 5);
+        req.writeUInt16BE(SOCKS5_PROBE_PORT, 5 + hostBuf.length);
+        armTimer(SOCKS5_CONNECT_TIMEOUT_MS);
+        socket.write(req);
+      } else if (step === 1) {
+        finish(buf.length >= 2 && buf[0] === 0x05 && buf[1] === 0x00);
+      }
+    });
+
+    armTimer(SOCKS5_HANDSHAKE_TIMEOUT_MS);
+    socket.connect(port, "127.0.0.1", () => {
+      socket.write(Buffer.from([0x05, 0x01, 0x00]));
+    });
   });
 }
 
 async function syncLocalSubnodeBridgeProxies(force = false) {
   const now = Date.now();
-  if (!force && now - lastSubnodeBridgeSync < 15000) return;
+  if (!force && now - lastSubnodeBridgeSync < 30000) return;
   lastSubnodeBridgeSync = now;
-  const ports = Array.from({ length: SUBNODE_BRIDGE_MAX_PORT - SUBNODE_BRIDGE_MIN_PORT + 1 }, (_, i) => SUBNODE_BRIDGE_MIN_PORT + i);
-  const checks = await Promise.all(ports.map(async (port) => ({ port, ok: await isSocks5Port(port) })));
-  const openPorts = checks.filter((r) => r.ok).map((r) => r.port);
-  for (const port of openPorts) {
+
+  const ports = Array.from(
+    { length: SUBNODE_BRIDGE_MAX_PORT - SUBNODE_BRIDGE_MIN_PORT + 1 },
+    (_, i) => SUBNODE_BRIDGE_MIN_PORT + i
+  );
+
+  const BATCH = 8;
+  const results: { port: number; ok: boolean }[] = [];
+  for (let i = 0; i < ports.length; i += BATCH) {
+    const batch = ports.slice(i, i + BATCH);
+    const batchResults = await Promise.all(
+      batch.map(async (port) => ({ port, ok: await testSocks5Connectivity(port) }))
+    );
+    results.push(...batchResults);
+  }
+
+  const good = results.filter((r) => r.ok).map((r) => r.port);
+  const bad = results.filter((r) => !r.ok).map((r) => r.port);
+  if (good.length || bad.length) {
+    console.log(`[subnode-bridge] 探测完成: 可用=${good.length} 失败=${bad.length} 端口:`, good.join(",") || "无");
+  }
+
+  for (const port of good) {
     await execute(
       `INSERT INTO proxies (formatted, host, port, status, used_count, last_used)
        VALUES ($1, '127.0.0.1', $2, 'idle', 0, NULL)
@@ -2200,6 +2253,15 @@ async function syncLocalSubnodeBridgeProxies(force = false) {
          port=$2,
          status=CASE WHEN proxies.status='banned' THEN 'idle' ELSE proxies.status END`,
       [`socks5://127.0.0.1:${port}`, port]
+    );
+  }
+
+  if (bad.length > 0) {
+    const badFormatted = bad.map((port) => `socks5://127.0.0.1:${port}`);
+    await execute(
+      `UPDATE proxies SET status='banned', last_used=NOW()
+       WHERE formatted = ANY($1::text[]) AND status != 'banned'`,
+      [badFormatted]
     );
   }
 }
@@ -2213,7 +2275,7 @@ async function forwardCfPoolRequest(endpoint: string, init?: RequestInit) {
 }
 
 const ELIGIBLE_SHARED_PROXY_SQL = `
-  (status != 'banned' OR ${SUBNODE_BRIDGE_SQL})
+  status != 'banned'
   AND NOT (host = '127.0.0.1' AND port BETWEEN 10820 AND 10845)
   AND NOT (formatted ILIKE 'socks5://127.0.0.1:1082%' OR formatted ILIKE 'socks5://127.0.0.1:1083%' OR formatted ILIKE 'socks5://127.0.0.1:1084%')
 `;
@@ -2222,12 +2284,11 @@ const SHARED_PROXY_SOURCE_CASE = `
   CASE
     WHEN ${SUBNODE_BRIDGE_SQL} THEN 'subnode_bridge'
     WHEN host = '127.0.0.1' THEN 'local_proxy'
-    WHEN formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%' THEN 'residential'
     ELSE 'external'
   END
 `;
 
-async function pickSharedProxyPool(limit: number): Promise<Array<{ id: number; formatted: string; source: string }>> {
+async function pickSharedProxyPool(limit: number, purpose: "generic" | "outlook" = "generic"): Promise<Array<{ id: number; formatted: string; source: string }>> {
   await syncLocalSubnodeBridgeProxies();
   const n = Math.min(50, Math.max(1, Math.floor(limit || 1)));
   const rows = await query<{ id: number; formatted: string; source: string }>(`
@@ -2237,14 +2298,13 @@ async function pickSharedProxyPool(limit: number): Promise<Array<{ id: number; f
     ORDER BY
       CASE
         WHEN ${SUBNODE_BRIDGE_SQL} THEN 0
-        WHEN formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%' THEN 1
-        WHEN host <> '127.0.0.1' THEN 2
-        ELSE 3
+        WHEN host <> '127.0.0.1' THEN 1
+        ELSE 2
       END,
       used_count ASC,
       RANDOM()
     LIMIT $1
-  `, [n]);
+  `, [n, purpose]);
   if (rows.length > 0) {
     await execute(
       "UPDATE proxies SET used_count = used_count + 1, last_used = NOW(), status = 'active' WHERE id = ANY($1::int[])",

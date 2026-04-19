@@ -25,7 +25,6 @@ interface ProxyStats {
   banned: number;
   sources: {
     subnodeBridge: number;
-    residential: number;
     external: number;
     localProxy: number;
   };
@@ -136,7 +135,6 @@ export default function Monitor() {
           banned: list.filter(p => p.status === "banned").length,
           sources: {
             subnodeBridge: Number(shared.sources?.subnodeBridge ?? 0),
-            residential: Number(shared.sources?.residential ?? 0),
             external: Number(shared.sources?.external ?? 0),
             localProxy: Number(shared.sources?.localProxy ?? 0),
           },
@@ -504,7 +502,7 @@ export default function Monitor() {
         <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-sm font-semibold text-gray-300">代理池状态</h2>
-            <span className="text-xs text-gray-600">共享代理（SOCKS5/住宅）与 CF IP 池是独立系统，分开显示</span>
+            <span className="text-xs text-gray-600">共享代理池（SOCKS5/HTTP）与 CF IP 池是独立系统，低于50个时自动用 CF IP 补充</span>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4 text-xs">
             <div className="rounded-lg bg-[#0d1117] border border-emerald-900/40 p-3">
@@ -516,8 +514,8 @@ export default function Monitor() {
               <div className="text-xl font-bold text-blue-400 mt-1">{proxyStats.sources.subnodeBridge}</div>
             </div>
             <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
-              <div className="text-gray-500">住宅/外部</div>
-              <div className="text-xl font-bold text-purple-400 mt-1">{proxyStats.sources.residential + proxyStats.sources.external}</div>
+              <div className="text-gray-500">外部代理</div>
+              <div className="text-xl font-bold text-purple-400 mt-1">{proxyStats.sources.external}</div>
             </div>
             <div className="rounded-lg bg-[#0d1117] border border-cyan-900/40 p-3">
               <div className="text-gray-500">CF IP 池（独立）</div>
@@ -539,7 +537,7 @@ export default function Monitor() {
                   />
                   <div
                     className="h-full bg-purple-500/80 transition-all"
-                    style={{ width: `${proxyStats.eligibleTotal > 0 ? ((proxyStats.sources.residential + proxyStats.sources.external) / proxyStats.eligibleTotal) * 100 : 0}%` }}
+                    style={{ width: `${proxyStats.eligibleTotal > 0 ? (proxyStats.sources.external / proxyStats.eligibleTotal) * 100 : 0}%` }}
                   />
                   {/* CF IP 池独立，不并入共享代理进度条 */}
                 </>
@@ -549,7 +547,6 @@ export default function Monitor() {
               <span className="text-emerald-400">共享代理 <strong className="text-white">{proxyStats.eligibleTotal}</strong></span>
               <span className="text-cyan-400/70">CF IP <strong className="text-white">{proxyStats.cf.available}</strong>（独立系统）</span>
               <span className="text-blue-400">子节点 <strong className="text-white">{proxyStats.sources.subnodeBridge}</strong></span>
-              <span className="text-purple-400">住宅 <strong className="text-white">{proxyStats.sources.residential}</strong></span>
               <span className="text-cyan-400">CF <strong className="text-white">{proxyStats.cf.available}</strong></span>
               <span className="text-gray-600">入库总数 {proxyStats.total}</span>
             </div>

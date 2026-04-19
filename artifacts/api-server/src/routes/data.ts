@@ -548,7 +548,6 @@ const PROXY_SOURCE_CASE = `
   CASE
     WHEN ${SUBNODE_BRIDGE_SQL} THEN 'subnode_bridge'
     WHEN host = '127.0.0.1' THEN 'local_proxy'
-    WHEN formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%' THEN 'residential'
     ELSE 'external'
   END
 `;
@@ -571,8 +570,7 @@ router.get("/data/proxies", async (req, res) => {
         COUNT(*) AS total,
         COUNT(*) FILTER (WHERE ${ELIGIBLE_PROXY_SQL}) AS eligible,
         COUNT(*) FILTER (WHERE ${ELIGIBLE_PROXY_SQL} AND ${SUBNODE_BRIDGE_SQL}) AS subnode_bridge,
-        COUNT(*) FILTER (WHERE ${ELIGIBLE_PROXY_SQL} AND (formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%')) AS residential,
-        COUNT(*) FILTER (WHERE ${ELIGIBLE_PROXY_SQL} AND host <> '127.0.0.1' AND formatted NOT ILIKE '%quarkip%' AND formatted NOT ILIKE '%pool-us%') AS external,
+        COUNT(*) FILTER (WHERE ${ELIGIBLE_PROXY_SQL} AND host <> '127.0.0.1') AS external,
         COUNT(*) FILTER (WHERE ${ELIGIBLE_PROXY_SQL} AND host = '127.0.0.1' AND NOT (${SUBNODE_BRIDGE_SQL})) AS local_proxy
       FROM proxies
     `);
@@ -583,7 +581,6 @@ router.get("/data/proxies", async (req, res) => {
       eligibleTotal: Number(stats?.eligible ?? 0),
       sources: {
         subnodeBridge: Number(stats?.subnode_bridge ?? 0),
-        residential: Number(stats?.residential ?? 0),
         external: Number(stats?.external ?? 0),
         localProxy: Number(stats?.local_proxy ?? 0),
       },
@@ -644,6 +641,21 @@ router.post("/data/proxies/reset", async (req, res) => {
 });
 
 // 批量导入代理
+
+// ── 清除代理（按 pattern）─────────────────────────────────────────────────
+router.delete("/data/proxies/purge", async (req, res) => {
+  try {
+    const { pattern } = req.query as { pattern?: string };
+    if (!pattern) { res.status(400).json({ success: false, error: "需要 pattern 参数" }); return; }
+    const result = await query<{ id: number }>(
+      `SELECT id FROM proxies WHERE formatted ILIKE $1`, [`%${pattern}%`]
+    );
+    if (result.length === 0) { res.json({ success: true, deleted: 0 }); return; }
+    await execute(`DELETE FROM proxies WHERE id = ANY($1::int[])`, [result.map(r => r.id)]);
+    console.log(`[proxies/purge] 删除 ${result.length} 个匹配 "${pattern}" 的代理`);
+    res.json({ success: true, deleted: result.length });
+  } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
+});
 router.post("/data/proxies/import", async (req, res) => {
   try {
     const { text } = req.body as { text: string };
@@ -779,50 +791,44 @@ function testProxyConnectivity(proxyUrl: string): Promise<boolean> {
   });
 }
 
-/** 从现有 pool-us/quarkip 代理中提取账号凭证，用于生成新 sessid 代理 */
-async function getPoolUsCredentials() {
-  const row = await queryOne<{ formatted: string }>(
-    `SELECT formatted FROM proxies WHERE formatted ILIKE 'socks5://%sessid%@pool-us%' LIMIT 1`, []
-  );
-  if (!row) return null;
-  const m = row.formatted.match(/socks5:\/\/(.+?-country-\w+)-sessid-\d+:(.+?)@([^:]+):(\d+)/);
-  if (!m) return null;
-  return { userPrefix: m[1], password: m[2], host: m[3], port: Number(m[4]) };
-}
-
-/** idle < REPLENISH_THRESHOLD 时生成新 sessid 并验证补充到 REPLENISH_TARGET */
-async function replenishProxyPool(currentIdle: number): Promise<number> {
-  const needed = REPLENISH_TARGET - currentIdle;
+/** eligible < REPLENISH_THRESHOLD 时从 CF IP 状态文件取全量 IP 补充到 REPLENISH_TARGET */
+async function replenishFromCfPool(currentEligible: number): Promise<number> {
+  const needed = REPLENISH_TARGET - currentEligible;
   if (needed <= 0) return 0;
-  const creds = await getPoolUsCredentials();
-  if (!creds) { console.log("[proxy-maintain] 无 pool-us 凭证，无法自动补充"); return 0; }
-  const { userPrefix, password, host, port } = creds;
-  console.log(`[proxy-maintain] idle=${currentIdle} < ${REPLENISH_THRESHOLD}，开始补充至 ${REPLENISH_TARGET}...`);
-  // 生成候选 sessid URL（每次用时间戳+随机偏移保证唯一）
-  const base = Date.now();
-  const candidates = Array.from({ length: needed + 15 }, (_, i) =>
-    `socks5://${userPrefix}-sessid-${base + i * 7 + Math.floor(Math.random() * 100)}:${password}@${host}:${port}`
-  );
-  let added = 0;
-  for (let i = 0; i < candidates.length && added < needed; i += 5) {
-    const batch = candidates.slice(i, i + 5);
-    const results = await Promise.all(batch.map(async url => ({ url, ok: await testProxyConnectivity(url) })));
-    for (const r of results) {
-      if (!r.ok || added >= needed) continue;
-      const hm = r.url.match(/socks5:\/\/(?:[^@]+@)?([^:]+):(\d+)/);
-      if (!hm) continue;
+  console.log(`[proxy-maintain] eligible=${currentEligible} < ${REPLENISH_THRESHOLD}，从 CF IP 池补充 ${needed} 个...`);
+  try {
+    // 直接读 CF 池状态文件，包含全量可用 IP（不受 status 命令 top-20 限制）
+    const { readFileSync } = await import("fs");
+    const CF_STATE_FILE = process.env["CF_POOL_STATE_FILE"] || "/tmp/cf_pool_state.json";
+    let cfState: { available?: Array<{ ip: string; latency: number }> } = {};
+    try { cfState = JSON.parse(readFileSync(CF_STATE_FILE, "utf8")); } catch {}
+    const available = cfState.available || [];
+    if (available.length === 0) { console.log("[proxy-maintain] CF 状态文件为空，无法补充"); return 0; }
+    // 过滤掉已在 proxies 表中的 IP
+    const allIps = available.map(x => x.ip);
+    const existing = await query<{ host: string }>(`SELECT host FROM proxies WHERE host = ANY($1::text[])`, [allIps]);
+    const existingSet = new Set(existing.map(row => row.host));
+    const candidates = available.filter(x => !existingSet.has(x.ip)).slice(0, needed + 5);
+    if (candidates.length === 0) { console.log("[proxy-maintain] CF IP 已全部在代理表中，无新 IP 可补"); return 0; }
+    let added = 0;
+    for (const cf of candidates) {
+      if (added >= needed) break;
+      const proxyUrl = `http://${cf.ip}:443`;
       try {
         await execute(
           `INSERT INTO proxies (formatted, host, port, status, used_count, last_used)
            VALUES ($1,$2,$3,'idle',0,NULL) ON CONFLICT (formatted) DO NOTHING`,
-          [r.url, hm[1], Number(hm[2])]
+          [proxyUrl, cf.ip, 443]
         );
         added++;
       } catch {}
     }
+    console.log(`[proxy-maintain] CF 池补充完成 +${added} 个（CF 全量: ${available.length}，eligible 目标 ${REPLENISH_TARGET}）`);
+    return added;
+  } catch (e) {
+    console.error("[proxy-maintain] CF 池补充出错:", e);
+    return 0;
   }
-  console.log(`[proxy-maintain] 补充完成 +${added} 个通网代理（目标 ${REPLENISH_TARGET}）`);
-  return added;
 }
 
 async function runProxyMaintenance() {
@@ -840,18 +846,10 @@ async function runProxyMaintenance() {
       recycled = stuck.length;
     }
 
-    // 2. pool-us/quarkip session 代理：used_count>=1 → 重置为 0（sessid 本身不过期，让连通性检测决定）
-    await execute(
-      `UPDATE proxies SET used_count=0
-       WHERE status='idle' AND used_count >= 1
-         AND (formatted ILIKE '%pool-us%' OR formatted ILIKE '%quarkip%')`, []
-    );
-
-    // 3. 非 session 普通代理：used_count>=1 且 idle → banned（单次消耗型）
+    // 2. 普通代理：used_count>=1 且 idle 且非桥 → banned（单次消耗型，含 CF IP）
     const usedRows = await query<{ id: number }>(
       `SELECT id FROM proxies
        WHERE status='idle' AND used_count >= 1
-         AND NOT (formatted ILIKE '%pool-us%' OR formatted ILIKE '%quarkip%')
          AND NOT (host='127.0.0.1' AND port BETWEEN ${SUBNODE_BRIDGE_MIN_PORT} AND ${SUBNODE_BRIDGE_MAX_PORT})`,
       []
     );
@@ -879,13 +877,19 @@ async function runProxyMaintenance() {
       banned += deadIds.length;
     }
 
-    // 5. 如果 idle 代理数量低于阈值，自动补充
-    const idleCount = await queryOne<{ cnt: string }>(
-      `SELECT COUNT(*) AS cnt FROM proxies WHERE status='idle'`, []
+    // 5. 如果有效可用（eligible）代理不足阈值，自动补充
+    //    eligible = 非banned + 非子节点桥 + 非本地代理，和前端显示口径一致
+    const eligibleCount = await queryOne<{ cnt: string }>(
+      `SELECT COUNT(*) AS cnt FROM proxies
+       WHERE status != 'banned'
+         AND NOT (host='127.0.0.1' AND port BETWEEN ${SUBNODE_BRIDGE_MIN_PORT} AND ${SUBNODE_BRIDGE_MAX_PORT})
+         AND NOT (formatted ILIKE 'socks5://127.0.0.1:1082%'
+               OR formatted ILIKE 'socks5://127.0.0.1:1083%'
+               OR formatted ILIKE 'socks5://127.0.0.1:1084%')`, []
     );
-    const currentIdle = Number(idleCount?.cnt ?? 0);
-    if (currentIdle < REPLENISH_THRESHOLD) {
-      replenished = await replenishProxyPool(currentIdle);
+    const currentEligible = Number(eligibleCount?.cnt ?? 0);
+    if (currentEligible < REPLENISH_THRESHOLD) {
+      replenished = await replenishFromCfPool(currentEligible);
     }
 
     lastMaintenanceResult = { ts: Date.now(), checked, banned, recycled, replenished };
