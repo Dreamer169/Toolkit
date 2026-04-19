@@ -427,6 +427,23 @@ async def _wait_for_token(page, max_s: int = 15, label: str = "") -> tuple[str, 
 
 # ── Step 1 ────────────────────────────────────────────────────────────────────
 async def fill_step1(page) -> str | None:
+    # v7.31b: 先点 Continue with email 按钮
+    _email_btn_found = False
+    for _ebs in [
+        "button:has-text(" + chr(34) + "Continue with email" + chr(34) + ")",
+        "button:has-text(" + chr(34) + "Email" + chr(34) + ")",
+        "[data-cy=" + chr(34) + "email-signup" + chr(34) + "]",
+    ]:
+        _eb = page.locator(_ebs)
+        if await _eb.count():
+            await _eb.first.click()
+            log("[step1] email btn: " + _ebs)
+            await page.wait_for_timeout(1500)
+            _email_btn_found = True
+            break
+    if not _email_btn_found:
+        log("[step1] no email btn, direct fill")
+
     # 填 email
     ok = await _fast_fill(
         page,
