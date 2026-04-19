@@ -2096,14 +2096,33 @@ const CF_POOL_SCRIPT = process.env["CF_POOL_SCRIPT"]
     "/home/runner/workspace/artifacts/api-server/cf_pool_api.py",
   ].find((candidate) => existsSync(candidate))
   || path.resolve(process.cwd(), "artifacts/api-server/cf_pool_api.py");
+const CF_POOL_PYTHON = process.env["PYTHON_BIN"] || "python3";
+const CF_POOL_REMOTE_API_BASE = (process.env["CF_POOL_REMOTE_API_BASE_URL"] || process.env["REMOTE_API_BASE_URL"] || "http://45.205.27.69:8080/api").replace(/\/$/, "");
+
+async function forwardCfPoolRequest(endpoint: string, init?: RequestInit) {
+  const r = await fetch(`${CF_POOL_REMOTE_API_BASE}${endpoint}`, init);
+  const text = await r.text();
+  let data: unknown;
+  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  return { status: r.status, data };
+}
+
+function shouldForwardCfPool(error?: Error) {
+  return Boolean(error?.message?.includes("ENOENT"));
+}
 
 router.get("/tools/cf-pool/status", async (_req, res) => {
   try {
     const { spawnSync } = await import("child_process");
-    const r = spawnSync("python3", [CF_POOL_SCRIPT, "status"], {
+    const r = spawnSync(CF_POOL_PYTHON, [CF_POOL_SCRIPT, "status"], {
       timeout: 10000, encoding: "utf8",
       env: { ...process.env, PYTHONUNBUFFERED: "1" },
     });
+    if (shouldForwardCfPool(r.error)) {
+      const remote = await forwardCfPoolRequest("/tools/cf-pool/status");
+      res.status(remote.status).json(remote.data);
+      return;
+    }
     if (r.stderr) console.error("[cf-pool]", r.stderr.slice(0, 200));
     if (r.error || r.status !== 0) {
       res.status(500).json({ success: false, error: r.error?.message || r.stderr || "cf_pool_api failed" });
@@ -2122,7 +2141,7 @@ router.post("/tools/cf-pool/refresh", async (req, res) => {
       count?: number; target?: number; threads?: number; port?: number; maxLatency?: number;
     };
     const { spawnSync } = await import("child_process");
-    const r = spawnSync("python3", [
+    const r = spawnSync(CF_POOL_PYTHON, [
       CF_POOL_SCRIPT, "refresh",
       "--count", String(count),
       "--target", String(target),
@@ -2130,6 +2149,15 @@ router.post("/tools/cf-pool/refresh", async (req, res) => {
       "--port", String(port),
       "--max-latency", String(maxLatency),
     ], { timeout: 45000, encoding: "utf8", env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+    if (shouldForwardCfPool(r.error)) {
+      const remote = await forwardCfPoolRequest("/tools/cf-pool/refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req.body ?? {}),
+      });
+      res.status(remote.status).json(remote.data);
+      return;
+    }
     if (r.stderr) console.error("[cf-pool refresh]", r.stderr.slice(0, 400));
     if (r.error || r.status !== 0) {
       res.status(500).json({ success: false, error: r.error?.message || r.stderr || "cf_pool_api failed" });
@@ -2148,10 +2176,19 @@ router.post("/tools/cf-pool/ban", async (req, res) => {
   if (!ip) { res.status(400).json({ success: false, error: "ip 不能为空" }); return; }
   try {
     const { spawnSync } = await import("child_process");
-    const r = spawnSync("python3", [CF_POOL_SCRIPT, "ban", "--ip", ip], {
+    const r = spawnSync(CF_POOL_PYTHON, [CF_POOL_SCRIPT, "ban", "--ip", ip], {
       timeout: 8000, encoding: "utf8",
       env: { ...process.env, PYTHONUNBUFFERED: "1" },
     });
+    if (shouldForwardCfPool(r.error)) {
+      const remote = await forwardCfPoolRequest("/tools/cf-pool/ban", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req.body ?? {}),
+      });
+      res.status(remote.status).json(remote.data);
+      return;
+    }
     if (r.error || r.status !== 0) {
       res.status(500).json({ success: false, error: r.error?.message || r.stderr || "ban failed" });
       return;
@@ -2170,12 +2207,21 @@ router.post("/tools/cf-pool/retest", async (req, res) => {
       maxLatency?: number; threads?: number; port?: number;
     };
     const { spawnSync } = await import("child_process");
-    const r = spawnSync("python3", [
+    const r = spawnSync(CF_POOL_PYTHON, [
       CF_POOL_SCRIPT, "retest",
       "--max-latency", String(maxLatency),
       "--threads",     String(threads),
       "--port",        String(port),
     ], { timeout: 60000, encoding: "utf8", env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+    if (shouldForwardCfPool(r.error)) {
+      const remote = await forwardCfPoolRequest("/tools/cf-pool/retest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req.body ?? {}),
+      });
+      res.status(remote.status).json(remote.data);
+      return;
+    }
     if (r.error || r.status !== 0) {
       res.status(500).json({ success: false, error: r.error?.message || r.stderr || "retest failed" });
       return;

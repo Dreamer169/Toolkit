@@ -9,7 +9,9 @@ const SCRIPTS_DIR = path.resolve(WORKSPACE_DIR, "scripts");
 const PYTHON = process.env.PYTHON_BIN || "/usr/bin/python3";
 const LOCAL_API_BASE = (process.env.LOCAL_API_BASE_URL || "http://127.0.0.1:" + (process.env.PORT || "8080")).replace(/\/$/, "");
 const VPS_GATEWAY = process.env.VPS_GATEWAY_URL || "http://45.205.27.69:8080/api/gateway";
-const XRAY_PORTS  = Array.from({ length: 26 }, (_, i) => 10820 + i);
+// Dead ports detected via connectivity scan (10827-10829, 10834-10841 offline)
+const XRAY_PORTS_DEAD = new Set([10827,10828,10829,10834,10835,10836,10837,10838,10839,10840,10841,10845]);
+const XRAY_PORTS  = [1090, ...Array.from({ length: 26 }, (_, i) => 10820 + i).filter(p => !XRAY_PORTS_DEAD.has(p))];
 // Dead ports detected via connectivity scan (10827-10829, 10834-10841 offline)
 const DEAD_PORTS  = new Set([10827, 10828, 10829, 10834, 10835, 10836, 10837, 10838, 10839, 10840, 10841]);
 
@@ -18,6 +20,8 @@ const OUTLOOK_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
 const OUTLOOK_SCOPE     = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access";
 // CF-banned port cooldown: port → timestamp when cooldown expires (5 min)
 const cfBannedUntil = new Map<number, number>();
+// Dead ports: ERR_CONNECTION_CLOSED → skip for 10 min
+const portDeadUntil = new Map<number, number>();
 // Port reputation: last time port returned a real form response (not cf_ban/captcha_invalid)
 const portLastGood = new Map<number, number>();
 
@@ -65,7 +69,7 @@ function rotateCfIpInXray(bannedIp: string) {
   if (!ROTATE_SCRIPT) { console.warn("[cf-rotate] rotate_xray_ip.py 未找到"); return; }
   try {
     const { spawnSync } = require("child_process");
-    const r = spawnSync("python3", [ROTATE_SCRIPT, "--banned-ip", bannedIp],
+    const r = spawnSync(PYTHON, [ROTATE_SCRIPT, "--banned-ip", bannedIp],
       { timeout: 12000, encoding: "utf8" });
     const result = r.stdout ? JSON.parse(r.stdout) : {};
     if (result.success) {
@@ -73,7 +77,13 @@ function rotateCfIpInXray(bannedIp: string) {
       // xray 已 reload，重建 port→IP 映射
       rebuildXrayPortMap().catch(() => {});
     } else {
-      console.warn(`[cf-rotate] 失败: ${result.error}`);
+      const error = String(result.error || r.stderr || r.error?.message || "unknown");
+      if (error.includes("not found in xray.json")) {
+        console.warn(`[cf-rotate] stale banned IP ${bannedIp}, rebuild map and skip`);
+        rebuildXrayPortMap().catch(() => {});
+        return;
+      }
+      console.warn(`[cf-rotate] 失败: ${error}`);
     }
   } catch (e) { console.warn("[cf-rotate] exception:", e); }
 }
@@ -421,15 +431,15 @@ router.post("/replit/register", (req, res) => {
           const portQueue = sortedByReputation(availablePorts());
           if (portQueue.length < 6) portQueue.push(...shuffled(XRAY_PORTS)); // 兜底
 
-          for (let attempt = 1; attempt <= 6; attempt++) {
+          for (let attempt = 1; attempt <= 10; attempt++) {
             const tryPort = portQueue[(attempt - 1) % portQueue.length];
-            log(`    Attempt ${attempt}/6 via SOCKS5:${tryPort}`);
+            log(`    Attempt ${attempt}/10 via SOCKS5:${tryPort}`);
 
             const { parsed } = await runPython(regScript, {
               email: outlook.email,
               username,
               password,
-              proxy: "socks5://127.0.0.1:1088",
+              proxy: `socks5://127.0.0.1:${tryPort}`,
               headless,
               max_wait: 90,
               capsolver_key: process.env.CAPSOLVER_KEY ?? "",
@@ -468,10 +478,16 @@ router.post("/replit/register", (req, res) => {
               log(`    Rate-limited (too quickly) → skip this Outlook`);
               break;
             }
-            // signup_username_field_missing → step1可能已成功（账号已建），当作成功处理
+            // signup_username_field_missing → step1可能已成功，或被限速 → 重试看结果
             if (lastErr.includes("signup_username_field_missing")) {
-              log(`    username_field_missing → assuming step1 succeeded, proceeding to verify`);
-              regOk = true;
+              // 如果是第6次 → 假设成功
+              if (attempt >= 10) {
+                log(`    username_field_missing on last attempt → assuming step1 succeeded`);
+                regOk = true;
+              } else {
+                log(`    username_field_missing attempt ${attempt} → switch port + retry`);
+                portLastGood.set(tryPort, Date.now());
+              }
               break;
             }
             // captcha_token_invalid → Replit server拒绝token → 立即rate-limit该email → 跳下一个Outlook
@@ -492,11 +508,17 @@ router.post("/replit/register", (req, res) => {
               }
               continue;
             }
-            // v7.31b: account_rate_limited = IP被限速，换端口重试（最多6次）
+            // account_rate_limited = Replit IP限速 → 换端口+轮换CF IP重试
             if (lastErr.includes("account_rate_limited")) {
               portLastGood.set(tryPort, Date.now()); // port got response
-              log();
-              await new Promise(r => setTimeout(r, 4000));
+              log(`    ⏳ account_rate_limited on port ${tryPort} (exit: ${exitIp}) → rotate CF IP + switch port`);
+              const cfIpRl = xrayPortCfIp.get(tryPort);
+              if (cfIpRl) {
+                rotateCfIpInXray(cfIpRl);
+                await new Promise(r => setTimeout(r, 3000));
+              } else {
+                await new Promise(r => setTimeout(r, 2000));
+              }
               continue;
             }
 
@@ -521,6 +543,10 @@ router.post("/replit/register", (req, res) => {
 
             if (isInstantSwitch) {
               // CF封禁/连接失败 → 轮换该端口的 CF CDN IP
+              if (lastErr.includes("ERR_CONNECTION_CLOSED")) {
+                portDeadUntil.set(tryPort, Date.now() + 10 * 60 * 1000);
+                log(`    [dead] port ${tryPort} dead 10min`);
+              }
               const needsCfRotate =
                 lastErr.includes("cf_ip_banned")             ||
                 lastErr.includes("cf_hard_block")            ||

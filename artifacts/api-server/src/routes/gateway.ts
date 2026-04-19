@@ -185,6 +185,18 @@ function isCreditExhausted(text: string) {
   return CREDIT_PATTERNS.some((p) => p.test(text));
 }
 
+function isReplitIdleHtml(text: string) {
+  return /Run this app to see the results here|Go to Replit|replit\.com/i.test(text)
+    && /<html|<!doctype html/i.test(text);
+}
+
+function isBrowserAppHtml(text: string, contentType = "") {
+  return /text\/html/i.test(contentType)
+    || /^\s*<!doctype html/i.test(text)
+    || /id=["']root["']|You need to enable JavaScript/i.test(text)
+    || isReplitIdleHtml(text);
+}
+
 // 到下个 UTC 00:00 的剩余毫秒（额度冷却时长）
 function msUntilUtcMidnight(): number {
   const now = Date.now();
@@ -478,6 +490,8 @@ function recordFailure(node: GatewayNode, status: number | undefined, error: str
   ) {
     // 网络中断/节点宕机：NODE_DOWN_MS 冷却（之前没退避，会无限重试）
     node.downUntil = Date.now() + NODE_DOWN_MS;
+  } else if (node.type === "friend-openai" && (status === 404 || isReplitIdleHtml(error))) {
+    node.downUntil = Date.now() + 30 * 60_000;
   }
 }
 
@@ -872,10 +886,10 @@ async function streamNode(node: GatewayNode, req: Request, res: Response, body: 
 
 // ═══ 节点探测工具 ════════════════════════════════════════════════════════════
 
-async function probeNodeUrl(rawUrl: string, apiKey?: string, timeoutMs = 10_000) {
+async function probeNodeUrl(rawUrl: string, apiKey?: string, timeoutMs = 10_000, requireOpenAiModels = false) {
   const baseUrl = rawUrl.replace(/\/$/, "");
   const started = Date.now();
-  for (const path of ["/health", "/v1/models", "/nodes", "/stats"]) {
+  for (const path of ["/v1/models", "/health", "/nodes", "/stats"]) {
     try {
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
@@ -883,12 +897,16 @@ async function probeNodeUrl(rawUrl: string, apiKey?: string, timeoutMs = 10_000)
       const timer = setTimeout(() => ctrl.abort(), timeoutMs);
       const res = await fetch(`${baseUrl}${path}`, { headers, signal: ctrl.signal });
       clearTimeout(timer);
+      const contentType = res.headers.get("content-type") || "";
+      const text = await res.text();
+      if (isReplitIdleHtml(text)) return { ok: false, latencyMs: Date.now() - started, error: "replit_idle_placeholder" };
+      if (isBrowserAppHtml(text, contentType)) continue;
+      if (!res.ok) continue;
       if (res.ok) {
-        const contentType = res.headers.get("content-type") || "";
-        const text = await res.text();
-        if (/text\/html/i.test(contentType) || /^\s*<!doctype html/i.test(text) || /id=["']root["']|You need to enable JavaScript/i.test(text)) continue;
         const data = JSON.parse(text || "{}") as { data?: Array<{ id: string }>; success?: boolean; status?: string };
         const models = Array.isArray(data.data) ? data.data.map((m) => m.id).slice(0, 5) : [];
+        if (requireOpenAiModels && path !== "/v1/models") continue;
+        if (requireOpenAiModels && models.length === 0) continue;
         return { ok: true, latencyMs: Date.now() - started, models };
       }
     } catch {}
@@ -1521,7 +1539,7 @@ router.post("/self-register", async (req, res) => {
   }
   const baseUrl = gatewayUrl.replace(/\/$/, "");
   // 探测目标是否真的是 gateway
-  const probe = await probeNodeUrl(baseUrl, undefined, 8000);
+  const probe = await probeNodeUrl(baseUrl, undefined, 8000, true);
   if (!probe.ok) {
     res.status(422).json({ ok: false, error: "探测失败，URL 不可达", detail: probe.error });
     return;
