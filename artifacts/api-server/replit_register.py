@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-replit_register.py — Replit 注册表单自动化 v7.28
+replit_register.py — Replit 注册表单自动化 v7.29
 策略（全免费，无付费服务）：
   Layer 1: playwright + stealth (chrome_runtime=True, webgl_vendor=True)
            + Canvas 2D 噪声注入 → reCAPTCHA Enterprise 自动评分 token（无需挑战）
@@ -210,7 +210,7 @@ async def solve_recaptcha_audio(page) -> str | None:
 
     # 点击音频按钮
     try:
-        audio_btn = challenge_frame.locator("#recaptcha-audio-button")
+        audio_btn = challenge_frame.locator("#recaptcha-audio-button, .rc-button-audio")
         if await audio_btn.count():
             await audio_btn.click()
             log("[audio] 点击音频按钮")
@@ -223,7 +223,7 @@ async def solve_recaptcha_audio(page) -> str | None:
     # 下载音频 + 识别
     for attempt in range(3):
         try:
-            audio_src_el = challenge_frame.locator(".rc-audiochallenge-tdownload-link, audio source, #audio-source")
+            audio_src_el = challenge_frame.locator(".rc-audiochallenge-download-link, audio source, #audio-source")
             if not await audio_src_el.count():
                 log(f"[audio] 第{attempt+1}次：未找到音频链接")
                 await page.wait_for_timeout(2000)
@@ -281,7 +281,7 @@ async def solve_recaptcha_audio(page) -> str | None:
 
 # ── CF Turnstile 等待 ─────────────────────────────────────────────────────────
 async def wait_cf(page) -> str | None:
-    for _w in range(60):
+    for _w in range(120):
         await page.wait_for_timeout(500)
         try:
             title = await page.title()
@@ -292,11 +292,18 @@ async def wait_cf(page) -> str | None:
         if "just a moment" in tl:
             if _w % 10 == 0:
                 log(f"[cf] CF challenge... ({_w//2}s)")
+            # 30s 时尝试 reload（部分 IP 需要）
+            if _w == 60:
+                log("[cf] 30s 未通过，尝试 reload...")
+                try:
+                    await page.reload(wait_until="domcontentloaded", timeout=20000)
+                except Exception:
+                    pass
             continue
         return None
     title2 = await page.title()
     if "just a moment" in title2.lower():
-        log("[cf] 30s 超时，代理 IP 被 CF 封")
+        log("[cf] 60s 超时，代理 IP 被 CF 封")
         return "signup_cf_js_challenge_timeout"
     return None
 
@@ -323,7 +330,7 @@ async def _human_warmup(page):
 
         # 阶段 2：大量 bezier 鼠标移动（20次，覆盖全屏）
         x, y = _random.randint(300, 800), _random.randint(150, 500)
-        for i in range(20):
+        for i in range(8):
             nx = _random.randint(60, w - 60)
             ny = _random.randint(60, h - 60)
             await _bezier(x, y, nx, ny, steps=_random.randint(18, 30))
@@ -346,7 +353,7 @@ async def _human_warmup(page):
 
         # 阶段 4：再次鼠标移动（10次，专注于页面中央区域）
         x, y = _random.randint(400, 700), _random.randint(200, 500)
-        for _ in range(10):
+        for _ in range(5):
             nx = _random.randint(200, w - 200)
             ny = _random.randint(150, h - 200)
             await _bezier(x, y, nx, ny, steps=_random.randint(15, 25))
@@ -371,9 +378,9 @@ async def _human_warmup(page):
             pass
 
         # 阶段 6：最终停顿（用户"决定"开始填表）
-        await page.wait_for_timeout(_random.randint(2000, 4000))
+        await page.wait_for_timeout(_random.randint(400, 800))
 
-        log("[warmup] ✓ 完成（约 40-55s 行为积累）")
+        log("[warmup] ✓ 完成（约 8-12s 轻量行为）")
     except Exception as e:
         log(f"[warmup] 异常(忽略): {e}")
 
@@ -463,28 +470,26 @@ async def fill_step1(page) -> str | None:
         log(f"[probe] 异常: {e}")
         rc_token, cf_token, any_rc, any_ts = "", "", False, False
 
-    # ── 核心策略 v7.27：使用 auto-token（invisible Enterprise 不展示 bframe/音频）
-    # Replit 使用 invisible Enterprise 模式，无 bframe/checkbox challenge。
-    # 策略：让 Enterprise JS 在充分的行为积累后自动生成 token，尽量提高 score。
-    # 音频挑战作为 fallback：仅当 auto-token 未出现时尝试。
-    if any_rc and not rc_token:
-        log("[captcha] Enterprise invisible: 等待 auto-token (max 20s)…")
-        rc_token, cf_token = await _wait_for_token(page, max_s=20)
-
-    if any_rc and not rc_token:
-        # Fallback: 尝试音频挑战（针对 v2 widget 模式）
-        log("[captcha] 无 auto-token，尝试 checkbox+音频作为 fallback")
+    # ── 核心策略 v7.29：音频挑战优先（v7.3 验证有效），auto-token 作 fallback
+    # v7.3 实测：音频能到达 "Email already in use" / "too quickly" 阶段。
+    # 策略：若检测到 reCAPTCHA → 先尝试音频（checkbox → bframe → STT）
+    #       若音频失败或无 checkbox → 等待 Enterprise auto-token（max 25s）
+    if any_rc:
+        stale_rc_token = rc_token
+        if stale_rc_token:
+            log(f"[captcha] 忽略预置 auto-token={len(stale_rc_token)}chars，优先使用音频/checkbox token")
+        rc_token = ""
+        log("[captcha] v7.30: reCAPTCHA 强制音频优先，一次提交避免 auto-token 二次触发 rate limit")
         audio_token = await solve_recaptcha_audio(page) or ""
         if audio_token:
             log(f"[captcha] ✅ 音频通过 token={len(audio_token)}chars")
             rc_token = audio_token
-            # React-aware token 注入
             try:
                 await page.evaluate("""
                     (token) => {
-                        const el = document.querySelector('[name="recaptchaToken"]');
+                        var el = document.querySelector('[name="recaptchaToken"]');
                         if (!el) return;
-                        const setter = Object.getOwnPropertyDescriptor(
+                        var setter = Object.getOwnPropertyDescriptor(
                             window.HTMLInputElement.prototype, 'value').set;
                         setter.call(el, token);
                         el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -495,11 +500,11 @@ async def fill_step1(page) -> str | None:
             except Exception as e:
                 log(f"[captcha] token 注入异常(忽略): {e}")
         else:
-            log("[captcha] 音频 fallback 失败，用现有 token 提交（或空提交）")
-            rc_token, cf_token = await _wait_for_token(page, max_s=8)
+            log("[captcha] 音频失败/无 checkbox → 等待 Enterprise auto-token (max 25s)…")
+            rc_token, cf_token = await _wait_for_token(page, max_s=25)
     elif not rc_token and not cf_token:
-        log("[captcha] 等待 Enterprise 自动 token (max 15s)...")
-        rc_token, cf_token = await _wait_for_token(page, max_s=15)
+        log("[captcha] 等待 Enterprise 自动 token (max 20s)...")
+        rc_token, cf_token = await _wait_for_token(page, max_s=20)
 
     # ── Turnstile 额外等待（无付费服务）
     if any_ts and not cf_token:
@@ -1131,22 +1136,18 @@ async def run() -> dict:
     stealth_fn = None
     pw_ctx_fn  = None
 
-    # Layer 0: rebrowser-playwright (CDP级 Runtime.enable 隐藏)
-    use_rebrowser = False
-    log("v7.28 starting: rebrowser + stealth + Canvas/WebGL injection + captcha retry")
+    # Layer 0: playwright+stealth (v7.3 proven approach for CF bypass)
+    log("v7.31: playwright+stealth primary (matches v7.3 CF bypass, no rebrowser)")
     try:
-        from rebrowser_playwright.async_api import async_playwright as _rapw
-        pw_ctx_fn = _rapw
-        use_rebrowser = True
-        log("✅ rebrowser-playwright active (Runtime.enable hidden)")
+        from playwright.async_api import async_playwright as _apw
+        pw_ctx_fn = _apw
+        log("✅ playwright active (TLS fingerprint clean for CF)")
     except ImportError:
-        log("⚠ rebrowser-playwright 未安装 → fallback playwright")
-
-    # Layer 1: playwright fallback
-    if not use_rebrowser:
+        # fallback rebrowser
         try:
-            from playwright.async_api import async_playwright as _apw
-            pw_ctx_fn = _apw
+            from rebrowser_playwright.async_api import async_playwright as _rapw
+            pw_ctx_fn = _rapw
+            log("⚠ playwright 未安装 → rebrowser fallback")
         except ImportError:
             final["error"] = "playwright/rebrowser 均未安装"
             return final
