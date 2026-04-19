@@ -67,24 +67,29 @@ const ROTATE_SCRIPT = [
 
 function rotateCfIpInXray(bannedIp: string) {
   if (!ROTATE_SCRIPT) { console.warn("[cf-rotate] rotate_xray_ip.py 未找到"); return; }
+  // 使用 spawn（异步）避免 spawnSync 阻塞 Node.js 主线程最多 12s
   try {
-    const { spawnSync } = require("child_process");
-    const r = spawnSync(PYTHON, [ROTATE_SCRIPT, "--banned-ip", bannedIp],
-      { timeout: 12000, encoding: "utf8" });
-    const result = r.stdout ? JSON.parse(r.stdout) : {};
-    if (result.success) {
-      console.log(`[cf-rotate] ${bannedIp} → ${result.new_ip}  outbounds=${result.changed_outbounds} reload=${result.reload}`);
-      // xray 已 reload，重建 port→IP 映射
-      rebuildXrayPortMap().catch(() => {});
-    } else {
-      const error = String(result.error || r.stderr || r.error?.message || "unknown");
-      if (error.includes("not found in xray.json")) {
-        console.warn(`[cf-rotate] stale banned IP ${bannedIp}, rebuild map and skip`);
-        rebuildXrayPortMap().catch(() => {});
-        return;
-      }
-      console.warn(`[cf-rotate] 失败: ${error}`);
-    }
+    let stdout = "";
+    const proc = spawn(PYTHON, [ROTATE_SCRIPT, "--banned-ip", bannedIp]);
+    proc.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
+    proc.on("close", () => {
+      try {
+        const result = stdout ? JSON.parse(stdout) : {};
+        if (result.success) {
+          console.log(`[cf-rotate] ${bannedIp} → ${result.new_ip}  outbounds=${result.changed_outbounds} reload=${result.reload}`);
+          rebuildXrayPortMap().catch(() => {});
+        } else {
+          const error = String(result.error || "unknown");
+          if (error.includes("not found in xray.json")) {
+            console.warn(`[cf-rotate] stale banned IP ${bannedIp}, rebuild map and skip`);
+            rebuildXrayPortMap().catch(() => {});
+            return;
+          }
+          console.warn(`[cf-rotate] 失败: ${error}`);
+        }
+      } catch (e) { console.warn("[cf-rotate] parse error:", e); }
+    });
+    proc.on("error", (e: Error) => console.warn("[cf-rotate] spawn error:", e.message));
   } catch (e) { console.warn("[cf-rotate] exception:", e); }
 }
 
@@ -122,7 +127,7 @@ async function rebuildXrayPortMap() {
 }
 function availablePorts(): number[] {
   const now = Date.now();
-  return XRAY_PORTS.filter(p => !DEAD_PORTS.has(p) && (cfBannedUntil.get(p) ?? 0) < now);
+  return XRAY_PORTS.filter(p => !DEAD_PORTS.has(p) && (cfBannedUntil.get(p) ?? 0) < now && (portDeadUntil.get(p) ?? 0) < now);
 }
 function sortedByReputation(ports: number[]): number[] {
   // Good ports (recently had form response) first, then others
@@ -429,7 +434,7 @@ router.post("/replit/register", (req, res) => {
 
           // 每个Outlook账号：信誉好的端口优先，避免重复
           const portQueue = sortedByReputation(availablePorts());
-          if (portQueue.length < 6) portQueue.push(...shuffled(XRAY_PORTS)); // 兜底
+          if (portQueue.length < 6) portQueue.push(...shuffled(availablePorts())); // 兜底（过滤死端口）
 
           for (let attempt = 1; attempt <= 10; attempt++) {
             const tryPort = portQueue[(attempt - 1) % portQueue.length];
@@ -500,11 +505,11 @@ router.post("/replit/register", (req, res) => {
               // 换个 CF CDN IP 再试——captcha 失败通常是 IP 信誉问题
               const cfIpC = xrayPortCfIp.get(tryPort);
               if (cfIpC) {
-                log(`    captcha_token_invalid (${captchaFailCount}/2) → rotate CF IP ${cfIpC} + retry`);
+                log(`    captcha_token_invalid (${captchaFailCount}/3) → rotate CF IP ${cfIpC} + retry`);
                 rotateCfIpInXray(cfIpC);
                 await new Promise(r => setTimeout(r, 2000));
               } else {
-                log(`    captcha_token_invalid (${captchaFailCount}/2) → instant port switch`);
+                log(`    captcha_token_invalid (${captchaFailCount}/3) → instant port switch`);
               }
               continue;
             }
@@ -530,7 +535,8 @@ router.post("/replit/register", (req, res) => {
               lastErr.includes("ERR_CERT")               ||  // SSL证书损坏端口立即跳
               lastErr.includes("ERR_CONNECTION_RESET")    ||
               lastErr.includes("ERR_CONNECTION_CLOSED")  ||  // 连接被关闭→立即换IP
-              lastErr.includes("ERR_EMPTY_RESPONSE");    // 空响应→换IP
+              lastErr.includes("ERR_EMPTY_RESPONSE")       ||  // 空响应→换IP
+              lastErr.includes("ERR_SOCKS_CONNECTION_FAILED");  // SOCKS5桥未就绪→立即换端口
 
             const retryable =
               isInstantSwitch ||
@@ -543,7 +549,7 @@ router.post("/replit/register", (req, res) => {
 
             if (isInstantSwitch) {
               // CF封禁/连接失败 → 轮换该端口的 CF CDN IP
-              if (lastErr.includes("ERR_CONNECTION_CLOSED")) {
+              if (lastErr.includes("ERR_CONNECTION_CLOSED") || lastErr.includes("ERR_SOCKS_CONNECTION_FAILED")) {
                 portDeadUntil.set(tryPort, Date.now() + 10 * 60 * 1000);
                 log(`    [dead] port ${tryPort} dead 10min`);
               }
