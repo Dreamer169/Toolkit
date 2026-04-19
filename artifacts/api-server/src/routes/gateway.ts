@@ -1087,6 +1087,34 @@ router.all(/^\/(api\/v1|api\/accounts)\//, async (req, res) => {
   }
 });
 
+// ── 节点状态 (供桥接器健康同步) ───────────────────────────────────────────────
+// GET /api/gateway/nodes/status — 轻量健康端点
+// 只返回 friend-openai 节点，带 ready/down 状态，桥接器据此过滤死节点
+router.get("/nodes/status", (_req, res) => {
+  const now = Date.now();
+  const nodes = allNodes()
+    .filter((n) => n.type === "friend-openai" && n.enabled)
+    .map((n) => {
+      // 规范化 baseUrl：去掉末尾 /api（桥接器自己追加路径）
+      const rawBase = n.baseUrl ?? "";
+      const base = rawBase.endsWith("/api") ? rawBase.slice(0, -4) : rawBase;
+      const isDown = n.downUntil > now;
+      return {
+        id: n.id,
+        baseUrl: base.replace(/\/$/, ""),
+        status: isDown ? "down" : "ready",
+        downUntil: isDown ? new Date(n.downUntil).toISOString() : null,
+        lastLatencyMs: n.lastLatencyMs ?? null,
+        lastError: isDown ? (n.lastError ?? null) : null,
+        successes: n.successes,
+        failures: n.failures,
+        lastChecked: n.lastUsedAt ?? null,
+      };
+    });
+  const ready = nodes.filter((n) => n.status === "ready").length;
+  res.json({ ok: true, total: nodes.length, ready, down: nodes.length - ready, nodes });
+});
+
 // ── 节点管理 ─────────────────────────────────────────────────────────────────
 router.post("/nodes", (req, res) => {
   const body = req.body as {

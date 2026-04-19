@@ -48,16 +48,18 @@ def _base_to_wss(base_http: str) -> str:
 
 def fetch_nodes_from_gateway():
     try:
-        req = urllib.request.Request(f"{GATEWAY_API}/gateway/nodes",
+        req = urllib.request.Request(f"{GATEWAY_API}/gateway/nodes/status",
                                      headers={"Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=5) as r:
             data = json.loads(r.read())
         urls = []
         for n in data.get("nodes", []):
-            if n.get("type") == "friend-openai":
+            if n.get("status") == "ready":
                 base = (n.get("baseUrl") or "").strip()
                 if base:
                     urls.append(_base_to_wss(base))
+            elif n.get("status") == "down":
+                log.warning(f"skip down: {(n.get("baseUrl") or "")[:50]} until={n.get("downUntil")}")
         return urls
     except Exception as e:
         log.warning(f"gateway sync failed: {e}")

@@ -31,21 +31,20 @@ _nodes      = list(_seed)
 _fc         = {}   # fail counters per URL
 
 def fetch_nodes_from_gateway():
-    """从本地网关拉取所有在线的 friend-openai 子节点 URL。"""
+    """从网关 /nodes/status 拉取 ready 状态的 friend-openai 节点。"""
     try:
-        req = urllib.request.Request(f"{GATEWAY_API}/gateway/nodes",
+        req = urllib.request.Request(f"{GATEWAY_API}/gateway/nodes/status",
                                      headers={"Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=5) as r:
             data = json.loads(r.read())
         urls = []
         for n in data.get("nodes", []):
-            if n.get("type") == "friend-openai":
+            if n.get("status") == "ready":
                 base = (n.get("baseUrl") or "").rstrip("/")
-                # Normalize: strip trailing /api — bridge appends /api/stream/... itself
-                if base.endswith("/api"):
-                    base = base[:-4].rstrip("/")
                 if base:
                     urls.append(base)
+            elif n.get("status") == "down":
+                print(f"[poll-bridge] skip down: {(n.get(baseUrl) or )[:50]} until={n.get(downUntil)}", flush=True)
         return urls
     except Exception as e:
         print(f"[poll-bridge] gateway sync failed: {e}", flush=True)
