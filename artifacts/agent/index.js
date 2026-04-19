@@ -22,7 +22,6 @@ const ANT_KEY   = process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY  || "";
 const GEM_BASE  = process.env.AI_INTEGRATIONS_GEMINI_BASE_URL    || "";
 const GEM_KEY   = process.env.AI_INTEGRATIONS_GEMINI_API_KEY     || "";
 
-// 静态模型列表兜底（探测用）
 const STATIC_MODELS = [
   { id: "gpt-4o",            object: "model", created: 1706745938, owned_by: "system" },
   { id: "gpt-4o-mini",       object: "model", created: 1721172717, owned_by: "system" },
@@ -35,12 +34,17 @@ function post(targetUrl, opts) {
   return new Promise((resolve, reject) => {
     const p   = new url.URL(targetUrl);
     const lib = p.protocol === "https:" ? https : http;
+    const body = opts.body
+      ? (typeof opts.body === "string" ? Buffer.from(opts.body) : Buffer.from(JSON.stringify(opts.body)))
+      : null;
+    const hdrs = { ...(opts.headers || {}) };
+    if (body) hdrs["content-length"] = body.length;
     const req = lib.request({
       hostname: p.hostname,
       port:     p.port || (p.protocol === "https:" ? 443 : 80),
       path:     p.pathname + p.search,
       method:   opts.method || "GET",
-      headers:  opts.headers || {},
+      headers:  hdrs,
     }, (res) => {
       let d = "";
       res.on("data", c => d += c);
@@ -50,7 +54,7 @@ function post(targetUrl, opts) {
       });
     });
     req.on("error", reject);
-    if (opts.body) req.write(typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body));
+    if (body) req.write(body);
     req.end();
   });
 }
@@ -76,24 +80,27 @@ async function heartbeat() {
   } catch (_) {}
 }
 
-function pipe(req, res, base, key) {
-  const target = new url.URL(`${base}${req.url}`);
-  const lib    = target.protocol === "https:" ? https : http;
-  const hdrs   = { ...req.headers, authorization: `Bearer ${key}`, host: target.hostname };
-  delete hdrs["content-length"];
-
-  let body = "";
-  req.on("data", c => body += c);
+// FIX: collect body as Buffer chunks to avoid corrupting binary data
+// FIX: stripPrefix is a RegExp anchored at path start
+function pipe(req, res, base, key, stripPrefix) {
+  const chunks = [];
+  req.on("data", c => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
   req.on("end", () => {
+    const body   = Buffer.concat(chunks);
+    const reqUrl = stripPrefix ? req.url.replace(stripPrefix, "") : req.url;
+    const target = new url.URL(`${base.replace(/\/$/, "")}${reqUrl || "/"}`);
+    const lib    = target.protocol === "https:" ? https : http;
+    const hdrs   = { ...req.headers, authorization: `Bearer ${key}`, host: target.hostname };
+    delete hdrs["content-length"];
     const pr = lib.request({
       hostname: target.hostname,
       port:     target.port || (target.protocol === "https:" ? 443 : 80),
       path:     target.pathname + target.search,
       method:   req.method,
-      headers:  { ...hdrs, "content-length": Buffer.byteLength(body) },
+      headers:  { ...hdrs, "content-length": body.length },
     }, up => { res.writeHead(up.statusCode, up.headers); up.pipe(res); });
     pr.on("error", () => { res.writeHead(502); res.end('{"error":"bad gateway"}'); });
-    if (body) pr.write(body);
+    if (body.length) pr.write(body);
     pr.end();
   });
 }
@@ -108,36 +115,30 @@ const server = http.createServer((req, res) => {
   }
 
   if (path === "/v1/models" && req.method === "GET") {
-    if (OAI_BASE && OAI_KEY) { pipe(req, res, OAI_BASE, OAI_KEY); return; }
+    if (OAI_BASE && OAI_KEY) { pipe(req, res, OAI_BASE, OAI_KEY, null); return; }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ object: "list", data: STATIC_MODELS }));
     return;
   }
 
   if (path.startsWith("/v1/")) {
-    if (OAI_BASE && OAI_KEY) { pipe(req, res, OAI_BASE, OAI_KEY); return; }
+    if (OAI_BASE && OAI_KEY) { pipe(req, res, OAI_BASE, OAI_KEY, null); return; }
     res.writeHead(503, { "Content-Type": "application/json" });
     res.end('{"error":"service unavailable"}');
     return;
   }
 
+  // FIX: use anchored regex /^\/anthropic/ instead of string "/anthropic"
   if (path.startsWith("/anthropic/")) {
-    if (ANT_BASE && ANT_KEY) {
-      req.url = req.url.replace("/anthropic", "");
-      pipe(req, res, ANT_BASE, ANT_KEY);
-      return;
-    }
+    if (ANT_BASE && ANT_KEY) { pipe(req, res, ANT_BASE, ANT_KEY, /^\/anthropic/); return; }
     res.writeHead(503, { "Content-Type": "application/json" });
     res.end('{"error":"service unavailable"}');
     return;
   }
 
+  // FIX: use anchored regex /^\/gemini/ instead of string "/gemini"
   if (path.startsWith("/gemini/")) {
-    if (GEM_BASE && GEM_KEY) {
-      req.url = req.url.replace("/gemini", "");
-      pipe(req, res, GEM_BASE, GEM_KEY);
-      return;
-    }
+    if (GEM_BASE && GEM_KEY) { pipe(req, res, GEM_BASE, GEM_KEY, /^\/gemini/); return; }
     res.writeHead(503, { "Content-Type": "application/json" });
     res.end('{"error":"service unavailable"}');
     return;
