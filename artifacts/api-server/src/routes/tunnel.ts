@@ -119,7 +119,8 @@ function createTunnelRouter(prefix: "stream" | "tunnel") {
     }
 
     if (session.closed) {
-      res.status(204).end();
+      cleanupSession(req.params["id"]);
+      res.status(410).json({ error: "session closed" });
       return;
     }
 
@@ -132,7 +133,8 @@ function createTunnelRouter(prefix: "stream" | "tunnel") {
     });
 
     if (!data) {
-      res.status(204).end();
+      cleanupSession(req.params["id"]);
+      res.status(410).json({ error: "session closed" });
       return;
     }
 
