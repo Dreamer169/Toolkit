@@ -33,9 +33,15 @@ app.use("/api", tunnelRouter);
 app.use(express.json());
 app.use("/api", router);
 
-app.get("/health", (_req, res) => res.json({ ok: true, name: "replit-subnode", tunnel: true }));
-app.get("/v1/models", (_req, res) => res.json({ object: "list", data: [{ id: "tunnel-proxy", object: "model", owned_by: "subnode" }] }));
-app.get("/nodes", (_req, res) => res.json({ ok: true }));
-app.get("/stats", (_req, res) => res.json({ ok: true }));
+app.get("/health", (_req, res) => {
+  res.json({ ok: true, name: "replit-subnode", tunnel: true });
+});
+
+app.get("/v1/models", (_req, res) => {
+  res.json({
+    object: "list",
+    data: [{ id: "tunnel-proxy", object: "model", owned_by: "subnode" }],
+  });
+});
 
 export default app;
