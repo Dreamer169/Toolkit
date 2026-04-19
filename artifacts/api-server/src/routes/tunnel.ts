@@ -218,7 +218,7 @@ export function selfRegister(): void {
         : undefined);
 
   if (!domain) {
-    logger.warn("Subnode self-register skipped: no public domain");
+    logger.debug("Subnode self-register skipped: no public domain (not a Replit env)");
     return;
   }
 

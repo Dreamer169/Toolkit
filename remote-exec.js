@@ -2,7 +2,7 @@ const http = require('http');
 const { exec } = require('child_process');
 const fs = require('fs');
 
-const TOKEN = process.env.EXEC_TOKEN || 'zencoder-exec-2026';
+const TOKEN = process.env.EXEC_SECRET || process.env.EXEC_TOKEN || 'zencoder-exec-2026';
 const DEFAULT_CWD = fs.existsSync('/root/Toolkit') ? '/root/Toolkit' : '/workspaces/Toolkit';
 
 const server = http.createServer((req, res) => {
@@ -40,6 +40,8 @@ const server = http.createServer((req, res) => {
   });
 });
 
+process.on('SIGTERM', () => { server.close(() => process.exit(0)); });
+process.on('SIGINT',  () => { server.close(() => process.exit(0)); });
 server.listen(Number(process.env.EXEC_PORT || 9999), '0.0.0.0', () => {
   console.log('Remote exec server running');
 });
