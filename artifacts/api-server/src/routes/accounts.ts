@@ -10,10 +10,11 @@ const PYTHON = process.env.PYTHON_BIN || "/usr/bin/python3";
 const LOCAL_API_BASE = (process.env.LOCAL_API_BASE_URL || "http://127.0.0.1:" + (process.env.PORT || "8080")).replace(/\/$/, "");
 const VPS_GATEWAY = process.env.VPS_GATEWAY_URL || "http://45.205.27.69:8080/api/gateway";
 // Dead ports detected via connectivity scan (10827-10829, 10834-10841 offline)
-const XRAY_PORTS_DEAD = new Set([10827,10828,10829,10834,10835,10836,10837,10838,10839,10840,10841,10845]);
-const XRAY_PORTS  = [...Array.from({ length: 26 }, (_, i) => 10820 + i).filter(p => !XRAY_PORTS_DEAD.has(p))];  // port 1090 removed: http_socks5_bridge sub-node is dead
-// Dead ports detected via connectivity scan (10827-10829, 10834-10841 offline)
-const DEAD_PORTS  = new Set([10827, 10828, 10829, 10834, 10835, 10836, 10837, 10838, 10839, 10840, 10841]);
+// All quarkip 10820-10845 confirmed datacenter IPs → CF JS challenge all → removed
+// Only port 1090 (Replit sub-node via WS tunnel, exit: Replit residential-like IP) remains
+const XRAY_PORTS_DEAD = new Set(Array.from({ length: 26 }, (_, i) => 10820 + i));  // all quarkip dead
+const XRAY_PORTS  = [1090];  // ONLY Replit sub-node: bypasses CF, best exit IP
+const DEAD_PORTS  = XRAY_PORTS_DEAD;
 
 // Outlook OAuth (Thunderbird client_id)
 const OUTLOOK_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
@@ -130,10 +131,12 @@ function availablePorts(): number[] {
   return XRAY_PORTS.filter(p => !DEAD_PORTS.has(p) && (cfBannedUntil.get(p) ?? 0) < now && (portDeadUntil.get(p) ?? 0) < now);
 }
 function sortedByReputation(ports: number[]): number[] {
-  // Good ports (recently had form response) first, then others
-  const good = ports.filter(p => portLastGood.has(p)).sort((a, b) => (portLastGood.get(b)!) - (portLastGood.get(a)!));
-  const other = ports.filter(p => !portLastGood.has(p));
-  return [...shuffled(good), ...shuffled(other)];
+  // Port 1090 (Replit sub-node, best CF bypass) always first
+  const has1090 = ports.includes(1090);
+  const rest = ports.filter(p => p !== 1090);
+  const good = rest.filter(p => portLastGood.has(p)).sort((a, b) => (portLastGood.get(b)!) - (portLastGood.get(a)!));
+  const other = rest.filter(p => !portLastGood.has(p));
+  return [...(has1090 ? [1090] : []), ...shuffled(good), ...shuffled(other)];
 }
 function shuffled(arr: number[]): number[] { return [...arr].sort(() => Math.random() - 0.5); }
 
@@ -427,6 +430,7 @@ router.post("/replit/register", (req, res) => {
 
           // ── Step 2a: 最多 6 次不同代理端口重试（shuffle不重复）───────
           let captchaFailCount = 0; // 同一 Outlook 账号的 captcha_token_invalid 次数
+          let rateLimitCount  = 0; // account_rate_limited 次数（2次即切换邮件）
           const regScript = path.join(API_DIR, "replit_register.py");
           let regOk  = false;
           let exitIp = "";
@@ -513,9 +517,14 @@ router.post("/replit/register", (req, res) => {
               }
               continue;
             }
-            // account_rate_limited = Replit IP限速 → 换端口+轮换CF IP重试
+            // account_rate_limited = Replit/邮件限速 → 换端口；2次以上=邮件级限速，直接换邮件
             if (lastErr.includes("account_rate_limited")) {
               portLastGood.set(tryPort, Date.now()); // port got response
+              rateLimitCount++;
+              if (rateLimitCount >= 2) {
+                log(`    account_rate_limited x${rateLimitCount} on different IPs → email-level rate limit, skip Outlook`);
+                break; // 换下一个 Outlook 账号
+              }
               log(`    ⏳ account_rate_limited on port ${tryPort} (exit: ${exitIp}) → rotate CF IP + switch port`);
               const cfIpRl = xrayPortCfIp.get(tryPort);
               if (cfIpRl) {
@@ -550,8 +559,10 @@ router.post("/replit/register", (req, res) => {
             if (isInstantSwitch) {
               // CF封禁/连接失败 → 轮换该端口的 CF CDN IP
               if (lastErr.includes("ERR_CONNECTION_CLOSED") || lastErr.includes("ERR_SOCKS_CONNECTION_FAILED")) {
-                portDeadUntil.set(tryPort, Date.now() + 10 * 60 * 1000);
-                log(`    [dead] port ${tryPort} dead 10min`);
+                // port 1090 = Replit sub-node: short 2min cooldown (instance may restart quickly)
+                const deadMs = tryPort === 1090 ? 2 * 60 * 1000 : 10 * 60 * 1000;
+                portDeadUntil.set(tryPort, Date.now() + deadMs);
+                log(`    [dead] port ${tryPort} dead ${deadMs/60000}min`);
               }
               const needsCfRotate =
                 lastErr.includes("cf_ip_banned")             ||
@@ -561,17 +572,21 @@ router.post("/replit/register", (req, res) => {
                 lastErr.includes("ERR_EMPTY_RESPONSE")       ||
                 lastErr.includes("ERR_CERT");
               if (needsCfRotate) {
-                // 封禁冷却：永久封禁5min，JS challenge短暂1min
-                if (lastErr.includes("cf_ip_banned") || lastErr.includes("cf_hard_block")) {
-                  cfBannedUntil.set(tryPort, Date.now() + 5 * 60 * 1000);
-                } else if (lastErr.includes("cf_js_challenge_timeout")) {
-                  cfBannedUntil.set(tryPort, Date.now() + 1 * 60 * 1000); // 1min冷却
-                }
-                const cfIp = xrayPortCfIp.get(tryPort);
-                if (cfIp) {
-                  log(`    → rotate CF IP ${cfIp} in xray (pool → new IP)`);
-                  rotateCfIpInXray(cfIp);
-                  await new Promise(r => setTimeout(r, 2000));  // wait xray reload
+                // 封禁冷却：永久封禁5min，JS challenge短暂1min（port 1090=Replit sub-node不走CF封禁）
+                if (tryPort !== 1090) {
+                  if (lastErr.includes("cf_ip_banned") || lastErr.includes("cf_hard_block")) {
+                    cfBannedUntil.set(tryPort, Date.now() + 5 * 60 * 1000);
+                  } else if (lastErr.includes("cf_js_challenge_timeout")) {
+                    cfBannedUntil.set(tryPort, Date.now() + 1 * 60 * 1000); // 1min冷却
+                  }
+                  const cfIp = xrayPortCfIp.get(tryPort);
+                  if (cfIp) {
+                    log(`    → rotate CF IP ${cfIp} in xray (pool → new IP)`);
+                    rotateCfIpInXray(cfIp);
+                    await new Promise(r => setTimeout(r, 2000));  // wait xray reload
+                  }
+                } else {
+                  log(`    → port 1090 (Replit sub-node) CF issue → skip CF rotation, try next port`);
                 }
               }
               log(`    → instant port switch`);
