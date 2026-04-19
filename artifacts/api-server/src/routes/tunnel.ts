@@ -107,37 +107,36 @@ function createTunnelRouter(prefix: "stream" | "tunnel") {
     }
 
     res.set({
-      "Transfer-Encoding": "chunked",
       "Content-Type": "application/octet-stream",
       "Cache-Control": "no-store, no-cache",
       "X-Accel-Buffering": "no",
-      Connection: "keep-alive",
+      Connection: "close",
     });
-    res.flushHeaders();
 
-    const writeChunk = (data: Buffer) => {
-      res.write(data);
-      const flushable = res as typeof res & { flush?: () => void };
-      flushable.flush?.();
-    };
-
-    while (!res.destroyed) {
-      if (session.readBuffer.length > 0) {
-        writeChunk(Buffer.concat(session.readBuffer.splice(0)));
-      } else if (session.closed) {
-        res.end();
-        return;
-      } else {
-        const data = await new Promise<Buffer | null>((resolve) =>
-          session.waiters.push(resolve),
-        );
-        if (!data) {
-          res.end();
-          return;
-        }
-        writeChunk(data);
-      }
+    if (session.readBuffer.length > 0) {
+      res.end(Buffer.concat(session.readBuffer.splice(0)));
+      return;
     }
+
+    if (session.closed) {
+      res.status(204).end();
+      return;
+    }
+
+    const data = await new Promise<Buffer | null>((resolve) => {
+      const timer = setTimeout(() => resolve(Buffer.alloc(0)), 25_000);
+      session.waiters.push((chunk) => {
+        clearTimeout(timer);
+        resolve(chunk);
+      });
+    });
+
+    if (!data) {
+      res.status(204).end();
+      return;
+    }
+
+    res.end(data);
   });
 
   router.post(`/${prefix}/write/:id`, (req, res) => {
