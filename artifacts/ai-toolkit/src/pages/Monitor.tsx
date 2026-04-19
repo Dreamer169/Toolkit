@@ -563,22 +563,26 @@ export default function Monitor() {
           <span className="text-xs text-gray-600">每 2 分钟自动运行 · 验证真实出网连通性</span>
         </div>
         {maintainStatus ? (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
             <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
               <div className="text-gray-500">上次运行</div>
               <div className="text-white font-medium mt-1">{elapsed(maintainStatus.ts)}</div>
             </div>
             <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
-              <div className="text-gray-500">探测数量</div>
+              <div className="text-gray-500">连通性验证</div>
               <div className="text-blue-400 font-bold text-lg mt-1">{maintainStatus.checked}</div>
             </div>
             <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
-              <div className="text-gray-500">封禁（无效/已用）</div>
+              <div className="text-gray-500">封禁无效代理</div>
               <div className="text-red-400 font-bold text-lg mt-1">{maintainStatus.banned}</div>
             </div>
             <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
-              <div className="text-gray-500">回收卡死 active</div>
+              <div className="text-gray-500">回收卡死</div>
               <div className="text-amber-400 font-bold text-lg mt-1">{maintainStatus.recycled}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-emerald-900/40 p-3">
+              <div className="text-gray-500">自动补充</div>
+              <div className="text-emerald-400 font-bold text-lg mt-1">{(maintainStatus as any).replenished ?? 0}</div>
             </div>
           </div>
         ) : (

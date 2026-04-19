@@ -736,16 +736,18 @@ router.post("/data/captcha-config", async (req, res) => {
 // ── 代理池后台维护 ─────────────────────────────────────────────────────────────
 const PROXY_MAINTAIN_INTERVAL_MS = 2 * 60 * 1000;   // 2 分钟跑一次
 const STUCK_ACTIVE_TIMEOUT_MS    = 8 * 60 * 1000;   // active 超 8 分钟算卡死
+const REPLENISH_THRESHOLD        = 50;               // idle 低于此数触发补充
+const REPLENISH_TARGET           = 100;              // 补充目标数量
 
 interface MaintenanceResult {
-  ts: number; checked: number; banned: number; recycled: number;
+  ts: number; checked: number; banned: number; recycled: number; replenished: number;
 }
 let lastMaintenanceResult: MaintenanceResult | null = null;
 
-/** 对任意 SOCKS5 代理 URL 做真实连通性探测（握手 + CONNECT login.live.com:443） */
+/** 对任意 SOCKS5 代理 URL 做真实连通性探测：握手 + CONNECT login.live.com:443 */
 function testProxyConnectivity(proxyUrl: string): Promise<boolean> {
   return new Promise((resolve) => {
-    if (!proxyUrl.startsWith("socks5://")) { resolve(true); return; } // HTTP 代理暂跳过
+    if (!proxyUrl.startsWith("socks5://")) { resolve(true); return; }
     const m = proxyUrl.match(/socks5:\/\/(?:[^@]+@)?([^:]+):(\d+)/);
     if (!m) { resolve(false); return; }
     const [, proxyHost, proxyPortStr] = m;
@@ -777,43 +779,93 @@ function testProxyConnectivity(proxyUrl: string): Promise<boolean> {
   });
 }
 
+/** 从现有 pool-us/quarkip 代理中提取账号凭证，用于生成新 sessid 代理 */
+async function getPoolUsCredentials() {
+  const row = await queryOne<{ formatted: string }>(
+    `SELECT formatted FROM proxies WHERE formatted ILIKE 'socks5://%sessid%@pool-us%' LIMIT 1`, []
+  );
+  if (!row) return null;
+  const m = row.formatted.match(/socks5:\/\/(.+?-country-\w+)-sessid-\d+:(.+?)@([^:]+):(\d+)/);
+  if (!m) return null;
+  return { userPrefix: m[1], password: m[2], host: m[3], port: Number(m[4]) };
+}
+
+/** idle < REPLENISH_THRESHOLD 时生成新 sessid 并验证补充到 REPLENISH_TARGET */
+async function replenishProxyPool(currentIdle: number): Promise<number> {
+  const needed = REPLENISH_TARGET - currentIdle;
+  if (needed <= 0) return 0;
+  const creds = await getPoolUsCredentials();
+  if (!creds) { console.log("[proxy-maintain] 无 pool-us 凭证，无法自动补充"); return 0; }
+  const { userPrefix, password, host, port } = creds;
+  console.log(`[proxy-maintain] idle=${currentIdle} < ${REPLENISH_THRESHOLD}，开始补充至 ${REPLENISH_TARGET}...`);
+  // 生成候选 sessid URL（每次用时间戳+随机偏移保证唯一）
+  const base = Date.now();
+  const candidates = Array.from({ length: needed + 15 }, (_, i) =>
+    `socks5://${userPrefix}-sessid-${base + i * 7 + Math.floor(Math.random() * 100)}:${password}@${host}:${port}`
+  );
+  let added = 0;
+  for (let i = 0; i < candidates.length && added < needed; i += 5) {
+    const batch = candidates.slice(i, i + 5);
+    const results = await Promise.all(batch.map(async url => ({ url, ok: await testProxyConnectivity(url) })));
+    for (const r of results) {
+      if (!r.ok || added >= needed) continue;
+      const hm = r.url.match(/socks5:\/\/(?:[^@]+@)?([^:]+):(\d+)/);
+      if (!hm) continue;
+      try {
+        await execute(
+          `INSERT INTO proxies (formatted, host, port, status, used_count, last_used)
+           VALUES ($1,$2,$3,'idle',0,NULL) ON CONFLICT (formatted) DO NOTHING`,
+          [r.url, hm[1], Number(hm[2])]
+        );
+        added++;
+      } catch {}
+    }
+  }
+  console.log(`[proxy-maintain] 补充完成 +${added} 个通网代理（目标 ${REPLENISH_TARGET}）`);
+  return added;
+}
+
 async function runProxyMaintenance() {
   const t0 = Date.now();
-  let recycled = 0, banned = 0, checked = 0;
+  let recycled = 0, banned = 0, checked = 0, replenished = 0;
   try {
-    // 1. 回收卡在 active 超过 8 分钟的代理 → 改回 idle
+    // 1. 回收卡 active 超 8 分钟的代理 → idle，重置 used_count
     const stuckCutoff = new Date(Date.now() - STUCK_ACTIVE_TIMEOUT_MS).toISOString();
     const stuck = await query<{ id: number }>(
       `SELECT id FROM proxies WHERE status='active' AND (last_used IS NULL OR last_used < $1)`,
       [stuckCutoff]
     );
     if (stuck.length > 0) {
-      await execute(`UPDATE proxies SET status='idle' WHERE id=ANY($1::int[])`, [stuck.map(r=>r.id)]);
+      await execute(`UPDATE proxies SET status='idle', used_count=0 WHERE id=ANY($1::int[])`, [stuck.map(r => r.id)]);
       recycled = stuck.length;
     }
 
-    // 2. 已消耗代理（used_count>=1, idle, 非桥）→ 标记 banned
+    // 2. pool-us/quarkip session 代理：used_count>=1 → 重置为 0（sessid 本身不过期，让连通性检测决定）
+    await execute(
+      `UPDATE proxies SET used_count=0
+       WHERE status='idle' AND used_count >= 1
+         AND (formatted ILIKE '%pool-us%' OR formatted ILIKE '%quarkip%')`, []
+    );
+
+    // 3. 非 session 普通代理：used_count>=1 且 idle → banned（单次消耗型）
     const usedRows = await query<{ id: number }>(
       `SELECT id FROM proxies
        WHERE status='idle' AND used_count >= 1
+         AND NOT (formatted ILIKE '%pool-us%' OR formatted ILIKE '%quarkip%')
          AND NOT (host='127.0.0.1' AND port BETWEEN ${SUBNODE_BRIDGE_MIN_PORT} AND ${SUBNODE_BRIDGE_MAX_PORT})`,
       []
     );
     if (usedRows.length > 0) {
-      await execute(
-        `UPDATE proxies SET status='banned', last_used=NOW() WHERE id=ANY($1::int[])`,
-        [usedRows.map(r=>r.id)]
-      );
+      await execute(`UPDATE proxies SET status='banned', last_used=NOW() WHERE id=ANY($1::int[])`, [usedRows.map(r => r.id)]);
       banned += usedRows.length;
     }
 
-    // 3. 连通性检测：idle/used_count=0 的非桥 SOCKS5 代理，每批 5 个，最多 30 个
+    // 4. 连通性检测：随机抽 30 个 idle SOCKS5 代理（含 pool-us），验证真实出网
     const toCheck = await query<{ id: number; formatted: string }>(
       `SELECT id, formatted FROM proxies
-       WHERE status='idle' AND used_count=0
-         AND formatted ILIKE 'socks5://%'
+       WHERE status='idle' AND formatted ILIKE 'socks5://%'
          AND NOT (host='127.0.0.1' AND port BETWEEN ${SUBNODE_BRIDGE_MIN_PORT} AND ${SUBNODE_BRIDGE_MAX_PORT})
-       LIMIT 30`, []
+       ORDER BY RANDOM() LIMIT 30`, []
     );
     checked = toCheck.length;
     const deadIds: number[] = [];
@@ -827,8 +879,17 @@ async function runProxyMaintenance() {
       banned += deadIds.length;
     }
 
-    lastMaintenanceResult = { ts: Date.now(), checked, banned, recycled };
-    console.log(`[proxy-maintain] 完成 recycled=${recycled} banned=${banned} checked=${checked} elapsed=${Date.now()-t0}ms`);
+    // 5. 如果 idle 代理数量低于阈值，自动补充
+    const idleCount = await queryOne<{ cnt: string }>(
+      `SELECT COUNT(*) AS cnt FROM proxies WHERE status='idle'`, []
+    );
+    const currentIdle = Number(idleCount?.cnt ?? 0);
+    if (currentIdle < REPLENISH_THRESHOLD) {
+      replenished = await replenishProxyPool(currentIdle);
+    }
+
+    lastMaintenanceResult = { ts: Date.now(), checked, banned, recycled, replenished };
+    console.log(`[proxy-maintain] 完成 recycled=${recycled} banned=${banned} checked=${checked} replenished=${replenished} elapsed=${Date.now() - t0}ms`);
   } catch (e) {
     console.error("[proxy-maintain] 出错:", e);
   }
