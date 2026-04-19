@@ -8,7 +8,7 @@ Env:
   WS_TOKEN      - 隧道认证 token
   BRIDGE_HOST   - 监听地址 (default 127.0.0.1)
   BRIDGE_PORT   - 监听端口 (default 1089)
-  REFRESH_SECS  - 节点刷新间隔 (default 60)
+  REFRESH_SECS  - 节点刷新间隔 (default 6)
   WS_URL        - 手动单 URL 兜底（旧配置兼容）
 """
 import asyncio, urllib.parse, os, struct, logging, socket
@@ -28,7 +28,7 @@ GATEWAY_API  = os.environ.get("GATEWAY_API",  "http://localhost:8080/api")
 WS_TOKEN     = os.environ.get("WS_TOKEN",     os.environ.get("TUNNEL_TOKEN", "123456"))
 HOST         = os.environ.get("BRIDGE_HOST",  "127.0.0.1")
 PORT         = int(os.environ.get("BRIDGE_PORT", "1089"))
-REFRESH_SECS = int(os.environ.get("REFRESH_SECS", "60"))
+REFRESH_SECS = int(os.environ.get("REFRESH_SECS", "6"))
 
 # 旧配置兼容种子
 _seed_raw = os.environ.get("WS_URL", "")
