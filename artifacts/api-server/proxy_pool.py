@@ -51,10 +51,10 @@ class ProxyPool:
             cur.execute("""
                 SELECT formatted, host, port, status
                 FROM proxies
-                WHERE (status IN ('active','idle') OR (host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089'))
+                WHERE (status IN ('active','idle') OR ((host = '127.0.0.1' AND port BETWEEN 1089 AND 1199) OR formatted = 'socks5://127.0.0.1:1089' OR formatted LIKE 'socks5://127.0.0.1:109%' OR formatted LIKE 'socks5://127.0.0.1:11%'))
                   AND NOT (host = '127.0.0.1' AND port BETWEEN 10820 AND 10845)
                 ORDER BY
-                  CASE WHEN (host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089') THEN 0 ELSE 1 END,
+                  CASE WHEN ((host = '127.0.0.1' AND port BETWEEN 1089 AND 1199) OR formatted = 'socks5://127.0.0.1:1089' OR formatted LIKE 'socks5://127.0.0.1:109%' OR formatted LIKE 'socks5://127.0.0.1:11%') THEN 0 ELSE 1 END,
                   id
             """)
             rows = cur.fetchall()
@@ -66,7 +66,7 @@ class ProxyPool:
                 # 加入新增的
                 for r in rows:
                     if r[0] not in existing_urls:
-                        group = "subnode_bridge" if ((r[1] == "127.0.0.1" and int(r[2] or 0) in (1090,1091,1092,1089)) or str(r[0]) in ("socks5://127.0.0.1:1090","socks5://127.0.0.1:1091","socks5://127.0.0.1:1092","socks5://127.0.0.1:1089")) else "default"
+                        group = "subnode_bridge" if ((r[1] == "127.0.0.1" and 1089 <= int(r[2] or 0) <= 1199) or str(r[0]) == "socks5://127.0.0.1:1089" or str(r[0]).startswith("socks5://127.0.0.1:109") or str(r[0]).startswith("socks5://127.0.0.1:11")) else "default"
                         self._proxies.append({"url": r[0], "group": group, "banned_until": 0})
                 # 移除数据库里已不存在的（非 active/idle 或已知死亡端口）
                 self._proxies = [p for p in self._proxies if p["url"] in new_urls]

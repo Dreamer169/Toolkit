@@ -4,6 +4,7 @@ import { Router, type IRouter } from "express";
 import { createHash, randomBytes, randomUUID } from "crypto";
 import { execute, query, queryOne } from "../db.js";
 import { existsSync } from "fs";
+import { Socket } from "net";
 import path from "path";
 
 const router: IRouter = Router();
@@ -1624,9 +1625,10 @@ router.post("/tools/cursor/register", async (req, res) => {
   let proxy = proxyInput;
   if (!proxy && autoProxy) {
     try {
+      await syncLocalSubnodeBridgeProxies();
       const { query: dbQuery } = await import("../db.js");
       const rows = await dbQuery<{ id: number; formatted: string }>(
-        `SELECT id, formatted FROM proxies WHERE ${ELIGIBLE_SHARED_PROXY_SQL} ORDER BY CASE WHEN (host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089') THEN 0 WHEN formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%' THEN 1 WHEN host <> '127.0.0.1' THEN 2 ELSE 3 END, used_count ASC, RANDOM() LIMIT 1`
+        `SELECT id, formatted FROM proxies WHERE ${ELIGIBLE_SHARED_PROXY_SQL} ORDER BY CASE WHEN ${SUBNODE_BRIDGE_SQL} THEN 0 WHEN formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%' THEN 1 WHEN host <> '127.0.0.1' THEN 2 ELSE 3 END, used_count ASC, RANDOM() LIMIT 1`
       );
       if (rows[0]) {
         proxy = rows[0].formatted;
@@ -1777,9 +1779,10 @@ router.post("/tools/cursor/register-http", async (req, res) => {
     proxy = "socks5://127.0.0.1:10808";
   } else if (!proxy && autoProxy) {
     try {
+      await syncLocalSubnodeBridgeProxies();
       const { query: dbQuery } = await import("../db.js");
       const rows = await dbQuery<{ formatted: string }>(
-        `SELECT formatted FROM proxies WHERE ${ELIGIBLE_SHARED_PROXY_SQL} ORDER BY CASE WHEN (host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089') THEN 0 WHEN formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%' THEN 1 WHEN host <> '127.0.0.1' THEN 2 ELSE 3 END, used_count ASC, RANDOM() LIMIT 1`
+        `SELECT formatted FROM proxies WHERE ${ELIGIBLE_SHARED_PROXY_SQL} ORDER BY CASE WHEN ${SUBNODE_BRIDGE_SQL} THEN 0 WHEN formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%' THEN 1 WHEN host <> '127.0.0.1' THEN 2 ELSE 3 END, used_count ASC, RANDOM() LIMIT 1`
       );
       if (rows[0]) proxy = rows[0].formatted;
     } catch {}
@@ -2119,6 +2122,56 @@ const CF_POOL_SCRIPT = process.env["CF_POOL_SCRIPT"]
   || path.resolve(process.cwd(), "artifacts/api-server/cf_pool_api.py");
 const CF_POOL_PYTHON = process.env["PYTHON_BIN"] || "python3";
 const CF_POOL_REMOTE_API_BASE = (process.env["CF_POOL_REMOTE_API_BASE_URL"] || process.env["REMOTE_API_BASE_URL"] || "http://45.205.27.69:8080/api").replace(/\/$/, "");
+const SUBNODE_BRIDGE_MIN_PORT = Number(process.env["SUBNODE_BRIDGE_MIN_PORT"] || 1089);
+const SUBNODE_BRIDGE_MAX_PORT = Number(process.env["SUBNODE_BRIDGE_MAX_PORT"] || 1199);
+const SUBNODE_BRIDGE_SQL = `
+  (
+    (host = '127.0.0.1' AND port BETWEEN ${SUBNODE_BRIDGE_MIN_PORT} AND ${SUBNODE_BRIDGE_MAX_PORT})
+    OR formatted = 'socks5://127.0.0.1:1089'
+    OR formatted ILIKE 'socks5://127.0.0.1:109%'
+    OR formatted ILIKE 'socks5://127.0.0.1:11%'
+  )
+`;
+let lastSubnodeBridgeSync = 0;
+
+function isSocks5Port(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = new Socket();
+    let done = false;
+    const finish = (ok: boolean) => {
+      if (done) return;
+      done = true;
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(250);
+    socket.once("connect", () => socket.write(Buffer.from([0x05, 0x01, 0x00])));
+    socket.once("data", (buf) => finish(buf.length >= 2 && buf[0] === 0x05 && buf[1] === 0x00));
+    socket.once("timeout", () => finish(false));
+    socket.once("error", () => finish(false));
+    socket.connect(port, "127.0.0.1");
+  });
+}
+
+async function syncLocalSubnodeBridgeProxies(force = false) {
+  const now = Date.now();
+  if (!force && now - lastSubnodeBridgeSync < 15000) return;
+  lastSubnodeBridgeSync = now;
+  const ports = Array.from({ length: SUBNODE_BRIDGE_MAX_PORT - SUBNODE_BRIDGE_MIN_PORT + 1 }, (_, i) => SUBNODE_BRIDGE_MIN_PORT + i);
+  const checks = await Promise.all(ports.map(async (port) => ({ port, ok: await isSocks5Port(port) })));
+  const openPorts = checks.filter((r) => r.ok).map((r) => r.port);
+  for (const port of openPorts) {
+    await execute(
+      `INSERT INTO proxies (formatted, host, port, status, used_count, last_used)
+       VALUES ($1, '127.0.0.1', $2, 'idle', 0, NULL)
+       ON CONFLICT (formatted) DO UPDATE SET
+         host='127.0.0.1',
+         port=$2,
+         status=CASE WHEN proxies.status='banned' THEN 'idle' ELSE proxies.status END`,
+      [`socks5://127.0.0.1:${port}`, port]
+    );
+  }
+}
 
 async function forwardCfPoolRequest(endpoint: string, init?: RequestInit) {
   const r = await fetch(`${CF_POOL_REMOTE_API_BASE}${endpoint}`, init);
@@ -2129,14 +2182,14 @@ async function forwardCfPoolRequest(endpoint: string, init?: RequestInit) {
 }
 
 const ELIGIBLE_SHARED_PROXY_SQL = `
-  (status != 'banned' OR (host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089'))
+  (status != 'banned' OR ${SUBNODE_BRIDGE_SQL})
   AND NOT (host = '127.0.0.1' AND port BETWEEN 10820 AND 10845)
   AND NOT (formatted ILIKE 'socks5://127.0.0.1:1082%' OR formatted ILIKE 'socks5://127.0.0.1:1083%' OR formatted ILIKE 'socks5://127.0.0.1:1084%')
 `;
 
 const SHARED_PROXY_SOURCE_CASE = `
   CASE
-    WHEN (host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089') THEN 'subnode_bridge'
+    WHEN ${SUBNODE_BRIDGE_SQL} THEN 'subnode_bridge'
     WHEN host = '127.0.0.1' THEN 'local_proxy'
     WHEN formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%' THEN 'residential'
     ELSE 'external'
@@ -2144,6 +2197,7 @@ const SHARED_PROXY_SOURCE_CASE = `
 `;
 
 async function pickSharedProxyPool(limit: number): Promise<Array<{ id: number; formatted: string; source: string }>> {
+  await syncLocalSubnodeBridgeProxies();
   const n = Math.min(50, Math.max(1, Math.floor(limit || 1)));
   const rows = await query<{ id: number; formatted: string; source: string }>(`
     SELECT id, formatted, ${SHARED_PROXY_SOURCE_CASE} AS source
@@ -2151,7 +2205,7 @@ async function pickSharedProxyPool(limit: number): Promise<Array<{ id: number; f
     WHERE ${ELIGIBLE_SHARED_PROXY_SQL}
     ORDER BY
       CASE
-        WHEN (host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089') THEN 0
+        WHEN ${SUBNODE_BRIDGE_SQL} THEN 0
         WHEN formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%' THEN 1
         WHEN host <> '127.0.0.1' THEN 2
         ELSE 3

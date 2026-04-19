@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { query, queryOne, execute } from "../db.js";
+import { Socket } from "net";
 
 const router = Router();
 
@@ -417,15 +418,66 @@ router.post("/data/configs/batch", async (req, res) => {
 });
 
 // ─── 代理池 CRUD ─────────────────────────────────────────
+const SUBNODE_BRIDGE_MIN_PORT = Number(process.env["SUBNODE_BRIDGE_MIN_PORT"] || 1089);
+const SUBNODE_BRIDGE_MAX_PORT = Number(process.env["SUBNODE_BRIDGE_MAX_PORT"] || 1199);
+const SUBNODE_BRIDGE_SQL = `
+  (
+    (host = '127.0.0.1' AND port BETWEEN ${SUBNODE_BRIDGE_MIN_PORT} AND ${SUBNODE_BRIDGE_MAX_PORT})
+    OR formatted = 'socks5://127.0.0.1:1089'
+    OR formatted ILIKE 'socks5://127.0.0.1:109%'
+    OR formatted ILIKE 'socks5://127.0.0.1:11%'
+  )
+`;
+let lastSubnodeBridgeSync = 0;
+
+function isSocks5Port(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = new Socket();
+    let done = false;
+    const finish = (ok: boolean) => {
+      if (done) return;
+      done = true;
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(250);
+    socket.once("connect", () => socket.write(Buffer.from([0x05, 0x01, 0x00])));
+    socket.once("data", (buf) => finish(buf.length >= 2 && buf[0] === 0x05 && buf[1] === 0x00));
+    socket.once("timeout", () => finish(false));
+    socket.once("error", () => finish(false));
+    socket.connect(port, "127.0.0.1");
+  });
+}
+
+async function syncLocalSubnodeBridgeProxies(force = false) {
+  const now = Date.now();
+  if (!force && now - lastSubnodeBridgeSync < 15000) return;
+  lastSubnodeBridgeSync = now;
+  const ports = Array.from({ length: SUBNODE_BRIDGE_MAX_PORT - SUBNODE_BRIDGE_MIN_PORT + 1 }, (_, i) => SUBNODE_BRIDGE_MIN_PORT + i);
+  const checks = await Promise.all(ports.map(async (port) => ({ port, ok: await isSocks5Port(port) })));
+  const openPorts = checks.filter((r) => r.ok).map((r) => r.port);
+  for (const port of openPorts) {
+    await execute(
+      `INSERT INTO proxies (formatted, host, port, status, used_count, last_used)
+       VALUES ($1, '127.0.0.1', $2, 'idle', 0, NULL)
+       ON CONFLICT (formatted) DO UPDATE SET
+         host='127.0.0.1',
+         port=$2,
+         status=CASE WHEN proxies.status='banned' THEN 'idle' ELSE proxies.status END`,
+      [`socks5://127.0.0.1:${port}`, port]
+    );
+  }
+}
+
 const ELIGIBLE_PROXY_SQL = `
-  (status != 'banned' OR (host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089'))
+  (status != 'banned' OR ${SUBNODE_BRIDGE_SQL})
   AND NOT (host = '127.0.0.1' AND port BETWEEN 10820 AND 10845)
   AND NOT (formatted ILIKE 'socks5://127.0.0.1:1082%' OR formatted ILIKE 'socks5://127.0.0.1:1083%' OR formatted ILIKE 'socks5://127.0.0.1:1084%')
 `;
 
 const PROXY_SOURCE_CASE = `
   CASE
-    WHEN (host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089') THEN 'subnode_bridge'
+    WHEN ${SUBNODE_BRIDGE_SQL} THEN 'subnode_bridge'
     WHEN host = '127.0.0.1' THEN 'local_proxy'
     WHEN formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%' THEN 'residential'
     ELSE 'external'
@@ -434,6 +486,7 @@ const PROXY_SOURCE_CASE = `
 
 router.get("/data/proxies", async (req, res) => {
   try {
+    await syncLocalSubnodeBridgeProxies();
     const rows = await query(`
       SELECT id, formatted, host, port, status, used_count, last_used, created_at,
              ${PROXY_SOURCE_CASE} AS source,
@@ -448,10 +501,10 @@ router.get("/data/proxies", async (req, res) => {
       SELECT
         COUNT(*) AS total,
         COUNT(*) FILTER (WHERE ${ELIGIBLE_PROXY_SQL}) AS eligible,
-        COUNT(*) FILTER (WHERE ${ELIGIBLE_PROXY_SQL} AND ((host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089'))) AS subnode_bridge,
+        COUNT(*) FILTER (WHERE ${ELIGIBLE_PROXY_SQL} AND ${SUBNODE_BRIDGE_SQL}) AS subnode_bridge,
         COUNT(*) FILTER (WHERE ${ELIGIBLE_PROXY_SQL} AND (formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%')) AS residential,
         COUNT(*) FILTER (WHERE ${ELIGIBLE_PROXY_SQL} AND host <> '127.0.0.1' AND formatted NOT ILIKE '%quarkip%' AND formatted NOT ILIKE '%pool-us%') AS external,
-        COUNT(*) FILTER (WHERE ${ELIGIBLE_PROXY_SQL} AND host = '127.0.0.1' AND port NOT IN (1090,1091,1092,1089)) AS local_proxy
+        COUNT(*) FILTER (WHERE ${ELIGIBLE_PROXY_SQL} AND host = '127.0.0.1' AND NOT (${SUBNODE_BRIDGE_SQL})) AS local_proxy
       FROM proxies
     `);
     res.json({
@@ -472,13 +525,14 @@ router.get("/data/proxies", async (req, res) => {
 // 从共享代理池取一个最少使用的代理（子节点桥/住宅/外部代理优先，排除已知死亡的 CF 本地端口）
 router.get("/data/proxies/pick", async (req, res) => {
   try {
+    await syncLocalSubnodeBridgeProxies();
     const row = await queryOne<{ id: number; formatted: string; source: string }>(`
       SELECT id, formatted, ${PROXY_SOURCE_CASE} AS source
       FROM proxies
       WHERE ${ELIGIBLE_PROXY_SQL}
       ORDER BY
         CASE
-          WHEN (host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089') THEN 0
+          WHEN ${SUBNODE_BRIDGE_SQL} THEN 0
           WHEN formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%' THEN 1
           WHEN host <> '127.0.0.1' THEN 2
           ELSE 3
