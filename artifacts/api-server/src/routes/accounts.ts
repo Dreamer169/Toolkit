@@ -11,7 +11,7 @@ const LOCAL_API_BASE = (process.env.LOCAL_API_BASE_URL || "http://127.0.0.1:" + 
 const VPS_GATEWAY = process.env.VPS_GATEWAY_URL || "http://45.205.27.69:8080/api/gateway";
 // Dead ports detected via connectivity scan (10827-10829, 10834-10841 offline)
 const XRAY_PORTS_DEAD = new Set([10827,10828,10829,10834,10835,10836,10837,10838,10839,10840,10841,10845]);
-const XRAY_PORTS  = [...Array.from({ length: 26 }, (_, i) => 10820 + i).filter(p => !XRAY_PORTS_DEAD.has(p))];  // port 1090 removed: http_socks5_bridge sub-node is dead
+const XRAY_PORTS  = [1090, ...Array.from({ length: 26 }, (_, i) => 10820 + i).filter(p => !XRAY_PORTS_DEAD.has(p))];  // 1090=Replit sub-node (CF bypass priority)
 // Dead ports detected via connectivity scan (10827-10829, 10834-10841 offline)
 const DEAD_PORTS  = new Set([10827, 10828, 10829, 10834, 10835, 10836, 10837, 10838, 10839, 10840, 10841]);
 
