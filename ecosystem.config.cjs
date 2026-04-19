@@ -191,8 +191,8 @@ module.exports = {
       "autorestart": true
     },
     {
-      "name": "ngrok-sub2api",
-      "script": "/root/Toolkit/start-ngrok-sub2api.sh",
+      "name": "ngrok-apiserver",
+      "script": "/root/Toolkit/start-ngrok-apiserver.sh",
       "interpreter": "bash",
       "cwd": "/root/Toolkit",
       "restart_delay": 5000,
