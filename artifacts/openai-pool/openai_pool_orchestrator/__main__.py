@@ -100,7 +100,7 @@ def main() -> None:
         app,
         host="0.0.0.0",
         port=port,
-        log_level="warning",
+        log_level="error",
         timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT,
     )
     server = uvicorn.Server(config)

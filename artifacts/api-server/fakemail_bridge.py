@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import signal
 """
 免费邮箱桥接服务 - 无需任何 API Key
 1. 用 fng-api 从 fakenamegenerator.com 生成真实身份（含邮箱）
@@ -244,4 +245,10 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     server = HTTPServer(("0.0.0.0", PORT), Handler)
     print(f"FakeMail Bridge running on port {PORT}", flush=True)
+    import signal
+    def _shutdown(sig, frame):
+        print("[fakemail] shutting down...", flush=True)
+        server.shutdown()
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
     server.serve_forever()

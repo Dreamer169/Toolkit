@@ -4,6 +4,7 @@ const fs = require('fs');
 
 const TOKEN = process.env.EXEC_SECRET || process.env.EXEC_TOKEN || 'zencoder-exec-2026';
 const DEFAULT_CWD = fs.existsSync('/root/Toolkit') ? '/root/Toolkit' : '/workspaces/Toolkit';
+const PORT = Number(process.env.EXEC_PORT || 9999);
 
 const server = http.createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
@@ -40,8 +41,26 @@ const server = http.createServer((req, res) => {
   });
 });
 
+function startServer(retries = 5) {
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log('Remote exec server running on port ' + PORT);
+  });
+}
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE' && arguments[0] !== 0) {
+    console.error('Port ' + PORT + ' in use, retrying in 3s...');
+    setTimeout(() => {
+      server.close();
+      startServer();
+    }, 3000);
+  } else {
+    console.error('Server error:', err.message);
+    process.exit(1);
+  }
+});
+
 process.on('SIGTERM', () => { server.close(() => process.exit(0)); });
 process.on('SIGINT',  () => { server.close(() => process.exit(0)); });
-server.listen(Number(process.env.EXEC_PORT || 9999), '0.0.0.0', () => {
-  console.log('Remote exec server running');
-});
+
+startServer();

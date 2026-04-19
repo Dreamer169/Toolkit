@@ -81,12 +81,20 @@ def handle(client, addr):
         except: pass
 
 def main():
+    import signal, sys
     s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
-    s.bind(("127.0.0.1",PORT)); s.listen(64)
+    s.bind(("127.0.0.1",PORT)); s.listen(64); s.settimeout(2.0)
     print(f"[ws-proxy] SOCKS5 bridge on 127.0.0.1:{PORT}, {len(BASE_URLS)} repl(s), path:{WS_PATH}",flush=True)
     for u in BASE_URLS: print(f"[ws-proxy]   {u}",flush=True)
-    while True:
-        c,a=s.accept()
-        threading.Thread(target=handle,args=(c,a),daemon=True).start()
+    running = [True]
+    def _stop(sig,frame):
+        print("[ws-proxy] shutting down",flush=True); running[0]=False; s.close()
+    signal.signal(signal.SIGTERM, _stop); signal.signal(signal.SIGINT, _stop)
+    while running[0]:
+        try:
+            c,a=s.accept()
+            threading.Thread(target=handle,args=(c,a),daemon=True).start()
+        except socket.timeout: continue
+        except OSError: break
 
 if __name__=="__main__": main()

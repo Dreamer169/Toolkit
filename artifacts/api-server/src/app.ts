@@ -1,4 +1,4 @@
-import express, { type Express } from "express";
+import express, { type Express, type ErrorRequestHandler } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
 import router from "./routes";
@@ -43,5 +43,14 @@ app.get("/v1/models", (_req, res) => {
     data: [{ id: "tunnel-proxy", object: "model", owned_by: "subnode" }],
   });
 });
+
+const jsonErrorHandler: ErrorRequestHandler = (err, _req, res, next) => {
+  if (err.type === "entity.parse.failed") {
+    res.status(400).json({ error: "Invalid JSON body" });
+  } else {
+    next(err);
+  }
+};
+app.use(jsonErrorHandler);
 
 export default app;

@@ -1,5 +1,6 @@
 #!/bin/bash
 # Xray IP 自动守护脚本：检测代理失效后自动换IP并重启
+mkdir -p /tmp/toolkit_logs
 LOG=/tmp/toolkit_logs/xray-watchdog.log
 XRAY_CFG=/root/Toolkit/xray.json
 DOMAIN=iam.jimhacker.qzz.io
