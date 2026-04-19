@@ -53,6 +53,12 @@ def http_get_chunks(url, callback, timeout=30):
         conn.request("GET",path,headers={"Accept":"*/*","Connection":"close"})
         resp=conn.getresponse()
         status=resp.status
+        if status in (204,404,410):
+            try:
+                resp.read()
+            except Exception:
+                pass
+            return status
         while True:
             chunk=resp.read(4096)
             if not chunk: break
