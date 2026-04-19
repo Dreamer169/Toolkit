@@ -1,4 +1,9 @@
 #!/usr/bin/env node
+/**
+ * Reseek 隐蔽子节点 Agent
+ * 运行在 Reseek 工作区，通过 AI Integrations 代理 AI 请求，
+ * 启动后自动向主节点网关 self-register。
+ */
 "use strict";
 const http  = require("http");
 const https = require("https");
@@ -12,9 +17,10 @@ const MY_URL      = process.env.MY_GATEWAY_URL ||
 const NODE_NAME   = process.env.NODE_NAME ||
                     process.env.REPL_OWNER ||
                     process.env.REPLIT_OWNER ||
-                    "node";
+                    "reseek-agent";
 const EXEC_SECRET = process.env.EXEC_SECRET || "";
 
+// AI Integration 凭据（Reseek 平台注入）
 const OAI_BASE  = process.env.AI_INTEGRATIONS_OPENAI_BASE_URL    || "";
 const OAI_KEY   = process.env.AI_INTEGRATIONS_OPENAI_API_KEY     || "";
 const ANT_BASE  = process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL || "";
