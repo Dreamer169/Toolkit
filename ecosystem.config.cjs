@@ -172,11 +172,21 @@ module.exports = {
       "cwd": "/root/Toolkit",
       "env": {
         "BRIDGE_PORT": "1089",
-        "WS_URL": "wss://e30c0ae2-f8c5-4be1-ac08-513f36159e84-00-2mfc7zpe4ng5o.picard.replit.dev/api/stream",
+        "WS_URL": "wss://e30c0ae2-f8c5-4be1-ac08-513f36159e84-00-2mfc7zpe4ng5o.picard.replit.dev/api/stream/ws",
         "WS_TOKEN": "1NnCcQJcNgwlTDPEnDIkWEKzWIdmZ/4+BmsOp1/jLP6ojCWsv8+xTwcLj34Mu2viWy0q5SEoDP0q2qE5xHaRRg=="
       },
       "restart_delay": 5000,
       "max_restarts": 30,
+      "watch": false,
+      "autorestart": true
+    },
+    {
+      "name": "subnode-keepalive",
+      "script": "/root/Toolkit/subnode_keepalive.sh",
+      "interpreter": "bash",
+      "cwd": "/root/Toolkit",
+      "restart_delay": 10000,
+      "max_restarts": 999,
       "watch": false,
       "autorestart": true
     }

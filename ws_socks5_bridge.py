@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-WS-SOCKS5 Bridge Client
-本地启动 SOCKS5 服务器，每条连接通过 WebSocket 隧道到 Replit 中转节点出网
-隐藏真实 VPS IP，流量看起来来自 Replit
+WS-SOCKS5 Bridge Client (Protocol-A compatible)
+连接协议对齐 handleTunnelWs: ?token=<tok>&host=<h>&port=<p> 查询参数
 """
 import asyncio
 import urllib.parse
-import json
 import os
 import struct
 import logging
@@ -19,10 +17,7 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "websockets"])
     import websockets
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [ws-bridge] %(levelname)s %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [ws-bridge] %(levelname)s %(message)s")
 log = logging.getLogger("ws-bridge")
 
 WS_URL   = os.environ.get("WS_URL", "")
@@ -61,9 +56,6 @@ async def socks5_handshake(reader, writer):
 
     port_raw = await reader.readexactly(2)
     port = struct.unpack("!H", port_raw)[0]
-
-    writer.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
-    await writer.drain()
     return host, port
 
 
@@ -76,29 +68,35 @@ async def handle(reader, writer):
         writer.close()
         return
 
-    log.info(f"{peer} → {host}:{port}")
-    url = f"{WS_URL}?t={urllib.parse.quote(WS_TOKEN, safe=chr(39))}"
+    log.info(f"{peer} -> {host}:{port}")
+    qs = urllib.parse.urlencode({"token": WS_TOKEN, "host": host, "port": str(port)})
+    url = f"{WS_URL}?{qs}"
 
     try:
-        async with websockets.connect(
-            url,
-            max_size=None,
-            ping_interval=20,
-            ping_timeout=30,
-            additional_headers={"X-Token": WS_TOKEN}
-        ) as ws:
-            await ws.send(json.dumps({"host": host, "port": port}))
+        async with websockets.connect(url, max_size=None, ping_interval=20, ping_timeout=30) as ws:
+            connected = asyncio.Event()
 
-            async def ws_to_local():
-                try:
-                    async for msg in ws:
-                        writer.write(msg if isinstance(msg, bytes) else msg.encode())
+            async def recv_loop():
+                async for msg in ws:
+                    if isinstance(msg, str):
+                        import json
+                        try:
+                            d = json.loads(msg)
+                            if d.get("ok"):
+                                writer.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
+                                await writer.drain()
+                                connected.set()
+                        except Exception:
+                            pass
+                    else:
+                        if not connected.is_set():
+                            connected.set()
+                        writer.write(msg)
                         await writer.drain()
-                except Exception:
-                    pass
                 writer.close()
 
-            async def local_to_ws():
+            async def send_loop():
+                await asyncio.wait_for(connected.wait(), timeout=15)
                 try:
                     while True:
                         data = await reader.read(65536)
@@ -109,9 +107,14 @@ async def handle(reader, writer):
                     pass
                 await ws.close()
 
-            await asyncio.gather(ws_to_local(), local_to_ws())
+            await asyncio.gather(recv_loop(), send_loop())
     except Exception as e:
         log.error(f"ws error {host}:{port}: {e}")
+        try:
+            writer.write(b"\x05\x04\x00\x01" + b"\x00" * 6)
+            await writer.drain()
+        except Exception:
+            pass
         writer.close()
 
 
@@ -119,12 +122,11 @@ async def main():
     if not WS_URL or not WS_TOKEN:
         log.error("WS_URL and WS_TOKEN must be set")
         return
-    srv = await asyncio.start_server(handle, HOST, PORT)
     log.info(f"SOCKS5 bridge listening {HOST}:{PORT}")
-    log.info(f"Tunnel → {WS_URL}")
+    log.info(f"Tunnel -> {WS_URL}")
+    srv = await asyncio.start_server(handle, HOST, PORT)
     async with srv:
         await srv.serve_forever()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
