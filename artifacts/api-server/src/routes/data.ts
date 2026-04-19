@@ -417,25 +417,82 @@ router.post("/data/configs/batch", async (req, res) => {
 });
 
 // ─── 代理池 CRUD ─────────────────────────────────────────
+const ELIGIBLE_PROXY_SQL = `
+  (status != 'banned' OR (host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089'))
+  AND NOT (host = '127.0.0.1' AND port BETWEEN 10820 AND 10845)
+  AND NOT (formatted ILIKE 'socks5://127.0.0.1:1082%' OR formatted ILIKE 'socks5://127.0.0.1:1083%' OR formatted ILIKE 'socks5://127.0.0.1:1084%')
+`;
+
+const PROXY_SOURCE_CASE = `
+  CASE
+    WHEN (host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089') THEN 'subnode_bridge'
+    WHEN host = '127.0.0.1' THEN 'local_proxy'
+    WHEN formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%' THEN 'residential'
+    ELSE 'external'
+  END
+`;
+
 router.get("/data/proxies", async (req, res) => {
   try {
-    const rows = await query("SELECT id, formatted, host, port, status, used_count, last_used, created_at FROM proxies ORDER BY used_count ASC, id ASC LIMIT 200");
-    res.json({ success: true, data: rows, total: rows.length });
+    const rows = await query(`
+      SELECT id, formatted, host, port, status, used_count, last_used, created_at,
+             ${PROXY_SOURCE_CASE} AS source,
+             (${ELIGIBLE_PROXY_SQL}) AS eligible
+      FROM proxies
+      ORDER BY used_count ASC, id ASC
+      LIMIT 300
+    `);
+    const stats = await queryOne<{
+      total: string; eligible: string; subnode_bridge: string; residential: string; external: string; local_proxy: string;
+    }>(`
+      SELECT
+        COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE ${ELIGIBLE_PROXY_SQL}) AS eligible,
+        COUNT(*) FILTER (WHERE ${ELIGIBLE_PROXY_SQL} AND ((host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089'))) AS subnode_bridge,
+        COUNT(*) FILTER (WHERE ${ELIGIBLE_PROXY_SQL} AND (formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%')) AS residential,
+        COUNT(*) FILTER (WHERE ${ELIGIBLE_PROXY_SQL} AND host <> '127.0.0.1' AND formatted NOT ILIKE '%quarkip%' AND formatted NOT ILIKE '%pool-us%') AS external,
+        COUNT(*) FILTER (WHERE ${ELIGIBLE_PROXY_SQL} AND host = '127.0.0.1' AND port NOT IN (1090,1091,1092,1089)) AS local_proxy
+      FROM proxies
+    `);
+    res.json({
+      success: true,
+      data: rows,
+      total: Number(stats?.total ?? rows.length),
+      eligibleTotal: Number(stats?.eligible ?? 0),
+      sources: {
+        subnodeBridge: Number(stats?.subnode_bridge ?? 0),
+        residential: Number(stats?.residential ?? 0),
+        external: Number(stats?.external ?? 0),
+        localProxy: Number(stats?.local_proxy ?? 0),
+      },
+    });
   } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
 });
 
-// 从代理池取一个最少使用的代理（供注册时自动选取）
+// 从共享代理池取一个最少使用的代理（子节点桥/住宅/外部代理优先，排除已知死亡的 CF 本地端口）
 router.get("/data/proxies/pick", async (req, res) => {
   try {
-    const row = await queryOne<{ id: number; formatted: string }>(
-      "SELECT id, formatted FROM proxies WHERE status != 'banned' AND formatted NOT ILIKE '%quarkip%' AND formatted NOT ILIKE '%pool-us%' ORDER BY used_count ASC, RANDOM() LIMIT 1"
-    );
-    if (!row) { res.json({ success: false, error: "代理池为空，请先导入代理" }); return; }
+    const row = await queryOne<{ id: number; formatted: string; source: string }>(`
+      SELECT id, formatted, ${PROXY_SOURCE_CASE} AS source
+      FROM proxies
+      WHERE ${ELIGIBLE_PROXY_SQL}
+      ORDER BY
+        CASE
+          WHEN (host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089') THEN 0
+          WHEN formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%' THEN 1
+          WHEN host <> '127.0.0.1' THEN 2
+          ELSE 3
+        END,
+        used_count ASC,
+        RANDOM()
+      LIMIT 1
+    `);
+    if (!row) { res.json({ success: false, error: "共享代理池为空，请先导入代理或部署子节点" }); return; }
     await execute(
       "UPDATE proxies SET used_count = used_count + 1, last_used = NOW(), status = 'active' WHERE id = $1",
       [row.id]
     );
-    res.json({ success: true, proxy: row.formatted, id: row.id });
+    res.json({ success: true, proxy: row.formatted, id: row.id, source: row.source });
   } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
 });
 

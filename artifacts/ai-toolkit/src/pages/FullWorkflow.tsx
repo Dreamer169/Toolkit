@@ -108,7 +108,7 @@ export default function FullWorkflow() {
   useEffect(() => {
     // 只显示 DB 共享 socks5 代理池数量（与其他功能共用的住宅代理池）
     fetch(`${API}/data/proxies`).then(r => r.json()).then(d => {
-      if (d.success) setPoolCount(d.total);
+      if (d.success) setPoolCount(d.eligibleTotal ?? d.total);
     }).catch(() => {});
     fetch(`${API}/data/captcha-config`).then(r => r.json()).then(d => {
       if (d.success) {
@@ -182,7 +182,7 @@ export default function FullWorkflow() {
           email: data.outlook.email,
           password: data.outlook.password,
           autoProxy: !proxy && autoProxy,
-          proxyMode: !proxy && autoProxy ? "cf" : "",
+          proxyMode: !proxy && autoProxy ? "auto" : "",
           cfPort: 443,
         }),
       });
@@ -483,8 +483,8 @@ export default function FullWorkflow() {
             <div className="bg-emerald-900/20 border border-emerald-700/40 rounded-lg px-4 py-3 flex items-center gap-3">
               <span className="text-emerald-400 text-lg flex-shrink-0">🌐</span>
               <div className="flex-1 text-sm">
-                <p className="text-emerald-300 font-medium">代理池已就绪：{poolCount} 个住宅代理可用</p>
-                <p className="text-emerald-600 text-xs mt-0.5">启动注册时将自动从池中选取一个，每账号使用独立 session IP</p>
+                <p className="text-emerald-300 font-medium">代理池已就绪：{poolCount} 个共享代理可用</p>
+                <p className="text-emerald-600 text-xs mt-0.5">优先使用子节点代理链路/住宅代理；不足时后端自动退回 CF+xray 备用池</p>
               </div>
               <button onClick={pickProxyFromPool} className="px-3 py-1.5 bg-emerald-800 hover:bg-emerald-700 rounded text-xs text-emerald-300 whitespace-nowrap">
                 手动选取查看
@@ -515,7 +515,7 @@ export default function FullWorkflow() {
             </div>
             <button onClick={startRegistration} className={`flex-1 py-3 rounded-lg text-white font-semibold transition-colors ${(proxy || autoProxy) ? "bg-blue-700 hover:bg-blue-600" : "bg-blue-900/60 hover:bg-blue-800/60 border border-blue-700/50"}`}>
               🚀 启动注册{Number(count) > 1 ? `（顺序 ×${count}）` : ""}
-              {!proxy && autoProxy ? "（CF+xray代理池）" : !proxy ? "（无代理）" : ""}
+              {!proxy && autoProxy ? "（共享代理池优先）" : !proxy ? "（无代理）" : ""}
             </button>
             <button onClick={prepare} className="px-4 py-3 bg-[#21262d] border border-[#30363d] rounded-lg text-gray-400 hover:text-white text-sm">
               重新生成

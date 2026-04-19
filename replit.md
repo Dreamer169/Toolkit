@@ -135,6 +135,11 @@ Critical implementation details:
 - Mail Center account badges render all current tags using exact tag matching instead of substring checks.
 - Outlook message fetch now falls back from `mailFolders/inbox/messages` to a full-mailbox Graph query when the inbox folder returns empty, preventing moved/archived/deleted historical mail from looking like a blank mailbox.
 
+### Unified Proxy Pool Behavior
+- Shared proxy pool selection now prefers subnode bridge ports (1090/1091/1092/1089), then residential/external proxies, and excludes dead local CF xray ports 10820-10845.
+- Outlook auto proxy mode uses the shared proxy pool first and falls back to CF+xray only when no eligible shared proxy is available.
+- `proxy_pool.py` was updated to match the actual `proxies` schema (`formatted/host/port`) so non-CF proxy supplementation can sync correctly.
+
 ---
 
 ## Database Schema (PostgreSQL)

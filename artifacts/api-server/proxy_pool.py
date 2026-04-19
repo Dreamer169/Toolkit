@@ -49,10 +49,13 @@ class ProxyPool:
             conn = psycopg2.connect(DATABASE_URL)
             cur  = conn.cursor()
             cur.execute("""
-                SELECT proxy_url, proxy_group, status
+                SELECT formatted, host, port, status
                 FROM proxies
-                WHERE status = 'active'
-                ORDER BY id
+                WHERE (status IN ('active','idle') OR (host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089'))
+                  AND NOT (host = '127.0.0.1' AND port BETWEEN 10820 AND 10845)
+                ORDER BY
+                  CASE WHEN (host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089') THEN 0 ELSE 1 END,
+                  id
             """)
             rows = cur.fetchall()
             conn.close()
@@ -63,8 +66,9 @@ class ProxyPool:
                 # 加入新增的
                 for r in rows:
                     if r[0] not in existing_urls:
-                        self._proxies.append({"url": r[0], "group": r[1] or "default", "banned_until": 0})
-                # 移除数据库里已不存在的（非 active）
+                        group = "subnode_bridge" if ((r[1] == "127.0.0.1" and int(r[2] or 0) in (1090,1091,1092,1089)) or str(r[0]) in ("socks5://127.0.0.1:1090","socks5://127.0.0.1:1091","socks5://127.0.0.1:1092","socks5://127.0.0.1:1089")) else "default"
+                        self._proxies.append({"url": r[0], "group": group, "banned_until": 0})
+                # 移除数据库里已不存在的（非 active/idle 或已知死亡端口）
                 self._proxies = [p for p in self._proxies if p["url"] in new_urls]
 
             print(f"[ProxyPool] 同步数据库完成，当前池 {len(self._proxies)} 个代理，其中有效 {len(self._active())} 个", flush=True)
@@ -114,11 +118,9 @@ class ProxyPool:
                 cur  = conn.cursor()
                 cur.execute("""
                     UPDATE proxies
-                    SET status=banned, ban_reason=%s, banned_until=%s
-                    WHERE proxy_url=%s
-                """, (reason,
-                      datetime.utcnow() + timedelta(seconds=self._ban_seconds),
-                      proxy_url))
+                    SET status='banned', last_used=NOW()
+                    WHERE formatted=%s
+                """, (proxy_url,))
                 conn.commit()
                 conn.close()
             except Exception:
@@ -137,8 +139,8 @@ class ProxyPool:
             cur  = conn.cursor()
             cur.execute("""
                 UPDATE proxies
-                SET status=active, ban_reason=NULL, banned_until=NULL
-                WHERE status=banned AND banned_until < %s
+                SET status='idle'
+                WHERE status='banned' AND last_used < %s
             """, (datetime.utcnow(),))
             recovered = cur.rowcount
             conn.commit()
@@ -206,7 +208,7 @@ class ProxyPool:
             conn = psycopg2.connect(DATABASE_URL)
             cur  = conn.cursor()
             cur.execute(
-                "UPDATE proxies SET status=invalid WHERE proxy_url = ANY(%s)",
+                "UPDATE proxies SET status='banned', last_used=NOW() WHERE formatted = ANY(%s)",
                 (list(invalid_set),)
             )
             conn.commit()
@@ -280,8 +282,8 @@ class ProxyMaintainer:
                 stats = self._pool.stats()
                 print(
                     f"[ProxyMaintainer] [{ts}] 维护完成 | "
-                    f"检测={result[checked]} 清除={result[invalid]} "
-                    f"| 池状态: 总={stats[total]} 有效={stats[active]} 封禁={stats[banned]}",
+                    f"检测={result['checked']} 清除={result['invalid']} "
+                    f"| 池状态: 总={stats['total']} 有效={stats['active']} 封禁={stats['banned']}",
                     flush=True
                 )
             except Exception as e:
@@ -310,7 +312,7 @@ if __name__ == "__main__":
     pool = get_pool()
     print(json.dumps(pool.stats(), indent=2))
     for p in pool.list():
-        print(f"  {p[status]:6}  {p[url]}  [{p[group]}]")
+        print(f"  {p['status']:6}  {p['url']}  [{p['group']}]")
     # 手动触发一次维护演示
     print("\n--- 手动触发有效性检测 ---")
     pool.validate_all()

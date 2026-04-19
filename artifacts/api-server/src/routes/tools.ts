@@ -1249,18 +1249,43 @@ router.post("/tools/outlook/register", async (req, res) => {
     proxyMode?: string; cfPort?: number;
   };
 
+  const n   = Math.min(999, Math.max(1, Math.floor(Number(count) || 1)));
+  const eng = ["patchright", "playwright"].includes(engine) ? engine : "patchright";
+  const jobId = `reg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
   // 解析多代理列表（支持换行或逗号分隔）
-  const proxyList: string[] = proxiesInput
-    ? proxiesInput.split(/[\n,]+/).map((p: string) => p.trim()).filter(Boolean)
+  let proxyList: string[] = proxiesInput
+    ? proxiesInput.split(/\n|,/).map((p: string) => p.trim()).filter(Boolean)
     : proxyInput ? [proxyInput] : [];
 
   let proxy = proxyList[0] || "";
   const preJobLogs: Array<{ type: string; message: string }> = [];
-  if (!proxy && autoProxy && proxyMode !== "cf") {
-    preJobLogs.push({ type: "warn", message: "⚠ 已停用旧 DB/quarkip 代理池，自动代理改用 CF IP 池 + xray" });
-  }
+  let effectiveProxyMode = proxyList.length > 0 ? "" : (proxyMode === "cf" ? "cf" : "");
 
-  const effectiveProxyMode = proxyList.length > 0 ? "" : "cf";
+  if (!proxy && autoProxy && proxyMode !== "cf") {
+    try {
+      const picked = await pickSharedProxyPool(n);
+      if (picked.length > 0) {
+        proxyList = picked.map((p) => p.formatted);
+        proxy = proxyList[0] || "";
+        effectiveProxyMode = "";
+        const sourceCounts = picked.reduce<Record<string, number>>((acc, p) => {
+          acc[p.source] = (acc[p.source] || 0) + 1;
+          return acc;
+        }, {});
+        const sourceLabel = Object.entries(sourceCounts).map(([k, v]) => `${k}:${v}`).join(", ");
+        preJobLogs.push({ type: "log", message: `🌐 共享代理池已选取 ${picked.length} 个节点（${sourceLabel}）` });
+      } else {
+        effectiveProxyMode = "cf";
+        preJobLogs.push({ type: "warn", message: "⚠ 共享代理池无可用节点，自动退回 CF IP 池 + xray" });
+      }
+    } catch (e) {
+      effectiveProxyMode = "cf";
+      preJobLogs.push({ type: "warn", message: `⚠ 共享代理池读取失败，自动退回 CF IP 池 + xray: ${String(e).slice(0, 120)}` });
+    }
+  } else if (!proxy && autoProxy) {
+    effectiveProxyMode = "cf";
+  }
 
   // 读取打码服务配置（可选）
   let captchaService = "";
@@ -1275,10 +1300,6 @@ router.post("/tools/outlook/register", async (req, res) => {
       if (cfg.service && cfg.apiKey) { captchaService = cfg.service; captchaKey = cfg.apiKey; }
     }
   } catch {}
-
-  const n   = Math.min(999, Math.max(1, Math.floor(Number(count) || 1)));
-  const eng = ["patchright", "playwright"].includes(engine) ? engine : "patchright";
-  const jobId = `reg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
   const proxyDisplay = proxy ? proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@") : "无代理";
   const job = await jobQueue.create(jobId);
@@ -1315,7 +1336,7 @@ router.post("/tools/outlook/register", async (req, res) => {
   }
   if (effectiveProxyMode === "cf") {
     args.push("--proxy-mode", "cf", "--cf-port", String(cfPort));
-    job.logs.push({ type: "log", message: `☁️ CF+xray 代理池：每账号独占一个已测速 CF 节点` });
+    job.logs.push({ type: "log", message: `☁️ CF+xray 代理池：共享代理不可用时作为备用，每账号独占一个已测速 CF 节点` });
   }
 
   const _spawnEnv: Record<string, string> = { ...process.env as Record<string, string>, PYTHONUNBUFFERED: "1" };
@@ -1605,7 +1626,7 @@ router.post("/tools/cursor/register", async (req, res) => {
     try {
       const { query: dbQuery } = await import("../db.js");
       const rows = await dbQuery<{ id: number; formatted: string }>(
-        "SELECT id, formatted FROM proxies WHERE status != 'banned' AND formatted NOT ILIKE '%quarkip%' AND formatted NOT ILIKE '%pool-us%' ORDER BY used_count ASC, RANDOM() LIMIT 1"
+        `SELECT id, formatted FROM proxies WHERE ${ELIGIBLE_SHARED_PROXY_SQL} ORDER BY CASE WHEN (host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089') THEN 0 WHEN formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%' THEN 1 WHEN host <> '127.0.0.1' THEN 2 ELSE 3 END, used_count ASC, RANDOM() LIMIT 1`
       );
       if (rows[0]) {
         proxy = rows[0].formatted;
@@ -1758,7 +1779,7 @@ router.post("/tools/cursor/register-http", async (req, res) => {
     try {
       const { query: dbQuery } = await import("../db.js");
       const rows = await dbQuery<{ formatted: string }>(
-        "SELECT formatted FROM proxies WHERE status != 'banned' AND formatted NOT ILIKE '%quarkip%' AND formatted NOT ILIKE '%pool-us%' ORDER BY used_count ASC, RANDOM() LIMIT 1"
+        `SELECT formatted FROM proxies WHERE ${ELIGIBLE_SHARED_PROXY_SQL} ORDER BY CASE WHEN (host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089') THEN 0 WHEN formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%' THEN 1 WHEN host <> '127.0.0.1' THEN 2 ELSE 3 END, used_count ASC, RANDOM() LIMIT 1`
       );
       if (rows[0]) proxy = rows[0].formatted;
     } catch {}
@@ -2105,6 +2126,47 @@ async function forwardCfPoolRequest(endpoint: string, init?: RequestInit) {
   let data: unknown;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   return { status: r.status, data };
+}
+
+const ELIGIBLE_SHARED_PROXY_SQL = `
+  (status != 'banned' OR (host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089'))
+  AND NOT (host = '127.0.0.1' AND port BETWEEN 10820 AND 10845)
+  AND NOT (formatted ILIKE 'socks5://127.0.0.1:1082%' OR formatted ILIKE 'socks5://127.0.0.1:1083%' OR formatted ILIKE 'socks5://127.0.0.1:1084%')
+`;
+
+const SHARED_PROXY_SOURCE_CASE = `
+  CASE
+    WHEN (host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089') THEN 'subnode_bridge'
+    WHEN host = '127.0.0.1' THEN 'local_proxy'
+    WHEN formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%' THEN 'residential'
+    ELSE 'external'
+  END
+`;
+
+async function pickSharedProxyPool(limit: number): Promise<Array<{ id: number; formatted: string; source: string }>> {
+  const n = Math.min(50, Math.max(1, Math.floor(limit || 1)));
+  const rows = await query<{ id: number; formatted: string; source: string }>(`
+    SELECT id, formatted, ${SHARED_PROXY_SOURCE_CASE} AS source
+    FROM proxies
+    WHERE ${ELIGIBLE_SHARED_PROXY_SQL}
+    ORDER BY
+      CASE
+        WHEN (host = '127.0.0.1' AND port IN (1090,1091,1092,1089)) OR formatted IN ('socks5://127.0.0.1:1090','socks5://127.0.0.1:1091','socks5://127.0.0.1:1092','socks5://127.0.0.1:1089') THEN 0
+        WHEN formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%' THEN 1
+        WHEN host <> '127.0.0.1' THEN 2
+        ELSE 3
+      END,
+      used_count ASC,
+      RANDOM()
+    LIMIT $1
+  `, [n]);
+  if (rows.length > 0) {
+    await execute(
+      "UPDATE proxies SET used_count = used_count + 1, last_used = NOW(), status = 'active' WHERE id = ANY($1::int[])",
+      [rows.map((r) => r.id)]
+    );
+  }
+  return rows;
 }
 
 function shouldForwardCfPool(error?: Error) {
