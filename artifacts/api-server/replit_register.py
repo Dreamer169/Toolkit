@@ -53,12 +53,19 @@ _JS_FULL_PROBE = """() => {
     var iframes = Array.from(document.querySelectorAll('iframe')).map(e=>({
         src: e.src, id: e.id, cls: e.className
     }));
-    var cfEl = document.querySelector('[name="cf-turnstile-response"]');
-    var rcEl = document.querySelector('[name="g-recaptcha-response"], #g-recaptcha-response, [name="recaptchaToken"]');
+    var cfEl  = document.querySelector('[name="cf-turnstile-response"]');
+    // v2 checkbox token (g-recaptcha-response) vs Replit's Enterprise field (recaptchaToken)
+    var rcV2El = document.querySelector('#g-recaptcha-response') ||
+                 document.querySelector('[name="g-recaptcha-response"]');
+    var rcEntEl = document.querySelector('[name="recaptchaToken"]');
+    // prefer recaptchaToken (Replit's field), fallback to v2
+    var rcPrimary = rcEntEl || rcV2El;
     return {
         iframes,
-        cfToken: cfEl ? cfEl.value : null,
-        rcToken: rcEl ? rcEl.value : null,
+        cfToken:       cfEl     ? cfEl.value      : null,
+        rcToken:       rcPrimary ? rcPrimary.value : null,
+        rcV2Token:     rcV2El   ? rcV2El.value.slice(0,20)   : null,
+        rcEntToken:    rcEntEl  ? rcEntEl.value.slice(0,20)  : null,
     };
 }"""
 
@@ -329,7 +336,7 @@ async def _human_warmup(page):
 
         # 阶段 2：大量 bezier 鼠标移动（20次，覆盖全屏）
         x, y = _random.randint(300, 800), _random.randint(150, 500)
-        for i in range(8):
+        for i in range(20):
             nx = _random.randint(60, w - 60)
             ny = _random.randint(60, h - 60)
             await _bezier(x, y, nx, ny, steps=_random.randint(18, 30))
@@ -352,7 +359,7 @@ async def _human_warmup(page):
 
         # 阶段 4：再次鼠标移动（10次，专注于页面中央区域）
         x, y = _random.randint(400, 700), _random.randint(200, 500)
-        for _ in range(5):
+        for _ in range(10):
             nx = _random.randint(200, w - 200)
             ny = _random.randint(150, h - 200)
             await _bezier(x, y, nx, ny, steps=_random.randint(15, 25))
@@ -362,7 +369,7 @@ async def _human_warmup(page):
         # 阶段 5：尝试 hover 页面可见链接/按钮（不点击）
         try:
             links = await page.locator("a, button").all()
-            for lnk in _random.sample(links, min(4, len(links))):
+            for lnk in _random.sample(links, min(6, len(links))):
                 try:
                     bbox = await lnk.bounding_box()
                     if bbox and bbox["x"] > 0 and bbox["y"] > 0:
@@ -377,9 +384,9 @@ async def _human_warmup(page):
             pass
 
         # 阶段 6：最终停顿（用户"决定"开始填表）
-        await page.wait_for_timeout(_random.randint(400, 800))
+        await page.wait_for_timeout(_random.randint(2000, 4000))
 
-        log("[warmup] ✓ 完成（约 8-12s 轻量行为）")
+        log("[warmup] ✓ 完成（约 40-55s 行为积累）")
     except Exception as e:
         log(f"[warmup] 异常(忽略): {e}")
 
@@ -482,45 +489,78 @@ async def fill_step1(page) -> str | None:
         cf_token = probe.get("cfToken") or ""
         any_rc = bool(extract_recaptcha_sitekey(iframes)) or any("recaptcha" in f.get("src","") for f in iframes)
         any_ts = bool(extract_turnstile_sitekey(iframes)) or any("challenges.cloudflare.com" in f.get("src","") for f in iframes)
+        rcV2  = probe.get("rcV2Token")  or ""
+        rcEnt = probe.get("rcEntToken") or ""
         log(f"[probe] iframes={len(iframes)} rc={bool(rc_token)} cf={bool(cf_token)} any_rc={any_rc} any_ts={any_ts}")
+        log(f"[probe] rcV2(g-recaptcha-response) prefix={rcV2!r}  rcEnt(recaptchaToken) prefix={rcEnt!r}")
         for fr in iframes:
             log(f"  iframe: {fr.get('src','')[:100]}")
     except Exception as e:
         log(f"[probe] 异常: {e}")
         rc_token, cf_token, any_rc, any_ts = "", "", False, False
 
-    # ── 核心策略 v7.29：音频挑战优先（v7.3 验证有效），auto-token 作 fallback
-    # v7.3 实测：音频能到达 "Email already in use" / "too quickly" 阶段。
-    # 策略：若检测到 reCAPTCHA → 先尝试音频（checkbox → bframe → STT）
-    #       若音频失败或无 checkbox → 等待 Enterprise auto-token（max 25s）
-    if any_rc:
-        stale_rc_token = rc_token
-        if stale_rc_token:
-            log(f"[captcha] 忽略预置 auto-token={len(stale_rc_token)}chars，优先使用音频/checkbox token")
-        rc_token = ""
-        log("[captcha] v7.30: reCAPTCHA 强制音频优先，一次提交避免 auto-token 二次触发 rate limit")
+    # ── 核心策略 v7.34：有预置 enterprise token 直接用（触发 RC callback 解锁按钮）
+    # 若无预置 token → 尝试音频/checkbox solve
+    async def _inject_and_trigger(token: str):
+        """
+        注入 token 到所有 reCAPTCHA 相关 DOM 字段，使用 Object.defineProperty 强制覆盖 value getter。
+        目的：阻止 Replit click handler 读到空 recaptchaToken 后再调用 grecaptcha.enterprise.execute()
+             （execute() 生成的 Enterprise score token 因 GCP IP 低分被 server code:2 拒绝）。
+        """
+        try:
+            n = await page.evaluate("""
+                (token) => {
+                    // 1. 覆盖所有 reCAPTCHA token 字段的 value getter（强制劫持）
+                    var sels = ['[name="g-recaptcha-response"]','#g-recaptcha-response','[name="recaptchaToken"]'];
+                    var count = 0;
+                    sels.forEach(function(sel) {
+                        document.querySelectorAll(sel).forEach(function(el) {
+                            try {
+                                // 先用 native setter 设置（触发 React onChange）
+                                var desc = Object.getOwnPropertyDescriptor(
+                                    el.tagName === 'TEXTAREA'
+                                        ? window.HTMLTextAreaElement.prototype
+                                        : window.HTMLInputElement.prototype,
+                                    'value');
+                                if (desc && desc.set) desc.set.call(el, token);
+                            } catch(e) {}
+                            // 再用 Object.defineProperty 锁死 value 的返回值
+                            // 这样即使 click handler 直接读 el.value 也得到我们的 token
+                            Object.defineProperty(el, 'value', {
+                                get: function() { return token; },
+                                configurable: true
+                            });
+                            try {
+                                el.dispatchEvent(new Event('input',  { bubbles: true }));
+                                el.dispatchEvent(new Event('change', { bubbles: true }));
+                            } catch(e) {}
+                            count++;
+                        });
+                    });
+                    return count;
+                }
+            """, token)
+            log(f"[captcha] token 注入字段数={n} (Object.defineProperty + React事件)")
+        except Exception as e:
+            log(f"[captcha] token 注入/callback 异常(忽略): {e}")
+
+    # v7.36: 恢复 v7.28 简单策略。不手动注入/覆盖 token。
+    # 让 warmup 40-55s 自然积累 Enterprise score，button click 时 Replit JS 生成最新 token。
+    # 关键：token 注入会触发 code:1，execute() 低分触发 code:2；概率性通过取决于 warmup 质量。
+    if any_rc and not rc_token:
+        log("[captcha] Enterprise: 等待 auto-token (max 20s)…")
+        rc_token, cf_token = await _wait_for_token(page, max_s=20)
+
+    if any_rc and not rc_token:
+        # Fallback: 尝试 checkbox 点击触发 Enterprise callback
+        log("[captcha] 无 auto-token → checkbox 触发 Enterprise callback")
         audio_token = await solve_recaptcha_audio(page) or ""
         if audio_token:
-            log(f"[captcha] ✅ 音频通过 token={len(audio_token)}chars")
+            log(f"[captcha] ✅ checkbox/音频通过 token={len(audio_token)}chars")
             rc_token = audio_token
-            try:
-                await page.evaluate("""
-                    (token) => {
-                        var el = document.querySelector('[name="recaptchaToken"]');
-                        if (!el) return;
-                        var setter = Object.getOwnPropertyDescriptor(
-                            window.HTMLInputElement.prototype, 'value').set;
-                        setter.call(el, token);
-                        el.dispatchEvent(new Event('input', { bubbles: true }));
-                        el.dispatchEvent(new Event('change', { bubbles: true }));
-                    }
-                """, rc_token)
-                log("[captcha] ✓ audio token 已注入 recaptchaToken 字段")
-            except Exception as e:
-                log(f"[captcha] token 注入异常(忽略): {e}")
         else:
-            log("[captcha] 音频失败/无 checkbox → 等待 Enterprise auto-token (max 25s)…")
-            rc_token, cf_token = await _wait_for_token(page, max_s=25)
+            log("[captcha] checkbox 失败，继续用现有 token 或空提交")
+            rc_token, cf_token = await _wait_for_token(page, max_s=8)
     elif not rc_token and not cf_token:
         log("[captcha] 等待 Enterprise 自动 token (max 20s)...")
         rc_token, cf_token = await _wait_for_token(page, max_s=20)
@@ -530,8 +570,22 @@ async def fill_step1(page) -> str | None:
         log("[Turnstile] 等待额外 10s...")
         rc_token, cf_token = await _wait_for_token(page, max_s=10, label="_ts")
 
-    # 提交前：延长等待 5-8s（给 reCAPTCHA Enterprise 更多行为评分时间）
-    await page.wait_for_timeout(_random.randint(5000, 8000))
+    # 提交前：5-8s 等待（给 Enterprise 最终行为评分时间，v7.28 proven strategy）
+    _pre_wait = _random.randint(5000, 8000)
+    log(f"[submit] 等待 {_pre_wait}ms → Enterprise 最终评分")
+    await page.wait_for_timeout(_pre_wait)
+    # 顺便检查按钮状态
+    try:
+        btn_check = page.locator('[data-cy="signup-create-account"]')
+        if await btn_check.count():
+            dis = await btn_check.first.get_attribute("disabled")
+            aria_dis = await btn_check.first.get_attribute("aria-disabled")
+            if dis is None and aria_dis != "true":
+                log("[submit-wait] 按钮已解锁 ✅")
+            else:
+                log("[submit-wait] 按钮仍 disabled → 将 force=True 点击")
+    except Exception:
+        pass
 
     # 提交前 re-check（只更新 cf；rc 由音频挑战控制，不覆盖）
     try:
@@ -548,12 +602,12 @@ async def fill_step1(page) -> str | None:
     except Exception:
         pass
 
-    # 先注册 response 拦截器（在 click 前）避免漏掉快速响应
+    # 先注册 response+request 拦截器（在 click 前）避免漏掉快速响应
     _api_resp: dict = {}
+    _api_req: dict = {}
     async def _on_response(resp):
         try:
             url = resp.url
-            # 只捕获 Replit 主域名的 POST（排除 sp.replit.com Stripe analytics）
             if ("replit.com" in url and "sp.replit.com" not in url
                     and resp.request.method == "POST"):
                 rb = await resp.body()
@@ -562,7 +616,17 @@ async def fill_step1(page) -> str | None:
                 _api_resp["body"]   = rb[:600].decode("utf-8", errors="replace")
         except Exception:
             pass
+    async def _on_request(req):
+        try:
+            url = req.url
+            if ("replit.com" in url and "sign-up" in url and req.method == "POST"):
+                pb = req.post_data or ""
+                _api_req["url"]  = url
+                _api_req["body"] = pb[:800]
+        except Exception:
+            pass
     page.on("response", _on_response)
+    page.on("request",  _on_request)
 
     # 提交 Step1：先尝试正常 click（5s），若 disabled 则 force=True 强制点击
     submitted = False
@@ -616,8 +680,15 @@ async def fill_step1(page) -> str | None:
 
     # 等待页面响应（最多 36s）— 用 response 拦截器看 Replit API 实际返回
 
-    _err_keywords = ("invalid","incorrect","taken","already","unavailable","error","failed",
-                     "too many","captcha","something went wrong","recaptcha")
+    # v7.34: 修复 "already" 误匹配 "Already have an account? Log in"（正常页面文本）
+    # 改为更精确的错误词组
+    _err_keywords = ("invalid","incorrect","taken",
+                     "already in use","already exists","already registered","already been used",
+                     "email is taken","username is taken",
+                     "unavailable","something went wrong",
+                     "too many","rate limit",
+                     "captcha token","captcha validation","captcha failed",
+                     "recaptcha failed","recaptcha invalid","recaptcha expired")
     for _w in range(18):
         await page.wait_for_timeout(2000)
         cur_url = page.url
@@ -627,6 +698,13 @@ async def fill_step1(page) -> str | None:
         if _api_resp.get("status"):
             log(f"[step1-wait] API={_api_resp['status']} url={_api_resp.get('url','')[:80]}")
             log(f"[step1-wait] API body: {_api_resp.get('body','')[:300]}")
+            if _api_req.get("body"):
+                req_body = _api_req["body"]
+                # 只显示 recaptchaToken 部分，截断不泄露完整 token
+                import re as _re
+                m = _re.search(r'"recaptchaToken"\s*:\s*"([^"]{0,60})', req_body)
+                rtok = m.group(1) if m else "(not found)"
+                log(f"[step1-wait] REQ recaptchaToken prefix: {rtok}... (total req {len(req_body)}chars)")
             break
         try:
             body_w = (await page.locator("body").inner_text())[:600].lower()
