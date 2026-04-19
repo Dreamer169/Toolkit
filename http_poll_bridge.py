@@ -1,212 +1,146 @@
 #!/usr/bin/env python3
-  """
-  VPS-side HTTP-poll SOCKS5 bridge (子节点 TCP relay, Protocol-C).
+"""
+VPS HTTP-poll SOCKS5 bridge (Protocol-C, sub-node relay).
+Connects to sub-node /api/stream/open|read|write (HTTP polling, not WS).
+No Replit WS proxy blocking. Looks like normal HTTP data streaming.
 
-  分工:
-    - http_ws_bridge.py (port 1090): VPS → WS → 代理 Replit repl → internet  [ws-bridge / 代理链路]
-    - ws_tunnel_bridge.py (port 1091): VPS → WS → 代理 Replit repl → internet  [ws-tunnel-bridge / 代理链路]
-    - http_poll_bridge.py (port 1092): VPS → HTTP 轮询 → 子节点 /api/stream/* → internet  [poll-bridge / 子节点]
+Env:
+  SUBNODE_URLS  - comma-separated sub-node base URLs (required)
+  STREAM_TOKEN  - auth token matching sub-node TUNNEL_TOKEN
+  SOCKS_PORT    - local SOCKS5 port (default 1092)
+"""
+import socket, threading, struct, os, random, json
+import urllib.request, urllib.parse, urllib.error, http.client, ssl as ssl_mod
 
-  子节点优势: HTTP 轮询不经过 Replit 代理拦截，WS 会被子节点 Replit 环境的反代过滤。
-  子节点 /api/stream/open|read|write 是 tunnel.ts 的 HTTP 轮询变体，流量看起来像普通 HTTP 数据流。
+_RAW = os.environ.get("SUBNODE_URLS", "")
+SUBNODE_URLS = [u.strip().rstrip("/") for u in _RAW.split(",") if u.strip()]
+TOKEN    = os.environ.get("STREAM_TOKEN", os.environ.get("TUNNEL_TOKEN", "1NnCcQJcNgwlTDPEnDIkWEKzWIdmZ/4+BmsOp1/jLP6ojCWsv8+xTwcLj34Mu2viWy0q5SEoDP0q2qE5xHaRRg=="))
+PORT     = int(os.environ.get("SOCKS_PORT", "1092"))
+R_TOUT   = int(os.environ.get("POLL_TIMEOUT", "25"))
+W_TOUT   = int(os.environ.get("CHUNK_TIMEOUT", "10"))
 
-  配置:
-    SUBNODE_URLS   - 逗号分隔的子节点 base URL 列表（必须），例如:
-                     https://xxx.replit.dev,https://yyy.replit.dev
-    STREAM_TOKEN   - tunnel.ts TUNNEL_TOKEN 值（与子节点部署时的 token 一致）
-    SOCKS_PORT     - 本机 SOCKS5 监听端口（默认 1092）
-    POLL_TIMEOUT   - 单次 read 长轮询超时秒数（默认 25）
-    CHUNK_TIMEOUT  - 写入 chunk 等待超时（默认 10）
-  """
-  import socket, threading, struct, os, time, random, queue
-  import urllib.request, urllib.parse, urllib.error, http.client, json
+_fc = {}
+def pick():
+    if not SUBNODE_URLS: return None
+    if len(SUBNODE_URLS)==1: return SUBNODE_URLS[0]
+    w=[1.0/(1+_fc.get(u,0)) for u in SUBNODE_URLS]; t=sum(w); r=random.random()*t
+    for u,wt in zip(SUBNODE_URLS,w):
+        r-=wt
+        if r<=0: return u
+    return SUBNODE_URLS[-1]
+def fail(u): _fc[u]=_fc.get(u,0)+1
+def ok(u):   _fc[u]=max(0,_fc.get(u,0)-1)
 
-  SUBNODE_URLS  = [u.strip().rstrip("/") for u in os.environ.get("SUBNODE_URLS", "").split(",") if u.strip()]
-  STREAM_TOKEN  = os.environ.get("STREAM_TOKEN", os.environ.get("TUNNEL_TOKEN", "1NnCcQJcNgwlTDPEnDIkWEKzWIdmZ/4+BmsOp1/jLP6ojCWsv8+xTwcLj34Mu2viWy0q5SEoDP0q2qE5xHaRRg=="))
-  SOCKS_PORT    = int(os.environ.get("SOCKS_PORT", "1092"))
-  POLL_TIMEOUT  = int(os.environ.get("POLL_TIMEOUT", "25"))
-  CHUNK_TIMEOUT = int(os.environ.get("CHUNK_TIMEOUT", "10"))
+CTX = ssl_mod.create_default_context()
 
-  _fail_counts = {}
+def http_post(url, body=b"", timeout=10):
+    req=urllib.request.Request(url,data=body,method="POST")
+    req.add_header("Content-Type","application/octet-stream")
+    try:
+        with urllib.request.urlopen(req,timeout=timeout,context=CTX) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, b""
 
-  def pick_subnode():
-      if not SUBNODE_URLS:
-          return None
-      if len(SUBNODE_URLS) == 1:
-          return SUBNODE_URLS[0]
-      weights = [1.0 / (1 + _fail_counts.get(u, 0)) for u in SUBNODE_URLS]
-      total = sum(weights)
-      r = random.random() * total
-      for u, w in zip(SUBNODE_URLS, weights):
-          r -= w
-          if r <= 0: return u
-      return SUBNODE_URLS[-1]
+def http_get_chunks(url, callback, timeout=30):
+    parsed=urllib.parse.urlparse(url)
+    use_ssl=parsed.scheme=="https"
+    h=parsed.hostname; p=parsed.port or (443 if use_ssl else 80)
+    path=parsed.path+("?"+parsed.query if parsed.query else "")
+    if use_ssl: conn=http.client.HTTPSConnection(h,p,timeout=timeout,context=CTX)
+    else: conn=http.client.HTTPConnection(h,p,timeout=timeout)
+    try:
+        conn.request("GET",path,headers={"Accept":"*/*","Connection":"close"})
+        resp=conn.getresponse()
+        while True:
+            chunk=resp.read(4096)
+            if not chunk: break
+            callback(chunk)
+    except Exception: pass
+    finally: conn.close()
 
-  def mark_fail(u): _fail_counts[u] = _fail_counts.get(u, 0) + 1
-  def mark_ok(u):   _fail_counts[u] = max(0, _fail_counts.get(u, 0) - 1)
+def http_del(url, timeout=5):
+    try:
+        req=urllib.request.Request(url,method="DELETE")
+        urllib.request.urlopen(req,timeout=timeout,context=CTX)
+    except Exception: pass
 
-  def http_post(url, body=None, timeout=10):
-      """简单 HTTP POST，返回 (status, data_bytes)。"""
-      import ssl as ssl_mod
-      ctx = ssl_mod.create_default_context()
-      req = urllib.request.Request(url, data=body, method="POST")
-      req.add_header("Content-Type", "application/octet-stream")
-      try:
-          with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
-              return r.status, r.read()
-      except urllib.error.HTTPError as e:
-          return e.code, e.read()
+def handle(client, addr):
+    base=""; sid=""
+    try:
+        d=client.recv(256)
+        if not d or d[0]!=5: return
+        client.sendall(b"\x05\x00")
+        r=client.recv(256)
+        if len(r)<7 or r[1]!=1: client.sendall(b"\x05\x07\x00\x01"+b"\x00"*6); return
+        a=r[3]
+        if a==1:   h=socket.inet_ntoa(r[4:8]);              p=struct.unpack("!H",r[8:10])[0]
+        elif a==3: n=r[4]; h=r[5:5+n].decode();             p=struct.unpack("!H",r[5+n:7+n])[0]
+        elif a==4: h=socket.inet_ntop(socket.AF_INET6,r[4:20]); p=struct.unpack("!H",r[20:22])[0]
+        else: client.sendall(b"\x05\x08\x00\x01"+b"\x00"*6); return
 
-  def http_get_chunked(url, timeout=30):
-      """读取分块响应，返回 bytes 列表（阻塞直到连接关闭）。"""
-      import ssl as ssl_mod
-      parsed = urllib.parse.urlparse(url)
-      use_ssl = parsed.scheme == "https"
-      host = parsed.hostname
-      port = parsed.port or (443 if use_ssl else 80)
-      path = parsed.path + ("?" + parsed.query if parsed.query else "")
+        base=pick()
+        if not base:
+            print("[poll-bridge] no SUBNODE_URLS configured",flush=True)
+            client.sendall(b"\x05\x01\x00\x01"+b"\x00"*6); return
 
-      if use_ssl:
-          ctx = ssl_mod.create_default_context()
-          conn = http.client.HTTPSConnection(host, port, timeout=timeout, context=ctx)
-      else:
-          conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        print(f"[poll-bridge] {addr} -> {h}:{p} via {base[:50]}",flush=True)
+        qs=urllib.parse.urlencode({"host":h,"port":str(p),"token":TOKEN})
+        url=f"{base}/api/stream/open?{qs}"
+        st,body=http_post(url,timeout=10)
+        if st not in (200,201):
+            print(f"[poll-bridge] open failed {st}",flush=True); fail(base)
+            client.sendall(b"\x05\x04\x00\x01"+b"\x00"*6); return
+        try: sid=json.loads(body)["id"]
+        except Exception as e:
+            print(f"[poll-bridge] parse err:{e}",flush=True); fail(base)
+            client.sendall(b"\x05\x04\x00\x01"+b"\x00"*6); return
 
-      chunks = []
-      try:
-          conn.request("GET", path, headers={"Accept": "*/*", "Connection": "close"})
-          resp = conn.getresponse()
-          while True:
-              chunk = resp.read(4096)
-              if not chunk:
-                  break
-              chunks.append(chunk)
-      except Exception:
-          pass
-      finally:
-          conn.close()
-      return chunks
+        ok(base)
+        client.sendall(b"\x05\x00\x00\x01"+socket.inet_aton("0.0.0.0")+struct.pack("!H",p))
+        print(f"[poll-bridge] session {sid} open",flush=True)
 
-  def handle_socks5(client: socket.socket, addr):
-      chosen = ""
-      session_id = ""
-      base = ""
-      try:
-          data = client.recv(256)
-          if not data or data[0] != 5: return
-          client.sendall(b"\x05\x00")
-          req = client.recv(256)
-          if len(req) < 7 or req[1] != 1:
-              client.sendall(b"\x05\x07\x00\x01" + b"\x00"*6); return
+        tq=urllib.parse.quote(TOKEN,safe="")
+        def read_loop():
+            try:
+                while True:
+                    rurl=f"{base}/api/stream/read/{sid}?token={tq}"
+                    http_get_chunks(rurl,lambda c: client.sendall(c),timeout=R_TOUT+5)
+            except Exception as e:
+                print(f"[poll-bridge] read err:{e}",flush=True)
+            finally:
+                try: client.close()
+                except: pass
 
-          atyp = req[3]
-          if atyp == 1:
-              host = socket.inet_ntoa(req[4:8])
-              port = struct.unpack("!H", req[8:10])[0]
-          elif atyp == 3:
-              hlen = req[4]
-              host = req[5:5+hlen].decode()
-              port = struct.unpack("!H", req[5+hlen:7+hlen])[0]
-          elif atyp == 4:
-              host = socket.inet_ntop(socket.AF_INET6, req[4:20])
-              port = struct.unpack("!H", req[20:22])[0]
-          else:
-              client.sendall(b"\x05\x08\x00\x01" + b"\x00"*6); return
+        rt=threading.Thread(target=read_loop,daemon=True); rt.start()
+        client.settimeout(None)
+        while True:
+            try: data=client.recv(4096)
+            except: break
+            if not data: break
+            wurl=f"{base}/api/stream/write/{sid}?token={tq}"
+            st2,_=http_post(wurl,body=data,timeout=W_TOUT)
+            if st2 not in (200,201):
+                print(f"[poll-bridge] write {st2}",flush=True); break
+        rt.join(timeout=2)
+    except Exception as e:
+        print(f"[poll-bridge] error {addr}:{e}",flush=True)
+        if base: fail(base)
+    finally:
+        if sid and base:
+            _tq = urllib.parse.quote(TOKEN, safe=chr(34)+chr(34))
+            http_del(f"{base}/api/stream/{sid}?token={_tq}")
+        try: client.close()
+        except: pass
 
-          base = pick_subnode()
-          if not base:
-              print(f"[poll-bridge] no subnode configured", flush=True)
-              client.sendall(b"\x05\x01\x00\x01" + b"\x00"*6); return
+def main():
+    s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+    s.bind(("127.0.0.1",PORT)); s.listen(64)
+    print(f"[poll-bridge] HTTP-poll SOCKS5 on 127.0.0.1:{PORT}, {len(SUBNODE_URLS)} sub-node(s)",flush=True)
+    for u in SUBNODE_URLS: print(f"[poll-bridge]   {u}",flush=True)
+    if not SUBNODE_URLS: print("[poll-bridge]   (none - set SUBNODE_URLS env var to activate)",flush=True)
+    while True:
+        c,a=s.accept()
+        threading.Thread(target=handle,args=(c,a),daemon=True).start()
 
-          # /api/stream/open: 打开 TCP relay session
-          qs = urllib.parse.urlencode({"host": host, "port": str(port), "token": STREAM_TOKEN})
-          open_url = f"{base}/api/stream/open?{qs}"
-          print(f"[poll-bridge] {addr} → {host}:{port} via {base[:50]}", flush=True)
-
-          import ssl as ssl_mod
-          ctx = ssl_mod.create_default_context()
-          req2 = urllib.request.Request(open_url, data=b"", method="POST")
-          try:
-              with urllib.request.urlopen(req2, timeout=10, context=ctx) as r:
-                  body = r.read()
-                  resp_data = json.loads(body)
-                  if not resp_data.get("ok"):
-                      raise Exception(f"open failed: {resp_data}")
-                  session_id = resp_data["id"]
-          except Exception as e:
-              print(f"[poll-bridge] open failed ({base[:40]}): {e}", flush=True)
-              mark_fail(base)
-              client.sendall(b"\x05\x04\x00\x01" + b"\x00"*6); return
-
-          mark_ok(base)
-          client.sendall(b"\x05\x00\x00\x01" + socket.inet_aton("0.0.0.0") + struct.pack("!H", port))
-          print(f"[poll-bridge] session {session_id} open {host}:{port}", flush=True)
-
-          # 读线程: 轮询 /api/stream/read/:id → 发给 client
-          def read_loop():
-              try:
-                  while True:
-                      read_url = f"{base}/api/stream/read/{session_id}?token={urllib.parse.quote(STREAM_TOKEN)}"
-                      chunks = http_get_chunked(read_url, timeout=POLL_TIMEOUT + 5)
-                      if not chunks:
-                          break
-                      for chunk in chunks:
-                          try: client.sendall(chunk)
-                          except: return
-              except Exception as e:
-                  print(f"[poll-bridge] read_loop error: {e}", flush=True)
-              finally:
-                  try: client.close()
-                  except: pass
-
-          rt = threading.Thread(target=read_loop, daemon=True)
-          rt.start()
-
-          # 主线程: TCP 数据 → POST /api/stream/write/:id
-          client.settimeout(None)
-          while True:
-              try: data = client.recv(4096)
-              except: break
-              if not data: break
-              write_url = f"{base}/api/stream/write/{session_id}?token={urllib.parse.quote(STREAM_TOKEN)}"
-              st, _ = http_post(write_url, body=data, timeout=CHUNK_TIMEOUT)
-              if st not in (200, 201):
-                  print(f"[poll-bridge] write returned {st}, closing", flush=True)
-                  break
-
-          rt.join(timeout=2)
-
-      except Exception as e:
-          print(f"[poll-bridge] error {addr}: {e}", flush=True)
-          if base: mark_fail(base)
-      finally:
-          # 清理 session
-          if session_id and base:
-              try:
-                  del_url = f"{base}/api/stream/{session_id}?token={urllib.parse.quote(STREAM_TOKEN)}"
-                  req3 = urllib.request.Request(del_url, method="DELETE")
-                  import ssl as ssl_mod
-                  urllib.request.urlopen(req3, timeout=5, context=ssl_mod.create_default_context())
-              except: pass
-          try: client.close()
-          except: pass
-
-  def main():
-      if not SUBNODE_URLS:
-          print("[poll-bridge] WARNING: SUBNODE_URLS not set. Configure env var:", flush=True)
-          print("[poll-bridge]   SUBNODE_URLS=https://xxx.replit.dev,https://yyy.replit.dev", flush=True)
-      srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-      srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-      srv.bind(("127.0.0.1", SOCKS_PORT))
-      srv.listen(64)
-      print(f"[poll-bridge] HTTP-poll bridge (sub-nodes) on 127.0.0.1:{SOCKS_PORT}", flush=True)
-      print(f"[poll-bridge] {len(SUBNODE_URLS)} sub-node(s) configured, path: /api/stream/*", flush=True)
-      for u in SUBNODE_URLS:
-          print(f"[poll-bridge]   {u}", flush=True)
-      while True:
-          cl, addr = srv.accept()
-          threading.Thread(target=handle_socks5, args=(cl, addr), daemon=True).start()
-
-  if __name__ == "__main__":
-      main()
-  
+if __name__=="__main__": main()
