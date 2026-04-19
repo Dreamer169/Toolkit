@@ -5,8 +5,8 @@ VPS-side SOCKS5 → Replit HTTP tunnel bridge (3-endpoint, persistent keep-alive
 import socket, threading, struct, select, ssl, os, json, time
 import urllib.parse
 
-BASE_URL     = os.environ.get("BASE_URL",  "https://409aae3f-b215-4b9f-8e19-2065ea8cf7ba-00-pqdg4bl7sgun.worf.replit.dev")
-TUNNEL_TOKEN = os.environ.get("TUNNEL_TOKEN", "CHANGEME")
+BASE_URL     = os.environ.get("BASE_URL",  "https://4810fff0-32b6-424d-a20b-6a96c29a8a0d-00-mv8mjhwuqdxx.riker.replit.dev")
+TUNNEL_TOKEN = os.environ.get("TUNNEL_TOKEN", "1NnCcQJcNgwlTDPEnDIkWEKzWIdmZ/4+BmsOp1/jLP6ojCWsv8+xTwcLj34Mu2viWy0q5SEoDP0q2qE5xHaRRg==")
 SOCKS_PORT   = int(os.environ.get("SOCKS_PORT", "1090"))
 
 _parsed = urllib.parse.urlparse(BASE_URL)

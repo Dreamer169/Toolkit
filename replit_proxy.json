@@ -1,1 +1,8 @@
-{"proxy_url":"https://409aae3f-b215-4b9f-8e19-2065ea8cf7ba-00-pqdg4bl7sgun.worf.replit.dev","proxy_token":"U7VoR2wnOuKf1QHCPCOET2iK0cwi849nz0S70seKYOh2ZhYH12WNX9EQw8bZ9I9oSjc0Mj9XG3fKff1GLDKBFg=="}
+{
+  "proxy_url": "https://4810fff0-32b6-424d-a20b-6a96c29a8a0d-00-mv8mjhwuqdxx.riker.replit.dev",
+  "proxy_token": "1NnCcQJcNgwlTDPEnDIkWEKzWIdmZ/4+BmsOp1/jLP6ojCWsv8+xTwcLj34Mu2viWy0q5SEoDP0q2qE5xHaRRg==",
+  "socks5_port": 1090,
+  "exit_ip": "34.30.72.69",
+  "platform": "google-cloud",
+  "updated_at": "2026-04-19T03:35:18Z"
+}
