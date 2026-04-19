@@ -28,22 +28,14 @@ async function tagAccount(id: number, tag: string, status?: string): Promise<voi
     );
     const cur = rows[0];
     if (!cur) return;
-    const existingTags = cur.tags ?? "";
-    if (existingTags.split(",").map(t => t.trim()).includes(tag)) {
-      // tag 已存在，仅更新 status（如有）
-      if (status && cur.status !== status) {
-        await execute("UPDATE accounts SET status=$1, updated_at=NOW() WHERE id=$2", [status, id]);
-      }
-      return;
-    }
-    const newTags = existingTags ? `${existingTags},${tag}` : tag;
+    const mergedTags = Array.from(new Set([...(cur.tags ?? "").split(",").map(t => t.trim()).filter(Boolean), tag])).join(",");
     if (status) {
       await execute(
         "UPDATE accounts SET tags=$1, status=$2, updated_at=NOW() WHERE id=$3",
-        [newTags, status, id]
+        [mergedTags || null, status, id]
       );
     } else {
-      await execute("UPDATE accounts SET tags=$1, updated_at=NOW() WHERE id=$2", [newTags, id]);
+      await execute("UPDATE accounts SET tags=$1, updated_at=NOW() WHERE id=$2", [mergedTags || null, id]);
     }
     logger.info({ id, tag, status }, "[live-verify] 账号已自动打标签");
   } catch (e) {

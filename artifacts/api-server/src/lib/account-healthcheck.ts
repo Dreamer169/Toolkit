@@ -169,7 +169,11 @@ async function runCheck() {
           await execute(
             `UPDATE accounts
              SET status = 'needs_oauth',
-                 tags   = NULLIF(TRIM(BOTH ',' FROM COALESCE(tags,'') || ',needs_oauth_manual'), ','),
+                 tags   = (
+                   SELECT NULLIF(string_agg(DISTINCT tag, ','), '')
+                   FROM unnest(string_to_array(COALESCE(tags,'') || ',needs_oauth_manual', ',')) AS tag
+                   WHERE tag <> ''
+                 ),
                  updated_at = NOW()
              WHERE id = $1`,
             [acc.id]

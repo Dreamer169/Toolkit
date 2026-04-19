@@ -82,6 +82,30 @@ function fmtDate(iso: string) {
   return d.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
 }
 
+
+const TAG_LABELS: Record<string, string> = {
+  replit_used: "已用",
+  abuse_mode: "API封禁",
+  token_invalid: "token过期",
+  inbox_error: "收件箱错误",
+  needs_oauth_manual: "需手动授权",
+  inbox_verified: "收件箱✓",
+};
+const TAG_CLASSES: Record<string, string> = {
+  replit_used: "text-blue-300 bg-blue-950/40 border-blue-800/40",
+  abuse_mode: "text-red-300 bg-red-950/40 border-red-800/40",
+  token_invalid: "text-red-300 bg-red-950/40 border-red-800/40",
+  inbox_error: "text-amber-300 bg-amber-950/40 border-amber-800/40",
+  needs_oauth_manual: "text-violet-300 bg-violet-950/40 border-violet-800/40",
+  inbox_verified: "text-emerald-300 bg-emerald-950/40 border-emerald-800/40",
+};
+function tagsOf(acc: Account): string[] {
+  return Array.from(new Set((acc.tags ?? "").split(",").map(t => t.trim()).filter(Boolean)));
+}
+function hasTag(acc: Account, tag: string): boolean {
+  return tagsOf(acc).includes(tag);
+}
+
 export default function MailCenter() {
   const [accounts, setAccounts]         = useState<Account[]>([]);
   const [selAccount, setSelAccount]     = useState<Account | null>(null);
@@ -697,7 +721,8 @@ export default function MailCenter() {
             const active       = selAccount?.id === acc.id;
             const isSuspended  = acc.status === "suspended";
             const isNeedsOAuth = acc.status === "needs_oauth" || acc.status === "needs_oauth_pending";
-            const isAbuse      = (acc.tags ?? "").split(",").map(t => t.trim()).includes("abuse_mode");
+            const accTags      = tagsOf(acc);
+            const isAbuse      = accTags.includes("abuse_mode");
             const isOAuth      = hasOAuth(acc) && !isSuspended;
             const isImap       = hasImap(acc) && !isSuspended;
             const noAccess     = !isOAuth && !isImap;
@@ -724,8 +749,11 @@ export default function MailCenter() {
                     <div className="flex items-center gap-2 mt-0.5 ml-3">
                       <span className={`text-[10px] font-medium ${labelCls}`}>{label}</span>
                       {vb && <span className={`text-[10px] ${vb.cls}`}>· {vb.label}</span>}
-                      {!isSuspended && acc.tags?.includes("token_invalid") && <span className="text-[10px] text-red-400">· ⚠token过期</span>}
-                      {acc.tags?.includes("inbox_error") && <span className="text-[10px] text-amber-400">· 收件箱错误</span>}
+                      {accTags.map(tag => (
+                        <span key={tag} className={`text-[10px] px-1 py-0.5 rounded border ${TAG_CLASSES[tag] ?? "text-gray-400 bg-[#21262d] border-[#30363d]"}`}>
+                          {TAG_LABELS[tag] ?? tag}
+                        </span>
+                      ))}
                       <span className="text-[10px] text-gray-600 ml-auto">
                         {new Date(acc.created_at).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" })}
                       </span>
@@ -1007,6 +1035,7 @@ export default function MailCenter() {
           {!busy && selAccount && !needsAuth && !error && messages.length === 0 && (
             <div className="flex flex-col items-center mt-10 px-4 gap-1">
               <p className="text-xs text-gray-600 text-center">该文件夹暂无邮件</p>
+              {folder === "inbox" && <p className="text-xs text-gray-700 text-center">如果以前有邮件，可能已被移动到归档/垃圾邮件/已删除；后端会自动做全邮箱兜底查询。</p>}
               <p className="text-xs text-gray-700 text-center">{refreshCountdown}s 后自动刷新</p>
             </div>
           )}

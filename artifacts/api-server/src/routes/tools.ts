@@ -2545,6 +2545,64 @@ router.post("/tools/outlook/auto-auth-all", async (req, res) => {
 // 供邮件中心使用，前端只传账号ID，token管理完全在后端
 const DEFAULT_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
 
+
+function splitAccountTags(tags: string | null | undefined): string[] {
+  return Array.from(new Set((tags ?? "").split(",").map(t => t.trim()).filter(Boolean)));
+}
+
+async function addAccountTags(accountId: number, tagsToAdd: string[], status?: string): Promise<void> {
+  const { query, execute } = await import("../db.js");
+  const rows = await query<{ tags: string | null }>("SELECT tags FROM accounts WHERE id=$1", [accountId]);
+  const merged = Array.from(new Set([...splitAccountTags(rows[0]?.tags), ...tagsToAdd.map(t => t.trim()).filter(Boolean)])).join(",");
+  if (status) {
+    await execute("UPDATE accounts SET tags=$1, status=$2, updated_at=NOW() WHERE id=$3", [merged || null, status, accountId]);
+  } else {
+    await execute("UPDATE accounts SET tags=$1, updated_at=NOW() WHERE id=$2", [merged || null, accountId]);
+  }
+}
+
+type GraphMailMessage = {
+  id: string;
+  subject?: string;
+  from?: { emailAddress?: { name?: string; address?: string } };
+  receivedDateTime?: string;
+  bodyPreview?: string;
+  isRead?: boolean;
+  body?: { content?: string; contentType?: string };
+  parentFolderId?: string;
+};
+
+function mapGraphMessages(value: GraphMailMessage[] | undefined) {
+  return (value ?? []).map((m) => ({
+    id: m.id,
+    subject: m.subject || "(无主题)",
+    from: m.from?.emailAddress?.address ?? "",
+    fromName: m.from?.emailAddress?.name ?? "",
+    receivedAt: m.receivedDateTime ?? new Date().toISOString(),
+    preview: m.bodyPreview ?? "",
+    body: m.body?.content ?? "",
+    bodyType: m.body?.contentType ?? "text",
+    isRead: !!m.isRead,
+    folderId: m.parentFolderId ?? "",
+  }));
+}
+
+async function fetchGraphMessages(accessToken: string, mailFolder: string, limit: number, search: string | undefined, global = false) {
+  const select = "id,subject,from,receivedDateTime,bodyPreview,isRead,body,parentFolderId";
+  const q = (search ?? "").replace(/["\\]/g, " ").trim();
+  let url = global
+    ? `https://graph.microsoft.com/v1.0/me/messages?$top=${limit}&$select=${select}`
+    : `https://graph.microsoft.com/v1.0/me/mailFolders/${mailFolder}/messages?$top=${limit}&$select=${select}`;
+  if (q) {
+    url += `&$search="${encodeURIComponent(q)}"`;
+  } else {
+    url += "&$orderby=receivedDateTime desc";
+  }
+  const r = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}`, ConsistencyLevel: "eventual" } });
+  const data = await r.json() as { value?: GraphMailMessage[]; error?: { message?: string; code?: string } };
+  return { ok: r.ok, status: r.status, error: data.error, messages: r.ok ? mapGraphMessages(data.value) : [] };
+}
+
 // ── IMAP 辅助：spawn python3 outlook_imap.py ─────────────────────────────
 // 优先 XOAUTH2（access_token）→ Basic Auth 备用
 async function fetchViaImap(
@@ -2824,16 +2882,11 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
         const _errCode = (td as { error?: string }).error ?? "";
         const _errDesc = (td as { error_description?: string }).error_description ?? "";
         try {
-          const { execute: _tagEx } = await import("../db.js");
           const _isAbuse = _errDesc.includes("AADSTS70000") || _errDesc.includes("service abuse");
           if (_isAbuse) {
-            const _cr = await query<{tags:string|null}>("SELECT tags FROM accounts WHERE id=$1",[accountId]);
-            if (!(_cr[0]?.tags ?? "").split(",").includes("abuse_mode"))
-              await _tagEx("UPDATE accounts SET tags=NULLIF(TRIM(BOTH ',' FROM COALESCE(tags,'') || ',abuse_mode'),','), status='suspended', updated_at=NOW() WHERE id=$1",[accountId]);
+            await addAccountTags(accountId, ["abuse_mode"], "suspended");
           } else if (_errCode === "invalid_grant") {
-            const _cr = await query<{tags:string|null}>("SELECT tags FROM accounts WHERE id=$1",[accountId]);
-            if (!(_cr[0]?.tags ?? "").split(",").includes("token_invalid"))
-              await _tagEx("UPDATE accounts SET tags=NULLIF(TRIM(BOTH ',' FROM COALESCE(tags,'') || ',token_invalid'),','), status='suspended', updated_at=NOW() WHERE id=$1",[accountId]);
+            await addAccountTags(accountId, ["token_invalid"], "suspended");
           }
         } catch (_te) { /* tag 失败不中断主流程 */ }
         accessToken = acc.token ?? "";
@@ -2842,31 +2895,20 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
 
     // 有 accessToken → Graph API
     if (accessToken) {
-      let url = `https://graph.microsoft.com/v1.0/me/mailFolders/${mailFolder}/messages?$top=${limit}&$select=id,subject,from,receivedDateTime,bodyPreview,isRead,body&$orderby=receivedDateTime desc`;
-      if (search) url += `&$search="${encodeURIComponent(search)}"`;
-      const mr = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
-      const md = await mr.json() as {
-        value?: Array<{
-          id: string; subject: string;
-          from: { emailAddress: { name: string; address: string } };
-          receivedDateTime: string; bodyPreview: string; isRead: boolean;
-          body?: { content: string; contentType: string };
-        }>;
-        error?: { message: string; code: string };
-      };
-      if (mr.ok) {
-        const messages = (md.value ?? []).map((m) => ({
-          id: m.id,
-          subject: m.subject || "(无主题)",
-          from: m.from?.emailAddress?.address ?? "",
-          fromName: m.from?.emailAddress?.name ?? "",
-          receivedAt: m.receivedDateTime,
-          preview: m.bodyPreview,
-          body: m.body?.content ?? "",
-          bodyType: m.body?.contentType ?? "text",
-          isRead: m.isRead,
-        }));
-        res.json({ success: true, messages, count: messages.length, email: acc.email, via: "graph" });
+      const primary = await fetchGraphMessages(accessToken, mailFolder, limit, search, false);
+      if (primary.ok) {
+        if (primary.messages.length > 0 || mailFolder !== "inbox") {
+          res.json({ success: true, messages: primary.messages, count: primary.messages.length, email: acc.email, via: "graph" });
+          return;
+        }
+        // 收件箱为空时再查整个邮箱。历史邮件可能已被微软规则、自动验证或用户操作移动到归档/垃圾/已删除，
+        // 只查 mailFolders/inbox 会误显示为“空邮箱”。
+        const globalResult = await fetchGraphMessages(accessToken, mailFolder, limit, search, true);
+        if (globalResult.ok && globalResult.messages.length > 0) {
+          res.json({ success: true, messages: globalResult.messages, count: globalResult.messages.length, email: acc.email, via: "graph_all", folderFallback: true });
+          return;
+        }
+        res.json({ success: true, messages: [], count: 0, email: acc.email, via: "graph", folderFallback: globalResult.ok });
         return;
       }
       // Graph API 失败（token 过期等）→ 降级 IMAP

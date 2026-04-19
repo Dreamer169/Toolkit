@@ -129,6 +129,12 @@ Critical implementation details:
 - `artifacts/ai-toolkit/src/pages/` — All frontend pages
 - `artifacts/ai-toolkit/src/data/tools.ts` — 29 tool catalog entries
 
+
+### Mail Center Stability
+- Account tags are treated as a deduplicated comma-separated set; new automation tags are merged without replacing existing labels.
+- Mail Center account badges render all current tags using exact tag matching instead of substring checks.
+- Outlook message fetch now falls back from `mailFolders/inbox/messages` to a full-mailbox Graph query when the inbox folder returns empty, preventing moved/archived/deleted historical mail from looking like a blank mailbox.
+
 ---
 
 ## Database Schema (PostgreSQL)
