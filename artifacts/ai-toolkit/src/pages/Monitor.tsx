@@ -13,7 +13,25 @@ interface JobSummary {
   lastLog: { type: string; message: string } | null;
 }
 interface LogEntry { type: string; message: string }
-interface ProxyStats { total: number; idle: number; active: number; banned: number }
+interface ProxyStats {
+  total: number;
+  eligibleTotal: number;
+  dynamicAvailable: number;
+  idle: number;
+  active: number;
+  banned: number;
+  sources: {
+    subnodeBridge: number;
+    residential: number;
+    external: number;
+    localProxy: number;
+  };
+  cf: {
+    available: number;
+    usedTotal: number;
+    bannedTotal: number;
+  };
+}
 interface DbStats { accounts: number; identities: number; temp_emails: number; proxies: number }
 interface RecentAccount { id: number; platform: string; email: string; status: string; created_at: string }
 interface ApiHealth { ok: boolean; latency: number }
@@ -88,16 +106,32 @@ export default function Monitor() {
   // ── 拉取代理池统计 ─────────────────────────────────────────────────────────
   const fetchProxy = useCallback(async () => {
     try {
-      const r = await fetch(`${API}/data/proxies?limit=1`).then(r => r.json());
-      if (r.success) {
-        // 从 proxies 列表计算状态分布
-        const all = await fetch(`${API}/data/proxies?limit=9999`).then(r => r.json());
-        const list: { status: string }[] = all.proxies ?? [];
+      const [shared, cf] = await Promise.all([
+        fetch(`${API}/data/proxies?limit=9999`).then(r => r.json()),
+        fetch(`${API}/tools/cf-pool/status`).then(r => r.json()).catch(() => null),
+      ]);
+      if (shared.success) {
+        const list: { status: string }[] = shared.data ?? shared.proxies ?? [];
+        const cfAvailable = Number(cf?.available ?? 0);
+        const eligibleTotal = Number(shared.eligibleTotal ?? 0);
         setProxyStats({
-          total:  r.total ?? 0,
-          idle:   list.filter(p => p.status === "idle").length,
+          total: Number(shared.total ?? list.length ?? 0),
+          eligibleTotal,
+          dynamicAvailable: eligibleTotal + cfAvailable,
+          idle: list.filter(p => p.status === "idle").length,
           active: list.filter(p => p.status === "active").length,
           banned: list.filter(p => p.status === "banned").length,
+          sources: {
+            subnodeBridge: Number(shared.sources?.subnodeBridge ?? 0),
+            residential: Number(shared.sources?.residential ?? 0),
+            external: Number(shared.sources?.external ?? 0),
+            localProxy: Number(shared.sources?.localProxy ?? 0),
+          },
+          cf: {
+            available: cfAvailable,
+            usedTotal: Number(cf?.used_total ?? 0),
+            bannedTotal: Number(cf?.banned_total ?? 0),
+          },
         });
       }
     } catch {}
@@ -109,10 +143,10 @@ export default function Monitor() {
       const r = await fetch(`${API}/data/stats`).then(r => r.json());
       if (r.success) {
         setDbStats({
-          accounts:   r.counts.accounts   ?? 0,
-          identities: r.counts.identities ?? 0,
-          temp_emails:r.counts.temp_emails ?? 0,
-          proxies:    r.counts.proxies     ?? 0,
+          accounts:   r.counts?.accounts   ?? r.accounts?.total ?? 0,
+          identities: r.counts?.identities ?? 0,
+          temp_emails:r.counts?.temp_emails ?? r.emails?.total ?? 0,
+          proxies:    r.counts?.proxies     ?? ((r.proxies?.idle ?? 0) + (r.proxies?.active ?? 0) + (r.proxies?.banned ?? 0)),
         });
       }
     } catch {}
@@ -263,11 +297,11 @@ export default function Monitor() {
           <div className="text-xs text-gray-500 mb-1">代理池</div>
           {proxyStats ? (
             <>
-              <div className="text-lg font-bold text-emerald-400">{proxyStats.total} 个</div>
+              <div className="text-lg font-bold text-emerald-400">{proxyStats.dynamicAvailable} 可用</div>
               <div className="text-xs text-gray-600 mt-1 space-x-2">
-                <span className="text-gray-400">空闲 {proxyStats.idle}</span>
-                <span className="text-blue-400">活跃 {proxyStats.active}</span>
-                <span className="text-red-400">封禁 {proxyStats.banned}</span>
+                <span className="text-gray-400">共享 {proxyStats.eligibleTotal}</span>
+                <span className="text-cyan-400">CF {proxyStats.cf.available}</span>
+                <span className="text-red-400">封禁 {proxyStats.banned + proxyStats.cf.bannedTotal}</span>
               </div>
             </>
           ) : (
@@ -444,31 +478,57 @@ export default function Monitor() {
       {/* ── 代理池明细 ────────────────────────────────────────────────────── */}
       {proxyStats && (
         <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4">
-          <h2 className="text-sm font-semibold text-gray-300 mb-3">代理池状态</h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-gray-300">代理池状态</h2>
+            <span className="text-xs text-gray-600">显示动态可用数，不再显示静态入库总数</span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4 text-xs">
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">动态可用</div>
+              <div className="text-xl font-bold text-emerald-400 mt-1">{proxyStats.dynamicAvailable}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">子节点桥</div>
+              <div className="text-xl font-bold text-blue-400 mt-1">{proxyStats.sources.subnodeBridge}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">住宅/外部</div>
+              <div className="text-xl font-bold text-purple-400 mt-1">{proxyStats.sources.residential + proxyStats.sources.external}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">CF 可用</div>
+              <div className="text-xl font-bold text-cyan-400 mt-1">{proxyStats.cf.available}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">已封禁</div>
+              <div className="text-xl font-bold text-red-400 mt-1">{proxyStats.banned + proxyStats.cf.bannedTotal}</div>
+            </div>
+          </div>
           <div className="flex items-center gap-4">
             <div className="flex-1 h-3 bg-[#21262d] rounded-full overflow-hidden flex">
-              {proxyStats.total > 0 && (
+              {proxyStats.dynamicAvailable > 0 && (
                 <>
                   <div
-                    className="h-full bg-gray-500/60 transition-all"
-                    style={{ width: `${(proxyStats.idle / proxyStats.total) * 100}%` }}
-                  />
-                  <div
                     className="h-full bg-blue-500/80 transition-all"
-                    style={{ width: `${(proxyStats.active / proxyStats.total) * 100}%` }}
+                    style={{ width: `${(proxyStats.sources.subnodeBridge / proxyStats.dynamicAvailable) * 100}%` }}
                   />
                   <div
-                    className="h-full bg-red-500/80 transition-all"
-                    style={{ width: `${(proxyStats.banned / proxyStats.total) * 100}%` }}
+                    className="h-full bg-purple-500/80 transition-all"
+                    style={{ width: `${((proxyStats.sources.residential + proxyStats.sources.external) / proxyStats.dynamicAvailable) * 100}%` }}
+                  />
+                  <div
+                    className="h-full bg-cyan-500/80 transition-all"
+                    style={{ width: `${(proxyStats.cf.available / proxyStats.dynamicAvailable) * 100}%` }}
                   />
                 </>
               )}
             </div>
-            <div className="flex items-center gap-4 text-xs shrink-0">
-              <span className="text-gray-400">空闲 <strong className="text-white">{proxyStats.idle}</strong></span>
-              <span className="text-blue-400">活跃 <strong className="text-white">{proxyStats.active}</strong></span>
-              <span className="text-red-400">封禁 <strong className="text-white">{proxyStats.banned}</strong></span>
-              <span className="text-gray-600">共 {proxyStats.total}</span>
+            <div className="flex flex-wrap items-center gap-4 text-xs shrink-0">
+              <span className="text-gray-400">共享可用 <strong className="text-white">{proxyStats.eligibleTotal}</strong></span>
+              <span className="text-blue-400">子节点 <strong className="text-white">{proxyStats.sources.subnodeBridge}</strong></span>
+              <span className="text-purple-400">住宅 <strong className="text-white">{proxyStats.sources.residential}</strong></span>
+              <span className="text-cyan-400">CF <strong className="text-white">{proxyStats.cf.available}</strong></span>
+              <span className="text-gray-600">入库总数 {proxyStats.total}</span>
             </div>
           </div>
         </div>

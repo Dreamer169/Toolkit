@@ -162,3 +162,9 @@ Critical implementation details:
 - **team-all-in-one**: Flask service on port 5000 (reads PORT env var)
 - **openai-pool**: FastAPI service on port 8000 (reads PORT env var)
 - **Multi-node gateway bridge**: frontend defaults to `/api/gateway`. `/api/gateway/v1/models`, `/api/gateway/v1/chat/completions`, and `/api/gateway/v1/stats` expose an OpenAI-compatible gateway. It tries `45.205.27.69:9090` Sub2API first, marks it down on `no available OpenAI accounts`/503/429, then falls back to multiple virtual Reseek AI nodes backed by `AI_INTEGRATIONS_OPENAI_BASE_URL` + `AI_INTEGRATIONS_OPENAI_API_KEY`. Configure virtual fallback node count with `RESEEK_AI_NODE_COUNT` (default 4). `remote-exec.js` exposes `/health` and `/exec` on port 9999 for controlled remote operations.
+
+## Monitor Proxy Pool Display
+
+- Real-time Monitor now reports dynamic proxy availability instead of the static `proxies` table row count.
+- Dynamic available proxies are calculated as shared eligible proxies plus CF pool available IPs.
+- The monitor displays source breakdowns for subnode bridge, residential/external proxies, and CF IPs so changing pool state is visible during registration.
