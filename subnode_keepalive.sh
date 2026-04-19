@@ -1,9 +1,9 @@
 #!/bin/bash
 # VPS -> Replit 子节点入站保活脚本
-# 每 3 分钟发送 GET /api/health，防止 Replit 实例因无流量休眠
+# 每 3 分钟发送 GET /api/healthz，防止 Replit 实例因无流量休眠
 # 启动延迟 30s，避免与 PM2/Replit 同时重启时首次 ping 必失
 
-SUBNODE_URL="https://e30c0ae2-f8c5-4be1-ac08-513f36159e84-00-2mfc7zpe4ng5o.picard.replit.dev/api/health"
+SUBNODE_URL="https://a738e112-67aa-4781-95c0-aefd7e0860c8-00-3owssjt9lfedl.janeway.replit.dev/api/healthz"
 INTERVAL=180
 STARTUP_DELAY=30
 
