@@ -130,10 +130,12 @@ function availablePorts(): number[] {
   return XRAY_PORTS.filter(p => !DEAD_PORTS.has(p) && (cfBannedUntil.get(p) ?? 0) < now && (portDeadUntil.get(p) ?? 0) < now);
 }
 function sortedByReputation(ports: number[]): number[] {
-  // Good ports (recently had form response) first, then others
-  const good = ports.filter(p => portLastGood.has(p)).sort((a, b) => (portLastGood.get(b)!) - (portLastGood.get(a)!));
-  const other = ports.filter(p => !portLastGood.has(p));
-  return [...shuffled(good), ...shuffled(other)];
+  // Port 1090 (Replit sub-node, best CF bypass) always first
+  const has1090 = ports.includes(1090);
+  const rest = ports.filter(p => p !== 1090);
+  const good = rest.filter(p => portLastGood.has(p)).sort((a, b) => (portLastGood.get(b)!) - (portLastGood.get(a)!));
+  const other = rest.filter(p => !portLastGood.has(p));
+  return [...(has1090 ? [1090] : []), ...shuffled(good), ...shuffled(other)];
 }
 function shuffled(arr: number[]): number[] { return [...arr].sort(() => Math.random() - 0.5); }
 
@@ -550,8 +552,10 @@ router.post("/replit/register", (req, res) => {
             if (isInstantSwitch) {
               // CF封禁/连接失败 → 轮换该端口的 CF CDN IP
               if (lastErr.includes("ERR_CONNECTION_CLOSED") || lastErr.includes("ERR_SOCKS_CONNECTION_FAILED")) {
-                portDeadUntil.set(tryPort, Date.now() + 10 * 60 * 1000);
-                log(`    [dead] port ${tryPort} dead 10min`);
+                // port 1090 = Replit sub-node: short 2min cooldown (instance may restart quickly)
+                const deadMs = tryPort === 1090 ? 2 * 60 * 1000 : 10 * 60 * 1000;
+                portDeadUntil.set(tryPort, Date.now() + deadMs);
+                log(`    [dead] port ${tryPort} dead ${deadMs/60000}min`);
               }
               const needsCfRotate =
                 lastErr.includes("cf_ip_banned")             ||
@@ -561,17 +565,21 @@ router.post("/replit/register", (req, res) => {
                 lastErr.includes("ERR_EMPTY_RESPONSE")       ||
                 lastErr.includes("ERR_CERT");
               if (needsCfRotate) {
-                // 封禁冷却：永久封禁5min，JS challenge短暂1min
-                if (lastErr.includes("cf_ip_banned") || lastErr.includes("cf_hard_block")) {
-                  cfBannedUntil.set(tryPort, Date.now() + 5 * 60 * 1000);
-                } else if (lastErr.includes("cf_js_challenge_timeout")) {
-                  cfBannedUntil.set(tryPort, Date.now() + 1 * 60 * 1000); // 1min冷却
-                }
-                const cfIp = xrayPortCfIp.get(tryPort);
-                if (cfIp) {
-                  log(`    → rotate CF IP ${cfIp} in xray (pool → new IP)`);
-                  rotateCfIpInXray(cfIp);
-                  await new Promise(r => setTimeout(r, 2000));  // wait xray reload
+                // 封禁冷却：永久封禁5min，JS challenge短暂1min（port 1090=Replit sub-node不走CF封禁）
+                if (tryPort !== 1090) {
+                  if (lastErr.includes("cf_ip_banned") || lastErr.includes("cf_hard_block")) {
+                    cfBannedUntil.set(tryPort, Date.now() + 5 * 60 * 1000);
+                  } else if (lastErr.includes("cf_js_challenge_timeout")) {
+                    cfBannedUntil.set(tryPort, Date.now() + 1 * 60 * 1000); // 1min冷却
+                  }
+                  const cfIp = xrayPortCfIp.get(tryPort);
+                  if (cfIp) {
+                    log(`    → rotate CF IP ${cfIp} in xray (pool → new IP)`);
+                    rotateCfIpInXray(cfIp);
+                    await new Promise(r => setTimeout(r, 2000));  // wait xray reload
+                  }
+                } else {
+                  log(`    → port 1090 (Replit sub-node) CF issue → skip CF rotation, try next port`);
                 }
               }
               log(`    → instant port switch`);
