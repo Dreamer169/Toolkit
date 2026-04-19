@@ -1,49 +1,35 @@
-import * as http from "http";
-  import { WebSocketServer } from "ws";
-  import app from "./app";
-  import { logger } from "./lib/logger";
-  import { selfRegister, handleTunnelWs, handleStreamWs } from "./routes/tunnel";
+import app from "./app";
+import { logger } from "./lib/logger";
+import { selfRegister } from "./routes/tunnel";
 
-  const rawPort = process.env["PORT"];
-  if (!rawPort) throw new Error("PORT environment variable is required but was not provided.");
-  const port = Number(rawPort);
-  if (Number.isNaN(port) || port <= 0) throw new Error(`Invalid PORT value: "${rawPort}"`);
+const rawPort = process.env["PORT"];
 
-  const server = http.createServer(app);
-  const wss = new WebSocketServer({ noServer: true });
+if (!rawPort) {
+  throw new Error(
+    "PORT environment variable is required but was not provided.",
+  );
+}
 
-  server.on("upgrade", (req, socket, head) => {
-    const rawUrl = req.url ?? "/";
-    let pathname = rawUrl;
-    let searchStr = "";
-    const qi = rawUrl.indexOf("?");
-    if (qi !== -1) { pathname = rawUrl.slice(0, qi); searchStr = rawUrl.slice(qi + 1); }
+const port = Number(rawPort);
 
-    // 支持 /api/tunnel/ws（旧路径，代理 repl 兼容）和 /api/stream/ws（新路径）
-    if (pathname === "/api/tunnel/ws" || pathname === "/api/stream/ws") {
-      wss.handleUpgrade(req, socket, head, (ws) => {
-        const params = new URLSearchParams(searchStr);
-        // handleTunnelWs 和 handleStreamWs 相同实现
-        handleTunnelWs(ws, params);
-      });
-    } else {
-      socket.destroy();
-    }
-  });
+if (Number.isNaN(port) || port <= 0) {
+  throw new Error(`Invalid PORT value: "${rawPort}"`);
+}
 
-  server.listen(port, (err?: Error) => {
-    if (err) { logger.error({ err }, "Error listening on port"); process.exit(1); }
-    logger.info({ port }, "Server listening");
+const server = app.listen(port, (err) => {
+  if (err) {
+    logger.error({ err }, "Error listening on port");
+    process.exit(1);
+  }
 
-    const myUrl = process.env.MY_URL ||
-      (process.env.REPLIT_DEV_DOMAIN
-        ? `https://${process.env.REPLIT_DEV_DOMAIN}`
-        : `http://localhost:${port}`);
-    logger.info({ url: myUrl }, "Stream relay URL (WS: /api/stream/ws, /api/tunnel/ws; HTTP poll: /api/stream/open|read|write)");
+  logger.info({ port }, "Server listening");
+  logger.info(
+    { url: `http://localhost:${port}` },
+    "Stream relay URL (HTTP poll: /api/stream/open|read|write)",
+  );
+  setTimeout(selfRegister, 3_000).unref();
+});
 
-    setTimeout(() => {
-      selfRegister();
-      setInterval(selfRegister, 5 * 60 * 1000);
-    }, 3000);
-  });
-  
+server.on("error", (err) => {
+  logger.error({ err }, "Server error");
+});
