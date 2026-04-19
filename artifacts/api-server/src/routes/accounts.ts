@@ -429,6 +429,7 @@ router.post("/replit/register", (req, res) => {
 
           // ── Step 2a: 最多 6 次不同代理端口重试（shuffle不重复）───────
           let captchaFailCount = 0; // 同一 Outlook 账号的 captcha_token_invalid 次数
+          let rateLimitCount  = 0; // account_rate_limited 次数（2次即切换邮件）
           const regScript = path.join(API_DIR, "replit_register.py");
           let regOk  = false;
           let exitIp = "";
@@ -515,9 +516,14 @@ router.post("/replit/register", (req, res) => {
               }
               continue;
             }
-            // account_rate_limited = Replit IP限速 → 换端口+轮换CF IP重试
+            // account_rate_limited = Replit/邮件限速 → 换端口；2次以上=邮件级限速，直接换邮件
             if (lastErr.includes("account_rate_limited")) {
               portLastGood.set(tryPort, Date.now()); // port got response
+              rateLimitCount++;
+              if (rateLimitCount >= 2) {
+                log(`    account_rate_limited x${rateLimitCount} on different IPs → email-level rate limit, skip Outlook`);
+                break; // 换下一个 Outlook 账号
+              }
               log(`    ⏳ account_rate_limited on port ${tryPort} (exit: ${exitIp}) → rotate CF IP + switch port`);
               const cfIpRl = xrayPortCfIp.get(tryPort);
               if (cfIpRl) {
