@@ -106,6 +106,11 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                     "可以关闭" in content,
                     "device login is complete" in content.lower(),
                     "登录成功" in content,
+                    # oauth20_remoteconnect.srf 是设备码授权完成后的标准成功页
+                    "oauth20_remoteconnect.srf" in final_url.lower(),
+                    "you have signed in" in content.lower(),
+                    "successfully signed in" in content.lower(),
+                    "授权已完成" in content,
                 ]
                 if any(success_signals):
                     result["status"] = "done"

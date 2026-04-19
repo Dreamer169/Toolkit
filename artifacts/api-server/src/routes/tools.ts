@@ -2820,7 +2820,22 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
           [accessToken, td.refresh_token ?? acc.refresh_token, accountId]
         );
       } else {
-        // refresh 失败 → 降级到 IMAP（保留 DB token 尝试）
+        // refresh 失败 → 自动打标签，再降级 IMAP
+        const _errCode = (td as { error?: string }).error ?? "";
+        const _errDesc = (td as { error_description?: string }).error_description ?? "";
+        try {
+          const { execute: _tagEx } = await import("../db.js");
+          const _isAbuse = _errDesc.includes("AADSTS70000") || _errDesc.includes("service abuse");
+          if (_isAbuse) {
+            const _cr = await query<{tags:string|null}>("SELECT tags FROM accounts WHERE id=$1",[accountId]);
+            if (!(_cr[0]?.tags ?? "").split(",").includes("abuse_mode"))
+              await _tagEx("UPDATE accounts SET tags=NULLIF(TRIM(BOTH ',' FROM COALESCE(tags,'') || ',abuse_mode'),','), status='suspended', updated_at=NOW() WHERE id=$1",[accountId]);
+          } else if (_errCode === "invalid_grant") {
+            const _cr = await query<{tags:string|null}>("SELECT tags FROM accounts WHERE id=$1",[accountId]);
+            if (!(_cr[0]?.tags ?? "").split(",").includes("token_invalid"))
+              await _tagEx("UPDATE accounts SET tags=NULLIF(TRIM(BOTH ',' FROM COALESCE(tags,'') || ',token_invalid'),','), status='suspended', updated_at=NOW() WHERE id=$1",[accountId]);
+          }
+        } catch (_te) { /* tag 失败不中断主流程 */ }
         accessToken = acc.token ?? "";
       }
     }

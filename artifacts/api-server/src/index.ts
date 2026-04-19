@@ -2,37 +2,23 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { selfRegister } from "./routes/tunnel";
 import { startLiveVerifyPoller } from "./lib/live-verify-poller.js";
+import { startAccountHealthcheck } from "./lib/account-healthcheck.js";
 
 const rawPort = process.env["PORT"];
-
-if (!rawPort) {
-  throw new Error(
-    "PORT environment variable is required but was not provided.",
-  );
-}
+if (!rawPort) throw new Error("PORT environment variable is required but was not provided.");
 
 const port = Number(rawPort);
-
-if (Number.isNaN(port) || port <= 0) {
-  throw new Error(`Invalid PORT value: "${rawPort}"`);
-}
+if (Number.isNaN(port) || port <= 0) throw new Error(`Invalid PORT value: "${rawPort}"`);
 
 const server = app.listen(port, (err) => {
-  if (err) {
-    logger.error({ err }, "Error listening on port");
-    process.exit(1);
-  }
-
+  if (err) { logger.error({ err }, "Error listening on port"); process.exit(1); }
   logger.info({ port }, "Server listening");
-  logger.info(
-    { url: `http://localhost:${port}` },
-    "Stream relay URL (HTTP poll: /api/stream/open|read|write)",
-  );
+  logger.info({ url: `http://localhost:${port}` }, "Stream relay URL");
   setTimeout(selfRegister, 3_000).unref();
-  // 启动实时验证轮询：每 10 秒扫描所有 outlook 账号的未读验证邮件并自动点击
+  // 实时验证链接点击（每10秒扫描）
   startLiveVerifyPoller(10_000);
+  // 账号健康检查：自动补 OAuth + 打标签（每5分钟）
+  startAccountHealthcheck(5 * 60 * 1000);
 });
 
-server.on("error", (err) => {
-  logger.error({ err }, "Server error");
-});
+server.on("error", (err) => { logger.error({ err }, "Server error"); });

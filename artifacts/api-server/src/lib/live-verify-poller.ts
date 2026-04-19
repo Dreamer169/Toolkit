@@ -19,6 +19,38 @@ const failCounts = new Map<string, number>();
 export function setLiveVerifyEnabled(val: boolean) { _enabled = val; }
 export function getLiveVerifyStatus() { return { enabled: _enabled, lastRun: _lastRun, lastStats: _lastStats }; }
 
+/** 给账号追加 tag 并更新状态（幂等：tag 已存在不重复写） */
+async function tagAccount(id: number, tag: string, status?: string): Promise<void> {
+  try {
+    const { query, execute } = await import("../db.js");
+    const rows = await query<{ tags: string | null; status: string | null }>(
+      "SELECT tags, status FROM accounts WHERE id=$1", [id]
+    );
+    const cur = rows[0];
+    if (!cur) return;
+    const existingTags = cur.tags ?? "";
+    if (existingTags.split(",").map(t => t.trim()).includes(tag)) {
+      // tag 已存在，仅更新 status（如有）
+      if (status && cur.status !== status) {
+        await execute("UPDATE accounts SET status=$1, updated_at=NOW() WHERE id=$2", [status, id]);
+      }
+      return;
+    }
+    const newTags = existingTags ? `${existingTags},${tag}` : tag;
+    if (status) {
+      await execute(
+        "UPDATE accounts SET tags=$1, status=$2, updated_at=NOW() WHERE id=$3",
+        [newTags, status, id]
+      );
+    } else {
+      await execute("UPDATE accounts SET tags=$1, updated_at=NOW() WHERE id=$2", [newTags, id]);
+    }
+    logger.info({ id, tag, status }, "[live-verify] 账号已自动打标签");
+  } catch (e) {
+    logger.warn({ id, tag, err: String(e) }, "[live-verify] tagAccount 失败");
+  }
+}
+
 /** 调用 Graph API 把邮件标记为已读，避免重复处理 */
 async function markAsRead(accessToken: string, messageId: string): Promise<void> {
   try {
@@ -32,8 +64,8 @@ async function markAsRead(accessToken: string, messageId: string): Promise<void>
   }
 }
 
-/** 刷新 access_token */
-async function refreshToken(refreshToken: string): Promise<string | null> {
+/** 刷新 access_token，返回 token 及错误码（便于自动打标签） */
+async function refreshToken(rt: string): Promise<{ token: string | null; errorCode?: string; errorDesc?: string }> {
   try {
     const r = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
       method: "POST",
@@ -41,13 +73,16 @@ async function refreshToken(refreshToken: string): Promise<string | null> {
       body: new URLSearchParams({
         grant_type: "refresh_token",
         client_id: OAUTH_CLIENT_ID,
-        refresh_token: refreshToken,
+        refresh_token: rt,
         scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access",
       }).toString(),
     });
-    const td = await r.json() as { access_token?: string };
-    return td.access_token ?? null;
-  } catch { return null; }
+    const td = await r.json() as { access_token?: string; error?: string; error_description?: string };
+    if (td.access_token) return { token: td.access_token };
+    return { token: null, errorCode: td.error, errorDesc: td.error_description };
+  } catch (e) {
+    return { token: null, errorCode: "network_error", errorDesc: String(e) };
+  }
 }
 
 async function runOnce() {
@@ -56,8 +91,16 @@ async function runOnce() {
   const stats = { total: 0, clicked: 0, skipped: 0, failed: 0 };
   try {
     const { query } = await import("../db.js");
+    // 排除已被标记为 suspended 或 abuse_mode 的账号
     const rows = await query<{ id: number; email: string; token: string | null; refresh_token: string | null }>(
-      "SELECT id, email, token, refresh_token FROM accounts WHERE platform='outlook' AND (token IS NOT NULL AND token!='' OR refresh_token IS NOT NULL AND refresh_token!='')",
+      `SELECT id, email, token, refresh_token FROM accounts
+       WHERE platform='outlook'
+         AND COALESCE(status,'') != 'suspended'
+         AND COALESCE(tags,'') NOT LIKE '%abuse_mode%'
+         AND (
+           (token IS NOT NULL AND token != '')
+           OR (refresh_token IS NOT NULL AND refresh_token != '')
+         )`,
       []
     );
     stats.total = rows.length;
@@ -66,22 +109,44 @@ async function runOnce() {
 
     for (const acc of rows) {
       try {
-        // 优先用 refresh_token 换新 access_token
         let accessToken = "";
+
         if (acc.refresh_token) {
-          const newToken = await refreshToken(acc.refresh_token);
-          if (newToken) accessToken = newToken;
+          const result = await refreshToken(acc.refresh_token);
+          if (result.token) {
+            accessToken = result.token;
+          } else {
+            const desc = result.errorDesc ?? "";
+            const code = result.errorCode ?? "";
+            // 检测 service abuse mode（AADSTS70000）
+            if (desc.includes("AADSTS70000") || desc.includes("service abuse")) {
+              logger.warn({ email: acc.email, errorCode: code }, "[live-verify] 账号触发 service abuse，自动打标签");
+              await tagAccount(acc.id, "abuse_mode", "suspended");
+              stats.skipped++;
+              continue;
+            }
+            // invalid_grant = token 已过期/撤销
+            if (code === "invalid_grant" || desc.includes("AADSTS70008") || desc.includes("AADSTS700082")) {
+              logger.warn({ email: acc.email }, "[live-verify] refresh_token 已失效，自动打 token_invalid");
+              await tagAccount(acc.id, "token_invalid", "suspended");
+              stats.skipped++;
+              continue;
+            }
+            // 其他失败（网络等）→ 降级到 DB 里的旧 token 继续尝试
+            accessToken = acc.token ?? "";
+          }
+        } else {
+          accessToken = acc.token ?? "";
         }
-        if (!accessToken) accessToken = acc.token ?? "";
+
         if (!accessToken) { stats.skipped++; continue; }
 
         // 搜索未读验证邮件（用 $filter 而非 $search，避免搜索缓存延迟）
         const filterUrl = `https://graph.microsoft.com/v1.0/me/messages?$filter=isRead eq false and contains(subject,'${SUBJECT_FILTER}')&$select=id,subject,isRead,receivedDateTime&$top=20&$orderby=receivedDateTime desc`;
         const gr = await fetch(filterUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
         if (!gr.ok) {
-          // filter 可能不支持 contains，退回 search
-          const searchUrl = `https://graph.microsoft.com/v1.0/me/messages?$search="subject:${SUBJECT_FILTER}"&$select=id,subject,isRead,receivedDateTime&$top=20`;
-          const gr2 = await fetch(searchUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
+          const fallbackUrl = `https://graph.microsoft.com/v1.0/me/messages?$search="subject:${SUBJECT_FILTER}"&$select=id,subject,isRead,receivedDateTime&$top=20`;
+          const gr2 = await fetch(fallbackUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
           if (!gr2.ok) { stats.skipped++; continue; }
           const gd2 = await gr2.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
           const msgs2 = (gd2.value ?? []).filter(m => !m.isRead && m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase()));
@@ -129,7 +194,6 @@ async function processMessage(
     setTimeout(() => { child.kill(); resolve({ success: false, error: "timeout" }); }, 45_000);
   });
 
-  // 真正成功：patchright 未抛异常 且 页面标题不含 404
   const trueSuccess = result.success && !!result.title && !result.title.toLowerCase().includes("404");
 
   logger.info({
@@ -143,12 +207,10 @@ async function processMessage(
   }, "[live-verify] 点击验证结果");
 
   if (trueSuccess) {
-    // 成功后才标记已读，并清除失败计数
     await markAsRead(accessToken, msg.id);
     failCounts.delete(msg.id);
     stats.clicked++;
   } else {
-    // 失败：计数+1；达到3次才放弃并标记已读
     const prev = failCounts.get(msg.id) ?? 0;
     const next  = prev + 1;
     failCounts.set(msg.id, next);
