@@ -44,7 +44,7 @@ def fetch_nodes_from_gateway():
                 if base:
                     urls.append(base)
             elif n.get("status") == "down":
-                print(f"[poll-bridge] skip down: {(n.get(baseUrl) or )[:50]} until={n.get(downUntil)}", flush=True)
+                print("[poll-bridge] skip down: {} until={}".format((n.get("baseUrl") or "")[:50], n.get("downUntil")), flush=True)
         return urls
     except Exception as e:
         print(f"[poll-bridge] gateway sync failed: {e}", flush=True)

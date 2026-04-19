@@ -45,7 +45,7 @@ def fetch_nodes_from_gateway():
                 if base:
                     urls.append(_base_to_wss(base))
             elif n.get("status") == "down":
-                print(f"[ws-tunnel] skip down: {(n.get("baseUrl") or "")[:50]} until={n.get("downUntil")}", flush=True)
+                print("[ws-tunnel] skip down: {} until={}".format((n.get("baseUrl") or "")[:50], n.get("downUntil")), flush=True)
         return urls
     except Exception as e:
         print(f"[ws-tunnel] gateway sync failed: {e}", flush=True)

@@ -59,7 +59,7 @@ def fetch_nodes_from_gateway():
                 if base:
                     urls.append(_base_to_wss(base))
             elif n.get("status") == "down":
-                log.warning(f"skip down: {(n.get("baseUrl") or "")[:50]} until={n.get("downUntil")}")
+                log.warning("skip down: %s until=%s", (n.get("baseUrl") or "")[:50], n.get("downUntil"))
         return urls
     except Exception as e:
         log.warning(f"gateway sync failed: {e}")
