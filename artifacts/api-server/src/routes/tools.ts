@@ -1590,10 +1590,19 @@ router.get("/tools/outlook/register/:jobId", async (req, res) => {
 });
 
 // 列出所有任务（实时监控用）
+function classifyToolJob(jobId: string) {
+  if (jobId.startsWith("reg_")) return { source: "tools", kind: "outlook_register", title: "Outlook 注册" };
+  if (jobId.startsWith("curhttp_")) return { source: "tools", kind: "cursor_http_register", title: "Cursor HTTP 注册" };
+  if (jobId.startsWith("cur_")) return { source: "tools", kind: "cursor_register", title: "Cursor 注册" };
+  if (jobId.startsWith("retoken_")) return { source: "tools", kind: "outlook_retoken", title: "Outlook Retoken" };
+  return { source: "tools", kind: "tool_job", title: "工具任务" };
+}
+
 router.get("/tools/jobs", async (_req, res) => {
   const allJobs = await jobQueue.list();
   const jobs = allJobs.map(job => ({
     id: job.jobId,
+    ...classifyToolJob(job.jobId),
     status: job.status,
     startedAt: job.startedAt,
     logCount: job.logs.length,
@@ -1602,6 +1611,28 @@ router.get("/tools/jobs", async (_req, res) => {
     lastLog: job.logs.at(-1) ?? null,
   }));
   res.json({ success: true, jobs });
+});
+
+router.get("/tools/jobs/:jobId", async (req, res) => {
+  const job = await jobQueue.get(req.params.jobId);
+  if (!job) { res.status(404).json({ success: false, error: "任务不存在" }); return; }
+  const since = Number(req.query.since ?? 0);
+  res.json({
+    success: true,
+    jobId: job.jobId,
+    ...classifyToolJob(job.jobId),
+    status: job.status,
+    accounts: job.accounts,
+    logs: job.logs.slice(since),
+    nextSince: job.logs.length,
+    exitCode: job.exitCode,
+  });
+});
+
+router.delete("/tools/jobs/:jobId", (req, res) => {
+  const stopped = jobQueue.stop(req.params.jobId);
+  if (!stopped) { res.status(404).json({ success: false }); return; }
+  res.json({ success: true });
 });
 
 // 停止任务

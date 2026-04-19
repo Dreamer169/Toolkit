@@ -174,3 +174,9 @@ Critical implementation details:
 - Shared proxy pool no longer treats subnode bridges as a fixed single `1090` proxy.
 - API scans local SOCKS5 bridge ports in the configurable range `SUBNODE_BRIDGE_MIN_PORT..SUBNODE_BRIDGE_MAX_PORT` (defaults `1089..1199`) and upserts open SOCKS5 ports into the `proxies` table.
 - Source classification and proxy selection prioritize any discovered subnode bridge before residential/external proxies, allowing multi-instance bridge deployments to join the pool automatically.
+
+## Unified Real-Time Monitor Jobs
+
+- Real-time Monitor now combines persistent tool jobs with Replit route jobs, covering Outlook registration, Cursor registration, retoken jobs, Replit registration, full pipeline jobs, legacy signup jobs, and subnode deployment tasks.
+- New generic task endpoints expose summaries and incremental logs for both job systems: `/api/tools/jobs/:jobId` and `/api/replit/jobs/:jobId`.
+- Monitor stop buttons now target the correct job source instead of assuming every job is an Outlook registration job.

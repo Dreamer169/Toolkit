@@ -208,6 +208,61 @@ const jobs = new Map<string, Job>();
 function makeJobId() { return `rpl_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`; }
 function pick<T>(arr: T[]): T { return arr[Math.floor(Math.random() * arr.length)]; }
 
+function classifyReplitJob(jobId: string) {
+  if (jobId.startsWith("pipe_")) return { source: "replit", kind: "pipeline_full", title: "全自动流水线" };
+  if (jobId.startsWith("rpl_")) return { source: "replit", kind: "replit_job", title: "Replit 注册/部署" };
+  return { source: "replit", kind: "legacy_signup", title: "注册任务" };
+}
+
+function normalizeReplitStatus(status: Job["status"] | string) {
+  return status === "error" ? "error" : status;
+}
+
+router.get("/replit/jobs", (_req, res) => {
+  const list = Array.from(jobs.values()).map((job) => ({
+    id: job.id,
+    ...classifyReplitJob(job.id),
+    status: normalizeReplitStatus(job.status),
+    startedAt: job.started,
+    logCount: job.logs.length,
+    accountCount: Array.isArray(job.result?.results) ? job.result.results.length : 0,
+    exitCode: null,
+    lastLog: job.logs.length ? { type: job.status === "error" ? "error" : job.status === "done" ? "done" : "log", message: job.logs.at(-1) ?? "" } : null,
+  })).sort((a, b) => b.startedAt - a.startedAt);
+  res.json({ success: true, jobs: list });
+});
+
+router.get("/replit/jobs/:jobId", (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) { res.status(404).json({ success: false, error: "job not found" }); return; }
+  const since = Number(req.query.since ?? 0);
+  const logs = job.logs.slice(since).map((line) => ({
+    type: /fatal|error|失败|✗|❌/i.test(line) ? "error" : /✓|✅|成功|done/i.test(line) ? "success" : "log",
+    message: line,
+  }));
+  res.json({
+    success: true,
+    jobId: job.id,
+    ...classifyReplitJob(job.id),
+    status: normalizeReplitStatus(job.status),
+    elapsed: Math.round((Date.now() - job.started) / 1000),
+    logs,
+    nextSince: job.logs.length,
+    result: job.result,
+    exitCode: null,
+  });
+});
+
+router.delete("/replit/jobs/:jobId", (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) { res.status(404).json({ success: false, error: "job not found" }); return; }
+  if (job.status === "running") {
+    job.status = "error";
+    job.logs.push(`[${new Date().toISOString().slice(11,19)}] ⚠ 用户在监控中心标记停止（后台子进程如已启动可能继续到自然结束）`);
+  }
+  res.json({ success: true });
+});
+
 const REPLIT_USERNAME_ADJS = [
   "amber","ancient","arctic","autumn","azure","binary","brave","bright","calm","cedar","clear","clever","cosmic","crimson","crystal","daily","deep","distant","drift","dusty","early","ember","fair","fast","forest","fresh","frost","gentle","golden","green","hidden","honest","ivory","jade","keen","kind","lively","lunar","maple","mellow","misty","modern","neon","nimble","noble","north","ocean","opal","polar","quiet","rapid","river","ruby","sage","silent","silver","solar","solid","spring","steady","stellar","stone","storm","summer","swift","tidal","true","urban","velvet","violet","warm","wild","winter","young","zen"
 ];

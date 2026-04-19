@@ -5,7 +5,10 @@ const API = import.meta.env.BASE_URL.replace(/\/$/, "") + "/api";
 // ── 类型 ──────────────────────────────────────────────────────────────────────
 interface JobSummary {
   id: string;
-  status: "running" | "done" | "stopped" | "error";
+  source?: "tools" | "replit";
+  kind?: string;
+  title?: string;
+  status: "running" | "done" | "stopped" | "error" | "failed";
   startedAt: number;
   logCount: number;
   accountCount: number;
@@ -159,35 +162,43 @@ export default function Monitor() {
   // ── 拉取任务列表 ───────────────────────────────────────────────────────────
   const fetchJobs = useCallback(async () => {
     try {
-      const r = await fetch(`${API}/tools/jobs`).then(r => r.json());
-      if (r.success) {
-        setJobs(r.jobs);
-        setLastRefresh(Date.now());
-        // 如果有 running 任务且没有选中，自动选中最新的
-        setSelectedJob(prev => {
-          if (!prev && r.jobs.find((j: JobSummary) => j.status === "running")) {
-            return r.jobs.find((j: JobSummary) => j.status === "running")?.id ?? null;
-          }
-          return prev;
-        });
-      }
+      const [tools, replit] = await Promise.all([
+        fetch(`${API}/tools/jobs`).then(r => r.json()).catch(() => ({ success: false, jobs: [] })),
+        fetch(`${API}/replit/jobs`).then(r => r.json()).catch(() => ({ success: false, jobs: [] })),
+      ]);
+      const combined: JobSummary[] = [
+        ...(tools.success ? tools.jobs ?? [] : []),
+        ...(replit.success ? replit.jobs ?? [] : []),
+      ].sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+      setJobs(combined);
+      setLastRefresh(Date.now());
+      setSelectedJob(prev => {
+        if (!prev && combined.find((j: JobSummary) => j.status === "running")) {
+          return combined.find((j: JobSummary) => j.status === "running")?.id ?? null;
+        }
+        return prev;
+      });
     } catch {}
   }, []);
 
   // ── 拉取选中任务的日志 ────────────────────────────────────────────────────
   const fetchLogs = useCallback(async (jobId: string) => {
     try {
-      const r = await fetch(`${API}/tools/outlook/register/${jobId}?since=${sinceRef.current}`);
+      const job = jobs.find(j => j.id === jobId);
+      const source = job?.source === "replit" ? "replit" : "tools";
+      const r = await fetch(`${API}/${source}/jobs/${jobId}?since=${sinceRef.current}`);
       if (r.status === 404) { setSinceIdx(0); sinceRef.current = 0; return; }
       const d = await r.json();
       if (!d.success) return;
-      const newLines: LogEntry[] = d.logs ?? [];
+      const newLines: LogEntry[] = (d.logs ?? []).map((line: string | LogEntry) =>
+        typeof line === "string" ? { type: "log", message: line } : line
+      );
       if (newLines.length > 0) {
         setJobLogs(prev => [...prev, ...newLines]);
       }
       if (d.nextSince != null) { sinceRef.current = d.nextSince; setSinceIdx(d.nextSince); }
     } catch {}
-  }, []);
+  }, [jobs]);
 
   // ── 切换选中任务 ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -225,7 +236,9 @@ export default function Monitor() {
 
   // ── 停止任务 ──────────────────────────────────────────────────────────────
   async function stopJob(id: string) {
-    await fetch(`${API}/tools/outlook/register/${id}`, { method: "DELETE" }).catch(() => {});
+    const job = jobs.find(j => j.id === id);
+    const source = job?.source === "replit" ? "replit" : "tools";
+    await fetch(`${API}/${source}/jobs/${id}`, { method: "DELETE" }).catch(() => {});
     fetchJobs();
   }
 
@@ -241,7 +254,7 @@ export default function Monitor() {
           <h1 className="text-xl font-bold text-white flex items-center gap-2">
             <span className="text-lg">📡</span> 实时监控中心
           </h1>
-          <p className="text-xs text-gray-500 mt-0.5">每 2s 自动刷新 · 无需手动操作</p>
+          <p className="text-xs text-gray-500 mt-0.5">每 2s 自动刷新 · 覆盖 Outlook/Cursor/Replit/流水线/子节点部署任务</p>
         </div>
         <div className="flex items-center gap-3">
           <span className="text-xs text-gray-600">上次刷新 {elapsed(lastRefresh)}</span>
@@ -365,7 +378,7 @@ export default function Monitor() {
                     </div>
                     <span className="text-xs text-gray-600">{elapsed(job.startedAt)}</span>
                   </div>
-                  <div className="text-xs text-gray-500 font-mono truncate">{job.id}</div>
+                  <div className="text-xs text-gray-500 font-mono truncate">{job.title ? `${job.title} · ` : ""}{job.id}</div>
                   {job.lastLog && (
                     <div className={`text-xs mt-1.5 truncate ${logColor(job.lastLog.type)}`}>
                       {job.lastLog.message}
