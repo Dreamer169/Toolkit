@@ -109,7 +109,7 @@ def handle(client, addr):
                 while True:
                     rurl=f"{base}/api/stream/read/{sid}?token={tq}"
                     st=http_get_chunks(rurl,lambda c: client.sendall(c),timeout=R_TOUT+5)
-                    if st in (404,410):
+                    if st in (204,404,410):
                         break
             except Exception as e:
                 print(f"[poll-bridge] read err:{e}",flush=True)
