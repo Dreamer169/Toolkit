@@ -524,13 +524,13 @@ router.post("/replit/register", (req, res) => {
               const needsCfRotate =
                 lastErr.includes("cf_ip_banned")             ||
                 lastErr.includes("cf_hard_block")            ||
-                lastErr.includes("cf_js_challenge_timeout")  ||
+                // cf_js_challenge_timeout = 超时(非永久封禁), 不轮换IP避免xray频繁重启
                 lastErr.includes("ERR_CONNECTION_CLOSED")    ||
                 lastErr.includes("ERR_EMPTY_RESPONSE")       ||
                 lastErr.includes("ERR_CERT");
               if (needsCfRotate) {
-                // CF超时/封禁类 → 额外记录5分钟冷却
-                if (lastErr.includes("cf_ip_banned") || lastErr.includes("cf_hard_block") || lastErr.includes("cf_js_challenge_timeout")) {
+                // 只有真实封禁才记录冷却 + 轮换IP
+                if (lastErr.includes("cf_ip_banned") || lastErr.includes("cf_hard_block")) {
                   cfBannedUntil.set(tryPort, Date.now() + 5 * 60 * 1000);
                 }
                 const cfIp = xrayPortCfIp.get(tryPort);
