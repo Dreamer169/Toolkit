@@ -126,6 +126,10 @@ export default function MailCenter() {
   useEffect(() => { searchRef.current = search; }, [search]);
   const [autoRefreshError, setAutoRefreshError] = useState("");
   const [liveVerifyBusy, setLiveVerifyBusy] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  const [batchDelBusy, setBatchDelBusy]     = useState(false);
+  const [batchDelKw, setBatchDelKw]         = useState("");
+  const [batchDelResult, setBatchDelResult] = useState("");
   const [showManualAdd, setShowManualAdd]   = useState(false);
   const [manualForm, setManualForm]         = useState({ email: "", password: "", token: "" });
   const [manualBusy, setManualBusy]         = useState(false);
@@ -690,39 +694,75 @@ export default function MailCenter() {
             <p className="text-xs text-gray-600 text-center mt-8 px-4">暂无 Outlook 账号<br/>去「Outlook 工作流」注册</p>
           )}
           {accounts.map((acc) => {
-            const active = selAccount?.id === acc.id;
-            const isOAuth  = hasOAuth(acc);
-            const isImap   = hasImap(acc);
-            const noAccess = !isOAuth && !isImap;
-            const dot = isOAuth ? "bg-emerald-400" : isImap ? "bg-blue-400" : "bg-amber-400";
-            const label = isOAuth ? "OAuth" : isImap ? "IMAP" : "需授权";
-            const labelCls = isOAuth ? "text-emerald-500" : isImap ? "text-blue-400" : "text-amber-500";
+            const active       = selAccount?.id === acc.id;
+            const isSuspended  = acc.status === "suspended";
+            const isNeedsOAuth = acc.status === "needs_oauth" || acc.status === "needs_oauth_pending";
+            const isAbuse      = (acc.tags ?? "").split(",").map(t => t.trim()).includes("abuse_mode");
+            const isOAuth      = hasOAuth(acc) && !isSuspended;
+            const isImap       = hasImap(acc) && !isSuspended;
+            const noAccess     = !isOAuth && !isImap;
+            // dot color: suspended=red, needs_oauth=amber, oauth=green, imap=blue, none=amber
+            const dot      = isSuspended ? "bg-red-500" : isNeedsOAuth ? "bg-amber-400" : isOAuth ? "bg-emerald-400" : isImap ? "bg-blue-400" : "bg-amber-400";
+            const label    = isSuspended ? (isAbuse ? "API封禁" : "已停用") : isNeedsOAuth ? "需授权" : isOAuth ? "OAuth" : isImap ? "IMAP" : "需授权";
+            const labelCls = isSuspended ? "text-red-500" : isNeedsOAuth ? "text-amber-500" : isOAuth ? "text-emerald-500" : isImap ? "text-blue-400" : "text-amber-500";
             const vr = verifyStatus(acc.id);
             const vb = vr ? verifyBadge(vr.status) : null;
             const pwKey = `pw-${acc.id}`;
             const pwCopied = copied === pwKey;
+            const isConfirmDel = confirmDeleteId === acc.id;
             return (
-              <div key={acc.id} className={`border-b border-[#161b22] ${active ? "bg-blue-600/15" : ""} ${noAccess ? "opacity-70" : ""}`}>
-                <button onClick={() => selectAccount(acc)}
-                  className={`w-full text-left px-3 pt-2.5 pb-1.5 transition-colors border-l-2 ${
-                    active ? "border-l-blue-500" : "hover:bg-[#161b22] border-l-transparent"
-                  }`}>
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dot}`} />
-                    <span className="text-xs font-mono truncate text-gray-200">{acc.email}</span>
+              <div key={acc.id} className={`border-b border-[#161b22] group/acc ${active ? "bg-blue-600/15" : ""} ${noAccess ? "opacity-70" : ""}`}>
+                <div className="relative">
+                  <button onClick={() => selectAccount(acc)}
+                    className={`w-full text-left px-3 pt-2.5 pb-1.5 pr-7 transition-colors border-l-2 ${
+                      active ? "border-l-blue-500" : "hover:bg-[#161b22] border-l-transparent"
+                    }`}>
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dot}`} />
+                      <span className="text-xs font-mono truncate text-gray-200">{acc.email}</span>
+                    </div>
+                    <div className="flex items-center gap-2 mt-0.5 ml-3">
+                      <span className={`text-[10px] font-medium ${labelCls}`}>{label}</span>
+                      {vb && <span className={`text-[10px] ${vb.cls}`}>· {vb.label}</span>}
+                      {!isSuspended && acc.tags?.includes("token_invalid") && <span className="text-[10px] text-red-400">· ⚠token过期</span>}
+                      {acc.tags?.includes("inbox_error") && <span className="text-[10px] text-amber-400">· 收件箱错误</span>}
+                      <span className="text-[10px] text-gray-600 ml-auto">
+                        {new Date(acc.created_at).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" })}
+                      </span>
+                    </div>
+                  </button>
+                  {/* 悬浮删除按钮 */}
+                  <button
+                    onClick={e => { e.stopPropagation(); setConfirmDeleteId(acc.id); }}
+                    className="absolute right-1.5 top-2 opacity-0 group-hover/acc:opacity-100 transition-opacity p-1 hover:bg-red-900/30 rounded text-gray-600 hover:text-red-400"
+                    title="删除账号"
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                    </svg>
+                  </button>
+                </div>
+                {/* 删除确认条 */}
+                {isConfirmDel && (
+                  <div className="px-3 pb-2 flex items-center gap-2 bg-red-900/20 border-t border-red-800/30">
+                    <span className="text-[10px] text-red-400 flex-1">确认删除此账号？</span>
+                    <button
+                      onClick={async e => {
+                        e.stopPropagation();
+                        await fetch(`${API}/tools/outlook/account/${acc.id}`, { method: "DELETE" });
+                        setConfirmDeleteId(null);
+                        if (selAccount?.id === acc.id) { setSelAccount(null); setMessages([]); }
+                        loadAccounts();
+                      }}
+                      className="text-[10px] px-2 py-0.5 bg-red-600 hover:bg-red-700 text-white rounded transition-colors"
+                    >确认删除</button>
+                    <button
+                      onClick={e => { e.stopPropagation(); setConfirmDeleteId(null); }}
+                      className="text-[10px] px-2 py-0.5 bg-[#30363d] hover:bg-[#3d444d] text-gray-300 rounded transition-colors"
+                    >取消</button>
                   </div>
-                  <div className="flex items-center gap-2 mt-0.5 ml-3">
-                    <span className={`text-[10px] font-medium ${labelCls}`}>{label}</span>
-                    {vb && <span className={`text-[10px] ${vb.cls}`}>· {vb.label}</span>}
-                    {acc.tags?.includes("token_invalid") && <span className="text-[10px] text-red-400">· ⚠token过期</span>}
-                    {acc.tags?.includes("inbox_error") && <span className="text-[10px] text-amber-400">· 收件箱错误</span>}
-                    {acc.status === "suspended" && <span className="text-[10px] text-red-500">· 已停用</span>}
-                    <span className="text-[10px] text-gray-600 ml-auto">
-                      {new Date(acc.created_at).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" })}
-                    </span>
-                  </div>
-                </button>
-                {acc.password && (
+                )}
+                {acc.password && !isConfirmDel && (
                   <button
                     onClick={e => {
                       e.stopPropagation();
@@ -771,6 +811,51 @@ export default function MailCenter() {
             {busy ? "…" : "搜"}
           </button>
         </div>
+        {/* ── 批量按主题删除栏 ── */}
+        {selAccount && (
+          <div className="px-2 py-1.5 border-b border-[#21262d] flex gap-1 items-center bg-[#0d1117]">
+            <input
+              value={batchDelKw}
+              onChange={e => { setBatchDelKw(e.target.value); setBatchDelResult(""); }}
+              placeholder="按主题关键词批量删除（Enter确认）…"
+              className="flex-1 bg-[#161b22] border border-[#30363d] rounded px-2 py-1 text-[11px] text-gray-300 placeholder-gray-600 focus:outline-none focus:border-red-500/60"
+              onKeyDown={async e => {
+                if (e.key !== "Enter") return;
+                const kw = batchDelKw.trim();
+                if (!kw || !selAccount) return;
+                setBatchDelBusy(true); setBatchDelResult("🗑 删除中…");
+                const r = await fetch(`${API}/tools/outlook/account/${selAccount.id}/batch-delete-by-subject`, {
+                  method: "POST", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ keyword: kw }),
+                }).then(x => x.json()).catch(() => ({ success: false, error: "网络错误" }));
+                setBatchDelBusy(false);
+                setBatchDelResult(r.success ? `✅ 已删除 ${r.deleted} 封（含"${kw}"）` : `❌ ${r.error}`);
+                if (r.success) { setBatchDelKw(""); silentRefresh(selAccount, folder, search); }
+              }}
+            />
+            <button
+              disabled={batchDelBusy || !selAccount}
+              onClick={async () => {
+                const kw = batchDelKw.trim() || "verify";
+                if (!batchDelKw.trim()) { setBatchDelKw("verify"); return; }
+                setBatchDelBusy(true); setBatchDelResult("🗑 删除中…");
+                const r = await fetch(`${API}/tools/outlook/account/${selAccount.id}/batch-delete-by-subject`, {
+                  method: "POST", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ keyword: kw }),
+                }).then(x => x.json()).catch(() => ({ success: false, error: "网络错误" }));
+                setBatchDelBusy(false);
+                setBatchDelResult(r.success ? `✅ 已删除 ${r.deleted} 封（含"${kw}"）` : `❌ ${r.error}`);
+                if (r.success) { setBatchDelKw(""); silentRefresh(selAccount, folder, search); }
+              }}
+              className="px-2 py-1 bg-red-900/40 hover:bg-red-900/70 border border-red-800/40 rounded text-red-400 text-[11px] disabled:opacity-40 transition-colors whitespace-nowrap"
+            >{batchDelBusy ? "…" : "批删"}</button>
+          </div>
+        )}
+        {batchDelResult && (
+          <div className={`px-3 py-1 text-[10px] border-b border-[#21262d] ${batchDelResult.startsWith("✅") ? "text-emerald-400 bg-emerald-900/10" : batchDelResult.startsWith("❌") ? "text-red-400 bg-red-900/10" : "text-gray-500"}`}>
+            {batchDelResult}
+          </div>
+        )}
 
         <div className="flex-1 overflow-y-auto">
           {!selAccount && (

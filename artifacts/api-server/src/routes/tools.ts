@@ -3309,6 +3309,74 @@ router.post("/tools/outlook/auto-verify-emails", async (req, res) => {
 
 // ── 实时验证轮询控制 ─────────────────────────────────────────────────────
 
+// ── 手动删除 Outlook 账号（从 DB 中彻底移除）─────────────────────────────
+router.delete("/tools/outlook/account/:id", async (req, res) => {
+  const accountId = parseInt(req.params["id"] ?? "", 10);
+  if (!accountId) { res.status(400).json({ success: false, error: "无效 id" }); return; }
+  try {
+    const { execute } = await import("../db.js");
+    await execute("DELETE FROM accounts WHERE id=$1 AND platform='outlook'", [accountId]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
+// ── 按主题关键词批量删除邮件（Graph API）────────────────────────────────────
+router.post("/tools/outlook/account/:id/batch-delete-by-subject", async (req, res) => {
+  const accountId = parseInt(req.params["id"] ?? "", 10);
+  const { keyword } = req.body as { keyword?: string };
+  if (!accountId || !keyword?.trim()) {
+    res.status(400).json({ success: false, error: "accountId 和 keyword 不能为空" }); return;
+  }
+  try {
+    const { query, execute } = await import("../db.js");
+    const rows = await query<{ token: string | null; refresh_token: string | null }>(
+      "SELECT token, refresh_token FROM accounts WHERE id=$1 AND platform='outlook'", [accountId]
+    );
+    if (!rows[0]) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
+
+    let token = rows[0].token ?? "";
+    if (rows[0].refresh_token) {
+      const r = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token", client_id: OAUTH_CLIENT_ID,
+          refresh_token: rows[0].refresh_token,
+          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite offline_access",
+        }).toString(),
+      });
+      const td = await r.json() as { access_token?: string; refresh_token?: string };
+      if (td.access_token) {
+        token = td.access_token;
+        await execute("UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
+          [token, td.refresh_token ?? rows[0].refresh_token, accountId]);
+      }
+    }
+    if (!token) { res.status(400).json({ success: false, error: "无可用 token，请先授权" }); return; }
+
+    // 搜索包含关键词的邮件（搜索所有文件夹）
+    const kw = keyword.trim();
+    const searchUrl = `https://graph.microsoft.com/v1.0/me/messages?$search="subject:${kw}"&$select=id,subject&$top=50`;
+    const gr = await fetch(searchUrl, { headers: { Authorization: `Bearer ${token}` } });
+    if (!gr.ok) {
+      const gd = await gr.json() as { error?: { message?: string } };
+      res.status(400).json({ success: false, error: gd.error?.message ?? "Graph API 错误" }); return;
+    }
+    const gd = await gr.json() as { value?: Array<{ id: string; subject: string }> };
+    const msgs = (gd.value ?? []).filter(m => m.subject.toLowerCase().includes(kw.toLowerCase()));
+
+    let deleted = 0;
+    for (const msg of msgs) {
+      const dr = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${msg.id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (dr.ok || dr.status === 204) deleted++;
+    }
+    res.json({ success: true, deleted, total: msgs.length });
+  } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
 router.get("/tools/outlook/live-verify/status", (_req, res) => {
   res.json({ success: true, ...getLiveVerifyStatus() });
 });
