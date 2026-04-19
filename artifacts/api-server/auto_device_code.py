@@ -5,13 +5,13 @@
 """
 import asyncio, json, sys
 
-MAX_CONCURRENCY = 3  # 限制并发浏览器数量，防止服务器内存压力
+MAX_CONCURRENCY = 1  # 同一出口代理串行授权，降低微软登录风控和页面超时
 
 async def authorize_one(email: str, password: str, user_code: str, account_id: int, proxy: str = "", sem=None):
     from patchright.async_api import async_playwright
     result = {"accountId": account_id, "email": email, "status": "error", "msg": ""}
 
-    launch_opts = {"headless": True, "args": ["--no-sandbox", "--disable-dev-shm-usage"]}
+    launch_opts = {"headless": True, "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"]}
     ctx_opts = {}
     if proxy:
         ctx_opts["proxy"] = {"server": proxy}
@@ -25,8 +25,8 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
             page = await ctx.new_page()
 
             # 步骤1: 进入设备码授权页面
-            await page.goto("https://www.microsoft.com/link", timeout=30000, wait_until="domcontentloaded")
-            await asyncio.sleep(2)
+            await page.goto("https://www.microsoft.com/link", timeout=45000, wait_until="domcontentloaded")
+            await asyncio.sleep(3)
 
             # 步骤2: 输入 user code
             code_input = await page.query_selector('input[name="otc"], input[placeholder*="code" i], input[id*="code" i], input[type="text"]')
@@ -52,7 +52,7 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                     print(f"[{email}] 填入邮箱", flush=True)
                 btn = await page.query_selector('input[type="submit"], button[type="submit"]')
                 if btn: await btn.click()
-                await asyncio.sleep(3)
+                await asyncio.sleep(4)
 
             # 步骤4: 输入密码
             pw_input = await page.query_selector('input[type="password"], input[name="passwd"]')
@@ -61,7 +61,14 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                 print(f"[{email}] 填入密码", flush=True)
                 btn = await page.query_selector('input[type="submit"], button[type="submit"]')
                 if btn: await btn.click()
-                await asyncio.sleep(4)
+                await asyncio.sleep(6)
+
+            pw_input = await page.query_selector('input[type="password"], input[name="passwd"]')
+            if pw_input:
+                await pw_input.fill(password)
+                btn = await page.query_selector('input[type="submit"], button[type="submit"]')
+                if btn: await btn.click()
+                await asyncio.sleep(6)
 
             # 步骤5: 保持登录弹窗
             stay_btn = await page.query_selector('button:has-text("Yes"), button:has-text("是"), input[value="Yes"]')

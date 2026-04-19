@@ -1939,10 +1939,13 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
         return {}
 
 
-def register_one(ctrl, engine_name: str, headless: bool) -> dict:
-    username, fn_eng, ln_eng = gen_email_username()
-    email    = username
-    password = gen_password()
+def register_one(ctrl, engine_name: str, headless: bool, planned_username: str = "", planned_password: str = "") -> dict:
+    if planned_username:
+        email = planned_username.split("@")[0].strip()
+    else:
+        username, fn_eng, ln_eng = gen_email_username()
+        email = username
+    password = planned_password.strip() if planned_password else gen_password()
     result   = {
         "email": f"{email}@outlook.com",
         "username": email,
@@ -2037,6 +2040,8 @@ def main():
     # [已禁用] parser.add_argument("--captcha-key",     type=str,   default="",           help="打码服务 API Key")
     parser.add_argument("--proxy-mode",      type=str,   default="",           help="cf = 从 CF IP 池自动分配代理")
     parser.add_argument("--cf-port",         type=int,   default=443,          help="CF 代理端口（默认443）")
+    parser.add_argument("--username",        type=str,   default="",           help="指定首个 Outlook 用户名（可带 @outlook.com）")
+    parser.add_argument("--password",        type=str,   default="",           help="指定首个 Outlook 密码")
     args = parser.parse_args()
 
     headless = args.headless.lower() != "false"
@@ -2067,13 +2072,14 @@ def main():
         _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
         import cf_ip_pool as _cf_pool
         print(f"   CF代理池模式已启用 (port={args.cf_port})")
-        # 预加载一批 IP（若池为空）
+        # 预加载一批 IP：低于本次账号数时主动补池，避免只剩少量旧节点导致连续失败
         _pool_status = _cf_pool.get_pool_status()
-        if _pool_status['available'] == 0:
-            print("   CF池为空，自动生成并测速…", flush=True)
+        _need_ips = max(3, min(20, args.count + 2))
+        if _pool_status['available'] < _need_ips:
+            print(f"   CF池可用仅 {_pool_status['available']} 个，补充到至少 {_need_ips} 个…", flush=True)
             _cf_pool.refresh_pool(
-                generate_count=60, target_valid=20, threads=8,
-                port=args.cf_port, max_latency=1000.0,
+                generate_count=100, target_valid=25, threads=10,
+                port=args.cf_port, max_latency=900.0,
                 log_cb=lambda m: print(f"   {m}", flush=True)
             )
 
@@ -2137,7 +2143,11 @@ def main():
             max_captcha_retries=args.retries,
             captcha_solver=solver,
         )
-        r = register_one(ctrl, args.engine, headless)
+        planned_username = args.username if i == 0 else ""
+        planned_password = args.password if i == 0 else ""
+        if planned_username:
+            print(f"   使用完整工作流预生成账号: {planned_username.split('@')[0]}@outlook.com", flush=True)
+        r = register_one(ctrl, args.engine, headless, planned_username, planned_password)
         results.append(r)
 
         # 注册完成后清理 xray 实例

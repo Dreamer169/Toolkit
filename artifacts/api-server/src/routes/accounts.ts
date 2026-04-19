@@ -478,7 +478,7 @@ router.post("/replit/register", (req, res) => {
               portLastGood.set(tryPort, Date.now()); // port got form response → mark good
               log(`    Email already on Replit → marking replit_used`);
               await dbE(
-                "UPDATE accounts SET tags = COALESCE(tags || ',', '') || 'replit_used', updated_at = NOW() WHERE id = $1",
+                "UPDATE accounts SET tags = CASE WHEN string_to_array(COALESCE(tags,''), ',') @> ARRAY['replit_used'] THEN tags ELSE NULLIF(TRIM(BOTH ',' FROM COALESCE(tags,'') || ',replit_used'), ',') END, updated_at = NOW() WHERE id = $1",
                 [outlook.id]
               ).catch(() => {});
               break; // 跳出 attempt 循环，尝试下一个 Outlook
@@ -647,7 +647,7 @@ router.post("/replit/register", (req, res) => {
 
           // 标记 Outlook 已使用
           await dbE(
-            "UPDATE accounts SET tags = COALESCE(tags || ',', '') || 'replit_used', updated_at = NOW() WHERE id = $1",
+            "UPDATE accounts SET tags = CASE WHEN string_to_array(COALESCE(tags,''), ',') @> ARRAY['replit_used'] THEN tags ELSE NULLIF(TRIM(BOTH ',' FROM COALESCE(tags,'') || ',replit_used'), ',') END, updated_at = NOW() WHERE id = $1",
             [outlook.id]
           ).catch(() => {});
 

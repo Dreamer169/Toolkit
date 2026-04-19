@@ -178,6 +178,9 @@ export default function FullWorkflow() {
         body: JSON.stringify({
           count: submitCount, proxy, engine, headless: headless ? "true" : "false",
           wait, retries: 2, delay: 0,
+          username: data.outlook.username,
+          email: data.outlook.email,
+          password: data.outlook.password,
           autoProxy: !proxy && autoProxy,
           proxyMode: !proxy && autoProxy ? "cf" : "",
           cfPort: 443,
@@ -188,7 +191,7 @@ export default function FullWorkflow() {
       setJobId(d.jobId);
       sessionStorage.setItem('fw_jobId', d.jobId);
       addLog(`📋 任务 ID: ${d.jobId}`);
-      addLog(`🪪 身份: ${data.outlook.email} / ${data.outlook.password}`);
+      addLog(`🪪 Outlook预生成: ${data.outlook.email} / ${data.outlook.password}`);
       addLog(`🎭 指纹: UA=${data.fingerprint.userAgent.slice(0,60)}…`);
       addLog(`🖥️  屏幕: ${data.fingerprint.screen.width}×${data.fingerprint.screen.height} | DPR: ${data.fingerprint.devicePixelRatio}`);
       addLog(`⏱️  Bot 保护等待: ${wait}s | 引擎: ${engine}`);
