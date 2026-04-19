@@ -130,7 +130,7 @@ export default function Monitor() {
         setProxyStats({
           total: Number(shared.total ?? list.length ?? 0),
           eligibleTotal,
-          dynamicAvailable: eligibleTotal + cfAvailable,
+          dynamicAvailable: eligibleTotal,  // 只显示共享代理池，CF 单独展示
           idle: list.filter(p => p.status === "idle").length,
           active: list.filter(p => p.status === "active").length,
           banned: list.filter(p => p.status === "banned").length,
@@ -322,11 +322,10 @@ export default function Monitor() {
           <div className="text-xs text-gray-500 mb-1">代理池</div>
           {proxyStats ? (
             <>
-              <div className="text-lg font-bold text-emerald-400">{proxyStats.dynamicAvailable} 可用</div>
+              <div className="text-lg font-bold text-emerald-400">{proxyStats.eligibleTotal} 代理可用</div>
               <div className="text-xs text-gray-600 mt-1 space-x-2">
-                <span className="text-gray-400">共享 {proxyStats.eligibleTotal}</span>
-                <span className="text-cyan-400">CF {proxyStats.cf.available}</span>
-                <span className="text-red-400">封禁 {proxyStats.banned + proxyStats.cf.bannedTotal}</span>
+                <span className="text-cyan-400">CF {proxyStats.cf.available} IPs</span>
+                <span className="text-red-400">封禁 {proxyStats.banned}</span>
               </div>
             </>
           ) : (
@@ -505,12 +504,12 @@ export default function Monitor() {
         <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-sm font-semibold text-gray-300">代理池状态</h2>
-            <span className="text-xs text-gray-600">显示动态可用数，不再显示静态入库总数</span>
+            <span className="text-xs text-gray-600">共享代理（SOCKS5/住宅）与 CF IP 池是独立系统，分开显示</span>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4 text-xs">
-            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
-              <div className="text-gray-500">动态可用</div>
-              <div className="text-xl font-bold text-emerald-400 mt-1">{proxyStats.dynamicAvailable}</div>
+            <div className="rounded-lg bg-[#0d1117] border border-emerald-900/40 p-3">
+              <div className="text-gray-500">共享代理可用</div>
+              <div className="text-xl font-bold text-emerald-400 mt-1">{proxyStats.eligibleTotal}</div>
             </div>
             <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
               <div className="text-gray-500">子节点桥</div>
@@ -520,36 +519,35 @@ export default function Monitor() {
               <div className="text-gray-500">住宅/外部</div>
               <div className="text-xl font-bold text-purple-400 mt-1">{proxyStats.sources.residential + proxyStats.sources.external}</div>
             </div>
-            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
-              <div className="text-gray-500">CF 可用</div>
+            <div className="rounded-lg bg-[#0d1117] border border-cyan-900/40 p-3">
+              <div className="text-gray-500">CF IP 池（独立）</div>
               <div className="text-xl font-bold text-cyan-400 mt-1">{proxyStats.cf.available}</div>
             </div>
             <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
-              <div className="text-gray-500">已封禁</div>
-              <div className="text-xl font-bold text-red-400 mt-1">{proxyStats.banned + proxyStats.cf.bannedTotal}</div>
+              <div className="text-gray-500">共享封禁</div>
+              <div className="text-xl font-bold text-red-400 mt-1">{proxyStats.banned}</div>
+              <div className="text-gray-600 mt-0.5">CF封 {proxyStats.cf.bannedTotal}</div>
             </div>
           </div>
           <div className="flex items-center gap-4">
             <div className="flex-1 h-3 bg-[#21262d] rounded-full overflow-hidden flex">
-              {proxyStats.dynamicAvailable > 0 && (
+              {proxyStats.eligibleTotal > 0 && (
                 <>
                   <div
                     className="h-full bg-blue-500/80 transition-all"
-                    style={{ width: `${(proxyStats.sources.subnodeBridge / proxyStats.dynamicAvailable) * 100}%` }}
+                    style={{ width: `${proxyStats.eligibleTotal > 0 ? (proxyStats.sources.subnodeBridge / proxyStats.eligibleTotal) * 100 : 0}%` }}
                   />
                   <div
                     className="h-full bg-purple-500/80 transition-all"
-                    style={{ width: `${((proxyStats.sources.residential + proxyStats.sources.external) / proxyStats.dynamicAvailable) * 100}%` }}
+                    style={{ width: `${proxyStats.eligibleTotal > 0 ? ((proxyStats.sources.residential + proxyStats.sources.external) / proxyStats.eligibleTotal) * 100 : 0}%` }}
                   />
-                  <div
-                    className="h-full bg-cyan-500/80 transition-all"
-                    style={{ width: `${(proxyStats.cf.available / proxyStats.dynamicAvailable) * 100}%` }}
-                  />
+                  {/* CF IP 池独立，不并入共享代理进度条 */}
                 </>
               )}
             </div>
             <div className="flex flex-wrap items-center gap-4 text-xs shrink-0">
-              <span className="text-gray-400">共享可用 <strong className="text-white">{proxyStats.eligibleTotal}</strong></span>
+              <span className="text-emerald-400">共享代理 <strong className="text-white">{proxyStats.eligibleTotal}</strong></span>
+              <span className="text-cyan-400/70">CF IP <strong className="text-white">{proxyStats.cf.available}</strong>（独立系统）</span>
               <span className="text-blue-400">子节点 <strong className="text-white">{proxyStats.sources.subnodeBridge}</strong></span>
               <span className="text-purple-400">住宅 <strong className="text-white">{proxyStats.sources.residential}</strong></span>
               <span className="text-cyan-400">CF <strong className="text-white">{proxyStats.cf.available}</strong></span>
