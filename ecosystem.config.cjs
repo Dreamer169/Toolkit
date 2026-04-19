@@ -189,6 +189,16 @@ module.exports = {
       "max_restarts": 999,
       "watch": false,
       "autorestart": true
+    },
+    {
+      "name": "ngrok-sub2api",
+      "script": "/root/Toolkit/start-ngrok-sub2api.sh",
+      "interpreter": "bash",
+      "cwd": "/root/Toolkit",
+      "restart_delay": 5000,
+      "max_restarts": 20,
+      "watch": false,
+      "autorestart": true
     }
   ]
 };
