@@ -180,3 +180,10 @@ Critical implementation details:
 - Real-time Monitor now combines persistent tool jobs with Replit route jobs, covering Outlook registration, Cursor registration, retoken jobs, Replit registration, full pipeline jobs, legacy signup jobs, and subnode deployment tasks.
 - New generic task endpoints expose summaries and incremental logs for both job systems: `/api/tools/jobs/:jobId` and `/api/replit/jobs/:jobId`.
 - Monitor stop buttons now target the correct job source instead of assuming every job is an Outlook registration job.
+
+## Outlook Proxy Selection Reliability
+
+- Full workflow test exposed that local subnode bridges could pass SOCKS handshake while failing real CONNECT to Microsoft/Outlook endpoints.
+- Subnode bridge discovery now validates a real SOCKS5 CONNECT to `login.live.com:443` and marks failed bridge ports as banned.
+- Eligible proxy SQL now always excludes `banned` rows; subnode bridges are no longer force-selected after failure.
+- Outlook full workflow prioritizes residential proxies first, with subnode bridges behind residential sources, to reduce `ERR_SOCKS_CONNECTION_FAILED` registration failures.

@@ -2177,27 +2177,65 @@ def main():
             cur_proxy = ""
             print(f"\n[{i+1}/{args.count}] 开始注册...")
 
-        ctrl = CtrlCls(
-            proxy=cur_proxy,
-            wait_ms=args.wait,
-            max_captcha_retries=args.retries,
-            captcha_solver=solver,
-        )
         planned_username = args.username if i == 0 else ""
         planned_password = args.password if i == 0 else ""
-        if planned_username:
-            print(f"   使用完整工作流预生成账号: {planned_username.split('@')[0]}@outlook.com", flush=True)
-        r = register_one(ctrl, args.engine, headless, planned_username, planned_password)
-        results.append(r)
+        MAX_CF_IP_RETRIES = 3
+        cf_ip_retry = 0
+        r = None
+        _last_ip_info = ip_info
 
-        # 注册完成后清理 xray 实例
-        if xray_relay_inst:
-            xray_relay_inst.stop()
-            xray_relay_inst = None
-        if use_cf_pool and ip_info and _cf_pool:
-            _cf_pool.release_ip(job_id)
-            if _cf_pool.get_pool_status().get('available', 0) < 25:
-                start_cf_pool_refill("outlook_after_consume", count=240, target=80, port=args.cf_port)
+        while True:
+            # CF模式换IP重试：CAPTCHA失败时 ban 当前IP，重新获取新IP
+            if use_cf_pool and cf_ip_retry > 0:
+                job_id = f"reg_{i}_{int(time.time())}"
+                _new_ip = _cf_pool.acquire_ip(job_id, auto_refresh=False,
+                                              log_cb=lambda m: print(f"   {m}", flush=True))
+                if not _new_ip:
+                    start_cf_pool_refill("outlook_pool_empty_retry", count=240, target=80, port=args.cf_port)
+                    r = make_pool_skip_result(i, args, args.engine, "CF池无可用IP（CAPTCHA重试时耗尽），已后台补池")
+                    break
+                from xray_relay import XrayRelay as _XrayRelay
+                xray_relay_inst = _XrayRelay(_new_ip["ip"])
+                if xray_relay_inst.start(timeout=8.0):
+                    cur_proxy = xray_relay_inst.socks5_url
+                    ip_info = _new_ip
+                    print(f"   ↺ CF换IP重试 ({cf_ip_retry}/{MAX_CF_IP_RETRIES}): {_new_ip['ip']} 延迟{_new_ip['latency']}ms → SOCKS5:{xray_relay_inst.socks_port}", flush=True)
+                else:
+                    _cf_pool.ban_ip(_new_ip["ip"])
+                    _cf_pool.release_ip(job_id)
+                    r = make_pool_skip_result(i, args, args.engine, f"xray中继启动超时（CAPTCHA重试），已丢弃CF节点 {_new_ip['ip']}")
+                    break
+
+            ctrl = CtrlCls(
+                proxy=cur_proxy,
+                wait_ms=args.wait,
+                max_captcha_retries=args.retries,
+                captcha_solver=solver,
+            )
+            if planned_username:
+                print(f"   使用完整工作流预生成账号: {planned_username.split('@')[0]}@outlook.com", flush=True)
+            r = register_one(ctrl, args.engine, headless, planned_username, planned_password)
+
+            # 注册完成后清理 xray 实例
+            if xray_relay_inst:
+                xray_relay_inst.stop()
+                xray_relay_inst = None
+            if use_cf_pool and ip_info and _cf_pool:
+                _cf_pool.release_ip(job_id)
+                if _cf_pool.get_pool_status().get("available", 0) < 25:
+                    start_cf_pool_refill("outlook_after_consume", count=240, target=80, port=args.cf_port)
+
+            # CAPTCHA 失败时 ban 当前 CF IP，换新 IP 重试
+            if (not r["success"] and use_cf_pool and ip_info and _cf_pool
+                    and ("验证码" in r.get("error", "") or "CAPTCHA" in r.get("error", "").upper())
+                    and cf_ip_retry < MAX_CF_IP_RETRIES):
+                cf_ip_retry += 1
+                print(f"  ⚠ CAPTCHA 失败（IP={ip_info['ip']}），换新CF IP重试 ({cf_ip_retry}/{MAX_CF_IP_RETRIES})…", flush=True)
+                _cf_pool.ban_ip(ip_info["ip"])
+                continue
+            break
+
+        results.append(r)
 
         status = "✅ 注册成功" if r["success"] else f"❌ {r['error']}"
         print(f"  {status}  |  {r['email']}  密码: {r['password']}  耗时: {r['elapsed']}")
