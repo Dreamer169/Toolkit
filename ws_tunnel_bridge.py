@@ -1,22 +1,76 @@
 #!/usr/bin/env python3
-"""VPS SOCKS5 -> Replit WS bridge (ws-tunnel-bridge). Multi-instance WS_SERVERS."""
-import socket, threading, struct, os, random
-import urllib.parse, websocket
+"""VPS SOCKS5 -> Replit WS bridge (ws-tunnel-bridge).
+动态从网关发现 friend-openai 节点，每 REFRESH_SECS 秒同步一次。
 
-_ENV = os.environ.get("WS_SERVERS", "")
-_LEG = os.environ.get("WS_SERVER", "wss://a738e112-67aa-4781-95c0-aefd7e0860c8-00-3owssjt9lfedl.janeway.replit.dev/api/tunnel/ws")
-WS_SERVERS = [s.strip() for s in _ENV.split(",") if s.strip()] if _ENV else [_LEG]
-WS_TOKEN   = os.environ.get("WS_TOKEN", "CHANGEME")
-SOCKS_PORT = int(os.environ.get("SOCKS_PORT", "1091"))
+Env:
+  GATEWAY_API   - 本地网关 (default http://localhost:8080/api)
+  WS_TOKEN      - 隧道认证 token
+  SOCKS_PORT    - 本地 SOCKS5 端口 (default 1091)
+  REFRESH_SECS  - 节点刷新间隔 (default 60)
+  WS_SERVERS    - 手动种子 WSS URL（逗号分隔），网关不可达时兜底
+"""
+import socket, threading, struct, os, random, time, json
+import urllib.parse, urllib.request, websocket
 
-_fc = {}
+GATEWAY_API  = os.environ.get("GATEWAY_API",  "http://localhost:8080/api")
+WS_TOKEN     = os.environ.get("WS_TOKEN",     os.environ.get("TUNNEL_TOKEN", "123456"))
+SOCKS_PORT   = int(os.environ.get("SOCKS_PORT", "1091"))
+REFRESH_SECS = int(os.environ.get("REFRESH_SECS", "60"))
+
+_seed_raw  = os.environ.get("WS_SERVERS", os.environ.get("WS_SERVER", ""))
+_seed      = [s.strip() for s in _seed_raw.split(",") if s.strip()]
+
+_nodes_lock = threading.Lock()
+_nodes      = list(_seed)
+_fc         = {}
+
+def _base_to_wss(base_http: str) -> str:
+    """http(s)://domain[/api] -> wss://domain/api/tunnel/ws"""
+    b = base_http.strip().rstrip("/")
+    if b.endswith("/api"):
+        b = b[:-4].rstrip("/")
+    b = b.replace("https://", "wss://").replace("http://", "ws://")
+    return b + "/api/tunnel/ws"
+
+def fetch_nodes_from_gateway():
+    try:
+        req = urllib.request.Request(f"{GATEWAY_API}/gateway/nodes",
+                                     headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.loads(r.read())
+        urls = []
+        for n in data.get("nodes", []):
+            if n.get("type") == "friend-openai":
+                base = (n.get("baseUrl") or "").strip()
+                if base:
+                    urls.append(_base_to_wss(base))
+        return urls
+    except Exception as e:
+        print(f"[ws-tunnel] gateway sync failed: {e}", flush=True)
+        return None
+
+def node_sync_loop():
+    while True:
+        urls = fetch_nodes_from_gateway()
+        if urls is not None:
+            with _nodes_lock:
+                added   = [u for u in urls if u not in _nodes]
+                removed = [u for u in _nodes if u not in urls]
+                _nodes.clear(); _nodes.extend(urls)
+                if added:   print(f"[ws-tunnel] +nodes: {added}", flush=True)
+                if removed: print(f"[ws-tunnel] -nodes: {removed}", flush=True)
+                for u in removed: _fc.pop(u, None)
+        time.sleep(REFRESH_SECS)
+
 def pick():
-    if len(WS_SERVERS)==1: return WS_SERVERS[0]
-    w=[1.0/(1+_fc.get(s,0)) for s in WS_SERVERS]; t=sum(w); r=random.random()*t
-    for s,wt in zip(WS_SERVERS,w):
+    with _nodes_lock: nodes = list(_nodes)
+    if not nodes: return None
+    if len(nodes) == 1: return nodes[0]
+    w=[1.0/(1+_fc.get(s,0)) for s in nodes]; t=sum(w); r=random.random()*t
+    for s,wt in zip(nodes,w):
         r-=wt
         if r<=0: return s
-    return WS_SERVERS[-1]
+    return nodes[-1]
 def fail(s): _fc[s]=_fc.get(s,0)+1
 def ok(s):   _fc[s]=max(0,_fc.get(s,0)-1)
 
@@ -35,6 +89,10 @@ def handle(client, addr):
         else: client.sendall(b"\x05\x08\x00\x01"+b"\x00"*6); return
 
         chosen=pick()
+        if not chosen:
+            print("[ws-tunnel] no nodes available", flush=True)
+            client.sendall(b"\x05\x01\x00\x01"+b"\x00"*6); return
+
         print(f"[ws-tunnel] {addr} -> {h}:{p} via {chosen[:60]}", flush=True)
         base=chosen.rstrip("?").rstrip("&")
         sep="&" if "?" in base else "?"
@@ -48,13 +106,13 @@ def handle(client, addr):
                 except: ws.close()
             else:
                 try:
-                    import json; d2=json.loads(msg)
+                    d2=json.loads(msg)
                     if d2.get("ok"): done[0]=True; ev.set()
                     else: err[0]=d2.get("error","err"); ev.set()
                 except Exception as e: err[0]=str(e); ev.set()
         def on_err(ws,e): err[0]=str(e); ev.set()
         def on_cls(ws,c,m): ev.set()
-            
+
         ws=websocket.WebSocketApp(url,on_message=on_msg,on_error=on_err,on_close=on_cls)
         wst=threading.Thread(target=ws.run_forever,kwargs={"sslopt":{"cert_reqs":0}},daemon=True)
         wst.start()
@@ -82,10 +140,14 @@ def handle(client, addr):
         except: pass
 
 def main():
+    t=threading.Thread(target=node_sync_loop,daemon=True); t.start()
+    time.sleep(2)
     s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
     s.bind(("127.0.0.1",SOCKS_PORT)); s.listen(64)
-    print(f"[ws-tunnel] SOCKS5 bridge on 127.0.0.1:{SOCKS_PORT}, {len(WS_SERVERS)} WS server(s)",flush=True)
-    for u in WS_SERVERS: print(f"[ws-tunnel]   {u}",flush=True)
+    with _nodes_lock: nc=len(_nodes)
+    print(f"[ws-tunnel] SOCKS5 bridge on 127.0.0.1:{SOCKS_PORT}, {nc} WS server(s) (auto-sync every {REFRESH_SECS}s)",flush=True)
+    with _nodes_lock:
+        for u in _nodes: print(f"[ws-tunnel]   {u}",flush=True)
     while True:
         c,a=s.accept()
         threading.Thread(target=handle,args=(c,a),daemon=True).start()
