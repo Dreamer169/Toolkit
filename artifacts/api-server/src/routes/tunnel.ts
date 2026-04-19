@@ -32,6 +32,8 @@ function createId(): string {
 function cleanupSession(id: string): void {
   const session = sessions.get(id);
   if (!session) return;
+  session.closed = true;
+  for (const waiter of session.waiters.splice(0)) waiter(null);
   try {
     session.socket.destroy();
   } catch {
@@ -125,11 +127,17 @@ function createTunnelRouter(prefix: "stream" | "tunnel") {
     }
 
     const data = await new Promise<Buffer | null>((resolve) => {
-      const timer = setTimeout(() => resolve(Buffer.alloc(0)), 25_000);
-      session.waiters.push((chunk) => {
+      let waiter: (chunk: Buffer | null) => void;
+      const timer = setTimeout(() => {
+        const index = session.waiters.indexOf(waiter);
+        if (index >= 0) session.waiters.splice(index, 1);
+        resolve(Buffer.alloc(0));
+      }, 25_000);
+      waiter = (chunk) => {
         clearTimeout(timer);
         resolve(chunk);
-      });
+      };
+      session.waiters.push(waiter);
     });
 
     if (!data) {
