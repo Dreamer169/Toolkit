@@ -334,7 +334,10 @@ export function selfRegister(attempt = 0): void {
           ok ? "FriendNode registered ok" : "FriendNode register non-2xx",
         );
         if (!ok) {
-          const delay = Math.min(30_000 * Math.pow(2, attempt), 10 * 60_000);
+          // 422 = VPS 探测不到我们的 URL（节点尚未公开 / URL 不可达），改用极长退避避免日志轰炸
+          const delay = response.statusCode === 422
+            ? 10 * 60_000  // 固定 10 分钟
+            : Math.min(30_000 * Math.pow(2, attempt), 10 * 60_000);
           setTimeout(() => selfRegister(attempt + 1), delay).unref();
         }
       });

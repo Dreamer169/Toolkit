@@ -2219,6 +2219,19 @@ function testSocks5Connectivity(port: number): Promise<boolean> {
   });
 }
 
+/** 快速 TCP 连通性探测（不含 SOCKS5 握手），用于判断端口是否有服务在监听 */
+function testPortListening(port: number, timeoutMs = 300): Promise<boolean> {
+  return new Promise((resolve) => {
+    const s = new Socket();
+    let done = false;
+    const finish = (ok: boolean) => { if (!done) { done = true; s.destroy(); resolve(ok); } };
+    const t = setTimeout(() => finish(false), timeoutMs);
+    s.once("connect", () => { clearTimeout(t); finish(true); });
+    s.once("error",   () => { clearTimeout(t); finish(false); });
+    s.connect(port, "127.0.0.1");
+  });
+}
+
 async function syncLocalSubnodeBridgeProxies(force = false) {
   const now = Date.now();
   if (!force && now - lastSubnodeBridgeSync < 30000) return;
@@ -2229,21 +2242,33 @@ async function syncLocalSubnodeBridgeProxies(force = false) {
     (_, i) => SUBNODE_BRIDGE_MIN_PORT + i
   );
 
+  // 阶段1：快速 TCP 连通探测（300ms），区分"无监听"和"有监听但 SOCKS5 未达标"
   const BATCH = 8;
-  const results: { port: number; ok: boolean }[] = [];
+  const tcpResults: { port: number; listening: boolean }[] = [];
   for (let i = 0; i < ports.length; i += BATCH) {
     const batch = ports.slice(i, i + BATCH);
-    const batchResults = await Promise.all(
-      batch.map(async (port) => ({ port, ok: await testSocks5Connectivity(port) }))
-    );
-    results.push(...batchResults);
+    const r = await Promise.all(batch.map(async (port) => ({ port, listening: await testPortListening(port) })));
+    tcpResults.push(...r);
   }
 
-  const good = results.filter((r) => r.ok).map((r) => r.port);
-  const bad = results.filter((r) => !r.ok).map((r) => r.port);
-  if (good.length || bad.length) {
-    console.log(`[subnode-bridge] 探测完成: 可用=${good.length} 失败=${bad.length} 端口:`, good.join(",") || "无");
+  const listeningPorts = tcpResults.filter((r) => r.listening).map((r) => r.port);
+  const deadPorts      = tcpResults.filter((r) => !r.listening).map((r) => r.port);
+
+  // 阶段2：仅对监听端口做 SOCKS5→login.live.com 握手
+  const socks5Results: { port: number; ok: boolean }[] = [];
+  for (let i = 0; i < listeningPorts.length; i += BATCH) {
+    const batch = listeningPorts.slice(i, i + BATCH);
+    const r = await Promise.all(batch.map(async (port) => ({ port, ok: await testSocks5Connectivity(port) })));
+    socks5Results.push(...r);
   }
+
+  const good     = socks5Results.filter((r) => r.ok).map((r) => r.port);
+  const stubborn = socks5Results.filter((r) => !r.ok).map((r) => r.port);
+
+  console.log(
+    `[subnode-bridge] 探测完成: 可用=${good.length} 监听但SOCKS5不通=${stubborn.length} 死亡=${deadPorts.length} 端口:`,
+    good.join(",") || "无"
+  );
 
   for (const port of good) {
     await execute(
@@ -2257,16 +2282,16 @@ async function syncLocalSubnodeBridgeProxies(force = false) {
     );
   }
 
-  if (bad.length > 0) {
-    const badFormatted = bad.map((port) => `socks5://127.0.0.1:${port}`);
+  // 仅 ban 真正死亡（无监听）的端口，stubborn 端口保持原状不 ban
+  if (deadPorts.length > 0) {
+    const deadFormatted = deadPorts.map((port) => `socks5://127.0.0.1:${port}`);
     await execute(
       `UPDATE proxies SET status='banned', last_used=NOW()
        WHERE formatted = ANY($1::text[]) AND status != 'banned'`,
-      [badFormatted]
+      [deadFormatted]
     );
   }
 }
-
 async function forwardCfPoolRequest(endpoint: string, init?: RequestInit) {
   const r = await fetch(`${CF_POOL_REMOTE_API_BASE}${endpoint}`, init);
   const text = await r.text();
@@ -2296,6 +2321,7 @@ async function pickSharedProxyPool(limit: number, purpose: "generic" | "outlook"
     SELECT id, formatted, ${SHARED_PROXY_SOURCE_CASE} AS source
     FROM proxies
     WHERE ${ELIGIBLE_SHARED_PROXY_SQL}
+      AND ($2 = 'generic' OR (${SUBNODE_BRIDGE_SQL}) OR host != '127.0.0.1')
     ORDER BY
       CASE
         WHEN ${SUBNODE_BRIDGE_SQL} THEN 0

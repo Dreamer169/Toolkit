@@ -2064,12 +2064,6 @@ router.post("/self-register", async (req, res) => {
     res.status(401).json({ ok: false, error: "注册密钥不正确，请提供正确的 execSecret" });
     return;
   }
-  // 探测目标是否真的是 gateway
-  const probe = await probeNodeUrl(baseUrl, undefined, 8000, false);
-  if (!probe.ok) {
-    res.status(422).json({ ok: false, error: "探测失败，URL 不可达", detail: probe.error });
-    return;
-  }
   // B27+: 先按 normalizeBaseUrl 查（同时处理带/不带 /api/gateway 后缀的情况），再按 name 查
   const _normUrl = (u: string) => u.trim().replace(/\/$/, "")
     .replace(/\/api\/gateway$/, "").replace(/\/api$/, "").replace(/\/$/, "");
@@ -2082,6 +2076,14 @@ router.post("/self-register", async (req, res) => {
       if (!runtimeNodes.includes(byName)) runtimeNodes.push(byName);
       savePersistedNodes(runtimeNodes);
       existing = byName;
+    }
+  }
+  // 仅对新节点探测连通性；已注册节点重新上报时无需重探（节点刚启动 URL 可能尚未就绪）
+  if (!existing) {
+    const probe = await probeNodeUrl(baseUrl, undefined, 8000, false);
+    if (!probe.ok) {
+      res.status(422).json({ ok: false, error: "探测失败，URL 不可达", detail: probe.error });
+      return;
     }
   }
   if (existing) {
