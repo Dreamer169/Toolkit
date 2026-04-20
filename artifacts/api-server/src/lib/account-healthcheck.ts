@@ -6,6 +6,7 @@
  *     healthcheck 负责离线扫描（无 refresh 但 token 已过期的边角情况）
  */
 import { logger } from "./logger.js";
+import { microsoftFetch, getMicrosoftBrowserProxy, getMicrosoftProxyEnv } from "./proxy-fetch.js";
 import { spawn } from "child_process";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -17,18 +18,18 @@ let _running    = false;
 let _intervalId: ReturnType<typeof setInterval> | null = null;
 
 // ── 获取设备码 ─────────────────────────────────────────────────────────────
-async function getDeviceCode(email: string): Promise<{
+async function getDeviceCode(email: string, proxy?: string | null): Promise<{
   deviceCode: string; userCode: string; verificationUri: string;
 } | null> {
   try {
-    const r = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/devicecode", {
+    const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/devicecode", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         client_id: OAUTH_CLIENT_ID,
         scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access",
       }).toString(),
-    });
+    }, proxy);
     const d = await r.json() as { device_code?: string; user_code?: string; verification_uri?: string; error?: string };
     if (!d.device_code || !d.user_code) {
       logger.warn({ email, error: d.error }, "[healthcheck] 获取设备码失败");
@@ -42,13 +43,13 @@ async function getDeviceCode(email: string): Promise<{
 }
 
 // ── 轮询 token（等 patchright 完成浏览器操作后） ──────────────────────────
-async function pollForToken(deviceCode: string, maxAttempts = 18): Promise<{
+async function pollForToken(deviceCode: string, proxy?: string | null, maxAttempts = 18): Promise<{
   accessToken: string; refreshToken: string;
 } | null> {
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise(r => setTimeout(r, 5_000));
     try {
-      const r = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+      const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -56,7 +57,7 @@ async function pollForToken(deviceCode: string, maxAttempts = 18): Promise<{
           client_id: OAUTH_CLIENT_ID,
           device_code: deviceCode,
         }).toString(),
-      });
+      }, proxy);
       const d = await r.json() as { access_token?: string; refresh_token?: string; error?: string };
       if (d.access_token) return { accessToken: d.access_token, refreshToken: d.refresh_token ?? "" };
       if (d.error === "access_denied" || d.error === "expired_token") return null;
@@ -70,7 +71,8 @@ async function pollForToken(deviceCode: string, maxAttempts = 18): Promise<{
 async function autoOAuth(acc: { id: number; email: string; password: string }): Promise<boolean> {
   logger.info({ email: acc.email }, "[healthcheck] 开始自动补授权");
 
-  const dc = await getDeviceCode(acc.email);
+  const proxy = getMicrosoftBrowserProxy();
+  const dc = await getDeviceCode(acc.email, proxy);
   if (!dc) return false;
 
   logger.info({ email: acc.email, userCode: dc.userCode }, "[healthcheck] 设备码已获取，启动 patchright");
@@ -85,8 +87,8 @@ async function autoOAuth(acc: { id: number; email: string; password: string }): 
 
   // patchright 完成浏览器端授权
   const autoResult = await new Promise<{ status: string; msg?: string }>((resolve) => {
-    const child = spawn("python3", [scriptPath, payload], {
-      env: { ...process.env, PYTHONUNBUFFERED: "1" },
+    const child = spawn("python3", [scriptPath, payload, proxy], {
+      env: { ...process.env, ...getMicrosoftProxyEnv(proxy), PYTHONUNBUFFERED: "1" },
     });
     let out = "";
     child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
@@ -117,7 +119,7 @@ async function autoOAuth(acc: { id: number; email: string; password: string }): 
 
   logger.info({ email: acc.email }, "[healthcheck] 浏览器授权完成，轮询 token");
 
-  const tokens = await pollForToken(dc.deviceCode);
+  const tokens = await pollForToken(dc.deviceCode, proxy);
   if (!tokens) {
     logger.warn({ email: acc.email }, "[healthcheck] token 轮询超时");
     return false;

@@ -4,7 +4,7 @@ click_verify_link.py — 读取邮件正文，提取 Reseek 验证链接，用 p
 用法: python3 click_verify_link.py '<json>'
 JSON: { "token": "...", "message_id": "...", "verify_url": "" }
 """
-import sys, json, re, urllib.request, urllib.parse, html as html_lib
+import sys, json, re, os, urllib.request, urllib.parse, html as html_lib
 
 if len(sys.argv) < 2:
     print(json.dumps({"success": False, "error": "缺少参数"}))
@@ -15,11 +15,57 @@ token      = data.get("token", "")
 message_id = data.get("message_id", "")
 verify_url = data.get("verify_url", "")
 verify_url = html_lib.unescape(verify_url) if verify_url else verify_url
+proxy_url = data.get("proxy") or os.environ.get("MICROSOFT_BROWSER_PROXY") or os.environ.get("OUTLOOK_BROWSER_PROXY") or os.environ.get("MICROSOFT_HTTP_PROXY") or os.environ.get("OUTLOOK_HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or "http://127.0.0.1:8091"
 
 VERIFY_KWS   = ("verify", "confirm", "activate", "validation", "email-action",
                 "verificationToken", "emailVerification", "signup_success",
                 "token=", "confirmation")
 RESEEK_HOSTS = ("replit.com", "reseek.com", "replit.dev")
+
+
+def _with_local_proxy_auth(proxy):
+    if not proxy:
+        return ""
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", proxy):
+        proxy = "http://" + proxy
+    parsed = urllib.parse.urlparse(proxy)
+    if parsed.scheme.startswith("socks"):
+        return proxy
+    if parsed.username or parsed.password:
+        return proxy
+    if parsed.hostname in ("127.0.0.1", "localhost") and str(parsed.port or "") == "8091":
+        token = os.environ.get("CONNECT_PROXY_TOKEN") or os.environ.get("SESSION_SECRET") or "replproxy2024"
+        host = parsed.hostname or "127.0.0.1"
+        netloc = ":" + urllib.parse.quote(token, safe="") + "@" + host
+        if parsed.port:
+            netloc += f":{parsed.port}"
+        return urllib.parse.urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+    return proxy
+
+proxy_url = _with_local_proxy_auth(proxy_url)
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})) if proxy_url and not proxy_url.startswith("socks") else urllib.request.build_opener()
+
+def open_url(req, timeout):
+    return opener.open(req, timeout=timeout)
+
+def patchright_proxy(proxy):
+    if not proxy:
+        return None
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", proxy):
+        proxy = "http://" + proxy
+    parsed = urllib.parse.urlparse(proxy)
+    if parsed.scheme.startswith("socks"):
+        return {"server": proxy}
+    username = urllib.parse.unquote(parsed.username or "")
+    password = urllib.parse.unquote(parsed.password or "")
+    server_netloc = parsed.hostname or "127.0.0.1"
+    if parsed.port:
+        server_netloc += f":{parsed.port}"
+    conf = {"server": urllib.parse.urlunparse((parsed.scheme, server_netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))}
+    if username or password:
+        conf["username"] = username
+        conf["password"] = password
+    return conf
 
 
 def extract_verify_url(html_content):
@@ -41,7 +87,7 @@ def search_verify_email(token):
                    f"?$search=%22subject:{subj_kw}%22"
                    f"&$select=id,subject&$orderby=receivedDateTime+desc&$top=5")
             req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-            with urllib.request.urlopen(req, timeout=12) as r:
+            with open_url(req, timeout=12) as r:
                 d = json.loads(r.read())
             for m in d.get("value", []):
                 s = m.get("subject", "").lower()
@@ -66,7 +112,7 @@ if not verify_url:
                 f"https://graph.microsoft.com/v1.0/me/messages/{safe_id}?$select=body",
                 headers={"Authorization": f"Bearer {token}"}
             )
-            with urllib.request.urlopen(req, timeout=15) as r:
+            with open_url(req, timeout=15) as r:
                 body_data = json.loads(r.read())
             html = body_data.get("body", {}).get("content", "")
             verify_url = extract_verify_url(html)
@@ -85,9 +131,13 @@ try:
         browser = p.chromium.launch(headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
                   "--disable-extensions", "--mute-audio"])
-        ctx  = browser.new_context(user_agent=(
+        proxy_conf = patchright_proxy(proxy_url)
+        ctx_opts = {"user_agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"))
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")}
+        if proxy_conf:
+            ctx_opts["proxy"] = proxy_conf
+        ctx  = browser.new_context(**ctx_opts)
         page = ctx.new_page()
         print(f"[click_verify] 访问: {verify_url[:120]}", flush=True)
         resp = page.goto(verify_url, timeout=30000, wait_until="networkidle")

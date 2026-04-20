@@ -1,4 +1,5 @@
 import { logger } from "./logger.js";
+import { microsoftFetch, getMicrosoftBrowserProxy, getMicrosoftProxyEnv } from "./proxy-fetch.js";
 import { spawn } from "child_process";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -46,7 +47,7 @@ async function tagAccount(id: number, tag: string, status?: string): Promise<voi
 /** 调用 Graph API 把邮件标记为已读，避免重复处理 */
 async function markAsRead(accessToken: string, messageId: string): Promise<void> {
   try {
-    await fetch(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(messageId)}`, {
+    await microsoftFetch(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(messageId)}`, {
       method: "PATCH",
       headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({ isRead: true }),
@@ -57,9 +58,9 @@ async function markAsRead(accessToken: string, messageId: string): Promise<void>
 }
 
 /** 刷新 access_token，返回 token 及错误码（便于自动打标签） */
-async function refreshToken(rt: string): Promise<{ token: string | null; errorCode?: string; errorDesc?: string }> {
+async function refreshToken(rt: string, proxy?: string | null): Promise<{ token: string | null; errorCode?: string; errorDesc?: string }> {
   try {
-    const r = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+    const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -68,7 +69,7 @@ async function refreshToken(rt: string): Promise<{ token: string | null; errorCo
         refresh_token: rt,
         scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access",
       }).toString(),
-    });
+    }, proxy);
     const td = await r.json() as { access_token?: string; error?: string; error_description?: string };
     if (td.access_token) return { token: td.access_token };
     return { token: null, errorCode: td.error, errorDesc: td.error_description };
@@ -135,10 +136,10 @@ async function runOnce() {
 
         // 搜索未读验证邮件（用 $filter 而非 $search，避免搜索缓存延迟）
         const filterUrl = `https://graph.microsoft.com/v1.0/me/messages?$filter=isRead eq false and contains(subject,'${SUBJECT_FILTER}')&$select=id,subject,isRead,receivedDateTime&$top=20&$orderby=receivedDateTime desc`;
-        const gr = await fetch(filterUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
+        const gr = await microsoftFetch(filterUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
         if (!gr.ok) {
           const fallbackUrl = `https://graph.microsoft.com/v1.0/me/messages?$search="subject:${SUBJECT_FILTER}"&$select=id,subject,isRead,receivedDateTime&$top=20`;
-          const gr2 = await fetch(fallbackUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
+          const gr2 = await microsoftFetch(fallbackUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
           if (!gr2.ok) { stats.skipped++; continue; }
           const gd2 = await gr2.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
           const msgs2 = (gd2.value ?? []).filter(m => !m.isRead && m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase()));
@@ -170,12 +171,13 @@ async function processMessage(
   acc: { id: number; email: string },
   msg: { id: string; subject: string; receivedDateTime?: string },
   accessToken: string,
-  stats: { clicked: number; failed: number; skipped: number }
+  stats: { clicked: number; failed: number; skipped: number },
+  proxy?: string | null
 ) {
   const scriptPath = path.resolve(__dirname, "../click_verify_link.py");
-  const params = JSON.stringify({ token: accessToken, message_id: msg.id, verify_url: "" });
+  const params = JSON.stringify({ token: accessToken, message_id: msg.id, verify_url: "", proxy: getMicrosoftBrowserProxy(proxy) });
   const result = await new Promise<{ success: boolean; verify_url?: string; final_url?: string; title?: string; http_status?: number; error?: string }>((resolve) => {
-    const child = spawn("python3", [scriptPath, params], { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+    const child = spawn("python3", [scriptPath, params], { env: { ...process.env, ...getMicrosoftProxyEnv(proxy), PYTHONUNBUFFERED: "1" } });
     let out = "";
     child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
     child.on("close", () => {
