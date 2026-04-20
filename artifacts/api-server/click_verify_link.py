@@ -202,6 +202,47 @@ if not verify_url:
     print(json.dumps({"success": False, "error": "未找到验证链接，请手动检查邮件正文"}))
     sys.exit(0)
 
+
+def _try_firebase_verify(verify_url: str) -> dict:
+    """直接调 Firebase Identity Toolkit REST API 验证邮件，无需浏览器和代理。"""
+    try:
+        from urllib.parse import urlparse, parse_qs
+        qs = parse_qs(urlparse(verify_url).query)
+        oob_code = qs.get("oobCode", [""])[0]
+        api_key  = qs.get("apiKey",  [""])[0]
+        if not (oob_code and api_key):
+            return {"ok": False, "error": "URL 缺少 oobCode/apiKey"}
+        url  = f"https://identitytoolkit.googleapis.com/v1/accounts:update?key={api_key}"
+        body = json.dumps({"oobCode": oob_code}).encode()
+        # 直连 Google，不经 connect-proxy
+        req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read())
+        if data.get("emailVerified"):
+            return {"ok": True, "email": data.get("email", "")}
+        return {"ok": False, "error": f"emailVerified={data.get('emailVerified')} — 响应不含验证成功标志"}
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read()).get("error", {}).get("message", str(e))
+        except Exception:
+            msg = str(e)
+        return {"ok": False, "error": f"Firebase HTTPError: {msg}"}
+    except Exception as e:
+        return {"ok": False, "error": f"Firebase exception: {e}"}
+
+# --- 先尝试 Firebase REST API（不需要浏览器，不受代理影响）-----------
+print("[click_verify] 尝试 Firebase REST API 验证...", flush=True)
+_fb = _try_firebase_verify(verify_url)
+if _fb["ok"]:
+    print(f"[click_verify] ✅ Firebase 验证成功: {_fb.get('email', '')}", flush=True)
+    print(json.dumps({"success": True, "verify_url": verify_url,
+                      "final_url": verify_url,
+                      "title": "Email Verified via Firebase",
+                      "http_status": 200}))
+    sys.exit(0)
+print(f"[click_verify] Firebase 未成功({_fb['error']}), 降级到浏览器直连", flush=True)
+# ---------------------------------------------------------------------
+
 try:
     from patchright.sync_api import sync_playwright
     with sync_playwright() as p:
@@ -212,8 +253,9 @@ try:
         ctx_opts = {"user_agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")}
-        if proxy_conf:
-            ctx_opts["proxy"] = proxy_conf
+        # 直连 replit.com（VPS 有出口，connect-proxy 仅用于 Graph API）
+        # if proxy_conf:
+        #     ctx_opts["proxy"] = proxy_conf
         ctx  = browser.new_context(**ctx_opts)
         page = ctx.new_page()
         print(f"[click_verify] 访问: {verify_url[:120]}", flush=True)
