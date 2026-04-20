@@ -17,7 +17,7 @@ module.exports = {
         "SUB2API_ADMIN_KEY": "sk-06cf1c8b2ff7a09a1f11d7909a6d7cb7dee97e38793d630f25a3bddf2bf0ec16",
         "SUB2API_API_KEY": "sk-06cf1c8b2ff7a09a1f11d7909a6d7cb7dee97e38793d630f25a3bddf2bf0ec16",
         "LOCAL_GATEWAY_BASE_URL": "https://strive-phoney-vocalize.ngrok-free.dev/api/gateway",
-        "REPLIT_SUBNODES": "https://gh-cli-install--bandersonndz.replit.app/api/gateway,https://gh-cli-direct--elizabetha96.replit.app/api/gateway"
+        "REPLIT_SUBNODES": "https://gh-cli-direct--elizabetha96.replit.app/api/gateway,https://957ee4dd-b94b-4405-8373-7a1bd9558eff-00-1kr7ptb11d9tn.spock.replit.dev/api/gateway"
       },
       "restart_delay": 3000,
       "max_restarts": 20,
@@ -141,7 +141,7 @@ module.exports = {
       "cwd": "/root/Toolkit",
       "env": {
         "SOCKS_PORT": "1090",
-        "BASE_URLS": "https://gh-cli-install--jessicaphilli10.replit.app,https://gh-cli-install--bandersonndz.replit.app,https://gh-cli-direct--elizabetha96.replit.app",
+        "BASE_URLS": "https://gh-cli-direct--elizabetha96.replit.app,https://957ee4dd-b94b-4405-8373-7a1bd9558eff-00-1kr7ptb11d9tn.spock.replit.dev",
         "TUNNEL_TOKEN": "1NnCcQJcNgwlTDPEnDIkWEKzWIdmZ/4+BmsOp1/jLP6ojCWsv8+xTwcLj34Mu2viWy0q5SEoDP0q2qE5xHaRRg==",
         "WS_PATH": "/api/stream/ws"
       },
@@ -213,7 +213,7 @@ module.exports = {
         "SOCKS_PORT": "1092",
         "STREAM_TOKEN": "123456",
         "GATEWAY_API": "http://localhost:8080/api",
-        "SUBNODE_URLS": "https://gh-cli-direct--elizabetha96.replit.app,https://gh-cli-install--jessicaphilli10.replit.app,https://gh-cli-install--bandersonndz.replit.app,https://957ee4dd-b94b-4405-8373-7a1bd9558eff-00-1kr7ptb11d9tn.spock.replit.dev",
+        "SUBNODE_URLS": "https://gh-cli-direct--elizabetha96.replit.app,https://957ee4dd-b94b-4405-8373-7a1bd9558eff-00-1kr7ptb11d9tn.spock.replit.dev",
         "REFRESH_SECS": "30",
         "PYTHONUNBUFFERED": "1"
       }
@@ -232,7 +232,7 @@ module.exports = {
         "SOCKS_PORT": "1093",
         "STREAM_TOKEN": "123456",
         "GATEWAY_API": "http://localhost:8080/api",
-        "SUBNODE_URLS": "https://gh-cli-direct--elizabetha96.replit.app,https://gh-cli-install--jessicaphilli10.replit.app,https://gh-cli-install--bandersonndz.replit.app,https://957ee4dd-b94b-4405-8373-7a1bd9558eff-00-1kr7ptb11d9tn.spock.replit.dev",
+        "SUBNODE_URLS": "https://gh-cli-direct--elizabetha96.replit.app,https://957ee4dd-b94b-4405-8373-7a1bd9558eff-00-1kr7ptb11d9tn.spock.replit.dev",
         "REFRESH_SECS": "30",
         "PYTHONUNBUFFERED": "1"
       }
@@ -250,7 +250,7 @@ module.exports = {
         "SOCKS_PORT": "1094",
         "STREAM_TOKEN": "123456",
         "GATEWAY_API": "http://localhost:8080/api",
-        "SUBNODE_URLS": "https://gh-cli-direct--elizabetha96.replit.app,https://gh-cli-install--jessicaphilli10.replit.app,https://gh-cli-install--bandersonndz.replit.app,https://957ee4dd-b94b-4405-8373-7a1bd9558eff-00-1kr7ptb11d9tn.spock.replit.dev",
+        "SUBNODE_URLS": "https://gh-cli-direct--elizabetha96.replit.app,https://957ee4dd-b94b-4405-8373-7a1bd9558eff-00-1kr7ptb11d9tn.spock.replit.dev",
         "REFRESH_SECS": "30",
         "PYTHONUNBUFFERED": "1"
       }
@@ -268,7 +268,7 @@ module.exports = {
         "SOCKS_PORT": "1095",
         "STREAM_TOKEN": "123456",
         "GATEWAY_API": "http://localhost:8080/api",
-        "SUBNODE_URLS": "https://gh-cli-direct--elizabetha96.replit.app,https://gh-cli-install--jessicaphilli10.replit.app,https://gh-cli-install--bandersonndz.replit.app,https://957ee4dd-b94b-4405-8373-7a1bd9558eff-00-1kr7ptb11d9tn.spock.replit.dev",
+        "SUBNODE_URLS": "https://gh-cli-direct--elizabetha96.replit.app,https://957ee4dd-b94b-4405-8373-7a1bd9558eff-00-1kr7ptb11d9tn.spock.replit.dev",
         "REFRESH_SECS": "30",
         "PYTHONUNBUFFERED": "1"
       }
