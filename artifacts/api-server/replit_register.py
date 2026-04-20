@@ -157,7 +157,7 @@ def _whisper_stt(mp3_bytes: bytes) -> str | None:
     except Exception as e:
         log(f"[audio] Whisper 异常: {e}"); return None
 
-async def solve_recaptcha_audio(page) -> str | None:
+async def solve_recaptcha_audio(page, force_bframe: bool = False) -> str | None:
     log("[audio] ▶ 音频挑战开始")
     checkbox_frame = None
     for _w in range(15):
@@ -191,12 +191,18 @@ async def solve_recaptcha_audio(page) -> str | None:
         return ""
 
     # 等待 checkbox 通过（无挑战情况，最多 4s）
+    # force_bframe=True 时跳过早期返回，强制触发 bframe 音频挑战
+    _cb_token = ""
     for _ in range(8):
         await page.wait_for_timeout(500)
         t = await _read_token()
         if t:
-            log(f"[audio] ✅ checkbox 通过 token={len(t)}chars")
-            return t
+            if not force_bframe:
+                log(f"[audio] ✅ checkbox 通过 token={len(t)}chars")
+                return t
+            _cb_token = t
+            log(f"[audio] checkbox 通过 force_bframe=True → 继续触发音频 bframe")
+            break
 
     # 找 challenge iframe (bframe)
     challenge_frame = None
@@ -212,6 +218,9 @@ async def solve_recaptcha_audio(page) -> str | None:
         if t:
             log(f"[audio] ✅ 无 bframe，token={len(t)}chars")
             return t
+        if _cb_token:
+            log(f"[audio] ✅ force_bframe 但无 bframe，fallback cb_token={len(_cb_token)}chars")
+            return _cb_token
         log("[audio] 未找到 bframe")
         return None
 
@@ -1067,20 +1076,39 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
             log("[retry] captcha_token_invalid → 尝试音频挑战 (Layer 2)...")
             try:
                 # 当前页面仍在 signup，直接触发音频解算
-                audio_token = await solve_recaptcha_audio(page)
+                audio_token = await solve_recaptcha_audio(page, force_bframe=True)
                 if audio_token:
-                    log(f"[retry] ✅ 音频 token={len(audio_token)}chars → 注入并重新提交")
-                    # 注入 audio token 到 DOM
-                    await page.evaluate(
-                        """(tok) => {
-                            var els = document.querySelectorAll('[name="g-recaptcha-response"],#g-recaptcha-response,[name="recaptchaToken"]');
-                            els.forEach(el => { el.value = tok; Object.defineProperty(el,'value',{get:()=>tok,configurable:true}); });
-                            return els.length;
-                        }""",
-                        audio_token
-                    )
-                    await page.wait_for_timeout(800)
-                    # 重新提交
+                    log(f"[retry] ✅ 音频 token={len(audio_token)}chars → route-intercept 提交")
+                    # Route intercept: 拦截 sign-up POST，替换 recaptchaToken 为音频 token
+                    _tok_r = audio_token
+                    async def _signup_intercept_cfx(route, request):
+                        try:
+                            import json as _jcfx
+                            bd = _jcfx.loads(request.post_data or "{}")
+                            bd["recaptchaToken"] = _tok_r
+                            log(f"[route-cfx] recaptchaToken→audio({len(_tok_r)}chars)")
+                            await route.continue_(post_data=_jcfx.dumps(bd))
+                        except Exception as _re:
+                            log(f"[route-cfx] err: {_re}")
+                            await route.continue_()
+                    _intercept_fired_cfx = [False]
+                    _orig_intercept_cfx = _signup_intercept_cfx
+                    async def _signup_intercept_cfx2(route, request):
+                        _intercept_fired_cfx[0] = True
+                        await _orig_intercept_cfx(route, request)
+                    await page.route("**/api/v1/auth/sign-up**", _signup_intercept_cfx2)
+                    await page.wait_for_timeout(300)
+                    # 先解锁按钮（code:1 后 Replit 可能重置为 disabled）
+                    try:
+                        await page.evaluate("""
+                            () => {
+                                var btn = document.querySelector('[data-cy="signup-create-account"],button[type="submit"]');
+                                if (btn) { btn.removeAttribute("disabled"); btn.removeAttribute("aria-disabled"); }
+                            }
+                        """)
+                    except Exception: pass
+                    await page.wait_for_timeout(300)
+                    # 自然点击提交按钮，Replit JS 调用 execute()，route intercept 替换 token
                     _submitted2 = False
                     for sel_s in ['[data-cy="signup-create-account"]', 'button:has-text("Create Account")', 'button[type="submit"]']:
                         btn_s = page.locator(sel_s)
@@ -1090,14 +1118,33 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                             except Exception:
                                 await btn_s.first.click(force=True, timeout=3000)
                             _submitted2 = True
-                            log(f"[retry] 音频token提交: {sel_s}")
+                            log(f"[retry] 音频route提交: {sel_s}")
                             break
                     if not _submitted2:
                         await page.keyboard.press("Enter")
-                    await page.wait_for_timeout(4000)
+                    await page.wait_for_timeout(3000)
+                    # 如果 route intercept 未触发（Replit JS 未调用 API）→ 直接 fetch
+                    if not _intercept_fired_cfx[0]:
+                        log("[retry] route未触发 → 直接fetch提交")
+                        try:
+                            fr = await page.evaluate(
+                                """async ([e,p,t]) => {
+                                    var r=await fetch('/api/v1/auth/sign-up',{method:'POST',
+                                        headers:{'Content-Type':'application/json','Accept':'application/json','X-Requested-With':'XMLHttpRequest'},
+                                        credentials:'include',
+                                        body:JSON.stringify({email:e,password:p,recaptchaToken:t})});
+                                    return {s:r.status,b:(await r.text()).slice(0,300)};
+                                }""",
+                                [EMAIL, PASSWORD, _tok_r])
+                            log(f"[retry-fetch] e={EMAIL!r} s={fr.get('s')} b={str(fr.get('b',''))[:120]}")
+                        except Exception as _fe:
+                            log(f"[retry-fetch] err: {_fe}")
+                    await page.wait_for_timeout(1500)
+                    try: await page.unroute("**/api/v1/auth/sign-up**", _signup_intercept_cfx2)
+                    except Exception: pass
                     body_r = (await page.locator("body").inner_text())[:400]
                     if is_captcha_invalid(body_r):
-                        log("[retry] 音频token仍然无效")
+                        log("[retry] 音频route token 仍无效")
                         err1 = "captcha_token_invalid"
                     elif is_rate_limited(body_r):
                         log("[retry] ⏳ IP 速率限制 → account_rate_limited")
@@ -1218,8 +1265,7 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
 async def get_exit_ip_camoufox(proxy_cfg) -> str:
     try:
         from camoufox.async_api import AsyncCamoufox
-        proxy_str = proxy_cfg["server"] if proxy_cfg else None
-        async with AsyncCamoufox(headless=True, proxy=proxy_str, os="windows") as browser:
+        async with AsyncCamoufox(headless=True, proxy=proxy_cfg or None, os="windows") as browser:
             page = await browser.new_page()
             await page.goto("https://api.ipify.org/?format=json", timeout=20000)
             data = json.loads(await page.locator("body").inner_text())
@@ -1230,9 +1276,8 @@ async def get_exit_ip_camoufox(proxy_cfg) -> str:
 
 async def attempt_register_camoufox(proxy_cfg, exit_ip: str) -> dict:
     from camoufox.async_api import AsyncCamoufox
-    proxy_str = proxy_cfg["server"] if proxy_cfg else None
     result = {"ok": False, "phase": "init", "error": "", "exit_ip": exit_ip}
-    async with AsyncCamoufox(headless=HEADLESS, proxy=proxy_str, geoip=True, os="windows") as browser:
+    async with AsyncCamoufox(headless=HEADLESS, proxy=proxy_cfg or None, geoip=True, os="windows") as browser:
         page = await browser.new_page()
         try:
             await page.add_init_script(_CANVAS_WEBGL_NOISE_JS)
@@ -1298,15 +1343,34 @@ async def attempt_register_camoufox(proxy_cfg, exit_ip: str) -> dict:
                 try:
                     audio_token = await solve_recaptcha_audio(page)
                     if audio_token:
-                        log(f"[retry] audio token -> inject and resubmit")
-                        await page.evaluate(
-                            """(tok) => {
-                                var els = document.querySelectorAll('[name="g-recaptcha-response"],#g-recaptcha-response,[name="recaptchaToken"]');
-                                els.forEach(el => { el.value = tok; Object.defineProperty(el,"value",{get:()=>tok,configurable:true}); });
-                                return els.length;
-                            }""",
-                            audio_token)
-                        await page.wait_for_timeout(800)
+                        log(f"[retry] audio token → route-intercept resubmit ({len(audio_token)}chars)")
+                        _tok_r2 = audio_token
+                        async def _signup_intercept_pw(route, request):
+                            try:
+                                import json as _j2
+                                bd = _j2.loads(request.post_data or "{}")
+                                bd["recaptchaToken"] = _tok_r2
+                                log(f"[route-pw] recaptchaToken→audio({len(_tok_r2)}chars)")
+                                await route.continue_(post_data=_j2.dumps(bd))
+                            except Exception as _re:
+                                log(f"[route-pw] err: {_re}")
+                                await route.continue_()
+                        _intercept_fired_pw = [False]
+                        _orig_pw = _signup_intercept_pw
+                        async def _signup_intercept_pw2(route, request):
+                            _intercept_fired_pw[0] = True
+                            await _orig_pw(route, request)
+                        await page.route("**/api/v1/auth/sign-up**", _signup_intercept_pw2)
+                        await page.wait_for_timeout(300)
+                        try:
+                            await page.evaluate("""
+                                () => {
+                                    var btn = document.querySelector('[data-cy="signup-create-account"],button[type="submit"]');
+                                    if (btn) { btn.removeAttribute("disabled"); btn.removeAttribute("aria-disabled"); }
+                                }
+                            """)
+                        except Exception: pass
+                        await page.wait_for_timeout(300)
                         _s2 = False
                         for ss in ['[data-cy="signup-create-account"]', 'button:has-text("Create Account")', 'button[type="submit"]']:
                             bs = page.locator(ss)
@@ -1315,7 +1379,25 @@ async def attempt_register_camoufox(proxy_cfg, exit_ip: str) -> dict:
                                 except: await bs.first.click(force=True, timeout=3000)
                                 _s2 = True; break
                         if not _s2: await page.keyboard.press("Enter")
-                        await page.wait_for_timeout(4000)
+                        await page.wait_for_timeout(3000)
+                        if not _intercept_fired_pw[0]:
+                            log("[retry-pw] route未触发 → 直接fetch提交")
+                            try:
+                                fr2 = await page.evaluate(
+                                    """async ([e,p,t]) => {
+                                        var r=await fetch('/api/v1/auth/sign-up',{method:'POST',
+                                            headers:{'Content-Type':'application/json','Accept':'application/json','X-Requested-With':'XMLHttpRequest'},
+                                            credentials:'include',
+                                            body:JSON.stringify({email:e,password:p,recaptchaToken:t})});
+                                        return {s:r.status,b:(await r.text()).slice(0,300)};
+                                    }""",
+                                    [EMAIL, PASSWORD, _tok_r2])
+                                log(f"[retry-fetch-pw] e={EMAIL!r} s={fr2.get('s')} b={str(fr2.get('b',''))[:120]}")
+                            except Exception as _fe2:
+                                log(f"[retry-fetch-pw] err: {_fe2}")
+                        await page.wait_for_timeout(1500)
+                        try: await page.unroute("**/api/v1/auth/sign-up**", _signup_intercept_pw2)
+                        except Exception: pass
                         br = (await page.locator("body").inner_text())[:400]
                         if is_captcha_invalid(br): err1 = "captcha_token_invalid"
                         elif is_rate_limited(br): err1 = "account_rate_limited"
