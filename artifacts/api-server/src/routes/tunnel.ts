@@ -208,7 +208,8 @@ setInterval(() => {
   }
 }, 30_000).unref();
 
-export function selfRegister(): void {
+// 友节点自注册：启动后把本实例公开 URL 注册到 VPS 网关，最多重试 6 次
+export function selfRegister(attempt = 0): void {
   const domain =
     process.env["MY_URL"] ??
     (process.env["REPLIT_DOMAINS"]
@@ -218,17 +219,18 @@ export function selfRegister(): void {
         : undefined);
 
   if (!domain) {
-    logger.debug("Subnode self-register skipped: no public domain (not a Replit env)");
+    logger.debug("FriendNode self-register skipped: no public domain");
     return;
   }
 
+  const gatewayUrl = `${domain.replace(/\/$/, "")}/api`;
   const body = JSON.stringify({
-    gatewayUrl: `${domain.replace(/\/$/, "")}/api`,
+    gatewayUrl,
     name: NODE_NAME,
     token: TUNNEL_TOKEN,
     source: "runtime",
     model: "gpt-5-mini",
-    priority: 5,
+    priority: 2,
   });
 
   const target = new URL("/api/gateway/self-register", VPS_GATEWAY);
@@ -240,24 +242,30 @@ export function selfRegister(): void {
       headers: {
         "Content-Type": "application/json",
         "Content-Length": Buffer.byteLength(body),
+        "x-register-source": "replit-friend-node",
       },
     },
     (response) => {
       let data = "";
-      response.on("data", (chunk) => {
-        data += String(chunk);
-      });
+      response.on("data", (chunk) => { data += String(chunk); });
       response.on("end", () => {
+        const ok = response.statusCode === 200 || response.statusCode === 201;
         logger.info(
-          { statusCode: response.statusCode, response: data.slice(0, 200) },
-          "Subnode self-register completed",
+          { statusCode: response.statusCode, url: gatewayUrl, attempt },
+          ok ? "FriendNode registered ok" : "FriendNode register non-2xx",
         );
+        if (!ok && attempt < 5) {
+          setTimeout(() => selfRegister(attempt + 1), 30_000).unref();
+        }
       });
     },
   );
 
   request.on("error", (error) => {
-    logger.warn({ err: error }, "Subnode self-register failed");
+    logger.warn({ err: error, attempt }, "FriendNode self-register error");
+    if (attempt < 5) {
+      setTimeout(() => selfRegister(attempt + 1), 30_000).unref();
+    }
   });
   request.write(body);
   request.end();

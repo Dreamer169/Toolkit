@@ -74,7 +74,7 @@ type SelfRegisterBody = {
 
 const router = Router();
 // REMOTE_GATEWAY_BASE_URL: 远端 Sub2API 地址。
-// 留空 = 禁用 remote-sub2api 节点（Reseek 子节点模式，不需要再路由回 Sub2API）
+// 留空 = 禁用 remote-sub2api 节点（Reseek 友节点模式，不需要再路由回 Sub2API）
 // 设为 http://localhost:9090 = 远端主节点模式（PM2 ecosystem 显式配置）
 const REMOTE_SUB2API_URL = (process.env["REMOTE_GATEWAY_BASE_URL"] || "").replace(/\/$/, "");
 const SUB2API_ENABLED = REMOTE_SUB2API_URL.length > 0 && REMOTE_SUB2API_URL !== "disabled";
@@ -265,7 +265,7 @@ function parseFriendNodesFromEnv(): GatewayNode[] {
     }>;
     return parsed.filter((node) => node.baseUrl).map((node, index) => ({
       id: node.id || stableId("friend", `${node.baseUrl}-${index}`),
-      name: node.name || `Friend 节点 ${index + 1}`,
+      name: node.name || `友节点 ${index + 1}`,
       type: "friend-openai" as const,
       baseUrl: String(node.baseUrl).replace(/\/$/, ""),
       apiKey: node.apiKey,
@@ -292,7 +292,7 @@ function parseReplitSubnodes(): GatewayNode[] {
 
   return urls.map((url, i) => ({
     id: stableId("replit", url),
-    name: `Reseek 子节点 #${i + 1}`,
+    name: `Reseek 友节点 #${i + 1}`,
     type: "friend-openai" as const,
     baseUrl: url,
     model: "gpt-5-mini",
@@ -323,7 +323,7 @@ function createBuiltInNodes(): GatewayNode[] {
     },
     ...Array.from({ length: RESEEK_OPENAI_NODE_COUNT }, (_, index) => ({
       id: `reseek-openai-${index + 1}`,
-      name: `Reseek OpenAI 子节点 ${index + 1}`,
+      name: `Reseek OpenAI 友节点 ${index + 1}`,
       type: "reseek-openai" as const,
       baseUrl: OPENAI_BASE_URL,
       apiKey: OPENAI_API_KEY,
@@ -337,7 +337,7 @@ function createBuiltInNodes(): GatewayNode[] {
     })),
     ...ANTHROPIC_MODELS.map((model, index) => ({
       id: `reseek-anthropic-${index + 1}`,
-      name: `Reseek Anthropic 子节点 ${index + 1}`,
+      name: `Reseek Anthropic 友节点 ${index + 1}`,
       type: "reseek-anthropic" as const,
       baseUrl: ANTHROPIC_BASE_URL,
       apiKey: ANTHROPIC_API_KEY,
@@ -351,7 +351,7 @@ function createBuiltInNodes(): GatewayNode[] {
     })),
     ...GEMINI_MODELS.map((model, index) => ({
       id: `reseek-gemini-${index + 1}`,
-      name: `Reseek Gemini 子节点 ${index + 1}`,
+      name: `Reseek Gemini 友节点 ${index + 1}`,
       type: "reseek-gemini" as const,
       baseUrl: GEMINI_BASE_URL,
       apiKey: GEMINI_API_KEY,
@@ -1130,7 +1130,7 @@ router.post("/nodes", (req, res) => {
     const id = stableId("friend", `${baseUrl}-${item.model || ""}-${runtimeNodes.length}`);
     const node: GatewayNode = {
       id,
-      name: item.name || `Friend 节点 ${runtimeNodes.length + 1}`,
+      name: item.name || `友节点 ${runtimeNodes.length + 1}`,
       type: "friend-openai",
       baseUrl,
       apiKey: item.apiKey,
@@ -1203,9 +1203,9 @@ async function pushSub2ApiAccount(
   const jwt = await getSub2ApiAdminJWT();
   if (!jwt) return { ok: false, error: "sub2api admin JWT 获取失败" };
 
-  const label = `${name || "子节点"}-${provider}`;
+  const label = `${name || "友节点"}-${provider}`;
   
-  // B27: 所有平台都使用子节点公开 gateway URL
+  // B27: 所有平台都使用友节点公开 gateway URL
   const effectiveBaseUrl = (nodeBaseUrl
     ? nodeBaseUrl : baseUrl).replace(/\/$/, "");
 
@@ -1381,10 +1381,10 @@ router.get("/v1/models", async (req, res) => {
 
 // ── Responses API 代理（B25）──────────────────────────────────────────────────
 // sub2api 注册账号后会调 POST {nodeBaseUrl}/v1/responses
-// 子节点（有 integration）：直接代理到 Reseek /responses（不加 /v1/）
+// 友节点（有 integration）：直接代理到 Reseek /responses（不加 /v1/）
 // VPS（无 integration）：经 pool 路由调 callOpenAINode（内部也走 /responses）
 router.post("/v1/responses", async (req, res) => {
-  // ── 子节点：有本地 integration → 直接代理 ──
+  // ── 友节点：有本地 integration → 直接代理 ──
   if (OPENAI_BASE_URL && OPENAI_API_KEY) {
     try {
       const headers: Record<string, string> = {
@@ -1555,7 +1555,7 @@ router.post("/nodes/:id/recover", (req, res) => {
   res.json({ ok: true, node: nodeSnapshot(node) });
 });
 
-// ── 子节点自注册 (self-register) ──────────────────────────────────────────────
+// ── 友节点自注册 (self-register) ──────────────────────────────────────────────
 // 新 Reseek 工作区启动后调用远端服务器的此接口自动加入节点池
 // POST /api/gateway/self-register  body: { gatewayUrl, name? }
 router.post("/self-register", async (req, res) => {
@@ -1599,12 +1599,12 @@ router.post("/self-register", async (req, res) => {
   const id = stableId("friend", baseUrl);
   const node: GatewayNode = {
     id,
-    name: name || `子节点(${hostname})`,
+    name: name || `友节点(${hostname})`,
     type: "friend-openai",
     baseUrl,
-    apiKey: undefined, // B13 修复：子节点网关不需要 apiKey，调用时用请求方的原始 auth
+    apiKey: undefined, // B13 修复：友节点网关不需要 apiKey，调用时用请求方的原始 auth
     model: "gpt-5-mini",
-    priority: 3,
+    priority: (body as {priority?: number}).priority ?? 2,
     enabled: true,
     downUntil: 0,
     successes: 0,
@@ -1618,7 +1618,7 @@ router.post("/self-register", async (req, res) => {
 });
 
 // ── 对等节点列表 (peers) ───────────────────────────────────────────────────────
-// 返回所有 friend-openai 和 runtime 节点的公开信息，用于子节点间互相发现
+// 返回所有 friend-openai 和 runtime 节点的公开信息，用于友节点间互相发现
 router.get("/peers", (_req, res) => {
   const peers = allNodes()
     .filter((n) => n.type === "friend-openai" || n.source === "env" || n.source === "runtime")
@@ -1634,7 +1634,7 @@ router.get("/peers", (_req, res) => {
 });
 
 // ── 对等节点中继 (relay) ───────────────────────────────────────────────────────
-// 任何一个子节点都可以把请求中继到另一个已注册的子节点
+// 任何一个友节点都可以把请求中继到另一个已注册的友节点
 // POST /api/gateway/relay/:nodeId   body: { path, method, headers, body }
 // 或者 POST /api/gateway/relay  body: { targetUrl, path, method, headers?, body? }
 router.post(["/relay/:nodeId", "/relay"], async (req, res) => {

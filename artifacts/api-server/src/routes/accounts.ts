@@ -945,11 +945,11 @@ router.post("/replit/retry-verify", async (_req, res) => {
 });
 
 // ── POST /api/pipeline/full ────────────────────────────────────────────────────
-// 全自动流水线：Outlook 注册 → Reseek 注册 + 验证 → 子节点部署
+// 全自动流水线：Outlook 注册 → Reseek 注册 + 验证 → 友节点部署
 // body: { target?: number, skipOutlook?: boolean, skipReseek?: boolean }
 router.post("/pipeline/full", async (req, res) => {
   const {
-    target = 3,           // 目标 Reseek 子节点数量
+    target = 3,           // 目标 Reseek 友节点数量
     skipOutlook  = false, // 跳过 Outlook 注册步骤（已有足够账号时）
     skipReseek   = false, // 跳过 Reseek 注册步骤
   } = req.body as { target?: number; skipOutlook?: boolean; skipReseek?: boolean };
@@ -963,7 +963,7 @@ router.post("/pipeline/full", async (req, res) => {
     console.log(`[pipeline][${jobId}] ${msg}`);
   }
 
-  res.json({ success: true, jobId, message: `全自动流水线已启动 (目标${target}个子节点)` });
+  res.json({ success: true, jobId, message: `全自动流水线已启动 (目标${target}个友节点)` });
 
   (async () => {
     try {
@@ -1031,8 +1031,8 @@ router.post("/pipeline/full", async (req, res) => {
         log(`  验证结果: ${JSON.stringify(vr.results ?? []).slice(0, 200)}`);
       } catch (e) { log(`  重试验证失败: ${e}`); }
 
-      // ── Step 4: 子节点登录部署 ─────────────────────────────────────────────
-      log("=== Step4: 子节点登录部署 ===");
+      // ── Step 4: 友节点登录部署 ─────────────────────────────────────────────
+      log("=== Step4: 友节点登录部署 ===");
       const toDeploy = await dbQ<{ id: number; email: string; password: string; username: string }>(
         "SELECT id, email, password, COALESCE(username,'') AS username FROM accounts WHERE platform='replit' AND status IN ('active','registered') AND COALESCE(tags,'') NOT LIKE '%subnode_deployed%' LIMIT 3"
       );
@@ -1059,14 +1059,14 @@ router.post("/pipeline/full", async (req, res) => {
             "UPDATE accounts SET tags=COALESCE(tags||\',\',\'\') || \'subnode_deployed\', notes=$1, updated_at=NOW() WHERE id=$2",
             [webUrl, acc.id]
           );
-          // 注册为网关子节点
+          // 注册为网关友节点
           if (webUrl) {
             try {
               await localPost("/api/gateway/self-register", {
                 gatewayUrl: webUrl, name: acc.username || acc.email.split("@")[0],
               });
-              log(`  ✓ 已注册子节点 ${webUrl}`);
-            } catch (e) { log(`  子节点注册失败: ${e}`); }
+              log(`  ✓ 已注册友节点 ${webUrl}`);
+            } catch (e) { log(`  友节点注册失败: ${e}`); }
           }
         } else {
           log(`  ✗ 部署失败: ${String(deployR.parsed.error ?? "").slice(0, 120)}`);
@@ -1095,7 +1095,7 @@ router.get("/pipeline/full/:jobId", (req, res) => {
 
 
 // ── POST /api/replit/deploy-subnode ──────────────────────────────────────────
-// 对单个 Reseek 账号部署 agent 子节点 (浏览器自动化)
+// 对单个 Reseek 账号部署 agent 友节点 (浏览器自动化)
 // body: { replitId?: number, email?: string }
 router.post("/replit/deploy-subnode", async (req, res) => {
   const { replitId, email } = req.body as { replitId?: number; email?: string };
@@ -1107,7 +1107,7 @@ router.post("/replit/deploy-subnode", async (req, res) => {
     job.logs.push(line);
     console.log(`[deploy-sub][${jobId}] ${msg}`);
   }
-  res.json({ success: true, jobId, message: "子节点部署任务已启动" });
+  res.json({ success: true, jobId, message: "友节点部署任务已启动" });
 
   (async () => {
     try {
