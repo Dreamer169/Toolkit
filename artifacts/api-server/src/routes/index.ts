@@ -6,6 +6,7 @@ import agentRouter from "./agent.js";
 import cdpRelayRouter from "./cdp_relay.js";
 import accountsRouter from "./accounts.js";
 import gatewayRouter from "./gateway.js";
+import adminRouter from "./admin.js";
 
 const router: IRouter = Router();
 
@@ -16,5 +17,6 @@ router.use(dataRouter);
 router.use(agentRouter);
 router.use(accountsRouter);
 router.use("/gateway", gatewayRouter);
+router.use("/gateway", adminRouter);
 
 export default router;
