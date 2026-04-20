@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { spawn } from "child_process";
 import path from "path";
+import { microsoftFetch } from "../lib/proxy-fetch.js";
 
 const router = Router();
 const WORKSPACE_DIR = process.cwd().endsWith("/artifacts/api-server") ? path.resolve(process.cwd(), "../..") : process.cwd();
@@ -13,7 +14,7 @@ const VPS_GATEWAY = process.env.VPS_GATEWAY_URL || "http://45.205.27.69:8080/api
 // All quarkip 10820-10845 confirmed datacenter IPs → CF JS challenge all → removed
 // Only port 1090 (WS-proxy bridge: VPS → http_ws_bridge.py → Replit repl WS → internet, exit: Replit cloud IP) remains
 const XRAY_PORTS_DEAD = new Set(Array.from({ length: 26 }, (_, i) => 10820 + i));  // all quarkip dead
-const XRAY_PORTS  = [1092, 1090];  // 1092=http-poll-bridge (Replit cloud IP), 1090=WS-proxy bridge
+const XRAY_PORTS  = [1094, 1095, 1093, 1092, 1090];  // http-poll bridges first, WS bridge last
 const DEAD_PORTS  = XRAY_PORTS_DEAD;
 
 // Outlook OAuth (Thunderbird client_id)
@@ -137,12 +138,11 @@ function availablePorts(): number[] {
   return XRAY_PORTS.filter(p => !DEAD_PORTS.has(p) && (cfBannedUntil.get(p) ?? 0) < now && (portDeadUntil.get(p) ?? 0) < now);
 }
 function sortedByReputation(ports: number[]): number[] {
-  // Port 1092 (http-poll-bridge) and 1090 (WS-proxy bridge) prioritized
-  const has1092 = ports.includes(1092); const has1090 = ports.includes(1090);
-  const rest = ports.filter(p => p !== 1090 && p !== 1092);
+  const priority = [1094, 1095, 1093, 1092, 1090].filter((p) => ports.includes(p));
+  const rest = ports.filter((p) => !priority.includes(p));
   const good = rest.filter(p => portLastGood.has(p)).sort((a, b) => (portLastGood.get(b)!) - (portLastGood.get(a)!));
   const other = rest.filter(p => !portLastGood.has(p));
-  return [...(has1092 ? [1092] : []), ...(has1090 ? [1090] : []), ...shuffled(good), ...shuffled(other)];
+  return [...priority, ...shuffled(good), ...shuffled(other)];
 }
 function shuffled(arr: number[]): number[] { return [...arr].sort(() => Math.random() - 0.5); }
 
@@ -329,18 +329,29 @@ function runPython(script: string, arg: unknown, timeoutMs = 130_000): Promise<{
   return new Promise((resolve) => {
     const child = spawn(PYTHON, [script, JSON.stringify(arg)], {
       env: { ...process.env, PYTHONUNBUFFERED: "1" },
+      detached: true,
     });
     let out = "";
     child.stdout.on("data", (d: Buffer) => { out += d.toString(); process.stdout.write(d); });
     child.stderr.on("data", (d: Buffer) => { process.stderr.write(d); });
-    const timer = setTimeout(() => { child.kill(); resolve({ ok: false, raw: out, parsed: { error: "timeout" } }); }, timeoutMs);
+    let settled = false;
+    const finish = (result: { ok: boolean; raw: string; parsed: Record<string, unknown> }) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      try { process.kill(-child.pid!, "SIGTERM"); } catch { try { child.kill("SIGTERM"); } catch {} }
+      setTimeout(() => { try { process.kill(-child.pid!, "SIGKILL"); } catch {} }, 3000).unref();
+      finish({ ok: false, raw: out, parsed: { error: "timeout" } });
+    }, timeoutMs);
     child.on("close", () => {
       clearTimeout(timer);
       const last = out.trim().split("\n").at(-1) ?? "{}";
-      try { resolve({ ok: true, raw: out, parsed: JSON.parse(last) }); }
-      catch { resolve({ ok: false, raw: out, parsed: { error: last.slice(0, 300) } }); }
+      try { finish({ ok: true, raw: out, parsed: JSON.parse(last) }); }
+      catch { finish({ ok: false, raw: out, parsed: { error: last.slice(0, 300) } }); }
     });
-    child.on("error", (e) => { clearTimeout(timer); resolve({ ok: false, raw: "", parsed: { error: e.message } }); });
+    child.on("error", (e) => { clearTimeout(timer); finish({ ok: false, raw: "", parsed: { error: e.message } }); });
   });
 }
 
@@ -355,7 +366,7 @@ async function verifyOutlookInbox(
   // ── 辅助：用 access_token 测试收件箱 ─────────────────────────────────────
   async function tryInbox(tok: string): Promise<{ ok: boolean; count?: number; status?: number }> {
     try {
-      const r = await fetch(
+      const r = await microsoftFetch(
         "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=1&$select=id,receivedDateTime",
         { headers: { Authorization: `Bearer ${tok}` } }
       );
@@ -395,7 +406,7 @@ async function verifyOutlookInbox(
   let newAccessToken = "";
   let newRefreshToken = rt;
   try {
-    const tr = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+    const tr = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -463,6 +474,7 @@ router.post("/replit/register", (req, res) => {
   const parsedCount = Number.parseInt(String(req.body?.count ?? "1"), 10);
   const count = Math.min(Math.max(Number.isFinite(parsedCount) ? parsedCount : 1, 1), 3);
   const headless = req.body?.headless !== false;
+  const requestedEmail = typeof req.body?.email === "string" && req.body.email.trim() ? req.body.email.trim().toLowerCase() : null;
   const jobId    = makeJobId();
   const job: Job = { id: jobId, status: "running", started: Date.now(), logs: [], result: null };
   jobs.set(jobId, job);
@@ -496,6 +508,7 @@ router.post("/replit/register", (req, res) => {
              AND COALESCE(tags, '') NOT LIKE '%replit_used%'
              AND COALESCE(tags, '') NOT LIKE '%token_invalid%'
              AND COALESCE(tags, '') NOT LIKE '%inbox_error%'
+             AND ($1::text IS NULL OR LOWER(email) = $1)
              AND NOT EXISTS (
                SELECT 1 FROM accounts r
                WHERE r.platform = 'replit'
@@ -504,11 +517,12 @@ router.post("/replit/register", (req, res) => {
            ORDER BY
              CASE WHEN COALESCE(tags,'') LIKE '%inbox_verified%' THEN 0 ELSE 1 END,
              RANDOM()
-           LIMIT 10`
+           LIMIT 10`,
+          [requestedEmail]
         );
 
         if (!candidates.length) {
-          log("No available Outlook accounts — run FullWorkflow to generate more");
+          log(requestedEmail ? `No available Outlook account for ${requestedEmail}` : "No available Outlook accounts — run FullWorkflow to generate more");
           results.push({ ok: false, error: "No Outlook accounts available" });
           continue;
         }
@@ -541,15 +555,25 @@ router.post("/replit/register", (req, res) => {
           let lastErr = "";
 
           // 每个Outlook账号：信誉好的端口优先，避免重复
-          const portQueue = sortedByReputation(availablePorts());
+          let portQueue = sortedByReputation(availablePorts());
           if (portQueue.length === 0) {
             log(`  [skip] No available ports for this Outlook, skipping`);
             continue; // skip to next Outlook
           }
-          if (portQueue.length < 6) portQueue.push(...shuffled(availablePorts())); // 兜底（过滤死端口）
 
           for (let attempt = 1; attempt <= 10; attempt++) {
-            const tryPort = portQueue[(attempt - 1) % portQueue.length];
+            const livePorts = availablePorts();
+            if (livePorts.length === 0) {
+              log(`    No live SOCKS ports available, stop retrying this Outlook`);
+              break;
+            }
+            let tryPort = portQueue.find((p) => livePorts.includes(p));
+            if (!tryPort) {
+              portQueue = sortedByReputation(livePorts);
+              tryPort = portQueue[0];
+            }
+            portQueue = portQueue.filter((p) => p !== tryPort);
+            if (portQueue.length === 0) portQueue = sortedByReputation(availablePorts()).filter((p) => p !== tryPort);
             log(`    Attempt ${attempt}/10 via SOCKS5:${tryPort}`);
 
             const { parsed } = await runPython(regScript, {
@@ -631,12 +655,13 @@ router.post("/replit/register", (req, res) => {
             if (lastErr.includes("account_rate_limited")) {
               portLastGood.set(tryPort, Date.now()); // port got response
               rateLimitedIps.add(exitIp || String(tryPort));
-              if (tryPort === 1090 || tryPort === 1092) {
-                // Replit sub-node IP rate-limited by Replit.com → skip this email (don't mark port dead)
-                log(`    account_rate_limited on WS-proxy bridge (port 1090, exit: ${exitIp}) → Replit cloud IP rate-limited, skip email`);
+              if (tryPort === 1090) {
+                // WS bridge endpoint is rate-limited by Replit.com → skip this email (don't mark port dead)
+                log(`    account_rate_limited on WS-proxy bridge (port ${tryPort}, exit: ${exitIp}) → Replit cloud IP rate-limited, skip email`);
                 break;
               }
-              if (rateLimitedIps.size >= 2) {
+              const rateLimitThreshold = requestedEmail ? Math.max(4, XRAY_PORTS.length - 1) : 2;
+              if (rateLimitedIps.size >= rateLimitThreshold) {
                 log(`    account_rate_limited on ${rateLimitedIps.size} different IPs → email-level rate limit, skip Outlook`);
                 break; // 换下一个 Outlook 账号
               }
@@ -778,7 +803,7 @@ router.post("/replit/register", (req, res) => {
     job.status = okCount > 0 ? "done" : "error";
     job.result = { results, summary: `${okCount}/${count} succeeded` };
     log(`\nAll done: ${okCount}/${count} succeeded`);
-    await checkAndRefillReplitPool(dbQ, log);
+    if (!requestedEmail) await checkAndRefillReplitPool(dbQ, log);
   })().catch(err => {
     job.status = "error";
     job.logs.push(`FATAL: ${String(err)}`);
@@ -932,7 +957,7 @@ router.post("/replit/retry-verify", async (_req, res) => {
       let accessToken = outlook.token || "";
       if (outlook.refresh_token) {
         try {
-          const tr = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+          const tr = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
             method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
             body: new URLSearchParams({
               grant_type: "refresh_token",
