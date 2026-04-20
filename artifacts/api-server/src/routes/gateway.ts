@@ -269,6 +269,7 @@ function loadPersistedNodes(): GatewayNode[] {
         successes: 0,
         failures: 0,
         source: (n.source as GatewayNode["source"]) || "runtime",
+        models: Array.isArray(n.models) ? n.models : [],
       }));
   } catch {
     return [];
@@ -281,6 +282,7 @@ function savePersistedNodes(nodes: GatewayNode[]) {
     writeFileSync(NODES_FILE, JSON.stringify(nodes.map((n) => ({
       id: n.id, name: n.name, type: n.type, baseUrl: n.baseUrl, source: n.source,
       apiKey: n.apiKey, model: n.model, priority: n.priority, enabled: n.enabled,
+      models: n.models && n.models.length > 0 ? n.models : undefined,
     })), null, 2), "utf8");
   } catch {}
 }
@@ -470,7 +472,7 @@ function nodeSnapshot(node: GatewayNode) {
     id: node.id,
     name: node.name,
     type: node.type,
-    baseUrl: node.type.startsWith("reseek-") ? "Reseek AI integration" : node.baseUrl,
+    baseUrl: (node.type || "").startsWith("reseek-") ? "Reseek AI integration" : node.baseUrl,
     model: node.model,
     priority: node.priority,
     enabled: node.enabled,
@@ -567,7 +569,14 @@ function nodeMatchesRequestedModel(node: GatewayNode, model: string) {
   if (node.type === "reseek-openai" && OPENAI_MODELS.includes(normalized)) return true;
   if (node.type === "reseek-anthropic" && ANTHROPIC_MODELS.includes(normalized)) return true;
   if (node.type === "reseek-gemini" && GEMINI_MODELS.includes(normalized)) return true;
-  return node.type === "remote-sub2api" || node.type === "friend-openai";
+  if (node.type === "friend-openai") {
+    // 若友节点有明确的 models 列表，按列表过滤；否则接受所有请求（向后兼容）
+    if (Array.isArray(node.models) && node.models.length > 0) {
+      return node.models.includes(normalized);
+    }
+    return true;
+  }
+  return node.type === "remote-sub2api";
 }
 
 function normalizeRequestedModel(model: string) {
@@ -785,6 +794,7 @@ async function callOpenAiResponsesNode(node: GatewayNode, body: ChatBody) {
     headers: {
       Authorization: `Bearer ${node.apiKey}`,
       "Content-Type": "application/json",
+      "ngrok-skip-browser-warning": "1",
     },
     body: JSON.stringify(payload),
   });
@@ -854,6 +864,7 @@ async function streamAnthropicNode(node: GatewayNode, res: import("express").Res
   }
 
   const ctrl = new AbortController();
+  const streamTimeout = setTimeout(() => ctrl.abort(), 120_000); // B30 修复：防止流挂起永久占用连接
   const streamId = `chatcmpl-${Date.now()}`;
   const displayModel = rawModel || model;
 
@@ -862,16 +873,18 @@ async function streamAnthropicNode(node: GatewayNode, res: import("express").Res
   try {
     fetchRes = await fetch(`${node.baseUrl}/messages`, {
       method: "POST",
-      headers: { "x-api-key": String(node.apiKey), "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
+      headers: { "x-api-key": String(node.apiKey), "anthropic-version": "2023-06-01", "Content-Type": "application/json", "ngrok-skip-browser-warning": "1" },
       body: JSON.stringify(anthropicPayload),
       signal: ctrl.signal,
     });
   } catch (e) {
+    clearTimeout(streamTimeout);
     recordFailure(node, undefined, String(e), started);
     propagateFailureToSiblings(node);
     return false;
   }
   if (!fetchRes.ok || !fetchRes.body) {
+    clearTimeout(streamTimeout);
     const errText = await fetchRes.text().catch(() => fetchRes.statusText);
     recordFailure(node, fetchRes.status, errText, started);
     propagateFailureToSiblings(node);
@@ -953,6 +966,7 @@ async function streamAnthropicNode(node: GatewayNode, res: import("express").Res
       }
     }
   } catch (e) {
+    clearTimeout(streamTimeout);
     clearInterval(keepalive);
     recordFailure(node, undefined, String(e), started);
     propagateFailureToSiblings(node);
@@ -960,6 +974,7 @@ async function streamAnthropicNode(node: GatewayNode, res: import("express").Res
     return false;
   }
 
+  clearTimeout(streamTimeout);
   clearInterval(keepalive);
   if (inThinking && thinkingVisible) res.write(`data: ${JSON.stringify(sseChunk(streamId, displayModel, { content: "\n</thinking>\n\n" }))}
 
@@ -1007,6 +1022,7 @@ async function callAnthropicNode(node: GatewayNode, body: ChatBody) {
       "x-api-key": String(node.apiKey),
       "anthropic-version": "2023-06-01",
       "Content-Type": "application/json",
+      "ngrok-skip-browser-warning": "1",
     },
     body: JSON.stringify(anthropicPayload),
   });
@@ -1036,6 +1052,7 @@ async function callGeminiNode(node: GatewayNode, body: ChatBody) {
     headers: {
       "x-goog-api-key": String(node.apiKey),
       "Content-Type": "application/json",
+      "ngrok-skip-browser-warning": "1",
     },
     body: JSON.stringify({
       ...(systemText ? { systemInstruction: { parts: [{ text: systemText }] } } : {}),
@@ -1179,13 +1196,11 @@ async function probeNodeUrl(rawUrl: string, apiKey?: string, timeoutMs = 10_000,
       if (!isJson && isReplitIdleHtml(text)) return { ok: false, latencyMs: Date.now() - started, error: "replit_idle_placeholder" };
       if (!isJson && isBrowserAppHtml(text, contentType)) continue;
       if (!res.ok) continue;
-      if (res.ok) {
-        const data = JSON.parse(text || "{}") as { data?: Array<{ id: string }>; success?: boolean; status?: string };
-        const models = Array.isArray(data.data) ? data.data.map((m) => m.id).slice(0, 5) : [];
-        if (requireOpenAiModels && path !== "/v1/models") continue;
-        if (requireOpenAiModels && models.length === 0) continue;
-        return { ok: true, latencyMs: Date.now() - started, models };
-      }
+      const data = JSON.parse(text || "{}") as { data?: Array<{ id: string }>; success?: boolean; status?: string };
+      const models = Array.isArray(data.data) ? data.data.map((m) => m.id).slice(0, 100) : [];
+      if (requireOpenAiModels && path !== "/v1/models") continue;
+      if (requireOpenAiModels && models.length === 0) continue;
+      return { ok: true, latencyMs: Date.now() - started, models };
     } catch {}
   }
   return { ok: false, latencyMs: Date.now() - started, error: "所有探测路径均无响应" };
@@ -2032,13 +2047,15 @@ router.post("/self-register", async (req, res) => {
     if (name) existing.name = name;
     // 重新注册时同步更新 baseUrl（URL 可能因重启变化）和 priority
     if (baseUrl && baseUrl !== existing.baseUrl) existing.baseUrl = baseUrl;
+    // 确保 type 字段正确（兼容旧持久化数据中可能缺失 type 的情况）
+    if (!existing.type) existing.type = "friend-openai";
     const newPriority = (body as {priority?: number}).priority;
     if (newPriority != null) existing.priority = newPriority;
     // 更新存活时间：重置 downUntil（探测通过说明节点仍存活）
     existing.downUntil = 0;
     existing.failures = 0;
-    // 同步更新 models 能力列表
-    if (body.models && body.models.length > 0) existing.models = body.models;
+    // 同步更新 models 能力列表（有明确列表时更新，空列表时清空旧列表）
+    if (Array.isArray(body.models)) existing.models = body.models;
     // 若节点来自 runtimeNodes（动态注册），持久化保存
     if (runtimeNodes.includes(existing)) savePersistedNodes(runtimeNodes);
     const credentialPush = await pushSelfRegisterCredentialsToSub2Api(body, baseUrl, name);
@@ -2161,8 +2178,12 @@ async function backgroundProbeLoop(): Promise<void> {
       const result = await probeNodeUrl(node.baseUrl, node.apiKey, 12_000);
       if (result.ok) {
         probeFailCounts.delete(node.id);
-        if (node.downUntil > 0 && node.downUntil <= Date.now()) node.downUntil = 0;
+        node.downUntil = 0;   // 探测通过 → 立即解除惩罚，无论惩罚是否已到期
+        node.failures = 0;
+        node.lastLatencyMs = result.latencyMs;  // Bug7: 同步探测延迟
+        const modelsChanged = result.models && result.models.length > 0 && JSON.stringify(result.models) !== JSON.stringify(node.models);
         if (result.models && result.models.length > 0) node.models = result.models;
+        if (modelsChanged) savePersistedNodes(runtimeNodes);  // Bug8: 持久化 models 变更
       } else {
         const fails = (probeFailCounts.get(node.id) ?? 0) + 1;
         probeFailCounts.set(node.id, fails);
