@@ -1644,41 +1644,122 @@ async function callOpenAINode(node: GatewayNode, body: ChatBody): Promise<{ resp
   return { response, text };
 }
 
+// 调用友节点流式 Responses API（SSE 直透传，含 120s 超时保护）
+async function streamOpenAIResponseNode(
+  node: GatewayNode,
+  body: Record<string, unknown>,
+  reqAuth: string | undefined,
+  res: import("express").Response,
+): Promise<boolean> {
+  const authorization = node.apiKey ? `Bearer ${node.apiKey}` : reqAuth;
+  const ctrl = new AbortController();
+  const streamTimeout = setTimeout(() => ctrl.abort(), 120_000);
+  try {
+    const r = await fetch(`${node.baseUrl}/v1/responses`, {
+      method: "POST",
+      headers: {
+        ...(authorization ? { Authorization: authorization } : {}),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ...body, stream: true }),
+      signal: ctrl.signal,
+    });
+    if (!r.ok || !r.body) {
+      clearTimeout(streamTimeout);
+      const errText = await r.text().catch(() => r.statusText);
+      recordFailure(node, r.status, errText, Date.now());
+      return false;
+    }
+    recordSuccess(node, r.status, Date.now());
+    res.status(200);
+    res.setHeader("Content-Type", r.headers.get("content-type") || "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.setHeader("x-gateway-node", node.id);
+    for await (const chunk of r.body) res.write(chunk);
+    res.end();
+    clearTimeout(streamTimeout);
+    return true;
+  } catch (e) {
+    clearTimeout(streamTimeout);
+    recordFailure(node, undefined, String(e), Date.now());
+    return false;
+  }
+}
+
 // sub2api 注册账号后会调 POST {nodeBaseUrl}/v1/responses
 // 友节点（有 integration）：直接代理到 Reseek /responses（不加 /v1/）
-// VPS（无 integration）：经 pool 路由调 callOpenAINode（内部也走 /responses）
+// VPS（无 integration）：经 pool 路由调 callOpenAINode / streamOpenAIResponseNode
 router.post("/v1/responses", async (req, res) => {
-  // ── 友节点：有本地 integration → 直接代理 ──
+  const isStream = (req.body as Record<string, unknown>)?.stream === true;
+
+  // ── 友节点：有本地 OpenAI integration → 直接代理（流式 + 非流式）──
   if (OPENAI_BASE_URL && OPENAI_API_KEY) {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+    };
+    const oaiBeta = req.headers["openai-beta"];
+    if (oaiBeta) headers["OpenAI-Beta"] = String(oaiBeta);
     try {
-      const headers: Record<string, string> = {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      };
-      const oaiBeta = req.headers["openai-beta"];
-      if (oaiBeta) headers["OpenAI-Beta"] = String(oaiBeta);
+      const ctrl = new AbortController();
+      const tout = setTimeout(() => ctrl.abort(), 120_000);
       const r = await fetch(`${OPENAI_BASE_URL}/responses`, {
         method: "POST",
         headers,
         body: JSON.stringify(req.body),
-        signal: AbortSignal.timeout(90_000),
+        signal: ctrl.signal,
       });
-      const text = await r.text();
-      res.status(r.status);
-      res.setHeader("content-type", r.headers.get("content-type") || "application/json");
-      res.setHeader("x-gateway-node", "local-integration");
-      res.send(text);
+      clearTimeout(tout);
+      if (isStream && r.ok && r.body) {
+        res.status(200);
+        res.setHeader("Content-Type", r.headers.get("content-type") || "text/event-stream");
+        res.setHeader("Cache-Control", "no-cache");
+        res.setHeader("Connection", "keep-alive");
+        res.setHeader("X-Accel-Buffering", "no");
+        res.setHeader("x-gateway-node", "local-integration");
+        for await (const chunk of r.body) res.write(chunk);
+        res.end();
+      } else {
+        const text = await r.text();
+        res.status(r.status);
+        res.setHeader("content-type", r.headers.get("content-type") || "application/json");
+        res.setHeader("x-gateway-node", "local-integration");
+        res.send(text);
+      }
     } catch (e) {
-      res.status(502).json({ error: { message: "responses proxy failed", detail: String(e) } });
+      if (!res.headersSent)
+        res.status(502).json({ error: { message: "responses proxy failed", detail: String(e) } });
+      else res.end();
     }
     return;
   }
 
-  // ── VPS / 无 integration：通过 pool 路由（callOpenAINode 内部调 /responses）──
+  // ── VPS / 无 integration：通过 pool 路由 friend-openai 节点 ──
   const body = req.body as ChatBody;
   const candidates = orderedCandidates(typeof body.model === "string" ? body.model : "")
     .filter((n) => n.type === "friend-openai");
   const errors: Array<Record<string, unknown>> = [];
+
+  if (isStream) {
+    // 流式：SSE 直透传，成功即返回
+    const reqAuth = req.header("authorization");
+    for (const node of candidates) {
+      if (!node.enabled || node.downUntil > Date.now()) {
+        errors.push({ node: node.id, error: "[跳过]" });
+        continue;
+      }
+      const ok = await streamOpenAIResponseNode(node, body as Record<string, unknown>, reqAuth, res);
+      if (ok) return;
+      errors.push({ node: node.id, error: node.lastError ?? "stream failed" });
+    }
+    if (!res.headersSent)
+      res.status(503).json({ error: { message: "所有节点不可用", type: "gateway_unavailable", details: errors } });
+    return;
+  }
+
+  // 非流式：等待完整响应
   for (const node of candidates) {
     if (!node.enabled || node.downUntil > Date.now()) {
       errors.push({ node: node.id, error: "[跳过]" });
