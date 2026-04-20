@@ -13,6 +13,7 @@ Env:
 """
 import socket, threading, struct, os, random, json, time
 import urllib.request, urllib.parse, urllib.error, http.client, ssl as ssl_mod
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 TOKEN        = os.environ.get("STREAM_TOKEN", os.environ.get("TUNNEL_TOKEN", ""))
 PORT         = int(os.environ.get("SOCKS_PORT", "1092"))
@@ -30,21 +31,108 @@ _nodes_lock = threading.Lock()
 _nodes      = list(_seed)
 _fc         = {}   # fail counters per URL
 
+# stream 探测缓存：url -> (ok: bool, timestamp: float)
+_stream_probe_cache = {}
+_STREAM_PROBE_TTL   = 120  # 秒：同一节点两次探测最小间隔
+
+CTX = ssl_mod.create_default_context()
+
+def http_post(url, body=b"", timeout=10):
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/octet-stream")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=CTX) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, b""
+
+def http_del(url, timeout=5):
+    try:
+        req = urllib.request.Request(url, method="DELETE")
+        urllib.request.urlopen(req, timeout=timeout, context=CTX)
+    except Exception: pass
+
+def strip_gateway_path(b):
+    for sfx in ("/api/gateway", "/api"):
+        if b.endswith(sfx):
+            return b[:-len(sfx)]
+    return b
+
+def probe_stream(base_url):
+    """
+    独立探测节点的 /api/stream 通道，与 AI 健康状态完全解耦。
+    向节点发一个 open 请求，拿到 session id 后立即 DELETE 关闭。
+    有缓存 TTL，避免频繁探测。
+    """
+    now = time.time()
+    cached = _stream_probe_cache.get(base_url)
+    if cached and now - cached[1] < _STREAM_PROBE_TTL:
+        return cached[0]
+
+    stream_base = strip_gateway_path(base_url)
+    qs  = urllib.parse.urlencode({"host": "1.1.1.1", "port": "80", "token": TOKEN})
+    url = f"{stream_base}/api/stream/open?{qs}"
+    try:
+        st, body = http_post(url, timeout=8)
+        if st in (200, 201):
+            try:
+                sid = json.loads(body).get("id", "")
+                if sid:
+                    tq = urllib.parse.quote(TOKEN, safe="")
+                    http_del(f"{stream_base}/api/stream/{sid}?token={tq}")
+                    _stream_probe_cache[base_url] = (True, now)
+                    return True
+            except Exception:
+                pass
+        _stream_probe_cache[base_url] = (False, now)
+        return False
+    except Exception:
+        _stream_probe_cache[base_url] = (False, now)
+        return False
+
 def fetch_nodes_from_gateway():
-    """从网关 /nodes/status 拉取 ready 状态的 friend-openai 节点。"""
+    """
+    从网关拉取所有 enabled 的 friend-openai 节点，
+    独立用 /api/stream/open 探测每个节点的代理可用性，
+    不依赖 gateway 的 AI 健康状态（down/credit-exhausted 节点只要 stream 通就可用）。
+    """
     try:
         req = urllib.request.Request(f"{GATEWAY_API}/gateway/nodes/status",
                                      headers={"Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=5) as r:
             data = json.loads(r.read())
-        urls = []
+
+        candidates = []
         for n in data.get("nodes", []):
-            if n.get("status") == "ready":
-                base = (n.get("baseUrl") or "").rstrip("/")
-                if base:
+            if n.get("status") == "disabled":
+                continue  # 手动关闭的跳过
+            base = (n.get("baseUrl") or "").rstrip("/")
+            if base:
+                candidates.append((base, n.get("status", "unknown")))
+
+        if not candidates:
+            return []
+
+        urls = []
+        # 并行探测所有候选节点（最多 5 并发，避免打爆节点）
+        with ThreadPoolExecutor(max_workers=min(len(candidates), 5)) as ex:
+            futs = {ex.submit(probe_stream, base): (base, ai_st)
+                    for base, ai_st in candidates}
+            for fut in as_completed(futs):
+                base, ai_st = futs[fut]
+                try:
+                    stream_ok = fut.result()
+                except Exception:
+                    stream_ok = False
+                if stream_ok:
                     urls.append(base)
-            elif n.get("status") == "down":
-                print("[poll-bridge] skip down: {} until={}".format((n.get("baseUrl") or "")[:50], n.get("downUntil")), flush=True)
+                    if ai_st != "ready":
+                        print(f"[poll-bridge] +stream AI:{ai_st} {base[:70]}", flush=True)
+                else:
+                    if ai_st == "ready":
+                        print(f"[poll-bridge] -stream(AI ready but stream fail) {base[:70]}", flush=True)
+                    else:
+                        print(f"[poll-bridge] -stream AI:{ai_st} {base[:70]}", flush=True)
         return urls
     except Exception as e:
         print(f"[poll-bridge] gateway sync failed: {e}", flush=True)
@@ -70,13 +158,6 @@ def node_sync_loop():
                         _fc.pop(u, None)
         time.sleep(REFRESH_SECS)
 
-
-def strip_gateway_path(b):
-    for sfx in ("/api/gateway", "/api"):
-        if b.endswith(sfx):
-            return b[:-len(sfx)]
-    return b
-
 def pick():
     with _nodes_lock:
         nodes = list(_nodes)
@@ -91,17 +172,6 @@ def pick():
 
 def fail(u): _fc[u] = _fc.get(u, 0) + 1
 def ok(u):   _fc[u] = max(0, _fc.get(u, 0) - 1)
-
-CTX = ssl_mod.create_default_context()
-
-def http_post(url, body=b"", timeout=10):
-    req = urllib.request.Request(url, data=body, method="POST")
-    req.add_header("Content-Type", "application/octet-stream")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=CTX) as r:
-            return r.status, r.read()
-    except urllib.error.HTTPError as e:
-        return e.code, b""
 
 def http_get_chunks(url, callback, timeout=30):
     parsed = urllib.parse.urlparse(url)
@@ -125,12 +195,6 @@ def http_get_chunks(url, callback, timeout=30):
         return status
     except Exception: return None
     finally: conn.close()
-
-def http_del(url, timeout=5):
-    try:
-        req = urllib.request.Request(url, method="DELETE")
-        urllib.request.urlopen(req, timeout=timeout, context=CTX)
-    except Exception: pass
 
 def handle(client, addr):
     base = ""; sid = ""
