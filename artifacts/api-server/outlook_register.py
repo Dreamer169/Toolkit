@@ -92,12 +92,10 @@ def gen_email_username():
 
 # ─── 基础控制器 ───────────────────────────────────────────────────────────────
 class BaseController:
-    def __init__(self, proxy="", wait_ms=None, max_captcha_retries=MAX_CAPTCHA_RETRIES,
-                 captcha_solver=None):
+    def __init__(self, proxy="", wait_ms=None, max_captcha_retries=MAX_CAPTCHA_RETRIES):
         self.proxy          = proxy
         self.wait_time      = (wait_ms or BOT_PROTECTION_WAIT) * 1000  # ms
         self.max_retries    = max_captcha_retries
-        self.captcha_solver = captcha_solver   # captcha_solver.py 中的 Solver 对象
 
     def _build_proxy_cfg(self):
         """
@@ -146,91 +144,6 @@ class BaseController:
 
         page.on("request", on_request)
         return blob_container
-
-    def _inject_captcha_token(self, page, token: str) -> bool:
-        """
-        将打码服务返回的 token 注入到 Arkose/FunCaptcha 验证流程。
-        尝试多种注入方式，任一成功即返回 True。
-        """
-        print(f"[captcha] 注入 token (len={len(token)})…", flush=True)
-        script = f"""
-        (function() {{
-            var tk = {json.dumps(token)};
-            // 方式1: Microsoft 专用回调
-            try {{
-                if (window.ArkoseEnforcement && typeof window.ArkoseEnforcement.setAnswerToken === 'function') {{
-                    window.ArkoseEnforcement.setAnswerToken(tk);
-                    return 'ArkoseEnforcement.setAnswerToken';
-                }}
-            }} catch(e) {{}}
-            // 方式2: 隐藏 input 字段
-            var fields = document.querySelectorAll(
-                'input[name*="arkose"], input[name*="enforcement"], input[name*="fc-token"], ' +
-                'input[name*="FunCaptcha-Token"], input[id*="arkose"], input[type="hidden"]'
-            );
-            var injected = false;
-            fields.forEach(function(el) {{
-                el.value = tk;
-                el.dispatchEvent(new Event('change', {{bubbles: true}}));
-                injected = true;
-            }});
-            if (injected) return 'hidden-input';
-            // 方式3: postMessage 给所有 frame
-            document.querySelectorAll('iframe').forEach(function(fr) {{
-                try {{
-                    fr.contentWindow.postMessage({{
-                        eventId: 'challenge-complete',
-                        payload: {{sessionToken: tk}}
-                    }}, '*');
-                }} catch(e) {{}}
-            }});
-            window.postMessage({{
-                eventId: 'challenge-complete',
-                payload: {{sessionToken: tk}}
-            }}, '*');
-            return 'postMessage';
-        }})()
-        """
-        try:
-            method = page.evaluate(script)
-            print(f"[captcha] 注入成功，方式={method}", flush=True)
-            return True
-        except Exception as ex:
-            print(f"[captcha] 注入失败: {ex}", flush=True)
-            return False
-
-    def _solve_with_service(self, page, blob_container: list) -> bool:
-        """
-        调用 self.captcha_solver 解题并注入 token。
-        成功返回 True，失败返回 False。
-        """
-        if not self.captcha_solver:
-            return False
-        try:
-            page_url = page.url or "https://signup.live.com/signup"
-            blob = blob_container[0] if blob_container else None
-            print(f"[captcha] 调用打码服务… blob={'有' if blob else '无'}", flush=True)
-            token = self.captcha_solver.solve(page_url, blob=blob)
-            ok = self._inject_captcha_token(page, token)
-            if ok:
-                # 等待注入生效，然后检查是否通过
-                page.wait_for_timeout(3000)
-                # 如果验证质询 iframe 消失，说明通过了
-                try:
-                    page.wait_for_selector(
-                        'iframe[title="验证质询"]', state="detached", timeout=8000)
-                    print("[captcha] ✅ 打码服务验证通过", flush=True)
-                    return True
-                except Exception:
-                    # 可能直接跳到下一步（验证质询不会 detach 而是直接消失）
-                    if (not page.locator('iframe[title="验证质询"]').count()
-                            or page.get_by_text("取消").count()):
-                        print("[captcha] ✅ 打码服务验证通过（无 iframe detach）", flush=True)
-                        return True
-            return False
-        except Exception as ex:
-            print(f"[captcha] 打码服务失败: {ex}", flush=True)
-            return False
 
     def outlook_register(self, page, email, password):
         """
@@ -534,8 +447,7 @@ class PatchrightController(BaseController):
     def handle_captcha(self, page, blob_container=None):
         """
         优先使用 Enter 键法（等待视觉 CAPTCHA blob URL）；
-        失败后使用无障碍按钮点击法；
-        最后降级到打码服务。
+        失败后使用无障碍按钮点击法。
         """
         # ── [早期拦截] 在所有交互前安装网络请求拦截器 ──────────────────────
         # Arkose Labs 音频通过 XHR fetch，DOM 里 audio.src 始终为空
@@ -1636,16 +1548,9 @@ class PlaywrightController(BaseController):
         return p, b
 
     def handle_captcha(self, page, blob_container=None):
-        """
-        优先使用 Enter 键 + hsprotect.net 流量监听（原版逻辑）。
-        如果失败且配置了打码服务，则自动降级到 2captcha/CapMonster。
-        """
+        """使用 Enter 键 + hsprotect.net 流量监听"""
         ok = self._try_enter_challenge(page)
-        if ok:
-            return True
-        print("[captcha] Enter挑战失败，尝试打码服务…", flush=True)
-        # [已禁用] return self._solve_with_service(page, blob_container or [])
-        return False  # 付费打码服务已禁用
+        return ok
 
     def _try_enter_challenge(self, page) -> bool:
         """原版 Enter键 + hsprotect.net 流量监听逻辑"""
@@ -2115,16 +2020,7 @@ def main():
     headless = args.headless.lower() != "false"
     CtrlCls  = PatchrightController if args.engine == "patchright" else PlaywrightController
 
-    # 构建打码服务 solver（可选）
     solver = None
-    captcha_service = ""
-    captcha_key     = ""
-    # [已禁用] if captcha_service and captcha_key:
-    #     import sys as _sys, os as _os
-    #     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
-    #     from captcha_solver import build_solver
-    # [已禁用] solver = build_solver(captcha_service, captcha_key)
-    # [已禁用] print(f"[captcha] 打码服务已启用: {captcha_service}", flush=True)
 
     # 解析代理列表（--proxies 优先于 --proxy）
     proxy_list = []
@@ -2150,8 +2046,7 @@ def main():
         else:
             print(f"   CF池可用 {_pool_status['available']} 个，满足本轮需求", flush=True)
 
-    svc_hint = f"  打码服务={captcha_service}" if solver else ""
-    print(f"\n🚀 Outlook 批量注册  引擎={args.engine}  headless={headless}  count={args.count}{svc_hint}")
+    print(f"\n🚀 Outlook 批量注册  引擎={args.engine}  headless={headless}  count={args.count}")
     print(f"   bot_protection_wait={args.wait}s  max_captcha_retries={args.retries}")
     if use_cf_pool:
         print(f"   代理模式: CF IP 池（每账号独占一个 IP，用后丢弃）")
@@ -2215,9 +2110,12 @@ def main():
         cf_ip_retry = 0
         r = None
         _last_ip_info = ip_info
+        _retry_email = ""    # 记录上次失败时已生成的邮箱（换IP重试时复用，避免重新注册全流程）
+        _retry_password = "" # 记录上次失败时已生成的密码
 
         while True:
-            # CF模式换IP重试：CAPTCHA失败时 ban 当前IP，重新获取新IP
+            # CF模式换IP重试：CAPTCHA/Timeout失败时 ban 当前IP，重新获取新IP
+            # 复用已生成的 email+password 省去表单重填时间
             if use_cf_pool and cf_ip_retry > 0:
                 job_id = f"reg_{i}_{int(time.time())}"
                 _new_ip = _cf_pool.acquire_ip(job_id, auto_refresh=False,
@@ -2242,11 +2140,20 @@ def main():
                 proxy=cur_proxy,
                 wait_ms=args.wait,
                 max_captcha_retries=args.retries,
-                captcha_solver=solver,
             )
             if planned_username:
                 print(f"   使用完整工作流预生成账号: {planned_username.split('@')[0]}@outlook.com", flush=True)
-            r = register_one(ctrl, args.engine, headless, planned_username, planned_password)
+            # 若第一次attempt无指定用户名，传入已记录的重试邮箱（换IP时复用）
+            _effective_user = planned_username or _retry_email
+            _effective_pass = planned_password or _retry_password
+            if cf_ip_retry > 0 and _effective_user:
+                print(f"   ↳ 复用邮箱 {_effective_user.split('@')[0]}@outlook.com 继续注册（节省表单重填）", flush=True)
+            r = register_one(ctrl, args.engine, headless, _effective_user, _effective_pass)
+
+            # 保存本次生成的 email/password 供下次重试复用
+            if not _retry_email and r.get("email"):
+                _retry_email    = r["email"]
+                _retry_password = r.get("password", "")
 
             # 注册完成后清理 xray 实例
             if xray_relay_inst:
