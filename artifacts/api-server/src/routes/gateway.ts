@@ -1588,8 +1588,13 @@ router.post("/self-register", async (req, res) => {
   }
   if (existing) {
     if (name) existing.name = name;
+    // 重新注册时同步更新 baseUrl（URL 可能因重启变化）和 priority
+    if (baseUrl && baseUrl !== existing.baseUrl) existing.baseUrl = baseUrl;
+    const newPriority = (body as {priority?: number}).priority;
+    if (newPriority != null) existing.priority = newPriority;
     // 更新存活时间：重置 downUntil（探测通过说明节点仍存活）
-    if (existing.downUntil > 0 && existing.downUntil <= Date.now() + 60_000) existing.downUntil = 0;
+    existing.downUntil = 0;
+    existing.failures = 0;
     // 若节点来自 runtimeNodes（动态注册），持久化保存
     if (runtimeNodes.includes(existing)) savePersistedNodes(runtimeNodes);
     const credentialPush = await pushSelfRegisterCredentialsToSub2Api(body, baseUrl, name);
