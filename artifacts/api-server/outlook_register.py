@@ -376,16 +376,17 @@ class PatchrightController(BaseController):
         Enter键法（与 PlaywrightController._try_enter_challenge 相同逻辑，
         但在 patchright 下执行）。
         等待视觉 CAPTCHA 的 blob URL 加载，然后 Enter 键通过。
+        对 CF IP 模式：blob URL 通常不出现，使用短超时(5s)快速跳过。
         """
         print("[captcha] 尝试Enter键法（等待blob URL）…", flush=True)
         try:
             page.wait_for_event(
                 "request",
                 lambda req: req.url.startswith("blob:https://iframe.hsprotect.net/"),
-                timeout=22000,
+                timeout=5000,
             )
         except Exception:
-            print("[captcha] ⚠ 22s内未检测到blob URL，Enter键法跳过", flush=True)
+            print("[captcha] ⚠ 5s内未检测到blob URL，Enter键法跳过", flush=True)
             return False
 
         print("[captcha] ✅ 检测到blob URL，开始Enter键法", flush=True)
@@ -903,7 +904,7 @@ class PatchrightController(BaseController):
                         _press_again = _frame2.locator('[aria-label="再次按下"]')
                     if _press_again is None or _press_again.count() == 0:
                         _press_again = page.locator('[aria-label="再次按下"]')
-                    _box2 = _press_again.first.bounding_box(timeout=5000)
+                    _box2 = _press_again.first.bounding_box(timeout=2000)
                     if _box2 and _box2['width'] > 0:
                         _cx2 = _box2['x'] + _box2['width'] / 2 + _rnd.randint(-10, 10)
                         _cy2 = _box2['y'] + _box2['height'] / 2 + _rnd.randint(-5, 5)
@@ -1149,6 +1150,14 @@ class PatchrightController(BaseController):
                 if _net_now:
                     print(f"[captcha] ✅ 网络拦截到音频URL (等待{time.time()-_poll_audio_start:.1f}s): {_net_now[0][:80]}", flush=True)
                     break
+                # 快速检测: passkey/enroll 或 interrupt 页面出现 → CAPTCHA 已通过，无需等音频
+                _passkey_found = any(
+                    'interrupt' in getattr(_pf2, 'url', '') or 'passkey' in getattr(_pf2, 'url', '')
+                    for _pf2 in page.frames
+                )
+                if _passkey_found:
+                    print(f"[captcha] ✅ 检测到 passkey/interrupt 页，CAPTCHA 已通过（等待{time.time()-_poll_audio_start:.1f}s），跳过音频等待", flush=True)
+                    break
                 # 检查 fetching-volume 是否消失（意味着音频已加载）
                 _fetch_done = False
                 for _pf2 in page.frames:
@@ -1162,7 +1171,7 @@ class PatchrightController(BaseController):
                 if _fetch_done:
                     print(f"[captcha] ✅ fetching-volume 消失，音频元素已出现（等待{time.time()-_poll_audio_start:.1f}s）", flush=True)
                     break
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(1000)
             else:
                 print("[captcha] ⚠ 20s内音频未加载完成（代理延迟或挑战仍在fetching）", flush=True)
 
@@ -1240,7 +1249,7 @@ class PatchrightController(BaseController):
             if audio_solved:
                 print("[captcha] ✅ 音频挑战通过！", flush=True)
                 # 等待 CAPTCHA 消失
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(1500)
                 try:
                     page.wait_for_selector('iframe[title="验证质询"]', state="detached", timeout=8000)
                     return True
@@ -1251,7 +1260,7 @@ class PatchrightController(BaseController):
                     return False
 
             # ── 兜底：检查页面是否已通过 ─────────────────────────────────────
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(1500)
             try:
                 if page.get_by_text("取消").count() > 0:
                     print("[captcha] ✅ 出现取消按钮，认为已通过", flush=True)
@@ -1558,7 +1567,7 @@ class PlaywrightController(BaseController):
             page.wait_for_event(
                 "request",
                 lambda req: req.url.startswith("blob:https://iframe.hsprotect.net/"),
-                timeout=22000,
+                timeout=5000,
             )
         except Exception:
             return False
