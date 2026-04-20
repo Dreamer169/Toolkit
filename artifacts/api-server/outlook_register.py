@@ -1877,6 +1877,17 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
                     pass
                 page.wait_for_timeout(3000)
 
+            # 已落入 Outlook 收件箱（OAuth code 未被捕获），重新导航授权页
+            elif ('outlook.live.com/mail' in _poll_url or
+                  ('live.com' in _poll_url and '/mail/' in _poll_url) or
+                  'msalAuthRedirect' in _poll_url):
+                print(f'[oauth] ⚠ 已落入收件箱(URL={_poll_url[:60]})，重新导航授权页 (round={_poll_round+1})...', flush=True)
+                try:
+                    page.goto(auth_url, timeout=20000, wait_until='domcontentloaded')
+                except Exception:
+                    pass
+                page.wait_for_timeout(3000)
+
             # 其他页（login、interrupt、未知）：驱散中断后等待
             else:
                 _skip_ms_interrupts(page, label=f'oauth-poll-{_poll_round}')
@@ -2225,12 +2236,20 @@ def main():
                 if _cf_pool.get_pool_status().get("available", 0) < 25:
                     start_cf_pool_refill("outlook_after_consume", count=240, target=80, port=args.cf_port)
 
-            # CAPTCHA 失败时 ban 当前 CF IP，换新 IP 重试
+            # CAPTCHA/IP质量不佳/Timeout 失败时 ban 当前 CF IP，换新 IP 重试
+            _err_str = r.get("error", "")
+            _should_retry = (
+                "验证码" in _err_str
+                or "CAPTCHA" in _err_str.upper()
+                or "IP质量不佳" in _err_str
+                or ("Timeout" in _err_str and "注册界面" in _err_str)
+            )
             if (not r["success"] and use_cf_pool and ip_info and _cf_pool
-                    and ("验证码" in r.get("error", "") or "CAPTCHA" in r.get("error", "").upper())
+                    and _should_retry
                     and cf_ip_retry < MAX_CF_IP_RETRIES):
                 cf_ip_retry += 1
-                print(f"  ⚠ CAPTCHA 失败（IP={ip_info['ip']}），换新CF IP重试 ({cf_ip_retry}/{MAX_CF_IP_RETRIES})…", flush=True)
+                _reason = "CAPTCHA" if ("验证码" in _err_str or "CAPTCHA" in _err_str.upper()) else "IP质量/Timeout"
+                print(f"  ⚠ {_reason} 失败（IP={ip_info['ip']}），换新CF IP重试 ({cf_ip_retry}/{MAX_CF_IP_RETRIES})…", flush=True)
                 _cf_pool.ban_ip(ip_info["ip"])
                 continue
             break
