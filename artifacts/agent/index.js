@@ -156,5 +156,5 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, "0.0.0.0", () => {
   heartbeat();
-  setInterval(heartbeat, 5 * 60 * 1000);
+  setInterval(heartbeat, 30 * 1000);
 });

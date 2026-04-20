@@ -2196,12 +2196,12 @@ router.post(["/relay/:nodeId", "/relay"], async (req, res) => {
 // ═══ 周期性持久化自动存盘（每 5 分钟）══════════════════════════════════════════
 setInterval(() => {
   if (runtimeNodes.length > 0) savePersistedNodes(runtimeNodes);
-}, 5 * 60_000);
+}, 30_000);
 
 // ═══ B21：后台周期探测 friend-openai / register 节点 ══════════════════════════
 // 每 5 分钟对所有 register/runtime source 的 friend-openai 节点做一次健康探测
 // 探测失败时用指数退避：1m → 5m → 30m → 2h → UTC 凌晨
-const PROBE_INTERVAL_MS = 5 * 60_000;
+const PROBE_INTERVAL_MS = 30_000;
 const probeFailCounts = new Map<string, number>();
 
 function probeBackoffMs(failCount: number): number {
@@ -2236,7 +2236,7 @@ async function backgroundProbeLoop(): Promise<void> {
 }
 
 setInterval(() => { void backgroundProbeLoop(); }, PROBE_INTERVAL_MS);
-setTimeout(() => { void backgroundProbeLoop(); }, 30_000); // 启动 30s 后先探测一次
+setTimeout(() => { void backgroundProbeLoop(); }, 5_000); // 启动 5s 后先探测一次
 
 
 // B26: 启动时确认 sub2api channel+group 绑定
