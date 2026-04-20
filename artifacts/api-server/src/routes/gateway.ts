@@ -852,6 +852,7 @@ async function streamAnthropicNode(node: GatewayNode, res: import("express").Res
   const streamId = `chatcmpl-${Date.now()}`;
   const displayModel = rawModel || model;
 
+  const started = Date.now();
   let fetchRes: Awaited<ReturnType<typeof fetch>>;
   try {
     fetchRes = await fetch(`${node.baseUrl}/messages`, {
@@ -861,9 +862,16 @@ async function streamAnthropicNode(node: GatewayNode, res: import("express").Res
       signal: ctrl.signal,
     });
   } catch (e) {
+    recordFailure(node, undefined, String(e), started);
+    propagateFailureToSiblings(node);
     return false;
   }
-  if (!fetchRes.ok || !fetchRes.body) return false;
+  if (!fetchRes.ok || !fetchRes.body) {
+    const errText = await fetchRes.text().catch(() => fetchRes.statusText);
+    recordFailure(node, fetchRes.status, errText, started);
+    propagateFailureToSiblings(node);
+    return false;
+  }
 
   res.status(200);
   res.setHeader("Content-Type", "text/event-stream");
@@ -939,7 +947,13 @@ async function streamAnthropicNode(node: GatewayNode, res: import("express").Res
         }
       }
     }
-  } catch {}
+  } catch (e) {
+    clearInterval(keepalive);
+    recordFailure(node, undefined, String(e), started);
+    propagateFailureToSiblings(node);
+    if (!res.writableEnded) res.end();
+    return false;
+  }
 
   clearInterval(keepalive);
   if (inThinking && thinkingVisible) res.write(`data: ${JSON.stringify(sseChunk(streamId, displayModel, { content: "\n</thinking>\n\n" }))}
@@ -947,6 +961,7 @@ async function streamAnthropicNode(node: GatewayNode, res: import("express").Res
 `);
   res.write("data: [DONE]\n\n");
   res.end();
+  recordSuccess(node, fetchRes.status, started);
   return true;
 }
 
