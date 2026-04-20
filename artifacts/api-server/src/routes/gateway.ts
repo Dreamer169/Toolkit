@@ -727,6 +727,7 @@ async function callOpenAiCompatibleNode(node: GatewayNode, req: Request, body: C
     headers: {
       ...(authorization ? { Authorization: authorization } : {}),
       "Content-Type": "application/json",
+      "ngrok-skip-browser-warning": "1",
     },
     body: JSON.stringify(requestBody),
   });
@@ -788,8 +789,12 @@ async function callOpenAiResponsesNode(node: GatewayNode, body: ChatBody) {
     body: JSON.stringify(payload),
   });
   if (!result.response.ok) return result;
-  const parsed = JSON.parse(result.text || "{}") as ResponsesApiResult;
-  return { response: result.response, text: chatCompletionJson(node, model, extractResponsesText(parsed), parsed.id) };
+  try {
+    const parsed = JSON.parse(result.text || "{}") as ResponsesApiResult;
+    return { response: result.response, text: chatCompletionJson(node, model, extractResponsesText(parsed), parsed.id) };
+  } catch {
+    return result;
+  }
 }
 
 function convertMessagesForAnthropic(messages: Array<Record<string, unknown>>) {
@@ -1006,8 +1011,12 @@ async function callAnthropicNode(node: GatewayNode, body: ChatBody) {
     body: JSON.stringify(anthropicPayload),
   });
   if (!result.response.ok) return result;
-  const parsed = JSON.parse(result.text || "{}") as AnthropicResult;
-  return { response: result.response, text: chatCompletionJson(node, rawModel || model, extractAnthropicText(parsed, thinkingVisible), parsed.id) };
+  try {
+    const parsed = JSON.parse(result.text || "{}") as AnthropicResult;
+    return { response: result.response, text: chatCompletionJson(node, rawModel || model, extractAnthropicText(parsed, thinkingVisible), parsed.id) };
+  } catch {
+    return result;
+  }
 }
 
 async function callGeminiNode(node: GatewayNode, body: ChatBody) {
@@ -1035,8 +1044,12 @@ async function callGeminiNode(node: GatewayNode, body: ChatBody) {
     }),
   });
   if (!result.response.ok) return result;
-  const parsed = JSON.parse(result.text || "{}") as GeminiResult;
-  return { response: result.response, text: chatCompletionJson(node, model, extractGeminiText(parsed)) };
+  try {
+    const parsed = JSON.parse(result.text || "{}") as GeminiResult;
+    return { response: result.response, text: chatCompletionJson(node, model, extractGeminiText(parsed)) };
+  } catch {
+    return result;
+  }
 }
 
 async function callNode(node: GatewayNode, req: Request, body: ChatBody) {
@@ -1083,6 +1096,7 @@ async function streamNode(node: GatewayNode, req: Request, res: Response, body: 
         headers: {
           ...(authorization ? { Authorization: authorization } : {}),
           "Content-Type": "application/json",
+          "ngrok-skip-browser-warning": "1",
         },
         body: JSON.stringify({ ...requestBody, stream: true }),
         signal: ctrl.signal,
@@ -1152,7 +1166,7 @@ async function probeNodeUrl(rawUrl: string, apiKey?: string, timeoutMs = 10_000,
   const started = Date.now();
   for (const path of ["/v1/models", "/health", "/nodes", "/stats"]) {
     try {
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      const headers: Record<string, string> = { "Content-Type": "application/json", "ngrok-skip-browser-warning": "1" };
       if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -1543,7 +1557,7 @@ router.post("/nodes/batch-probe", async (req, res) => {
       let registered = false;
       let nodeId: string | undefined;
       if (probe.ok && autoRegister && !allNodes().some((n) => n.baseUrl === baseUrl)) {
-        const id = stableId("friend", `${baseUrl}-${model || ""}-${runtimeNodes.length}`);
+        const id = stableId("friend", baseUrl);
         try {
           const hostname = new URL(baseUrl).hostname.split(".")[0];
           const node: GatewayNode = {
@@ -1551,6 +1565,7 @@ router.post("/nodes/batch-probe", async (req, res) => {
             baseUrl, apiKey, model: model || "gpt-5-mini",
             priority: Number(priority) || 3, enabled: true,
             downUntil: 0, successes: 0, failures: 0, source: "runtime",
+            models: probe.models ?? [],
           };
           runtimeNodes.push(node);
           registered = true;
@@ -1706,6 +1721,7 @@ async function callOpenAINode(
     headers: {
       ...(authorization ? { Authorization: authorization } : {}),
       "Content-Type": "application/json",
+      "ngrok-skip-browser-warning": "1",
     },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(90_000),
@@ -1737,6 +1753,7 @@ async function streamOpenAIResponseNode(
       headers: {
         ...(authorization ? { Authorization: authorization } : {}),
         "Content-Type": "application/json",
+        "ngrok-skip-browser-warning": "1",
       },
       body: JSON.stringify({ ...body, stream: true }),
       signal: ctrl.signal,
@@ -2145,6 +2162,7 @@ async function backgroundProbeLoop(): Promise<void> {
       if (result.ok) {
         probeFailCounts.delete(node.id);
         if (node.downUntil > 0 && node.downUntil <= Date.now()) node.downUntil = 0;
+        if (result.models && result.models.length > 0) node.models = result.models;
       } else {
         const fails = (probeFailCounts.get(node.id) ?? 0) + 1;
         probeFailCounts.set(node.id, fails);
