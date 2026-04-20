@@ -224,13 +224,33 @@ export function selfRegister(attempt = 0): void {
   }
 
   const gatewayUrl = `${domain.replace(/\/$/, "")}/api/gateway`;
+  // 读取本实例所有 AI 集成 env，注册时一并上报给 VPS
+  const oaiBase = process.env["AI_INTEGRATIONS_OPENAI_BASE_URL"];
+  const oaiKey  = process.env["AI_INTEGRATIONS_OPENAI_API_KEY"];
+  const antBase = process.env["AI_INTEGRATIONS_ANTHROPIC_BASE_URL"];
+  const antKey  = process.env["AI_INTEGRATIONS_ANTHROPIC_API_KEY"];
+  const gemBase = process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"];
+  const gemKey  = process.env["AI_INTEGRATIONS_GEMINI_API_KEY"];
+
+  // 主模型按优先级决定：Anthropic > OpenAI > Gemini > fallback
+  const primaryModel = antKey
+    ? "claude-opus-4-6"
+    : oaiKey
+    ? "gpt-5-mini"
+    : gemKey
+    ? "gemini-2.5-flash"
+    : "gpt-5-mini";
+
   const body = JSON.stringify({
     gatewayUrl,
     name: NODE_NAME,
     token: TUNNEL_TOKEN,
     source: "runtime",
-    model: "gpt-5-mini",
+    model: primaryModel,
     priority: 2,
+    ...(antBase && antKey ? { anthropicBaseUrl: antBase, anthropicApiKey: antKey } : {}),
+    ...(oaiBase && oaiKey ? { openaiBaseUrl: oaiBase, openaiApiKey: oaiKey } : {}),
+    ...(gemBase && gemKey ? { geminiBaseUrl: gemBase, geminiApiKey: gemKey } : {}),
   });
 
   const target = new URL("/api/gateway/self-register", VPS_GATEWAY);
