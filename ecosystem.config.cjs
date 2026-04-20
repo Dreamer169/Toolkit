@@ -106,7 +106,7 @@ module.exports = {
     {
       "name": "ngrok",
       "script": "/usr/local/bin/ngrok",
-      "args": "http 3000 --domain=tried-habitant-kindly.ngrok-free.dev --log=stdout",
+      "args": "http 3000 --log=stdout",
       "interpreter": "none",
       "cwd": "/root/Toolkit",
       "restart_delay": 5000,
