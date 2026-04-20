@@ -186,9 +186,22 @@ def reload_xray() -> str:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--banned-ip", required=True)
+    ap.add_argument("--banned-ip", default="")
+    ap.add_argument("--pop-only", action="store_true", help="pop IP only, skip xray patch")
     args = ap.parse_args()
     banned = args.banned_ip.strip()
+
+    if args.pop_only:
+        entry, err, remaining, refill = pop_ip_from_pool(banned or "__none__")
+        if err or not entry:
+            print(__import__("json").dumps({"success":False,"error":err or "pool_empty","remaining":remaining}))
+            return
+        print(__import__("json").dumps({"success":True,"new_ip":entry["ip"],"latency":entry.get("latency"),"remaining":remaining}))
+        return
+
+    if not banned:
+        print(__import__("json").dumps({"success":False,"error":"--banned-ip required unless --pop-only"}))
+        return
 
     entry, err, remaining, refill_started = pop_ip_from_pool(banned)
     if err or not entry:

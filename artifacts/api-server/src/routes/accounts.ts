@@ -16,6 +16,14 @@ const VPS_GATEWAY = process.env.VPS_GATEWAY_URL || "http://45.205.27.69:8080/api
 const XRAY_PORTS_DEAD = new Set(Array.from({ length: 26 }, (_, i) => 10820 + i));  // all quarkip dead
 const XRAY_PORTS  = [1094, 1095, 1093, 1092, 1090];  // http-poll bridges first, WS bridge last
 const DEAD_PORTS  = XRAY_PORTS_DEAD;
+const TOR_SOCKS_PORT = 9050;  // Tor SOCKS5 (already running on VPS), exit = non-CF/non-GCP
+const DIRECT_PORT    = 0;     // Direct VPS IP (AS8796 FASTNET DATA), exit = 45.205.27.69
+
+/** Build proxy URL from port: 0=direct (no proxy), else SOCKS5 */
+function portToProxy(port: number): string {
+  if (port === DIRECT_PORT) return "";
+  return `socks5://127.0.0.1:${port}`;
+}
 
 // Outlook OAuth (Thunderbird client_id)
 const OUTLOOK_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
@@ -133,9 +141,123 @@ async function rebuildXrayPortMap() {
     console.log(`[cf-rotate] xray port→IP 映射已重建: ${xrayPortCfIp.size} 条`);
   } catch { /* 静默 */ }
 }
+
+// ── Dynamic per-attempt xray VLESS relay (fresh CF IP from pool each time) ────
+const XRAY_BIN_PATH = (() => {
+  const { existsSync } = require("fs");
+  const candidates = [
+    path.join(WORKSPACE_DIR, "artifacts/api-server/xray/xray"),
+    "/root/Toolkit/artifacts/api-server/xray/xray",
+  ];
+  return candidates.find(existsSync) ?? "";
+})();
+
+const POP_ONLY_SCRIPT = ROTATE_SCRIPT; // same script, --pop-only flag
+
+interface DynXray { port: number; cfIp: string; cleanup: () => void; }
+const activeDynXrays = new Map<number, () => void>();
+
+function _findFreeLocalPort(start = 20000, end = 29999): Promise<number | null> {
+  return new Promise(resolve => {
+    const net = require("net");
+    let p = start + Math.floor(Math.random() * (end - start));
+    const tryNext = (n: number) => {
+      if (n > end) { resolve(null); return; }
+      const s = net.createServer();
+      s.once("error", () => tryNext(n + 1));
+      s.once("listening", () => s.close(() => resolve(n)));
+      s.listen(n, "127.0.0.1");
+    };
+    tryNext(p);
+  });
+}
+
+function _waitForPort(port: number, timeoutMs = 8000): Promise<boolean> {
+  return new Promise(resolve => {
+    const net = require("net");
+    const deadline = Date.now() + timeoutMs;
+    const attempt = () => {
+      if (Date.now() > deadline) { resolve(false); return; }
+      const s = net.createConnection({ port, host: "127.0.0.1" });
+      s.on("connect", () => { s.destroy(); resolve(true); });
+      s.on("error", () => setTimeout(attempt, 300));
+    };
+    attempt();
+  });
+}
+
+async function spawnDynamicXray(bannedExitIp?: string): Promise<DynXray | null> {
+  if (!POP_ONLY_SCRIPT || !XRAY_BIN_PATH) {
+    console.warn("[dyn-xray] missing rotate script or xray binary");
+    return null;
+  }
+  // 1. Pop fresh CF IP from pool
+  const cfIp: string = await new Promise(resolve => {
+    const args = ["--pop-only"];
+    if (bannedExitIp && bannedExitIp !== "127.0.0.1" && bannedExitIp.includes(".")) {
+      args.push("--banned-ip", bannedExitIp);
+    }
+    let out = "";
+    const p = spawn(PYTHON, [POP_ONLY_SCRIPT, ...args]);
+    p.stdout.on("data", (d: Buffer) => { out += d; });
+    p.on("close", () => {
+      try { const j = JSON.parse(out); resolve(j.success ? j.new_ip : ""); }
+      catch { resolve(""); }
+    });
+    p.on("error", () => resolve(""));
+  });
+  if (!cfIp) { console.warn("[dyn-xray] pool empty or error"); return null; }
+
+  // 2. Find free port
+  const port = await _findFreeLocalPort();
+  if (!port) { console.warn("[dyn-xray] no free port"); return null; }
+
+  // 3. Write temp config
+  const { writeFileSync, unlinkSync } = require("fs");
+  const cfgPath = `/tmp/xray_dyn_${port}.json`;
+  const cfg = {
+    log: { loglevel: "none" },
+    inbounds: [{ port, listen: "127.0.0.1", protocol: "socks", settings: { auth: "noauth", udp: false } }],
+    outbounds: [{
+      protocol: "vless",
+      settings: { vnext: [{ address: cfIp, port: 443, users: [{ id: "b3be1361-709c-4cad-824a-732e434ea06f", encryption: "none", flow: "" }] }] },
+      streamSettings: {
+        network: "ws", security: "tls",
+        tlsSettings: { serverName: "iam.jimhacker.qzz.io", fingerprint: "chrome", alpn: ["h3", "h2", "http/1.1"], allowInsecure: false },
+        wsSettings: { path: "/?ed=2048", headers: { Host: "iam.jimhacker.qzz.io" } },
+      },
+    }],
+  };
+  try { writeFileSync(cfgPath, JSON.stringify(cfg)); } catch { return null; }
+
+  // 4. Spawn xray process
+  const xrayProc = spawn(XRAY_BIN_PATH, ["run", "-config", cfgPath], { stdio: "ignore" });
+  const cleanup = () => {
+    try { xrayProc.kill("SIGTERM"); } catch {}
+    try { unlinkSync(cfgPath); } catch {}
+    activeDynXrays.delete(port);
+  };
+  activeDynXrays.set(port, cleanup);
+  xrayProc.on("exit", () => { try { unlinkSync(cfgPath); } catch {} activeDynXrays.delete(port); });
+
+  // 5. Wait for SOCKS5 port
+  const ready = await _waitForPort(port, 8000);
+  if (!ready) {
+    console.warn(`[dyn-xray] port ${port} not ready in 8s (CF IP ${cfIp})`);
+    cleanup();
+    return null;
+  }
+
+  console.log(`[dyn-xray] ready: SOCKS5:${port} via CF IP ${cfIp}`);
+  return { port, cfIp, cleanup };
+}
+
 function availablePorts(): number[] {
   const now = Date.now();
-  return XRAY_PORTS.filter(p => !DEAD_PORTS.has(p) && (cfBannedUntil.get(p) ?? 0) < now && (portDeadUntil.get(p) ?? 0) < now);
+  const static_ = XRAY_PORTS.filter(p => !DEAD_PORTS.has(p) && (cfBannedUntil.get(p) ?? 0) < now && (portDeadUntil.get(p) ?? 0) < now);
+  // Include active dynamic xray relay ports so they show up in livePorts check
+  const dynamic = Array.from(activeDynXrays.keys());
+  return [...static_, ...dynamic];
 }
 function sortedByReputation(ports: number[]): number[] {
   const priority = [1094, 1095, 1093, 1092, 1090].filter((p) => ports.includes(p));
@@ -548,11 +670,15 @@ router.post("/replit/register", (req, res) => {
 
           // ── Step 2a: 最多 6 次不同代理端口重试（shuffle不重复）───────
           let captchaFailCount = 0; // 同一 Outlook 账号的 captcha_token_invalid 次数
+          let cfBlockedCount   = 0; // cf_api_blocked count → escalate Tor → direct
+          let cfJsTimeoutCount = 0; // consecutive cf_js_challenge_timeout → inject Tor after threshold
+          let torRateLimited   = false; // Tor IP also got account_rate_limited → never re-inject Tor
           const rateLimitedIps = new Set<string>(); // track unique IPs that rate-limited this email
           const regScript = path.join(API_DIR, "replit_register.py");
           let regOk  = false;
           let exitIp = "";
           let lastErr = "";
+          const dynXrayCleanups: Array<() => void> = []; // cleanup fns for dynamic xray instances
 
           // 每个Outlook账号：信誉好的端口优先，避免重复
           let portQueue = sortedByReputation(availablePorts());
@@ -567,8 +693,10 @@ router.post("/replit/register", (req, res) => {
               log(`    No live SOCKS ports available, stop retrying this Outlook`);
               break;
             }
-            let tryPort = portQueue.find((p) => livePorts.includes(p));
-            if (!tryPort) {
+            // Special ports (Tor=9050, direct=0) are always valid; skip livePorts check for them
+            const SPECIAL_PORTS = new Set([TOR_SOCKS_PORT, DIRECT_PORT]);
+            let tryPort = portQueue.find((p) => SPECIAL_PORTS.has(p) || livePorts.includes(p));
+            if (tryPort === undefined) {  // use === undefined, not !tryPort (0 is falsy)
               portQueue = sortedByReputation(livePorts);
               tryPort = portQueue[0];
             }
@@ -580,7 +708,7 @@ router.post("/replit/register", (req, res) => {
               email: outlook.email,
               username,
               password,
-              proxy: `socks5://127.0.0.1:${tryPort}`,
+              proxy: portToProxy(tryPort),
               headless,
               max_wait: 90,
               capsolver_key: process.env.CAPSOLVER_KEY ?? "",
@@ -665,13 +793,52 @@ router.post("/replit/register", (req, res) => {
                 log(`    account_rate_limited on ${rateLimitedIps.size} different IPs → email-level rate limit, skip Outlook`);
                 break; // 换下一个 Outlook 账号
               }
-              log(`    ⏳ account_rate_limited on port ${tryPort} (exit: ${exitIp}) → rotate CF IP + switch port`);
+              log(`    ⏳ account_rate_limited on port ${tryPort} (exit: ${exitIp}) → rotate CF IP + spawn dynamic xray`);
               const cfIpRl = xrayPortCfIp.get(tryPort);
-              if (cfIpRl) {
-                rotateCfIpInXray(cfIpRl);
-                await new Promise(r => setTimeout(r, 3000));
+              if (cfIpRl) rotateCfIpInXray(cfIpRl);
+              // Track if Tor itself was rate-limited → mark it so we never re-inject
+              if (tryPort === TOR_SOCKS_PORT) {
+                torRateLimited = true;
+                log(`    [tor] Tor IP also rate-limited → mark torRateLimited, skip Tor re-injection`);
+              }
+              // Inject Tor first as non-CF/non-GCP exit (free, diverse exit nodes)
+              if (!torRateLimited && !portQueue.includes(TOR_SOCKS_PORT)) {
+                portQueue.unshift(TOR_SOCKS_PORT);
+                log(`    → pre-queued Tor SOCKS5:9050 (non-CF/non-GCP exit, tries before CF xray)`);
+              }
+              // Spawn a fresh xray VLESS relay with a new CF IP (different exit IP)
+              const dynXray = await spawnDynamicXray(exitIp || undefined);
+              if (dynXray) {
+                log(`    [dyn-xray] spawned SOCKS5:${dynXray.port} via CF IP ${dynXray.cfIp} → queued after Tor`);
+                dynXrayCleanups.push(dynXray.cleanup);
+                // Insert dynXray AFTER Tor in queue so Tor is tried first
+                const torIdx = portQueue.indexOf(TOR_SOCKS_PORT);
+                if (torIdx >= 0) portQueue.splice(torIdx + 1, 0, dynXray.port);
+                else portQueue.unshift(dynXray.port);
               } else {
-                await new Promise(r => setTimeout(r, 2000));
+                log(`    [dyn-xray] spawn failed → Tor will be tried`);
+              }
+              continue;
+            }
+
+            // cf_api_blocked: CF CDN exit IP blocked by Cloudflare WAF (CF-on-CF)
+            // Escalation: Tor SOCKS5 (port 9050) -> VPS direct (port 0) -> give up
+            if (lastErr.includes("cf_api_blocked")) {
+              cfBlockedCount++;
+              if (cfBlockedCount === 1) {
+                if (!torRateLimited) {
+                  log(`    ⛔ cf_api_blocked (exit: ${exitIp}) → inject Tor SOCKS5:9050`);
+                  portQueue.unshift(TOR_SOCKS_PORT);
+                } else {
+                  log(`    ⛔ cf_api_blocked (exit: ${exitIp}) → Tor rate-limited, inject VPS direct`);
+                  portQueue.unshift(DIRECT_PORT);
+                }
+              } else if (cfBlockedCount === 2) {
+                log(`    ⛔ cf_api_blocked x2 → inject VPS direct (port 0, AS8796)`);
+                portQueue.unshift(DIRECT_PORT);
+              } else {
+                log(`    ⛔ cf_api_blocked x${cfBlockedCount} → Tor+direct both tried, skip Outlook`);
+                break;
               }
               continue;
             }
@@ -717,7 +884,26 @@ router.post("/replit/register", (req, res) => {
                   if (lastErr.includes("cf_ip_banned") || lastErr.includes("cf_hard_block")) {
                     cfBannedUntil.set(tryPort, Date.now() + 5 * 60 * 1000);
                   } else if (lastErr.includes("cf_js_challenge_timeout")) {
-                    cfBannedUntil.set(tryPort, Date.now() + 1 * 60 * 1000); // 1min冷却
+                    cfBannedUntil.set(tryPort, Date.now() + 1 * 60 * 1000); // 1min cooldown
+                    if (tryPort === TOR_SOCKS_PORT) {
+                      // Tor itself got CF-challenged → disable Tor entirely
+                      torRateLimited = true;
+                      log(`    [tor] Tor IP also CF-challenged (${exitIp}) → mark torRateLimited`);
+                    } else if (XRAY_PORTS.includes(tryPort)) {
+                      // Only count static port CF timeouts (not dynamic, not Tor)
+                      cfJsTimeoutCount++;
+                    }
+                    if (cfJsTimeoutCount >= 3 && !torRateLimited && !portQueue.includes(TOR_SOCKS_PORT)) {
+                      log(`    [cf-js x${cfJsTimeoutCount}] All static ports CF-challenged → inject Tor SOCKS5:9050 (non-CF exit)`);
+                      portQueue.unshift(TOR_SOCKS_PORT);
+                    } else if (cfJsTimeoutCount >= 3 && torRateLimited && !portQueue.includes(DIRECT_PORT)) {
+                      log(`    [cf-js x${cfJsTimeoutCount}] All static ports CF-challenged, Tor blocked → inject VPS direct (port 0)`);
+                      portQueue.unshift(DIRECT_PORT);
+                    } else if (torRateLimited && !portQueue.includes(DIRECT_PORT) && tryPort === TOR_SOCKS_PORT) {
+                      // Tor just got blocked → inject VPS direct immediately
+                      log(`    [tor] Tor CF-blocked → inject VPS direct (port 0)`);
+                      portQueue.unshift(DIRECT_PORT);
+                    }
                   }
                   const cfIp = xrayPortCfIp.get(tryPort);
                   if (cfIp) {
@@ -727,6 +913,13 @@ router.post("/replit/register", (req, res) => {
                   }
                 } else {
                   log(`    → port 1090 (WS-proxy bridge, Replit IP) CF issue → skip CF rotation, try next port`);
+                  // WS bridge = Replit cloud IP, no CF rotation needed, handled above
+                }
+                // Dynamic xray port (>19999) with CF JS challenge → its CF CDN IP is fundamentally blocked
+                // Inject Tor as non-CF, non-GCP exit IP alternative (once per email)
+                if (lastErr.includes("cf_js_challenge_timeout") && tryPort > 19999 && !torRateLimited && !portQueue.includes(TOR_SOCKS_PORT)) {
+                  log(`    [dyn-xray:${tryPort} cf-timeout] → inject Tor SOCKS5:9050 (non-CF exit)`);
+                  portQueue.unshift(TOR_SOCKS_PORT);
                 }
               }
               log(`    → instant port switch`);
@@ -738,6 +931,10 @@ router.post("/replit/register", (req, res) => {
                             3000 + attempt * 1000;
             await new Promise(r => setTimeout(r, delayMs));
           }
+
+          // Cleanup all dynamic xray processes used for this Outlook account
+          for (const c of dynXrayCleanups) { try { c(); } catch {} }
+          dynXrayCleanups.length = 0;
 
           if (!regOk) continue; // 换下一个 Outlook 账号
 
