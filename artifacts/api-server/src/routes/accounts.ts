@@ -630,6 +630,7 @@ router.post("/replit/register", (req, res) => {
              AND COALESCE(tags, '') NOT LIKE '%replit_used%'
              AND COALESCE(tags, '') NOT LIKE '%token_invalid%'
              AND COALESCE(tags, '') NOT LIKE '%inbox_error%'
+             AND COALESCE(tags, '') NOT LIKE '%abuse_mode%'
              AND ($1::text IS NULL OR LOWER(email) = $1)
              AND NOT EXISTS (
                SELECT 1 FROM accounts r
