@@ -25,6 +25,7 @@
     "pg": "^8.20.0",
     "pino": "^9",
     "pino-http": "^10",
+    "undici": "^7.25.0",
     "ws": "^8.20.0"
   },
   "devDependencies": {
