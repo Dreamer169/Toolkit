@@ -1,5 +1,6 @@
 import { jobQueue } from "../lib/job-queue.js";
 import { setLiveVerifyEnabled, getLiveVerifyStatus } from "../lib/live-verify-poller.js";
+import { microsoftFetch, getMicrosoftProxyEnv } from "../lib/proxy-fetch.js";
 import { Router, type IRouter } from "express";
 import { createHash, randomBytes, randomUUID } from "crypto";
 import { execute, query, queryOne } from "../db.js";
@@ -690,7 +691,7 @@ router.post("/tools/outlook/refresh-token", async (req, res) => {
   }
   const tid = tenantId || "common";
   try {
-    const r = await fetch(`https://login.microsoftonline.com/${tid}/oauth2/v2.0/token`, {
+    const r = await microsoftFetch(`https://login.microsoftonline.com/${tid}/oauth2/v2.0/token`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -748,7 +749,7 @@ router.post("/tools/outlook/messages", async (req, res) => {
       accountEmail = account.email;
       accessToken = account.token || "";
       if (account.refresh_token) {
-        const tr = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+        const tr = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({
@@ -810,7 +811,7 @@ router.get("/tools/outlook/profile", async (req, res) => {
   const token = req.headers["x-access-token"] as string;
   if (!token) { res.status(400).json({ success: false, error: "缺少 x-access-token" }); return; }
   try {
-    const r = await fetch("https://graph.microsoft.com/v1.0/me?$select=id,displayName,mail,userPrincipalName,accountEnabled", {
+    const r = await microsoftFetch("https://graph.microsoft.com/v1.0/me?$select=id,displayName,mail,userPrincipalName,accountEnabled", {
       headers: { Authorization: `Bearer ${token}` },
     });
     const data = await r.json() as {
@@ -830,7 +831,7 @@ router.post("/tools/outlook/check-account", async (req, res) => {
   const { email } = req.body as { email?: string };
   if (!email) { res.status(400).json({ success: false, error: "email 不能为空" }); return; }
   try {
-    const r = await fetch("https://login.microsoftonline.com/common/GetCredentialType", {
+    const r = await microsoftFetch("https://login.microsoftonline.com/common/GetCredentialType", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -865,7 +866,7 @@ router.post("/tools/outlook/check-accounts-batch", async (req, res) => {
   const results: Array<{ email: string; exists: boolean; ifExistsResult: number }> = [];
   for (const email of emails.slice(0, 20)) {
     try {
-      const r = await fetch("https://login.microsoftonline.com/common/GetCredentialType", {
+      const r = await microsoftFetch("https://login.microsoftonline.com/common/GetCredentialType", {
         method: "POST",
         headers: { "Content-Type": "application/json", "User-Agent": "Mozilla/5.0", "Origin": "https://login.microsoftonline.com" },
         body: JSON.stringify({ username: email, isOtherIdpSupported: true, checkPhones: false, isRemoteNGCSupported: false, isCookieBannerShown: false, isFidoSupported: false, originalRequest: "", flowToken: "" }),
@@ -888,7 +889,7 @@ router.post("/tools/outlook/device-code", async (req, res) => {
   const cid = clientId || "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
   const tid = tenantId || "common";
   try {
-    const r = await fetch(`https://login.microsoftonline.com/${tid}/oauth2/v2.0/devicecode`, {
+    const r = await microsoftFetch(`https://login.microsoftonline.com/${tid}/oauth2/v2.0/devicecode`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -930,7 +931,7 @@ router.post("/tools/outlook/device-poll", async (req, res) => {
   const cid = clientId || "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
   const tid = tenantId || "common";
   try {
-    const r = await fetch(`https://login.microsoftonline.com/${tid}/oauth2/v2.0/token`, {
+    const r = await microsoftFetch(`https://login.microsoftonline.com/${tid}/oauth2/v2.0/token`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -999,7 +1000,7 @@ async function createBatchOAuthSessions(rows: { id: number; email: string }[]) {
   const sessionList: BatchOAuthSession[] = [];
   await Promise.allSettled(rows.map(async (acc) => {
     try {
-      const r = await fetch("https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode", {
+      const r = await microsoftFetch("https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({ client_id: CLIENT_ID, scope: SCOPE }).toString(),
@@ -1098,7 +1099,7 @@ router.post("/tools/outlook/batch-oauth/poll", async (req, res) => {
   // 并发轮询所有 pending 的账号
   await Promise.allSettled(sessions.filter(s => s.status === "pending").map(async (s) => {
     try {
-      const r = await fetch("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", {
+      const r = await microsoftFetch("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -1198,7 +1199,7 @@ router.post("/tools/outlook/batch-oauth/auto-complete", async (req, res) => {
         const CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
         const ps = batchOAuthSessions.get(sessionId) || [];
         for (const s of ps.filter((x: BatchOAuthSession) => x.status === "pending")) {
-          const r2 = await fetch("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", {
+          const r2 = await microsoftFetch("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", {
             method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
             body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:device_code", client_id: CLIENT_ID, device_code: s.deviceCode }).toString(),
           });
@@ -2569,7 +2570,7 @@ router.post("/tools/outlook/verify-accounts", async (req, res) => {
       // 1. 有 refresh_token → 先用 /common/ 刷新（优先级最高）
       let refreshError = "";
       if (acc.refresh_token) {
-        const r = await fetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
+        const r = await microsoftFetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({
@@ -2595,7 +2596,7 @@ router.post("/tools/outlook/verify-accounts", async (req, res) => {
       // 2. 有 accessToken → Graph API 验证（/me 轻量接口）
       //    不走 IMAP，避免 BasicAuthBlocked 误报
       if (accessToken) {
-        const gr = await fetch("https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName", {
+        const gr = await microsoftFetch("https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName", {
           headers: { Authorization: `Bearer ${accessToken}` },
         });
         if (gr.ok) {
@@ -2663,7 +2664,7 @@ router.post("/tools/outlook/auto-auth", async (req, res) => {
     // 已有 refresh_token → 直接刷新 access_token，无需用户操作
     if (acc.refresh_token) {
       const { execute } = await import("../db.js");
-      const r = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+      const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -2714,7 +2715,7 @@ router.post("/tools/outlook/auto-auth-all", async (req, res) => {
       // 优先用 refresh_token 刷新
       if (acc.refresh_token) {
         try {
-          const r = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+          const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
             method: "POST",
             headers: { "Content-Type": "application/x-www-form-urlencoded" },
             body: new URLSearchParams({
@@ -2805,7 +2806,7 @@ async function fetchGraphMessages(accessToken: string, mailFolder: string, limit
   } else {
     url += "&$orderby=receivedDateTime desc";
   }
-  const r = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}`, ConsistencyLevel: "eventual" } });
+  const r = await microsoftFetch(url, { headers: { Authorization: `Bearer ${accessToken}`, ConsistencyLevel: "eventual" } });
   const data = await r.json() as { value?: GraphMailMessage[]; error?: { message?: string; code?: string } };
   return { ok: r.ok, status: r.status, error: data.error, messages: r.ok ? mapGraphMessages(data.value) : [] };
 }
@@ -2893,7 +2894,7 @@ router.post("/tools/outlook/purge-invalid", async (req, res) => {
     // ── 多重确认辅助：Graph /me ────────────────────────────────────────────
     const checkGraphToken = async (token: string): Promise<boolean> => {
       try {
-        const gr = await fetch("https://graph.microsoft.com/v1.0/me?$select=mail", {
+        const gr = await microsoftFetch("https://graph.microsoft.com/v1.0/me?$select=mail", {
           headers: { Authorization: "Bearer " + token },
         });
         return gr.ok;
@@ -2915,7 +2916,7 @@ router.post("/tools/outlook/purge-invalid", async (req, res) => {
     for (const acc of rows) {
       // ── 第一轮：有 refresh_token → 尝试刷新 ──────────────────────────────
       if (acc.refresh_token) {
-        const r = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+        const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({
@@ -3067,7 +3068,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
 
     // 有 refresh_token → 先用 /common/ 刷新（不直接信任 DB 里可能过期的 token）
     if (acc.refresh_token) {
-      const r = await fetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
+      const r = await microsoftFetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -3275,7 +3276,7 @@ router.patch("/tools/outlook/message/:accountId/:messageId/read", async (req, re
 
     let token = rows[0].token ?? "";
     if (rows[0].refresh_token) {
-      const r = await fetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
+      const r = await microsoftFetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -3293,7 +3294,7 @@ router.patch("/tools/outlook/message/:accountId/:messageId/read", async (req, re
     }
     if (!token) { res.status(400).json({ success: false, error: "无可用 token" }); return; }
 
-    const gr = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${messageId}`, {
+    const gr = await microsoftFetch(`https://graph.microsoft.com/v1.0/me/messages/${messageId}`, {
       method: "PATCH",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ isRead }),
@@ -3328,7 +3329,7 @@ router.post("/tools/outlook/message/:accountId/:messageId/move", async (req, res
 
     let token = rows[0].token ?? "";
     if (rows[0].refresh_token) {
-      const r = await fetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
+      const r = await microsoftFetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -3346,7 +3347,7 @@ router.post("/tools/outlook/message/:accountId/:messageId/move", async (req, res
     }
     if (!token) { res.status(400).json({ success: false, error: "无可用 token" }); return; }
 
-    const gr = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${messageId}/move`, {
+    const gr = await microsoftFetch(`https://graph.microsoft.com/v1.0/me/messages/${messageId}/move`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ destinationId }),
@@ -3380,7 +3381,7 @@ router.delete("/tools/outlook/message/:accountId/:messageId", async (req, res) =
 
     let token = rows[0].token ?? "";
     if (rows[0].refresh_token) {
-      const r = await fetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
+      const r = await microsoftFetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -3398,7 +3399,7 @@ router.delete("/tools/outlook/message/:accountId/:messageId", async (req, res) =
     }
     if (!token) { res.status(400).json({ success: false, error: "无可用 token" }); return; }
 
-    const gr = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${messageId}`, {
+    const gr = await microsoftFetch(`https://graph.microsoft.com/v1.0/me/messages/${messageId}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -3433,7 +3434,7 @@ router.post("/tools/outlook/click-verify-link", async (req, res) => {
     // 刷新 token
     let accessToken = acc.token || "";
     if (acc.refresh_token) {
-      const tr = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+      const tr = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -3460,7 +3461,7 @@ router.post("/tools/outlook/click-verify-link", async (req, res) => {
     const params = JSON.stringify({ token: accessToken, message_id: messageId ?? "", verify_url: verifyUrl ?? "" });
     const { spawn } = await import("child_process");
     const result = await new Promise<{ success: boolean; verify_url?: string; final_url?: string; title?: string; error?: string }>((resolve) => {
-      const child = spawn(process.env.PYTHON_BIN || "/usr/bin/python3", [scriptPath, params], { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+      const child = spawn(process.env.PYTHON_BIN || "/usr/bin/python3", [scriptPath, params], { env: { ...process.env, ...getMicrosoftProxyEnv(), PYTHONUNBUFFERED: "1" } });
       let out = "";
       child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
       child.stderr.on("data", (d: Buffer) => { process.stderr.write(d); });
@@ -3497,7 +3498,7 @@ router.post("/tools/outlook/auto-verify-emails", async (req, res) => {
       try {
         let accessToken = acc.token || "";
         if (acc.refresh_token) {
-          const tr = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+          const tr = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
             method: "POST",
             headers: { "Content-Type": "application/x-www-form-urlencoded" },
             body: new URLSearchParams({
@@ -3526,7 +3527,7 @@ router.post("/tools/outlook/auto-verify-emails", async (req, res) => {
           const params = JSON.stringify({ token: accessToken, message_id: msg.id, verify_url: "" });
           const { spawn } = await import("child_process");
           const clickResult = await new Promise<{ success: boolean; verify_url?: string; error?: string }>((resolve) => {
-            const child = spawn(process.env.PYTHON_BIN || "/usr/bin/python3", [scriptPath, params], { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+            const child = spawn(process.env.PYTHON_BIN || "/usr/bin/python3", [scriptPath, params], { env: { ...process.env, ...getMicrosoftProxyEnv(), PYTHONUNBUFFERED: "1" } });
             let out = "";
             child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
             child.on("close", () => {
@@ -3585,7 +3586,7 @@ router.post("/tools/outlook/account/:id/batch-delete-by-subject", async (req, re
 
     let token = rows[0].token ?? "";
     if (rows[0].refresh_token) {
-      const r = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+      const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -3616,7 +3617,7 @@ router.post("/tools/outlook/account/:id/batch-delete-by-subject", async (req, re
 
     let deleted = 0;
     for (const msg of msgs) {
-      const dr = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${msg.id}`, {
+      const dr = await microsoftFetch(`https://graph.microsoft.com/v1.0/me/messages/${msg.id}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
       });

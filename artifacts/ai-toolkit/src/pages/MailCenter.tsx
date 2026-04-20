@@ -84,7 +84,7 @@ function fmtDate(iso: string) {
 
 
 const TAG_LABELS: Record<string, string> = {
-  replit_used: "已用",
+  replit_used: "replit_used",
   abuse_mode: "API封禁",
   token_invalid: "token过期",
   inbox_error: "收件箱错误",
