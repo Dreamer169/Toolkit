@@ -1419,7 +1419,7 @@ router.get("/nodes/status", (_req, res) => {
     .map((n) => {
       // 规范化 baseUrl：去掉末尾 /api（桥接器自己追加路径）
       const rawBase = n.baseUrl ?? "";
-      const base = rawBase.endsWith("/api") ? rawBase.slice(0, -4) : rawBase;
+      const base = rawBase.endsWith("/api/gateway") ? rawBase.slice(0, -12) : rawBase.endsWith("/api") ? rawBase.slice(0, -4) : rawBase;
       const isDown = n.downUntil > now;
       return {
         id: n.id,

@@ -60,6 +60,8 @@ def node_sync_loop():
                 removed = [u for u in _nodes if u not in urls]
                 _nodes.clear()
                 _nodes.extend(urls)
+                for su in _seed:
+                    if su not in _nodes: _nodes.insert(0, su)
                 if added:
                     print(f"[poll-bridge] +nodes: {added}", flush=True)
                 if removed:
@@ -67,6 +69,13 @@ def node_sync_loop():
                     for u in removed:
                         _fc.pop(u, None)
         time.sleep(REFRESH_SECS)
+
+
+def strip_gateway_path(b):
+    for sfx in ("/api/gateway", "/api"):
+        if b.endswith(sfx):
+            return b[:-len(sfx)]
+    return b
 
 def pick():
     with _nodes_lock:
@@ -145,7 +154,7 @@ def handle(client, addr):
 
         print(f"[poll-bridge] {addr} -> {h}:{p} via {base[:60]}", flush=True)
         qs  = urllib.parse.urlencode({"host": h, "port": str(p), "token": TOKEN})
-        url = f"{base}/api/stream/open?{qs}"
+        url = f"{strip_gateway_path(base)}/api/stream/open?{qs}"
         st, body = http_post(url, timeout=10)
         if st not in (200, 201):
             print(f"[poll-bridge] open failed {st}", flush=True); fail(base)
@@ -163,7 +172,7 @@ def handle(client, addr):
         def read_loop():
             try:
                 while True:
-                    rurl = f"{base}/api/stream/read/{sid}?token={tq}"
+                    rurl = f"{strip_gateway_path(base)}/api/stream/read/{sid}?token={tq}"
                     st   = http_get_chunks(rurl, lambda c: client.sendall(c), timeout=R_TOUT+5)
                     if st in (204, 404, 410): break
             except Exception as e:
@@ -178,7 +187,7 @@ def handle(client, addr):
             try: data = client.recv(4096)
             except: break
             if not data: break
-            wurl = f"{base}/api/stream/write/{sid}?token={tq}"
+            wurl = f"{strip_gateway_path(base)}/api/stream/write/{sid}?token={tq}"
             st2, _ = http_post(wurl, body=data, timeout=W_TOUT)
             if st2 not in (200, 201):
                 print(f"[poll-bridge] write {st2}", flush=True); break
