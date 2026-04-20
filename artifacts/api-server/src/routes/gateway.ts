@@ -737,6 +737,7 @@ async function callOpenAiCompatibleNode(node: GatewayNode, req: Request, body: C
       ...(authorization ? { Authorization: authorization } : {}),
       "Content-Type": "application/json",
       "ngrok-skip-browser-warning": "1",
+      ...(node.type === "friend-openai" ? { "x-gateway-hop": "1" } : {}),
     },
     body: JSON.stringify(requestBody),
   });
@@ -1114,6 +1115,7 @@ async function streamNode(node: GatewayNode, req: Request, res: Response, body: 
           ...(authorization ? { Authorization: authorization } : {}),
           "Content-Type": "application/json",
           "ngrok-skip-browser-warning": "1",
+          ...(node.type === "friend-openai" ? { "x-gateway-hop": "1" } : {}),
         },
         body: JSON.stringify({ ...requestBody, stream: true }),
         signal: ctrl.signal,
@@ -1137,14 +1139,42 @@ async function streamNode(node: GatewayNode, req: Request, res: Response, body: 
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
       res.setHeader("x-gateway-node", node.id);
-      for await (const chunk of response.body) res.write(chunk);
-      res.end();
+      // 监听客户端断连，提前中止上游 fetch 节约资源
+      const onClientClose = () => { ctrl.abort(); };
+      res.on("close", onClientClose);
+      try {
+        for await (const chunk of response.body) res.write(chunk);
+        res.end();
+      } catch (writeErr) {
+        // EPIPE / ERR_HTTP_HEADERS_SENT = 客户端已断连，节点本身正常，不记故障
+        const msg = String(writeErr);
+        if (/EPIPE|ERR_HTTP|write after end|aborted/i.test(msg)) {
+          ctrl.abort(); // 中止上游拉流
+          clearTimeout(streamTimeout);
+          res.off("close", onClientClose);
+          return true;  // 节点调用本身成功
+        }
+        throw writeErr; // 真正的上游写入异常，向外抛
+      }
+      res.off("close", onClientClose);
       clearTimeout(streamTimeout);
       return true;
     } catch (error) {
       // B9 修复：fetch() 本身抛异常（网络断开、超时 abort）时补充 recordFailure
       clearTimeout(streamTimeout);
+      // 客户端主动关闭连接导致的 abort 不算节点故障
+      if (/abort/i.test(String(error)) && res.writableEnded) return true;
       recordFailure(node, undefined, String(error), started);
+      // Bug12: headers 已发出（流已开始）→ 不能让外层循环再写下一节点（会污染 SSE 流）
+      // 发送错误 SSE 事件通知客户端，然后终止流，外层循环停止重试
+      if (res.headersSent && !res.writableEnded) {
+        try {
+          const errEvent = JSON.stringify({ error: { type: "stream_interrupted", message: "上游连接中断，请重试" } });
+          res.write("data: " + errEvent + "\n\n");
+          res.end();
+        } catch {}
+        return true;
+      }
       return false;
     }
   }
@@ -1903,7 +1933,10 @@ router.post("/v1/chat/completions", async (req, res) => {
     res.status(400).json({ error: { message: "messages 不能为空", type: "invalid_request_error" } });
     return;
   }
-  const candidates = orderedCandidates(typeof body.model === "string" ? body.model : "");
+  // B12 修复：循环检测 - 若请求来自另一个网关节点（hop 请求），禁止再路由到 friend-openai 节点，防止 VPS 通过自身 ngrok 回环
+  const isHopRequest = Boolean(req.header("x-gateway-hop"));
+  const candidates = orderedCandidates(typeof body.model === "string" ? body.model : "")
+    .filter((n) => !isHopRequest || n.type !== "friend-openai");
   const errors: Array<Record<string, unknown>> = [];
 
   if (body.stream) {
