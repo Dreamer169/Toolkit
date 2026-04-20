@@ -2243,5 +2243,13 @@ setTimeout(() => { void backgroundProbeLoop(); }, 5_000); // 启动 5s 后先探
 setTimeout(() => { void ensureSub2ApiSetup(); }, 10_000);
 
 
+
+// B99: serve setup script for new friend nodes
+router.get('/setup-gateway-node.sh', (_req, res) => {
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Content-Disposition', 'inline; filename=setup-gateway-node.sh');
+  res.sendFile('/root/Toolkit/public/setup-gateway-node.sh');
+});
+
 export default router;
 
