@@ -1783,6 +1783,27 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
 
     captured = {'code': None, 'error': None, 'error_description': None}
 
+    # ── 安装路由拦截器，捕获 nativeclient 重定向中的 code ──────────────────────
+    def _intercept_nativeclient(route, request):
+        url = request.url
+        if 'code=' in url or 'error=' in url:
+            params = _up.parse_qs(_up.urlparse(url).query)
+            if 'code' in params and not captured['code']:
+                captured['code'] = params['code'][0]
+                print(f'[oauth] ✅ 路由拦截到授权码 (code={params["code"][0][:12]}...)', flush=True)
+            elif 'error' in params and not captured['error']:
+                captured['error'] = params['error'][0]
+                captured['error_description'] = params.get('error_description', [''])[0]
+        try:
+            route.abort()
+        except Exception:
+            pass
+
+    try:
+        page.route('**/nativeclient**', _intercept_nativeclient)
+    except Exception as _re:
+        print(f'[oauth] ⚠ 路由拦截器安装失败: {_re}', flush=True)
+
     try:
         # Dismiss passkey/interrupt pages before navigating to OAuth consent
         _skip_ms_interrupts(page, label='pre-oauth')
