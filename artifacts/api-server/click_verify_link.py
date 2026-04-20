@@ -248,7 +248,8 @@ try:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-                  "--disable-extensions", "--mute-audio"])
+                  "--disable-extensions", "--mute-audio",
+                  "--no-proxy-server"])  # 阻止 Chromium 读取 HTTPS_PROXY 环境变量
         proxy_conf = patchright_proxy(proxy_url)
         ctx_opts = {"user_agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

@@ -185,6 +185,41 @@ async function runCheck() {
       }
     }
 
+
+    // ── 1b. 定期重试 needs_oauth_manual 账号（每12小时一次）──────────────
+    const manualRetryRows = await query<{ id: number; email: string; password: string }>(
+      `SELECT id, email, password FROM accounts
+       WHERE platform = 'outlook'
+         AND status NOT IN ('suspended', 'done', 'needs_oauth_pending')
+         AND COALESCE(tags, '') LIKE '%needs_oauth_manual%'
+         AND COALESCE(tags, '') NOT LIKE '%abuse_mode%'
+         AND password IS NOT NULL AND password != ''
+         AND updated_at < NOW() - INTERVAL '12 hours'
+       ORDER BY updated_at ASC
+       LIMIT 2`,
+      []
+    );
+    if (manualRetryRows.length > 0) {
+      logger.info({ count: manualRetryRows.length }, "[healthcheck] 发现可重试的 needs_oauth_manual 账号");
+      for (const acc of manualRetryRows) {
+        await execute("UPDATE accounts SET status='needs_oauth_pending', updated_at=NOW() WHERE id=$1", [acc.id]);
+        const ok = await autoOAuth(acc);
+        if (ok) {
+          // 清除 needs_oauth_manual 标签
+          await execute(
+            `UPDATE accounts SET tags = NULLIF(TRIM(BOTH ',' FROM
+               REGEXP_REPLACE(COALESCE(tags,''), '(^|,?)needs_oauth_manual(,|$)', ',', 'g')
+             ), ','), status='active', updated_at=NOW() WHERE id=$1`,
+            [acc.id]
+          );
+          logger.info({ email: acc.email }, "[healthcheck] needs_oauth_manual 重新授权成功，标签已清除");
+        } else {
+          await execute("UPDATE accounts SET status='needs_oauth', updated_at=NOW() WHERE id=$1", [acc.id]);
+          logger.warn({ email: acc.email }, "[healthcheck] needs_oauth_manual 重试仍失败，12h后再试");
+        }
+      }
+    }
+
     // ── 2. 扫描有 token/refresh 但状态异常（未在 live-verify 中覆盖到）的账号 ──
     // 只检查 status=active 且带有 needs_oauth_pending 遗留的清理
     await execute(

@@ -1118,7 +1118,15 @@ router.post("/tools/outlook/batch-oauth/poll", async (req, res) => {
         s.refreshToken = d.refresh_token ?? "";
         // 立即存入数据库
         await dbE(
-          "UPDATE accounts SET token=$1, refresh_token=$2, status='active', updated_at=NOW() WHERE id=$3",
+          `UPDATE accounts
+             SET token=$1, refresh_token=$2, status='active', updated_at=NOW(),
+                 tags = CASE
+                   WHEN COALESCE(tags,'') LIKE '%needs_oauth_manual%'
+                   THEN NULLIF(TRIM(BOTH ',' FROM
+                          REGEXP_REPLACE(COALESCE(tags,''), '(^|,?)needs_oauth_manual(,|$)', ',', 'g')
+                        ), ',')
+                   ELSE tags END
+           WHERE id=$3`,
           [d.access_token, d.refresh_token ?? "", s.accountId]
         );
       } else if (d.error === "expired_token" || d.error === "code_expired") {
@@ -1206,11 +1214,121 @@ router.post("/tools/outlook/batch-oauth/auto-complete", async (req, res) => {
           const td = await r2.json() as { access_token?: string; refresh_token?: string };
           if (td.access_token) {
             s.status = "done"; s.accessToken = td.access_token; s.refreshToken = td.refresh_token ?? "";
-            await dbAc("UPDATE accounts SET token=$1, refresh_token=$2, status='active', updated_at=NOW() WHERE id=$3", [td.access_token, td.refresh_token ?? "", s.accountId]);
+            await dbAc(
+              `UPDATE accounts SET token=$1, refresh_token=$2, status='active', updated_at=NOW(),
+                   tags = CASE WHEN COALESCE(tags,'') LIKE '%needs_oauth_manual%'
+                     THEN NULLIF(TRIM(BOTH ',' FROM
+                       REGEXP_REPLACE(COALESCE(tags,''), '(^|,?)needs_oauth_manual(,|$)', ',', 'g')), ',')
+                     ELSE tags END WHERE id=$3`,
+              [td.access_token, td.refresh_token ?? "", s.accountId]);
           }
         }
       } catch {}
       console.log(`[auto-complete] sessionId=${sessionId} exit=${exitCode}`);
+    });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+
+// POST /tools/outlook/batch-oauth/reauth-manual
+// 专门针对 needs_oauth_manual 账号重新发起 OAuth 授权（设备码 + 自动浏览器完成）
+router.post("/tools/outlook/batch-oauth/reauth-manual", async (req, res) => {
+  const { accountIds } = req.body as { accountIds?: number[] };
+  try {
+    cleanOldBatchSessions();
+    const { query: dbQRm, execute: dbERm } = await import("../db.js");
+
+    let rows: { id: number; email: string; password: string }[];
+    const baseFilter = `platform='outlook'
+       AND COALESCE(tags,'') LIKE '%needs_oauth_manual%'
+       AND COALESCE(tags,'') NOT LIKE '%abuse_mode%'
+       AND status NOT IN ('suspended', 'needs_oauth_pending')
+       AND password IS NOT NULL AND password != ''`;
+
+    if (accountIds?.length) {
+      rows = await dbQRm<{ id: number; email: string; password: string }>(
+        `SELECT id, email, COALESCE(password,'') AS password FROM accounts WHERE ${baseFilter} AND id = ANY($1::int[])`,
+        [accountIds]
+      );
+    } else {
+      rows = await dbQRm<{ id: number; email: string; password: string }>(
+        `SELECT id, email, COALESCE(password,'') AS password FROM accounts WHERE ${baseFilter} ORDER BY updated_at ASC LIMIT 10`
+      );
+    }
+
+    if (!rows.length) {
+      res.json({ success: false, error: "没有需要重授权的 needs_oauth_manual 账号" });
+      return;
+    }
+
+    // 清零 token（可能有残留的无效 token），防止被 batch-oauth/start 过滤
+    for (const r of rows) {
+      await dbERm(
+        "UPDATE accounts SET token=NULL, refresh_token=NULL, status='needs_oauth_pending', updated_at=NOW() WHERE id=$1",
+        [r.id]
+      );
+    }
+
+    const { sessionId, sessionList } = await createBatchOAuthSessions(rows);
+    const autoPayload = sessionList
+      .filter((s: BatchOAuthSession) => s.status === "pending")
+      .map((s: BatchOAuthSession) => {
+        const row = rows.find(r => r.id === s.accountId);
+        return { accountId: s.accountId, email: s.email, password: row?.password || "", userCode: s.userCode };
+      })
+      .filter((x: { password: string }) => x.password);
+
+    if (!autoPayload.length) {
+      res.json({ success: false, error: "设备码申请失败或无密码", sessionId });
+      return;
+    }
+
+    const { spawn: spawnRm } = await import("child_process");
+    const rmScript = new URL("../auto_device_code.py", import.meta.url).pathname;
+    const rmProc = spawnRm(
+      "python3", [rmScript, JSON.stringify(autoPayload), "http://127.0.0.1:10809"],
+      { detached: true, stdio: ["ignore", "pipe", "pipe"], env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: "1" } }
+    );
+    rmProc.unref();
+
+    res.json({
+      success: true, sessionId,
+      accounts: autoPayload.map((x: { accountId: number; email: string; userCode: string }) => ({
+        accountId: x.accountId, email: x.email, userCode: x.userCode,
+      })),
+    });
+
+    // 授权完成后更新 DB + 清除 needs_oauth_manual 标签
+    rmProc.on("close", async (exitCode: number | null) => {
+      try {
+        const { execute: dbRmCb } = await import("../db.js");
+        const CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
+        const ps = batchOAuthSessions.get(sessionId) || [];
+        for (const s of ps.filter((x: BatchOAuthSession) => x.status === "pending")) {
+          const r2 = await microsoftFetch("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", {
+            method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:device_code", client_id: CLIENT_ID, device_code: s.deviceCode }).toString(),
+          });
+          const td = await r2.json() as { access_token?: string; refresh_token?: string };
+          if (td.access_token) {
+            s.status = "done"; s.accessToken = td.access_token; s.refreshToken = td.refresh_token ?? "";
+            await dbRmCb(
+              `UPDATE accounts SET token=$1, refresh_token=$2, status='active', updated_at=NOW(),
+                 tags = NULLIF(TRIM(BOTH ',' FROM
+                   REGEXP_REPLACE(COALESCE(tags,''), '(^|,?)needs_oauth_manual(,|$)', ',', 'g')
+                 ), ',')
+               WHERE id=$3`,
+              [td.access_token, td.refresh_token ?? "", s.accountId]
+            );
+          } else {
+            // 授权仍失败：恢复 needs_oauth 状态
+            await dbRmCb("UPDATE accounts SET status='needs_oauth', updated_at=NOW() WHERE id=$1", [s.accountId]);
+          }
+        }
+      } catch (e) { console.error("[reauth-manual] callback error:", e); }
+      console.log(`[reauth-manual] sessionId=${sessionId} exit=${exitCode}`);
     });
   } catch (e: unknown) {
     res.status(500).json({ success: false, error: String(e) });
