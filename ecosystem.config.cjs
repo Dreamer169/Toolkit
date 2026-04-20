@@ -218,5 +218,60 @@ module.exports = {
         "PYTHONUNBUFFERED": "1"
       }
     }
+,
+    {
+      "name": "http-poll-bridge-2",
+      "script": "/root/Toolkit/http_poll_bridge.py",
+      "interpreter": "python3",
+      "cwd": "/root/Toolkit",
+      "restart_delay": 5000,
+      "max_restarts": 50,
+      "watch": false,
+      "autorestart": true,
+      "env": {
+        "SOCKS_PORT": "1093",
+        "STREAM_TOKEN": "123456",
+        "GATEWAY_API": "http://localhost:8080/api",
+        "SUBNODE_URLS": "https://gh-cli-direct--elizabetha96.replit.app,https://gh-cli-install--jessicaphilli10.replit.app,https://gh-cli-install--bandersonndz.replit.app,https://957ee4dd-b94b-4405-8373-7a1bd9558eff-00-1kr7ptb11d9tn.spock.replit.dev",
+        "REFRESH_SECS": "30",
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "http-poll-bridge-3",
+      "script": "/root/Toolkit/http_poll_bridge.py",
+      "interpreter": "python3",
+      "cwd": "/root/Toolkit",
+      "restart_delay": 5000,
+      "max_restarts": 50,
+      "watch": false,
+      "autorestart": true,
+      "env": {
+        "SOCKS_PORT": "1094",
+        "STREAM_TOKEN": "123456",
+        "GATEWAY_API": "http://localhost:8080/api",
+        "SUBNODE_URLS": "https://gh-cli-direct--elizabetha96.replit.app,https://gh-cli-install--jessicaphilli10.replit.app,https://gh-cli-install--bandersonndz.replit.app,https://957ee4dd-b94b-4405-8373-7a1bd9558eff-00-1kr7ptb11d9tn.spock.replit.dev",
+        "REFRESH_SECS": "30",
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "http-poll-bridge-4",
+      "script": "/root/Toolkit/http_poll_bridge.py",
+      "interpreter": "python3",
+      "cwd": "/root/Toolkit",
+      "restart_delay": 5000,
+      "max_restarts": 50,
+      "watch": false,
+      "autorestart": true,
+      "env": {
+        "SOCKS_PORT": "1095",
+        "STREAM_TOKEN": "123456",
+        "GATEWAY_API": "http://localhost:8080/api",
+        "SUBNODE_URLS": "https://gh-cli-direct--elizabetha96.replit.app,https://gh-cli-install--jessicaphilli10.replit.app,https://gh-cli-install--bandersonndz.replit.app,https://957ee4dd-b94b-4405-8373-7a1bd9558eff-00-1kr7ptb11d9tn.spock.replit.dev",
+        "REFRESH_SECS": "30",
+        "PYTHONUNBUFFERED": "1"
+      }
+    }
   ]
 };
