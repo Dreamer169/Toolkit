@@ -767,7 +767,7 @@ router.post("/replit/register", (req, res) => {
 // ── GET /api/replit/register/:jobId ──────────────────────────────────────────
 router.get("/replit/register/:jobId", (req, res) => {
   const job = jobs.get(req.params.jobId);
-  if (!job) return res.status(404).json({ success: false, error: "job not found" });
+  if (!job) { res.status(404).json({ success: false, error: "job not found" }); return; }
   res.json({
     jobId: job.id,
     status: job.status,
@@ -780,7 +780,7 @@ router.get("/replit/register/:jobId", (req, res) => {
 // ── POST /api/replit/gateway-register ─────────────────────────────────────────
 router.post("/replit/gateway-register", async (req, res) => {
   const { gatewayUrl, name } = req.body as { gatewayUrl: string; name?: string };
-  if (!gatewayUrl) return res.status(400).json({ success: false, error: "missing gatewayUrl" });
+  if (!gatewayUrl) { res.status(400).json({ success: false, error: "missing gatewayUrl" }); return; }
   try {
     const r = await localPost("/api/gateway/self-register", { gatewayUrl, name });
     res.json(r);
@@ -875,7 +875,7 @@ router.post("/signup", (req, res) => {
 
 router.get("/signup/status/:jobId", (req, res) => {
   const job = jobs.get(req.params.jobId);
-  if (!job) return res.status(404).json({ error: "job not found" });
+  if (!job) { res.status(404).json({ error: "job not found" }); return; }
   res.json({
     jobId: job.id, status: job.status,
     elapsed: Math.round((Date.now() - job.started) / 1000),
@@ -967,7 +967,7 @@ router.post("/pipeline/full", async (req, res) => {
 
   (async () => {
     try {
-      const { query: dbQ } = await import("../db.js");
+      const { query: dbQ, execute: dbE } = await import("../db.js");
 
       // ── Step 1: 检查 Outlook 账号供应 ────────────────────────────────────
       log("=== Step1: 检查 Outlook 账号池 ===");
@@ -1089,7 +1089,7 @@ router.post("/pipeline/full", async (req, res) => {
 // ── GET /api/pipeline/full/:jobId ─────────────────────────────────────────────
 router.get("/pipeline/full/:jobId", (req, res) => {
   const job = jobs.get(req.params.jobId);
-  if (!job) return res.status(404).json({ success: false, error: "job not found" });
+  if (!job) { res.status(404).json({ success: false, error: "job not found" }); return; }
   res.json({ jobId: job.id, status: job.status, elapsed: Math.round((Date.now() - job.started) / 1000), logs: job.logs, result: job.result });
 });
 
@@ -1177,7 +1177,7 @@ router.post("/replit/deploy-subnode", async (req, res) => {
 // ── GET /api/replit/deploy-subnode/:jobId ─────────────────────────────────────
 router.get("/replit/deploy-subnode/:jobId", (req, res) => {
   const job = jobs.get(req.params.jobId);
-  if (!job) return res.status(404).json({ success: false, error: "job not found" });
+  if (!job) { res.status(404).json({ success: false, error: "job not found" }); return; }
   res.json({ jobId: job.id, status: job.status, elapsed: Math.round((Date.now() - job.started) / 1000), logs: job.logs, result: job.result });
 });
 

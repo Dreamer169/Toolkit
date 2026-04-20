@@ -821,7 +821,7 @@ async function streamAnthropicNode(node: GatewayNode, res: import("express").Res
   const streamId = `chatcmpl-${Date.now()}`;
   const displayModel = rawModel || model;
 
-  let fetchRes: Response;
+  let fetchRes: Awaited<ReturnType<typeof fetch>>;
   try {
     fetchRes = await fetch(`${node.baseUrl}/messages`, {
       method: "POST",
@@ -1597,6 +1597,22 @@ router.get("/v1/models", async (req, res) => {
 
 
 // ── Responses API 代理（B25）──────────────────────────────────────────────────
+// 调用友节点非流式 OpenAI compatible 接口（/v1/responses）
+async function callOpenAINode(node: GatewayNode, body: ChatBody): Promise<{ response: Awaited<ReturnType<typeof fetch>>; text: string }> {
+  const authorization = node.apiKey ? `Bearer ${node.apiKey}` : undefined;
+  const response = await fetch(`${node.baseUrl}/v1/responses`, {
+    method: "POST",
+    headers: {
+      ...(authorization ? { Authorization: authorization } : {}),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(90_000),
+  });
+  const text = await response.text();
+  return { response, text };
+}
+
 // sub2api 注册账号后会调 POST {nodeBaseUrl}/v1/responses
 // 友节点（有 integration）：直接代理到 Reseek /responses（不加 /v1/）
 // VPS（无 integration）：经 pool 路由调 callOpenAINode（内部也走 /responses）
