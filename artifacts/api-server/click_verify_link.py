@@ -162,7 +162,7 @@ def search_verify_email(token):
         try:
             url = (f"https://graph.microsoft.com/v1.0/me/messages"
                    f"?$search=%22subject:{subj_kw}%22"
-                   f"&$select=id,subject&$orderby=receivedDateTime+desc&$top=5")
+                   f"&$select=id,subject,isRead,receivedDateTime&$top=10")
             req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
             with open_url(req, timeout=12) as r:
                 d = json.loads(r.read())
