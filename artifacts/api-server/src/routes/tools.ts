@@ -1536,7 +1536,7 @@ router.post("/tools/outlook/register", async (req, res) => {
                   const ps = batchOAuthSessions.get(sessionId) || [];
                   for (const s2 of ps.filter((x2: BatchOAuthSession) => x2.status === 'pending')) {
                     try {
-                      const r2 = await fetch('https://login.microsoftonline.com/consumers/oauth2/v2.0/token', {
+                      const r2 = await microsoftFetch('https://login.microsoftonline.com/consumers/oauth2/v2.0/token', {
                         method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                         body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:device_code', client_id: CLIENT_ID, device_code: s2.deviceCode }).toString(),
                       });
