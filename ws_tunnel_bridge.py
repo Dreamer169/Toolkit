@@ -41,12 +41,16 @@ def fetch_nodes_from_gateway():
                                      headers={"Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=5) as r:
             data = json.loads(r.read())
+        seen_wss: set[str] = set()
         urls = []
         for n in data.get("nodes", []):
             if n.get("status") == "ready":
                 base = (n.get("baseUrl") or "").strip()
                 if base:
-                    urls.append(_base_to_wss(base))
+                    wss = _base_to_wss(base)
+                    if wss not in seen_wss:
+                        seen_wss.add(wss)
+                        urls.append(wss)
             elif n.get("status") == "down":
                 print("[ws-tunnel] skip down: {} until={}".format((n.get("baseUrl") or "")[:50], n.get("downUntil")), flush=True)
         return urls
