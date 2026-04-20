@@ -1679,8 +1679,13 @@ router.get("/v1/models", async (req, res) => {
 
 // ── Responses API 代理（B25）──────────────────────────────────────────────────
 // 调用友节点非流式 OpenAI compatible 接口（/v1/responses）
-async function callOpenAINode(node: GatewayNode, body: ChatBody): Promise<{ response: Awaited<ReturnType<typeof fetch>>; text: string }> {
-  const authorization = node.apiKey ? `Bearer ${node.apiKey}` : undefined;
+async function callOpenAINode(
+  node: GatewayNode,
+  body: ChatBody,
+  reqAuth?: string,
+): Promise<{ response: Awaited<ReturnType<typeof fetch>>; text: string }> {
+  const authorization = node.apiKey ? `Bearer ${node.apiKey}` : reqAuth;
+  const started = Date.now();
   const response = await fetch(`${node.baseUrl}/v1/responses`, {
     method: "POST",
     headers: {
@@ -1691,6 +1696,12 @@ async function callOpenAINode(node: GatewayNode, body: ChatBody): Promise<{ resp
     signal: AbortSignal.timeout(90_000),
   });
   const text = await response.text();
+  if (response.ok) {
+    recordSuccess(node, response.status, started);
+  } else {
+    recordFailure(node, response.status, text || response.statusText, started);
+    propagateFailureToSiblings(node);
+  }
   return { response, text };
 }
 
@@ -1704,6 +1715,7 @@ async function streamOpenAIResponseNode(
   const authorization = node.apiKey ? `Bearer ${node.apiKey}` : reqAuth;
   const ctrl = new AbortController();
   const streamTimeout = setTimeout(() => ctrl.abort(), 120_000);
+  const started = Date.now();
   try {
     const r = await fetch(`${node.baseUrl}/v1/responses`, {
       method: "POST",
@@ -1717,10 +1729,11 @@ async function streamOpenAIResponseNode(
     if (!r.ok || !r.body) {
       clearTimeout(streamTimeout);
       const errText = await r.text().catch(() => r.statusText);
-      recordFailure(node, r.status, errText, Date.now());
+      recordFailure(node, r.status, errText, started);
+      propagateFailureToSiblings(node);
       return false;
     }
-    recordSuccess(node, r.status, Date.now());
+    recordSuccess(node, r.status, started);
     res.status(200);
     res.setHeader("Content-Type", r.headers.get("content-type") || "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
@@ -1733,7 +1746,8 @@ async function streamOpenAIResponseNode(
     return true;
   } catch (e) {
     clearTimeout(streamTimeout);
-    recordFailure(node, undefined, String(e), Date.now());
+    recordFailure(node, undefined, String(e), started);
+    propagateFailureToSiblings(node);
     return false;
   }
 }
@@ -1810,13 +1824,14 @@ router.post("/v1/responses", async (req, res) => {
   }
 
   // 非流式：等待完整响应
+  const nonStreamAuth = req.header("authorization");
   for (const node of candidates) {
     if (!node.enabled || node.downUntil > Date.now()) {
       errors.push({ node: node.id, error: "[跳过]" });
       continue;
     }
     try {
-      const result = await callOpenAINode(node, body);
+      const result = await callOpenAINode(node, body, nonStreamAuth);
       if (result.response.ok) {
         res.status(result.response.status);
         res.setHeader("x-gateway-node", node.id);
@@ -1826,6 +1841,8 @@ router.post("/v1/responses", async (req, res) => {
       }
       errors.push({ node: node.id, status: result.response.status, error: result.text?.slice(0, 200) });
     } catch (error) {
+      recordFailure(node, undefined, String(error), Date.now());
+      propagateFailureToSiblings(node);
       errors.push({ node: node.id, error: String(error) });
     }
   }
