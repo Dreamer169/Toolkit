@@ -25,9 +25,12 @@ _nodes      = list(_seed)
 _fc         = {}
 
 def _base_to_wss(base_http: str) -> str:
-    """http(s)://domain[/api] -> wss://domain/api/tunnel/ws"""
+    """http(s)://domain[/api[/gateway]] -> wss://domain/api/tunnel/ws"""
     b = base_http.strip().rstrip("/")
-    if b.endswith("/api"):
+    # Bug13: strip /api/gateway or /api suffixes (friend nodes register with /api/gateway)
+    if b.endswith("/api/gateway"):
+        b = b[:-len("/api/gateway")].rstrip("/")
+    elif b.endswith("/api"):
         b = b[:-4].rstrip("/")
     b = b.replace("https://", "wss://").replace("http://", "ws://")
     return b + "/api/tunnel/ws"
@@ -120,8 +123,48 @@ def handle(client, addr):
         wst.start()
         ev.wait(timeout=15)
         if not done[0]:
-            print(f"[ws-tunnel] failed ({chosen[:40]}): {err[0] or timeout}",flush=True)
-            fail(chosen); client.sendall(b"\x05\x01\x00\x01"+b"\x00"*6); ws.close(); return
+            print(f"[ws-tunnel] failed ({chosen[:40]}): {err[0] or 'timeout'}",flush=True)
+            fail(chosen); ws.close()
+            # Bug18 fix: retry with another node (max 2 retries)
+            retries = getattr(handle, '_retry', {})
+            key = id(client)
+            if retries.get(key, 0) < 2:
+                retries[key] = retries.get(key, 0) + 1
+                handle._retry = retries
+                alt = pick()
+                if alt and alt != chosen:
+                    print(f"[ws-tunnel] retry#{retries[key]} with {alt[:40]}",flush=True)
+                    sep="&" if "?" in alt else "?"
+                    url2=alt+sep+urllib.parse.urlencode({"token":WS_TOKEN,"host":h,"port":str(p)})
+                    ev2=threading.Event(); err2=[None]; done2=[False]
+                    def on_msg2(ws2,msg2):
+                        if isinstance(msg2,bytes):
+                            try: client.sendall(msg2)
+                            except: ws2.close()
+                        else:
+                            try:
+                                d3=json.loads(msg2)
+                                if d3.get("ok"): done2[0]=True; ev2.set()
+                                else: err2[0]=d3.get("error","err"); ev2.set()
+                            except Exception as ex: err2[0]=str(ex); ev2.set()
+                    def on_err2(ws2,e2): err2[0]=str(e2); ev2.set()
+                    def on_cls2(ws2,c2,m2): ev2.set()
+                    ws=websocket.WebSocketApp(url2,on_message=on_msg2,on_error=on_err2,on_close=on_cls2)
+                    wst=threading.Thread(target=ws.run_forever,kwargs={"sslopt":{"cert_reqs":0}},daemon=True)
+                    wst.start()
+                    ev2.wait(timeout=15)
+                    if done2[0]: chosen=alt; ok(alt)
+                    else:
+                        fail(alt); ws.close()
+                        retries.pop(key,None)
+                        client.sendall(b"\x05\x01\x00\x01"+b"\x00"*6); return
+                    retries.pop(key,None)
+                else:
+                    retries.pop(key,None)
+                    client.sendall(b"\x05\x01\x00\x01"+b"\x00"*6); return
+            else:
+                retries.pop(key,None)
+                client.sendall(b"\x05\x01\x00\x01"+b"\x00"*6); return
         ok(chosen)
         client.sendall(b"\x05\x00\x00\x01"+socket.inet_aton("0.0.0.0")+struct.pack("!H",p))
         def tcp_to_ws():

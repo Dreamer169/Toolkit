@@ -3,10 +3,12 @@ import { Pool } from "pg";
 let pool: Pool | null = null;
 
 function getPool(): Pool {
+  const dbUrl = process.env["DATABASE_URL"];
+  if (!dbUrl) throw new Error("[db] DATABASE_URL not configured, skipping DB operation");
   if (!pool) {
     pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: process.env.DATABASE_URL?.includes("localhost") ? false : { rejectUnauthorized: false },
+      connectionString: dbUrl,
+      ssl: dbUrl.includes("localhost") ? false : { rejectUnauthorized: false },
       max: 10,
     });
   }

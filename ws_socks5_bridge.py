@@ -39,9 +39,12 @@ _nodes      = list(_seed)
 _fc         = {}
 
 def _base_to_wss(base_http: str) -> str:
-    """http(s)://domain[/api] -> wss://domain/api/stream/ws"""
+    """http(s)://domain[/api[/gateway]] -> wss://domain/api/stream/ws"""
     b = base_http.strip().rstrip("/")
-    if b.endswith("/api"):
+    # Bug13: strip /api/gateway or /api suffixes (friend nodes register with /api/gateway)
+    if b.endswith("/api/gateway"):
+        b = b[:-len("/api/gateway")].rstrip("/")
+    elif b.endswith("/api"):
         b = b[:-4].rstrip("/")
     b = b.replace("https://", "wss://").replace("http://", "ws://")
     return b + "/api/stream/ws"
@@ -114,61 +117,98 @@ async def socks5_handshake(reader, writer):
 
 async def handle(reader, writer):
     peer = writer.get_extra_info("peername")
-    chosen = None
     try:
         host, port = await socks5_handshake(reader, writer)
     except Exception as e:
         log.warning(f"handshake fail {peer}: {e}"); writer.close(); return
 
-    chosen = pick_node()
-    if not chosen:
-        log.error("no WS nodes available")
-        try: writer.write(b"\x05\x01\x00\x01"+b"\x00"*6); await writer.drain()
-        except: pass
-        writer.close(); return
+    # Bug19 fix: retry up to MAX_TRIES different nodes on failure
+    MAX_TRIES = 3
+    tried = set()
+    last_err = "no nodes available"
 
-    log.info(f"{peer} -> {host}:{port} via {chosen[:60]}")
-    base = chosen.split("?")[0]
-    qs   = urllib.parse.urlencode({"token": WS_TOKEN, "host": host, "port": str(port)})
-    url  = f"{base}?{qs}"
+    for attempt in range(MAX_TRIES):
+        chosen = pick_node()
+        if not chosen or chosen in tried:
+            break
+        tried.add(chosen)
 
-    try:
-        async with websockets.connect(url, max_size=None, ping_interval=20, ping_timeout=30,
-                                      ssl=__import__("ssl").create_default_context()) as ws:
-            connected = asyncio.Event()
+        log.info(f"{peer} -> {host}:{port} via {chosen[:60]} (attempt {attempt+1})")
+        base = chosen.split("?")[0]
+        qs   = urllib.parse.urlencode({"token": WS_TOKEN, "host": host, "port": str(port)})
+        url  = f"{base}?{qs}"
 
-            async def recv_loop():
-                async for msg in ws:
-                    if isinstance(msg, str):
-                        try:
-                            d = json.loads(msg)
-                            if d.get("ok"):
-                                writer.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
-                                await writer.drain(); connected.set()
-                        except Exception: pass
-                    else:
-                        if not connected.is_set(): connected.set()
-                        writer.write(msg); await writer.drain()
-                writer.close()
+        # Bug21 fix: track whether tunnel was actually established so we
+        # know whether to retry or accept the result
+        connected = asyncio.Event()
 
-            async def send_loop():
-                await asyncio.wait_for(connected.wait(), timeout=15)
-                try:
-                    while True:
-                        data = await reader.read(65536)
-                        if not data: break
-                        await ws.send(data)
-                except Exception: pass
-                await ws.close()
+        try:
+            async with websockets.connect(url, max_size=None, ping_interval=20, ping_timeout=30,
+                                          ssl=__import__("ssl").create_default_context()) as ws:
 
-            await asyncio.gather(recv_loop(), send_loop())
+                async def recv_loop():
+                    async for msg in ws:
+                        if isinstance(msg, str):
+                            try:
+                                d = json.loads(msg)
+                                if d.get("ok"):
+                                    writer.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
+                                    await writer.drain(); connected.set()
+                            except Exception: pass
+                        else:
+                            if not connected.is_set(): connected.set()
+                            writer.write(msg); await writer.drain()
+                    writer.close()
+
+                async def send_loop():
+                    try:
+                        await asyncio.wait_for(connected.wait(), timeout=15)
+                    except asyncio.TimeoutError:
+                        return  # handshake timed out; recv_loop will close the WS
+                    try:
+                        while True:
+                            data = await reader.read(65536)
+                            if not data: break
+                            await ws.send(data)
+                    except Exception: pass
+                    await ws.close()
+
+                # Bug21 fix: use create_task + asyncio.wait(FIRST_COMPLETED) so that
+                # when recv_loop finishes (WS closed) the send_loop blocked on
+                # reader.read() is cancelled immediately — no more connection leak
+                recv_task = asyncio.create_task(recv_loop())
+                send_task = asyncio.create_task(send_loop())
+                await asyncio.wait([recv_task, send_task],
+                                   return_when=asyncio.FIRST_COMPLETED)
+                for t in (recv_task, send_task):
+                    if not t.done():
+                        t.cancel()
+                        try: await t
+                        except asyncio.CancelledError: pass
+
+        except Exception as e:
+            last_err = str(e)
+            log.error(f"ws error attempt {attempt+1} {host}:{port} via {chosen[:60]}: {e}")
+            fail(chosen)
+            # Bug19 fix: try next node instead of immediately returning error
+            continue
+
+        if not connected.is_set():
+            # WS connected but server never sent {ok:true} — node rejected tunnel
+            last_err = "handshake timeout or rejected by node"
+            log.warning(f"no handshake from {chosen[:60]} for {host}:{port}")
+            fail(chosen)
+            # Bug19 fix: retry with a different node
+            continue
+
         ok(chosen)
-    except Exception as e:
-        log.error(f"ws error {host}:{port}: {e}")
-        if chosen: fail(chosen)
-        try: writer.write(b"\x05\x04\x00\x01"+b"\x00"*6); await writer.drain()
-        except: pass
-        writer.close()
+        return  # tunnel completed successfully
+
+    # All retries exhausted
+    log.error(f"all {len(tried)} node(s) failed for {host}:{port}: {last_err}")
+    try: writer.write(b"\x05\x04\x00\x01"+b"\x00"*6); await writer.drain()
+    except: pass
+    writer.close()
 
 async def amain():
     log.info(f"SOCKS5 bridge listening {HOST}:{PORT} (auto-sync every {REFRESH_SECS}s)")

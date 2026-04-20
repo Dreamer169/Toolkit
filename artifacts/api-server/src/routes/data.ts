@@ -832,6 +832,7 @@ async function replenishFromCfPool(currentEligible: number): Promise<number> {
 }
 
 async function runProxyMaintenance() {
+  if (!process.env["DATABASE_URL"]) return; // no DB configured
   const t0 = Date.now();
   let recycled = 0, banned = 0, checked = 0, replenished = 0;
   try {
