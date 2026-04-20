@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # setup-gateway-node.sh
 # Run this in any fresh Replit pnpm workspace to add a deployable gateway node.
-# Usage:  bash <(curl -fsSL http://45.205.27.69:8080/setup-gateway-node.sh)
+# Usage:  bash <(curl -fsSL http://45.205.27.69:8080/api/gateway/setup-gateway-node.sh)
 set -e
 
 UPSTREAM="http://45.205.27.69:8080/api/gateway"
