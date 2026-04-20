@@ -1214,6 +1214,167 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
 
     return result
 
+
+async def get_exit_ip_camoufox(proxy_cfg) -> str:
+    try:
+        from camoufox.async_api import AsyncCamoufox
+        proxy_str = proxy_cfg["server"] if proxy_cfg else None
+        async with AsyncCamoufox(headless=True, proxy=proxy_str, os="windows") as browser:
+            page = await browser.new_page()
+            await page.goto("https://api.ipify.org/?format=json", timeout=20000)
+            data = json.loads(await page.locator("body").inner_text())
+            return data.get("ip", "")
+    except Exception as e:
+        log(f"get_exit_ip_camoufox err: {e}"); return ""
+
+
+async def attempt_register_camoufox(proxy_cfg, exit_ip: str) -> dict:
+    from camoufox.async_api import AsyncCamoufox
+    proxy_str = proxy_cfg["server"] if proxy_cfg else None
+    result = {"ok": False, "phase": "init", "error": "", "exit_ip": exit_ip}
+    async with AsyncCamoufox(headless=HEADLESS, proxy=proxy_str, geoip=True, os="windows") as browser:
+        page = await browser.new_page()
+        try:
+            await page.add_init_script(_CANVAS_WEBGL_NOISE_JS)
+            log("[camoufox] Canvas 2D noise injected (WebGL/fingerprint natively handled)")
+        except Exception as e:
+            log(f"[camoufox] canvas noise err: {e}")
+        try:
+            result["phase"] = "navigate"
+            try:
+                await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=20000)
+                await page.wait_for_timeout(_random.randint(2500, 4000))
+                await page.goto("https://github.com", wait_until="domcontentloaded", timeout=20000)
+                await page.wait_for_timeout(_random.randint(2000, 3500))
+            except Exception as e:
+                log(f"[pre-nav] err(ignored): {e}")
+            log("[camoufox] opening replit.com/signup ...")
+            await page.goto("https://replit.com/signup", wait_until="domcontentloaded", timeout=45000)
+            warmup_task = asyncio.create_task(_human_warmup(page))
+            t0 = await page.title()
+            b0 = (await page.locator("body").inner_text())[:400]
+            log(f"[camoufox] title: {t0!r}")
+            try:
+                wd_val = await page.evaluate("() => navigator.webdriver")
+                log(f"[detect] navigator.webdriver={wd_val}")
+            except Exception:
+                pass
+            if is_cf_blocked(t0, b0):
+                result["error"] = "signup_cf_ip_banned"; warmup_task.cancel(); return result
+            if is_integrity_error(b0):
+                result["error"] = "integrity_check_failed_on_load"; warmup_task.cancel(); return result
+            cf_err = await wait_cf(page)
+            if cf_err:
+                result["error"] = cf_err; warmup_task.cancel(); return result
+            await warmup_task
+            result["phase"] = "click_email_btn"
+            await page.wait_for_timeout(500)
+            for sel in [
+                'button:has-text("Email & password")', 'button:has-text("Continue with email")',
+                'button:has-text("Use email")', 'button:has-text("Email")',
+                '[data-cy="email-signup"]',
+            ]:
+                btn = page.locator(sel)
+                if await btn.count():
+                    await btn.first.click()
+                    log(f"[camoufox] clicked email btn: {sel}")
+                    await page.wait_for_timeout(_random.randint(2800, 4200))
+                    break
+            else:
+                log("[camoufox] email btn not found, form may be shown directly")
+            result["phase"] = "step1_wait"
+            try:
+                await page.wait_for_selector(
+                    'input[name="email"], input[type="email"], input[placeholder*="email" i]',
+                    timeout=15000)
+            except Exception:
+                t2 = await page.title(); b2 = (await page.locator("body").inner_text())[:300]
+                result["error"] = "signup_cf_ip_banned" if is_cf_blocked(t2, b2) else "signup_email_field_timeout"
+                return result
+            result["phase"] = "fill_step1"
+            err1 = await fill_step1(page)
+            if err1 == "captcha_token_invalid":
+                log("[retry] captcha_token_invalid -> audio challenge...")
+                try:
+                    audio_token = await solve_recaptcha_audio(page)
+                    if audio_token:
+                        log(f"[retry] audio token -> inject and resubmit")
+                        await page.evaluate(
+                            """(tok) => {
+                                var els = document.querySelectorAll('[name="g-recaptcha-response"],#g-recaptcha-response,[name="recaptchaToken"]');
+                                els.forEach(el => { el.value = tok; Object.defineProperty(el,"value",{get:()=>tok,configurable:true}); });
+                                return els.length;
+                            }""",
+                            audio_token)
+                        await page.wait_for_timeout(800)
+                        _s2 = False
+                        for ss in ['[data-cy="signup-create-account"]', 'button:has-text("Create Account")', 'button[type="submit"]']:
+                            bs = page.locator(ss)
+                            if await bs.count():
+                                try: await bs.first.click(timeout=5000)
+                                except: await bs.first.click(force=True, timeout=3000)
+                                _s2 = True; break
+                        if not _s2: await page.keyboard.press("Enter")
+                        await page.wait_for_timeout(4000)
+                        br = (await page.locator("body").inner_text())[:400]
+                        if is_captcha_invalid(br): err1 = "captcha_token_invalid"
+                        elif is_rate_limited(br): err1 = "account_rate_limited"
+                        elif is_integrity_error(br): err1 = "integrity_check_failed_after_step1"
+                        else:
+                            if "signup" not in page.url.lower(): err1 = None
+                            else:
+                                try:
+                                    await page.wait_for_selector('input[name="username"]', timeout=5000); err1 = None
+                                except Exception:
+                                    ba = (await page.locator("body").inner_text())[:400]
+                                    if is_rate_limited(ba): err1 = "account_rate_limited"
+                                    elif is_captcha_invalid(ba): err1 = "captcha_token_invalid"
+                                    else: err1 = None
+                    else:
+                        log("[retry] audio failed -> reload...")
+                        try:
+                            await page.reload(wait_until="domcontentloaded", timeout=25000)
+                            await page.wait_for_timeout(4000)
+                            for sr in ['button:has-text("Email & password")', '[data-cy="email-signup"]']:
+                                br2 = page.locator(sr)
+                                if await br2.count(): await br2.first.click(); await page.wait_for_timeout(3000); break
+                            await page.wait_for_selector('input[name="email"], input[type="email"]', timeout=10000)
+                            err1 = await fill_step1(page)
+                        except Exception as er: log(f"[retry] reload fail: {er}")
+                except Exception as er: log(f"[retry] audio err: {er}")
+            if err1: result["error"] = err1; return result
+            if is_integrity_error((await page.locator("body").inner_text())[:300]):
+                result["error"] = "integrity_check_failed_after_step1"; return result
+            result["phase"] = "step2_wait"
+            step2_appeared = False
+            try:
+                await page.wait_for_selector(
+                    'input[name="username"], input[placeholder*="username" i], #username',
+                    timeout=35000)
+                log("[camoufox] step2 username field appeared"); step2_appeared = True
+            except Exception: log("[camoufox] step2 username not appeared in 35s")
+            if not step2_appeared:
+                bck = (await page.locator("body").inner_text())[:500]
+                url_ck = page.url
+                log(f"[step2-miss] url={url_ck[:80]}")
+                SUCCESS_HINTS = ("verify your email","check your email","we sent","sent you","verification email","confirm your email","sent an email")
+                if any(h in bck.lower() for h in SUCCESS_HINTS):
+                    log("[step2-miss] single-step form, verify email sent")
+                    result["ok"] = True; result["phase"] = "verify_email_sent"; return result
+                if is_rate_limited(bck): result["error"] = "account_rate_limited"; return result
+                if is_captcha_invalid(bck): result["error"] = "captcha_token_invalid"; return result
+                result["error"] = "signup_username_field_missing"; return result
+            result["phase"] = "fill_step2"
+            err2 = await fill_step2(page)
+            if err2: result["error"] = err2; return result
+            if is_integrity_error((await page.locator("body").inner_text())[:300]):
+                result["error"] = "integrity_check_failed_at_step2"; return result
+            result["ok"] = True; result["phase"] = "done"
+            log("[camoufox] registration complete (verify email phase)")
+        except Exception as e:
+            log(f"[camoufox] attempt err: {e}"); result["error"] = str(e)
+        return result
+
 async def get_exit_ip(pw_module, proxy_cfg) -> str:
     try:
         br = await pw_module.chromium.launch(headless=True, proxy=proxy_cfg,
@@ -1233,49 +1394,50 @@ async def get_exit_ip(pw_module, proxy_cfg) -> str:
 async def run() -> dict:
     final = {"ok": False, "phase": "init", "error": "", "exit_ip": ""}
     proxy_cfg = {"server": PROXY} if PROXY else None
-
+    # v7.32: camoufox primary (Firefox native fingerprint, passes integrity check)
+    camoufox_available = False
+    try:
+        from camoufox.async_api import AsyncCamoufox as _ACF  # noqa
+        camoufox_available = True
+        log("✅ camoufox available (Firefox native fingerprint, passes integrity check)")
+    except ImportError:
+        log("⚠ camoufox not installed -> playwright+stealth fallback")
 
     stealth_fn = None
     pw_ctx_fn  = None
 
-    # Layer 0: playwright+stealth (v7.3 proven approach for CF bypass)
-    log("v7.31: playwright+stealth primary (matches v7.3 CF bypass, no rebrowser)")
-    try:
-        from playwright.async_api import async_playwright as _apw
-        pw_ctx_fn = _apw
-        log("✅ playwright active (TLS fingerprint clean for CF)")
-    except ImportError:
-        # fallback rebrowser
+    if not camoufox_available:
         try:
-            from rebrowser_playwright.async_api import async_playwright as _rapw
-            pw_ctx_fn = _rapw
-            log("⚠ playwright 未安装 → rebrowser fallback")
+            from playwright.async_api import async_playwright as _apw
+            pw_ctx_fn = _apw
+            log("✅ playwright active")
         except ImportError:
-            final["error"] = "playwright/rebrowser 均未安装"
-            return final
+            try:
+                from rebrowser_playwright.async_api import async_playwright as _rapw
+                pw_ctx_fn = _rapw
+                log("⚠ playwright not installed -> rebrowser fallback")
+            except ImportError:
+                final["error"] = "camoufox/playwright/rebrowser none available"
+                return final
+        try:
+            from playwright_stealth import Stealth
+            stealth_fn = Stealth(chrome_runtime=True, webgl_vendor=True).apply_stealth_async
+            log("playwright-stealth active (chrome_runtime=True, webgl_vendor=True)")
+        except ImportError:
+            stealth_fn = None
 
-    # playwright-stealth（JS层，与rebrowser互补）
+    # exit IP
     try:
-        from playwright_stealth import Stealth
-        stealth_fn = Stealth(
-            chrome_runtime=True,
-            webgl_vendor=True,
-        ).apply_stealth_async
-        log("playwright-stealth (chrome_runtime=True, webgl_vendor=True)")
-    except ImportError:
-        stealth_fn = None
-        log("⚠ playwright-stealth 未安装")
-
-    # 获取出口 IP
-    try:
-        async with pw_ctx_fn() as pw:
-            ip = await get_exit_ip(pw, proxy_cfg)
-            if ip:
-                final["exit_ip"] = ip
-                log(f"出口 IP: {ip}")
+        if camoufox_available:
+            ip = await get_exit_ip_camoufox(proxy_cfg)
+        else:
+            async with pw_ctx_fn() as pw:
+                ip = await get_exit_ip(pw, proxy_cfg)
+        if ip:
+            final["exit_ip"] = ip
+            log(f"exit IP: {ip}")
     except Exception as e:
-        log(f"出口 IP 异常: {e}")
-
+        log(f"exit IP error: {e}")
     INTEGRITY_ERRORS = {
         "integrity_check_failed_on_load", "integrity_check_failed_after_click",
         "integrity_check_failed_after_step1", "integrity_check_failed_at_step2",
@@ -1284,8 +1446,12 @@ async def run() -> dict:
 
     for attempt in range(1, 4):
         log(f"browser attempt {attempt}/3")
-        async with pw_ctx_fn() as pw:
-            res = await attempt_register(pw, proxy_cfg, stealth_fn, final["exit_ip"])
+        if camoufox_available:
+            res = await attempt_register_camoufox(proxy_cfg, final["exit_ip"])
+        else:
+            async with pw_ctx_fn() as pw:
+                res = await attempt_register(pw, proxy_cfg, stealth_fn, final["exit_ip"])
+        res["exit_ip"] = final["exit_ip"]
         res["exit_ip"] = final["exit_ip"]
         final = res
         if res["ok"]:

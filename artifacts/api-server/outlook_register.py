@@ -1627,6 +1627,99 @@ class PlaywrightController(BaseController):
         return True
 
 
+
+# ─── Camoufox 控制器 (Firefox native fingerprint) ────────────────────────────
+class CamoufoxController(BaseController):
+    """
+    Firefox-based controller using camoufox.
+    Native Canvas/WebGL fingerprinting — passes Cloudflare integrity checks
+    that Chromium-based drivers cannot pass.
+    Sync API: camoufox.sync_api.Camoufox
+    """
+
+    def launch(self, headless=True):
+        from camoufox.sync_api import Camoufox
+        proxy_str = self.proxy if self.proxy else None
+
+        class _PwCompat:
+            """Wraps camoufox context manager to expose p.stop() like sync_playwright()."""
+            def __init__(self_, cm):
+                self_._cm = cm
+            def stop(self_):
+                try: self_._cm.__exit__(None, None, None)
+                except Exception: pass
+
+        cm = Camoufox(headless=headless, proxy=proxy_str, os="windows", geoip=True)
+        browser = cm.__enter__()
+        return _PwCompat(cm), browser
+
+    def handle_captcha(self, page, blob_container=None):
+        return self._try_enter_challenge(page)
+
+    def _try_enter_challenge(self, page) -> bool:
+        """Enter key + hsprotect.net traffic monitoring (same as PlaywrightController)."""
+        try:
+            page.wait_for_event(
+                "request",
+                lambda req: req.url.startswith("blob:https://iframe.hsprotect.net/"),
+                timeout=5000,
+            )
+        except Exception:
+            return False
+        page.wait_for_timeout(800)
+
+        for _ in range(self.max_retries + 1):
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(11500)
+            page.keyboard.press("Enter")
+
+            try:
+                page.wait_for_event(
+                    "request",
+                    lambda req: req.url.startswith("https://browser.events.data.microsoft.com"),
+                    timeout=8000,
+                )
+                try:
+                    page.wait_for_event(
+                        "request",
+                        lambda req: req.url.startswith(
+                            "https://collector-pxzc5j78di.hsprotect.net/assets/js/bundle"
+                        ),
+                        timeout=1700,
+                    )
+                    page.wait_for_timeout(2000)
+                    continue
+                except Exception:
+                    if (page.get_by_text("一些异常活动").count()
+                            or page.get_by_text("此站点正在维护，暂时无法使用，请稍后重试。").count()):
+                        return False
+                    break
+            except Exception:
+                page.wait_for_timeout(5000)
+                page.keyboard.press("Enter")
+                try:
+                    page.wait_for_event(
+                        "request",
+                        lambda req: req.url.startswith("https://browser.events.data.microsoft.com"),
+                        timeout=10000,
+                    )
+                    try:
+                        page.wait_for_event(
+                            "request",
+                            lambda req: req.url.startswith(
+                                "https://collector-pxzc5j78di.hsprotect.net/assets/js/bundle"
+                            ),
+                            timeout=4000,
+                        )
+                    except Exception:
+                        break
+                except Exception:
+                    return False
+                page.wait_for_timeout(500)
+        else:
+            return False
+        return True
+
 # ─── 主任务 ───────────────────────────────────────────────────────────────────
 
 
@@ -2012,7 +2105,7 @@ def main():
     parser.add_argument("--count",           type=int,   default=1,            help="注册数量")
     parser.add_argument("--proxy",           type=str,   default="",           help="代理, 如 socks5://127.0.0.1:1080")
     parser.add_argument("--proxies",         type=str,   default="",           help="多代理轮换（逗号分隔），每次注册轮换一个节点")
-    parser.add_argument("--engine",          type=str,   default="patchright", choices=["patchright","playwright"])
+    parser.add_argument("--engine",          type=str,   default="patchright", choices=["patchright","playwright","camoufox"])
     parser.add_argument("--headless",        type=str,   default="true",       help="true/false")
     parser.add_argument("--wait",            type=int,   default=BOT_PROTECTION_WAIT, help="bot_protection_wait (秒)")
     parser.add_argument("--retries",         type=int,   default=MAX_CAPTCHA_RETRIES)
@@ -2027,7 +2120,9 @@ def main():
     args = parser.parse_args()
 
     headless = args.headless.lower() != "false"
-    CtrlCls  = PatchrightController if args.engine == "patchright" else PlaywrightController
+    CtrlCls  = (PatchrightController if args.engine == "patchright" else
+             CamoufoxController if args.engine == "camoufox" else
+             PlaywrightController)
 
     solver = None
 

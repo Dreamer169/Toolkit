@@ -1227,7 +1227,7 @@ router.post("/pipeline/full", async (req, res) => {
         log(`  不足 ${target} 个，启动 Outlook 注册 ${need} 个...`);
         try {
           const r = await localPost("/api/tools/outlook/register", {
-            count: need, headless: true, engine: "patchright",
+            count: need, headless: true, engine: "camoufox",
             wait: 11, retries: 2, proxyMode: "cf", cfPort: 443, delay: 3,
           }) as { jobId?: string };
           if (r.jobId) {
