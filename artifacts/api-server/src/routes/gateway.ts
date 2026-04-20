@@ -899,8 +899,10 @@ async function probeNodeUrl(rawUrl: string, apiKey?: string, timeoutMs = 10_000,
       clearTimeout(timer);
       const contentType = res.headers.get("content-type") || "";
       const text = await res.text();
-      if (isReplitIdleHtml(text)) return { ok: false, latencyMs: Date.now() - started, error: "replit_idle_placeholder" };
-      if (isBrowserAppHtml(text, contentType)) continue;
+      // 仅对 HTML 响应检测 Replit idle 页面和浏览器 app，避免 JSON 内含 HTML 片段误判
+      const isJson = contentType.includes("application/json");
+      if (!isJson && isReplitIdleHtml(text)) return { ok: false, latencyMs: Date.now() - started, error: "replit_idle_placeholder" };
+      if (!isJson && isBrowserAppHtml(text, contentType)) continue;
       if (!res.ok) continue;
       if (res.ok) {
         const data = JSON.parse(text || "{}") as { data?: Array<{ id: string }>; success?: boolean; status?: string };
@@ -1567,7 +1569,7 @@ router.post("/self-register", async (req, res) => {
   }
   const baseUrl = gatewayUrl.replace(/\/$/, "");
   // 探测目标是否真的是 gateway
-  const probe = await probeNodeUrl(baseUrl, undefined, 8000, true);
+  const probe = await probeNodeUrl(baseUrl, undefined, 8000, false);
   if (!probe.ok) {
     res.status(422).json({ ok: false, error: "探测失败，URL 不可达", detail: probe.error });
     return;

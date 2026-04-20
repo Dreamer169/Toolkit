@@ -223,7 +223,7 @@ export function selfRegister(attempt = 0): void {
     return;
   }
 
-  const gatewayUrl = `${domain.replace(/\/$/, "")}/api`;
+  const gatewayUrl = `${domain.replace(/\/$/, "")}/api/gateway`;
   const body = JSON.stringify({
     gatewayUrl,
     name: NODE_NAME,
