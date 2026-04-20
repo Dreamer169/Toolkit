@@ -140,7 +140,7 @@ const tabs: { id: Tab; label: string; icon: string; badge?: string }[] = [
   { id: "machine-reset",    label: "机器ID重置",      icon: "🔄", badge: "Cursor" },
   { id: "fingerprint",      label: "浏览器指纹",      icon: "🎭", badge: "新增" },
   { id: "team-register",    label: "Team 注册面板",   icon: "🤖", badge: "Python 原版" },
-  { id: "openai-pool",      label: "账号池编排器",     icon: "🏊", badge: "Python 原版" },
+  { id: "openai-pool",      label: "OpenAI账号注册管理",     icon: "🏊", badge: "Python 原版" },
 ];
 
 function App() {
@@ -205,7 +205,7 @@ function App() {
             <iframe
               src={tab === "team-register" ? "/team-all-in-one/" : "/openai-pool/"}
               className="w-full flex-1 border-0"
-              title={tab === "team-register" ? "ChatGPT Team 注册面板" : "OpenAI 账号池编排器"}
+              title={tab === "team-register" ? "ChatGPT Team 注册面板" : "OpenAI 账号注册管理"}
               sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
             />
           </div>
