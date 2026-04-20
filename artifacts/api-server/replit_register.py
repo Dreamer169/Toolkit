@@ -732,6 +732,16 @@ async def fill_step1(page) -> str | None:
     if _api_status == 400 and "captcha" in _api_body_r.lower():
         log(f"[step1] API captcha 400 → captcha_token_invalid")
         return "captcha_token_invalid"
+    if is_integrity_error(_api_body_r):
+        log(f"[step1] API body integrity error: {_api_body_r[:120]}")
+        return "integrity_check_failed_after_step1"
+    _abr_low = _api_body_r.lower()
+    if _api_status in (400, 422) and any(kw in _abr_low for kw in (
+        "already in use", "already registered", "already exists", "already been used",
+        "email is taken", "email.*already"
+    )):
+        log(f"[step1] API body: email already on Replit → {_api_body_r[:120]}")
+        return "Email already in use on Replit"
 
     body = (await page.locator("body").inner_text())[:1000]
     url  = page.url

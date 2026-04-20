@@ -496,6 +496,11 @@ router.post("/replit/register", (req, res) => {
              AND COALESCE(tags, '') NOT LIKE '%replit_used%'
              AND COALESCE(tags, '') NOT LIKE '%token_invalid%'
              AND COALESCE(tags, '') NOT LIKE '%inbox_error%'
+             AND NOT EXISTS (
+               SELECT 1 FROM accounts r
+               WHERE r.platform = 'replit'
+                 AND r.email = accounts.email
+             )
            ORDER BY
              CASE WHEN COALESCE(tags,'') LIKE '%inbox_verified%' THEN 0 ELSE 1 END,
              RANDOM()
