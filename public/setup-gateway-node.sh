@@ -117,8 +117,16 @@ function getNodeName(): string {
 }
 
 async function selfRegister() {
-  const gatewayUrl = getSelfUrl() + "/api/gateway";
+  const selfBase = getSelfUrl();
+  const gatewayUrl = selfBase + "/api/gateway";
   try {
+    // 去重：若该 URL 已在线则跳过注册
+    const check = await fetch(UPSTREAM + "/nodes/status", { signal: AbortSignal.timeout(5_000) }).catch(() => null);
+    if (check?.ok) {
+      const data = await check.json().catch(() => ({})) as { nodes?: Array<{ baseUrl?: string; status?: string }> };
+      const active = (data.nodes ?? []).find((n) => n.baseUrl === selfBase && n.status === "ready");
+      if (active) { console.log("[register] already active, skip"); return; }
+    }
     const r = await fetch(REMOTE_REGISTER, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
