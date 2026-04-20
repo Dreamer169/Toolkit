@@ -1587,43 +1587,93 @@ router.post("/nodes/:id/test", async (req, res) => {
 
 // ── 模型列表 ──────────────────────────────────────────────────────────────────
 router.get("/v1/models", async (req, res) => {
+  const seen = new Set<string>();
   const data: Array<Record<string, unknown>> = [];
   const errors: Array<Record<string, unknown>> = [];
   const nodes = allNodes();
-  // B12 修复：只列出有至少一个 enabled 节点的模型（integration 未配置时不暴露该模型）
+
+  // ── 1. 本地 Reseek 集成（直接枚举，无需 HTTP）────────────────────────────
+  // B12：只列出 enabled 节点对应的型号
   const hasOpenAI = nodes.some((n) => n.type === "reseek-openai" && n.enabled);
   const hasAnthropic = nodes.some((n) => n.type === "reseek-anthropic" && n.enabled);
   const hasGemini = nodes.some((n) => n.type === "reseek-gemini" && n.enabled);
   if (hasOpenAI)
-    for (const model of OPENAI_MODELS)
-      data.push({ id: model, object: "model", created: 0, owned_by: "reseek-openai", gateway_node: "reseek-openai-pool" });
+    for (const m of OPENAI_MODELS)
+      if (!seen.has(m)) { seen.add(m); data.push({ id: m, object: "model", created: 0, owned_by: "reseek-openai", gateway_node: "reseek-openai-pool" }); }
   if (hasAnthropic)
-    for (const model of ANTHROPIC_MODELS)
-      data.push({ id: model, object: "model", created: 0, owned_by: "reseek-anthropic", gateway_node: "reseek-anthropic-pool" });
+    for (const m of ANTHROPIC_MODELS)
+      if (!seen.has(m)) { seen.add(m); data.push({ id: m, object: "model", created: 0, owned_by: "reseek-anthropic", gateway_node: "reseek-anthropic-pool" }); }
   if (hasGemini)
-    for (const model of GEMINI_MODELS)
-      data.push({ id: model, object: "model", created: 0, owned_by: "reseek-gemini", gateway_node: "reseek-gemini-pool" });
-  for (const node of allNodes().filter((n) => n.type === "remote-sub2api" || n.type === "friend-openai")) {
+    for (const m of GEMINI_MODELS)
+      if (!seen.has(m)) { seen.add(m); data.push({ id: m, object: "model", created: 0, owned_by: "reseek-gemini", gateway_node: "reseek-gemini-pool" }); }
+
+  // ── 2. 友节点聚合：直接读取注册时存入的 models[]，零 HTTP 开销 ───────────
+  const friendModelMap = new Map<string, string[]>();   // modelId → [nodeId, ...]
+  const legacyFriendNodes: GatewayNode[] = [];          // 无 models[] 的旧节点，回退到 HTTP
+  for (const node of nodes) {
+    if (node.type !== "friend-openai") continue;
     if (!node.enabled || node.downUntil > Date.now()) continue;
-    const started = Date.now();
-    try {
-      const authorization = node.apiKey ? `Bearer ${node.apiKey}` : req.header("authorization");
-      const result = await fetchTextWithTimeout(`${node.baseUrl}/v1/models`, { method: "GET", headers: { ...(authorization ? { Authorization: authorization } : {}) } }, 12_000);
-      if (result.response.ok) {
-        const parsed = JSON.parse(result.text || "{}") as { data?: Array<Record<string, unknown>> };
-        if (Array.isArray(parsed.data)) data.push(...parsed.data.map((model) => ({ ...model, gateway_node: node.id })));
-        recordSuccess(node, result.response.status, started);
-      } else {
-        errors.push({ node: node.id, status: result.response.status, error: result.text });
-        if (!isSub2ApiEmptyAccount(node, result.response.status, result.text))
-          recordFailure(node, result.response.status, result.text || result.response.statusText, started);
+    if (node.models && node.models.length > 0) {
+      for (const m of node.models) {
+        if (!friendModelMap.has(m)) friendModelMap.set(m, []);
+        friendModelMap.get(m)!.push(node.id);
       }
-    } catch (error) {
-      errors.push({ node: node.id, error: String(error) });
-      recordFailure(node, undefined, String(error), started);
+    } else {
+      legacyFriendNodes.push(node);
     }
   }
-  res.json({ object: "list", data, gateway: { nodes: allNodes().map(nodeSnapshot), errors } });
+  // 去重后写入 data（model 已在本地 Reseek 中出现的跳过）
+  for (const [modelId, nodeIds] of friendModelMap) {
+    if (!seen.has(modelId)) {
+      seen.add(modelId);
+      data.push({
+        id: modelId,
+        object: "model",
+        created: 0,
+        owned_by: "friend-openai",
+        gateway_node: nodeIds[0],          // 首个支持该型号的节点
+        supported_nodes: nodeIds.length,   // 支持该型号的节点数
+      });
+    }
+  }
+
+  // ── 3. 旧版无 models[] 的友节点 + remote-sub2api：回退到 HTTP 查询 ───────
+  const fetchTargets = [
+    ...legacyFriendNodes,
+    ...nodes.filter((n) => n.type === "remote-sub2api" && n.enabled && n.downUntil <= Date.now()),
+  ];
+  await Promise.allSettled(
+    fetchTargets.map(async (node) => {
+      const started = Date.now();
+      try {
+        const authorization = node.apiKey ? `Bearer ${node.apiKey}` : req.header("authorization");
+        const result = await fetchTextWithTimeout(
+          `${node.baseUrl}/v1/models`,
+          { method: "GET", headers: { ...(authorization ? { Authorization: authorization } : {}) } },
+          12_000,
+        );
+        if (result.response.ok) {
+          const parsed = JSON.parse(result.text || "{}") as { data?: Array<Record<string, unknown>> };
+          if (Array.isArray(parsed.data)) {
+            for (const model of parsed.data) {
+              const mid = String(model["id"] ?? "");
+              if (mid && !seen.has(mid)) { seen.add(mid); data.push({ ...model, gateway_node: node.id }); }
+            }
+          }
+          recordSuccess(node, result.response.status, started);
+        } else {
+          errors.push({ node: node.id, status: result.response.status, error: result.text });
+          if (!isSub2ApiEmptyAccount(node, result.response.status, result.text))
+            recordFailure(node, result.response.status, result.text || result.response.statusText, started);
+        }
+      } catch (error) {
+        errors.push({ node: node.id, error: String(error) });
+        recordFailure(node, undefined, String(error), started);
+      }
+    }),
+  );
+
+  res.json({ object: "list", data, total: data.length, gateway: { nodes: allNodes().map(nodeSnapshot), errors } });
 });
 
 
