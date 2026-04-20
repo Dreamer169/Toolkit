@@ -6,11 +6,25 @@ function getPool(): Pool {
   const dbUrl = process.env["DATABASE_URL"];
   if (!dbUrl) throw new Error("[db] DATABASE_URL not configured, skipping DB operation");
   if (!pool) {
-    pool = new Pool({
-      connectionString: dbUrl,
-      ssl: dbUrl.includes("localhost") ? false : { rejectUnauthorized: false },
-      max: 10,
-    });
+    try {
+      const url = new URL(dbUrl);
+      const isLocal = url.hostname === "localhost" || url.hostname === "127.0.0.1";
+      pool = new Pool({
+        host: url.hostname,
+        port: url.port ? parseInt(url.port) : 5432,
+        database: url.pathname.replace(/^\//, ""),
+        user: decodeURIComponent(url.username),
+        password: decodeURIComponent(url.password),
+        ssl: isLocal ? false : { rejectUnauthorized: false },
+        max: 10,
+      });
+    } catch {
+      pool = new Pool({
+        connectionString: dbUrl,
+        ssl: dbUrl.includes("localhost") ? false : { rejectUnauthorized: false },
+        max: 10,
+      });
+    }
   }
   return pool;
 }
@@ -71,7 +85,6 @@ export async function initDatabase(): Promise<void> {
   await execute(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS proxy_port INTEGER`);
   await execute(`CREATE UNIQUE INDEX IF NOT EXISTS accounts_platform_email_unique ON accounts(platform, email)`);
   await execute(`CREATE INDEX IF NOT EXISTS accounts_platform_status_idx ON accounts(platform, status)`);
-
   await execute(`
     CREATE TABLE IF NOT EXISTS temp_emails (
       id SERIAL PRIMARY KEY,
@@ -86,7 +99,6 @@ export async function initDatabase(): Promise<void> {
     )
   `);
   await execute(`CREATE INDEX IF NOT EXISTS temp_emails_provider_status_idx ON temp_emails(provider, status)`);
-
   await execute(`
     CREATE TABLE IF NOT EXISTS proxies (
       id SERIAL PRIMARY KEY,
@@ -103,7 +115,6 @@ export async function initDatabase(): Promise<void> {
     )
   `);
   await execute(`CREATE INDEX IF NOT EXISTS proxies_status_used_idx ON proxies(status, used_count)`);
-
   await execute(`
     CREATE TABLE IF NOT EXISTS configs (
       key VARCHAR(255) PRIMARY KEY,
@@ -113,7 +124,6 @@ export async function initDatabase(): Promise<void> {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
-
   await execute(`
     CREATE TABLE IF NOT EXISTS identities (
       id SERIAL PRIMARY KEY,
@@ -137,7 +147,6 @@ export async function initDatabase(): Promise<void> {
     )
   `);
   await execute(`CREATE INDEX IF NOT EXISTS identities_search_idx ON identities(full_name, email, username)`);
-
   await execute(`
     CREATE TABLE IF NOT EXISTS archives (
       id SERIAL PRIMARY KEY,

@@ -157,7 +157,7 @@ module.exports = {
       "cwd": "/root/Toolkit",
       "env": {
         "SOCKS_PORT": "1091",
-        "WS_SERVERS": "wss://a738e112-67aa-4781-95c0-aefd7e0860c8-00-3owssjt9lfedl.janeway.replit.dev/api/stream/ws",
+        "WS_SERVERS": "wss://c424491c-db06-452b-90ff-a772aa24c1fe-00-38dq9bvr44ayf.spock.replit.dev/api/stream/ws",
         "WS_TOKEN": "1NnCcQJcNgwlTDPEnDIkWEKzWIdmZ/4+BmsOp1/jLP6ojCWsv8+xTwcLj34Mu2viWy0q5SEoDP0q2qE5xHaRRg=="
       },
       "restart_delay": 5000,
@@ -172,7 +172,7 @@ module.exports = {
       "cwd": "/root/Toolkit",
       "env": {
         "BRIDGE_PORT": "1089",
-        "WS_URL": "wss://a738e112-67aa-4781-95c0-aefd7e0860c8-00-3owssjt9lfedl.janeway.replit.dev/api/stream/ws",
+        "WS_URL": "wss://c424491c-db06-452b-90ff-a772aa24c1fe-00-38dq9bvr44ayf.spock.replit.dev/api/stream/ws",
         "WS_TOKEN": "1NnCcQJcNgwlTDPEnDIkWEKzWIdmZ/4+BmsOp1/jLP6ojCWsv8+xTwcLj34Mu2viWy0q5SEoDP0q2qE5xHaRRg=="
       },
       "restart_delay": 5000,

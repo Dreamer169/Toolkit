@@ -2070,8 +2070,10 @@ router.post("/self-register", async (req, res) => {
     res.status(422).json({ ok: false, error: "探测失败，URL 不可达", detail: probe.error });
     return;
   }
-  // B27: 先按 baseUrl 查，再按 name 查（处理 URL 变化的情况）
-  let existing = allNodes().find((n) => n.baseUrl === baseUrl);
+  // B27+: 先按 normalizeBaseUrl 查（同时处理带/不带 /api/gateway 后缀的情况），再按 name 查
+  const _normUrl = (u: string) => u.trim().replace(/\/$/, "")
+    .replace(/\/api\/gateway$/, "").replace(/\/api$/, "").replace(/\/$/, "");
+  let existing = allNodes().find((n) => _normUrl(n.baseUrl) === _normUrl(baseUrl));
   if (!existing && name) {
     const byName = allNodes().find((n) => n.name === name);
     if (byName) {
