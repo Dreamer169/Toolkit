@@ -23,6 +23,25 @@ VERIFY_KWS   = ("verify", "confirm", "activate", "validation", "email-action",
 RESEEK_HOSTS = ("replit.com", "reseek.com", "replit.dev")
 
 
+def _read_connect_proxy_token_from_proc():
+    """从 /proc 中读取 http_connect_proxy.py 实际使用的 token"""
+    import glob
+    for cmdline_path in glob.glob("/proc/*/cmdline"):
+        try:
+            cmd = open(cmdline_path, "rb").read().decode("utf-8", errors="replace")
+            if "http_connect_proxy" not in cmd:
+                continue
+            pid_dir = cmdline_path.rsplit("/", 1)[0]
+            env_raw = open(f"{pid_dir}/environ", "rb").read().decode("utf-8", errors="replace")
+            env = dict(e.split("=", 1) for e in env_raw.split("\x00") if "=" in e)
+            tok = env.get("CONNECT_PROXY_TOKEN", "") or env.get("SESSION_SECRET", "")
+            if tok:
+                return tok
+        except Exception:
+            pass
+    return ""
+
+
 def _with_local_proxy_auth(proxy):
     if not proxy:
         return ""
@@ -34,7 +53,10 @@ def _with_local_proxy_auth(proxy):
     if parsed.username or parsed.password:
         return proxy
     if parsed.hostname in ("127.0.0.1", "localhost") and str(parsed.port or "") == "8091":
-        token = os.environ.get("CONNECT_PROXY_TOKEN") or os.environ.get("SESSION_SECRET") or "replproxy2024"
+        token = (os.environ.get("CONNECT_PROXY_TOKEN") or
+                 os.environ.get("SESSION_SECRET") or
+                 _read_connect_proxy_token_from_proc() or
+                 "replproxy2024")
         host = parsed.hostname or "127.0.0.1"
         netloc = ":" + urllib.parse.quote(token, safe="") + "@" + host
         if parsed.port:
@@ -43,10 +65,65 @@ def _with_local_proxy_auth(proxy):
     return proxy
 
 proxy_url = _with_local_proxy_auth(proxy_url)
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})) if proxy_url and not proxy_url.startswith("socks") else urllib.request.build_opener()
+
 
 def open_url(req, timeout):
-    return opener.open(req, timeout=timeout)
+    """发起 HTTP/HTTPS 请求，HTTPS 通过手动 CONNECT 隧道（正确携带 Proxy-Authorization）"""
+    import http.client, base64, ssl as _ssl
+    url = req.full_url
+    headers = dict(req.headers)
+    parsed_url = urllib.parse.urlparse(url)
+    is_https = parsed_url.scheme == "https"
+    host = parsed_url.hostname
+    port = parsed_url.port or (443 if is_https else 80)
+    path = parsed_url.path or "/"
+    if parsed_url.query:
+        path += "?" + parsed_url.query
+
+    if proxy_url and not proxy_url.startswith("socks"):
+        parsed_proxy = urllib.parse.urlparse(proxy_url)
+        proxy_host = parsed_proxy.hostname or "127.0.0.1"
+        proxy_port = parsed_proxy.port or 80
+        proxy_user = urllib.parse.unquote(parsed_proxy.username or "")
+        proxy_pass = urllib.parse.unquote(parsed_proxy.password or "")
+        if is_https:
+            conn = http.client.HTTPConnection(proxy_host, proxy_port, timeout=timeout)
+            tunnel_headers = {}
+            if proxy_pass or proxy_user:
+                cred = base64.b64encode(f"{proxy_user}:{proxy_pass}".encode()).decode()
+                tunnel_headers["Proxy-Authorization"] = f"Basic {cred}"
+            conn.set_tunnel(host, port, headers=tunnel_headers)
+            conn.connect()
+            ssl_ctx = _ssl.create_default_context()
+            conn.sock = ssl_ctx.wrap_socket(conn.sock, server_hostname=host)
+        else:
+            conn = http.client.HTTPConnection(proxy_host, proxy_port, timeout=timeout)
+            path = url
+            if proxy_pass or proxy_user:
+                cred = base64.b64encode(f"{proxy_user}:{proxy_pass}".encode()).decode()
+                headers["Proxy-Authorization"] = f"Basic {cred}"
+    else:
+        if is_https:
+            conn = http.client.HTTPSConnection(host, port, timeout=timeout)
+        else:
+            conn = http.client.HTTPConnection(host, port, timeout=timeout)
+
+    conn.request("GET", path, headers=headers)
+    resp = conn.getresponse()
+    body = resp.read()
+
+    class _FakeResp:
+        def __init__(self, status, body):
+            self.status = status
+            self._body = body
+        def read(self):
+            return self._body
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            conn.close()
+
+    return _FakeResp(resp.status, body)
 
 def patchright_proxy(proxy):
     if not proxy:
