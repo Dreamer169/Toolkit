@@ -263,6 +263,24 @@ router.delete("/replit/jobs/:jobId", (req, res) => {
   res.json({ success: true });
 });
 
+// 批量清理所有已完成/出错的 jobs（清空内存中的 job 记录）
+router.delete("/replit/jobs", (req, res) => {
+  const killRunning = req.query.all === "1";
+  let cleared = 0;
+  for (const [id, job] of jobs.entries()) {
+    if (job.status === "error" || job.status === "done") {
+      jobs.delete(id);
+      cleared++;
+    } else if (killRunning && job.status === "running") {
+      job.status = "error";
+      job.logs.push(`[${new Date().toISOString().slice(11,19)}] ⚠ 强制停止`);
+      jobs.delete(id);
+      cleared++;
+    }
+  }
+  res.json({ success: true, cleared });
+});
+
 const REPLIT_USERNAME_ADJS = [
   "amber","ancient","arctic","autumn","azure","binary","brave","bright","calm","cedar","clear","clever","cosmic","crimson","crystal","daily","deep","distant","drift","dusty","early","ember","fair","fast","forest","fresh","frost","gentle","golden","green","hidden","honest","ivory","jade","keen","kind","lively","lunar","maple","mellow","misty","modern","neon","nimble","noble","north","ocean","opal","polar","quiet","rapid","river","ruby","sage","silent","silver","solar","solid","spring","steady","stellar","stone","storm","summer","swift","tidal","true","urban","velvet","violet","warm","wild","winter","young","zen"
 ];
