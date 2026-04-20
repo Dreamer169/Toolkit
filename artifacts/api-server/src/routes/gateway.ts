@@ -761,6 +761,164 @@ async function callOpenAiResponsesNode(node: GatewayNode, body: ChatBody) {
   return { response: result.response, text: chatCompletionJson(node, model, extractResponsesText(parsed), parsed.id) };
 }
 
+function convertMessagesForAnthropic(messages: Array<Record<string, unknown>>) {
+  return messages
+    .filter((m) => m["role"] !== "system")
+    .map((m) => {
+      const role = m["role"] === "assistant" ? "assistant" : "user";
+      const content = m["content"];
+      if (typeof content === "string") return { role, content };
+      if (Array.isArray(content)) {
+        const parts = content.map((part: unknown) => {
+          if (!part || typeof part !== "object") return { type: "text", text: String(part ?? "") };
+          const p = part as Record<string, unknown>;
+          if (p["type"] === "text") return { type: "text", text: String(p["text"] ?? "") };
+          if (p["type"] === "image_url") {
+            const imageUrl = p["image_url"] as Record<string, unknown> | undefined;
+            const url = typeof imageUrl === "object" ? String(imageUrl?.["url"] ?? "") : String(imageUrl ?? "");
+            if (url.startsWith("data:")) {
+              const match = url.match(/^data:([^;]+);base64,(.+)$/);
+              if (match) return { type: "image", source: { type: "base64", media_type: match[1], data: match[2] } };
+            }
+            return { type: "image", source: { type: "url", url } };
+          }
+          if ("text" in p) return { type: "text", text: String(p["text"] ?? "") };
+          return null;
+        }).filter(Boolean);
+        return { role, content: parts };
+      }
+      return { role, content: String(content ?? "") };
+    });
+}
+
+async function streamAnthropicNode(node: GatewayNode, res: import("express").Response, body: ChatBody): Promise<boolean> {
+  const rawModel = normalizeRequestedModel(typeof body.model === "string" ? body.model : "");
+  const { baseModel, thinkingEnabled, thinkingVisible } = parseClaudeThinkingSuffix(rawModel);
+  const baseModels = ANTHROPIC_MODELS.map((m) => parseClaudeThinkingSuffix(m).baseModel);
+  const model = baseModels.includes(baseModel) ? baseModel : parseClaudeThinkingSuffix(node.model).baseModel || node.model;
+
+  const system = (body.messages ?? [])
+    .filter((m) => m["role"] === "system")
+    .map((m) => messageText(m))
+    .join("\n\n") || undefined;
+  const messages = convertMessagesForAnthropic(body.messages ?? []);
+
+  const requestedMax = body.max_completion_tokens || body.max_tokens;
+  const modelMax = claudeMaxTokens(model, thinkingEnabled);
+  const finalMaxTokens = requestedMax ? Math.min(Number(requestedMax), modelMax) : modelMax;
+
+  const anthropicPayload: Record<string, unknown> = {
+    model, max_tokens: finalMaxTokens,
+    ...(system ? { system } : {}),
+    messages, stream: true,
+  };
+  if (thinkingEnabled) {
+    anthropicPayload["thinking"] = { type: "enabled", budget_tokens: 16000 };
+    anthropicPayload["temperature"] = 1;
+  }
+
+  const ctrl = new AbortController();
+  const streamId = `chatcmpl-${Date.now()}`;
+  const displayModel = rawModel || model;
+
+  let fetchRes: Response;
+  try {
+    fetchRes = await fetch(`${node.baseUrl}/messages`, {
+      method: "POST",
+      headers: { "x-api-key": String(node.apiKey), "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
+      body: JSON.stringify(anthropicPayload),
+      signal: ctrl.signal,
+    });
+  } catch (e) {
+    return false;
+  }
+  if (!fetchRes.ok || !fetchRes.body) return false;
+
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.setHeader("x-gateway-node", node.id);
+
+  // keepalive 心跳：每 5 秒发送一次，防止 thinking 期间超时
+  const keepalive = setInterval(() => { try { res.write(": keepalive\n\n"); } catch {} }, 5000);
+
+  let inThinking = false;
+  let hasThinkingBlock = false;
+  let buffer = "";
+
+  res.write(`data: ${JSON.stringify(sseChunk(streamId, displayModel, { role: "assistant", content: "" }))}
+
+`);
+
+  try {
+    const reader = fetchRes.body.getReader();
+    const decoder = new TextDecoder();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const dataStr = line.slice(6).trim();
+        if (!dataStr || dataStr === "[DONE]") continue;
+        let evt: Record<string, unknown>;
+        try { evt = JSON.parse(dataStr); } catch { continue; }
+        const type = evt["type"] as string | undefined;
+
+        if (type === "content_block_start") {
+          const block = evt["content_block"] as Record<string, unknown> | undefined;
+          if (block?.["type"] === "thinking") {
+            inThinking = true; hasThinkingBlock = true;
+            if (thinkingVisible) res.write(`data: ${JSON.stringify(sseChunk(streamId, displayModel, { content: "<thinking>\n" }))}
+
+`);
+          } else if (block?.["type"] === "text" && hasThinkingBlock) {
+            if (thinkingVisible && inThinking) {
+              res.write(`data: ${JSON.stringify(sseChunk(streamId, displayModel, { content: "\n</thinking>\n\n" }))}
+
+`);
+            }
+            inThinking = false;
+          }
+        } else if (type === "content_block_delta") {
+          const delta = evt["delta"] as Record<string, unknown> | undefined;
+          if (delta?.["type"] === "thinking_delta") {
+            if (thinkingVisible) res.write(`data: ${JSON.stringify(sseChunk(streamId, displayModel, { content: String(delta["thinking"] ?? "") }))}
+
+`);
+          } else if (delta?.["type"] === "text_delta") {
+            res.write(`data: ${JSON.stringify(sseChunk(streamId, displayModel, { content: String(delta["text"] ?? "") }))}
+
+`);
+          }
+        } else if (type === "message_delta") {
+          const delta = evt["delta"] as Record<string, unknown> | undefined;
+          const usage = evt["usage"] as Record<string, unknown> | undefined;
+          const finishReason = String(delta?.["stop_reason"] ?? "stop");
+          const usageData = usage ? { prompt_tokens: Number(usage["input_tokens"] ?? 0), completion_tokens: Number(usage["output_tokens"] ?? 0) } : undefined;
+          const chunk = sseChunk(streamId, displayModel, {}, finishReason === "end_turn" ? "stop" : finishReason);
+          if (usageData) (chunk as Record<string, unknown>)["usage"] = usageData;
+          res.write(`data: ${JSON.stringify(chunk)}
+
+`);
+        }
+      }
+    }
+  } catch {}
+
+  clearInterval(keepalive);
+  if (inThinking && thinkingVisible) res.write(`data: ${JSON.stringify(sseChunk(streamId, displayModel, { content: "\n</thinking>\n\n" }))}
+
+`);
+  res.write("data: [DONE]\n\n");
+  res.end();
+  return true;
+}
+
 async function callAnthropicNode(node: GatewayNode, body: ChatBody) {
   // ── 解析 thinking suffix ──────────────────────────────────────────────────
   const rawModel = normalizeRequestedModel(typeof body.model === "string" ? body.model : "");
@@ -773,12 +931,7 @@ async function callAnthropicNode(node: GatewayNode, body: ChatBody) {
     .filter((message) => message["role"] === "system")
     .map(messageText)
     .join("\n\n") || undefined;
-  const messages = (body.messages ?? [])
-    .filter((message) => message["role"] !== "system")
-    .map((message) => ({
-      role: message["role"] === "assistant" ? "assistant" : "user",
-      content: messageText(message),
-    }));
+  const messages = convertMessagesForAnthropic(body.messages ?? []);
 
   // ── max_tokens 按模型表决定 ───────────────────────────────────────────────
   const requestedMax = body.max_completion_tokens || body.max_tokens;
@@ -918,6 +1071,11 @@ async function streamNode(node: GatewayNode, req: Request, res: Response, body: 
       return false;
     }
   }
+  // reseek-anthropic 走真实 Anthropic SSE（含 thinking 心跳）
+  if (node.type === "reseek-anthropic") {
+    return streamAnthropicNode(node, res, body);
+  }
+
   const result = await callNode(node, req, { ...body, stream: false });
   if (!result.response.ok) return false;
   let content = "";
