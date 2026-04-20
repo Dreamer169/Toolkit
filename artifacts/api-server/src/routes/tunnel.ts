@@ -241,6 +241,53 @@ export function selfRegister(attempt = 0): void {
     ? "gemini-2.5-flash"
     : "gpt-5-mini";
 
+  // ── 完整能力型号表（含新发布未纳入参数的官方 model ID）────────────────────
+  const ANTHROPIC_ALL: string[] = [
+    // 网关内部命名（带 thinking 后缀，自动注入 extended thinking 参数）
+    "claude-opus-4-6", "claude-opus-4-6-thinking", "claude-opus-4-6-thinking-visible",
+    "claude-opus-4-5", "claude-opus-4-5-thinking", "claude-opus-4-5-thinking-visible",
+    "claude-opus-4-1", "claude-opus-4-1-thinking", "claude-opus-4-1-thinking-visible",
+    "claude-sonnet-4-6", "claude-sonnet-4-6-thinking", "claude-sonnet-4-6-thinking-visible",
+    "claude-sonnet-4-5", "claude-sonnet-4-5-thinking", "claude-sonnet-4-5-thinking-visible",
+    "claude-haiku-4-5", "claude-haiku-4-5-thinking", "claude-haiku-4-5-thinking-visible",
+    // Anthropic 官方 API model ID（直透传，无 thinking 注入）
+    "claude-opus-4-5-20251101", "claude-opus-4-1-20250514",
+    "claude-sonnet-4-5-20251101", "claude-sonnet-4-5-20250514",
+    "claude-haiku-4-5-20251101",
+    "claude-3-7-sonnet-20250219", "claude-3-5-sonnet-20241022", "claude-3-5-sonnet-20240620",
+    "claude-3-5-haiku-20241022",
+    "claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307",
+  ];
+  const OPENAI_ALL: string[] = [
+    // GPT-5 系列
+    "gpt-5.2", "gpt-5-mini", "gpt-5-nano",
+    // GPT-4.1 系列（2025-04 发布）
+    "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano",
+    // GPT-4o 系列
+    "gpt-4o", "gpt-4o-mini", "gpt-4o-2024-11-20", "gpt-4o-2024-08-06",
+    // GPT-4 旧系列
+    "gpt-4-turbo", "gpt-4-turbo-preview", "gpt-4",
+    // o 系列推理模型
+    "o4-mini", "o3", "o3-mini", "o1", "o1-mini", "o1-preview",
+  ];
+  const GEMINI_ALL: string[] = [
+    // Gemini 2.5 系列（2025 新）
+    "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-preview-04-17",
+    // Gemini 3 系列
+    "gemini-3-flash-preview",
+    // Gemini 2.0 系列
+    "gemini-2.0-flash", "gemini-2.0-flash-thinking-exp", "gemini-2.0-pro-exp",
+    // Gemini 1.5 系列
+    "gemini-1.5-pro", "gemini-1.5-flash", "gemini-1.5-flash-8b",
+  ];
+
+  // 按实际已配置的集成能力拼接 models 列表
+  const models: string[] = [
+    ...(antKey ? ANTHROPIC_ALL : []),
+    ...(oaiKey ? OPENAI_ALL : []),
+    ...(gemKey ? GEMINI_ALL : []),
+  ];
+
   const body = JSON.stringify({
     gatewayUrl,
     name: NODE_NAME,
@@ -248,6 +295,7 @@ export function selfRegister(attempt = 0): void {
     source: "runtime",
     model: primaryModel,
     priority: 2,
+    models: models.length > 0 ? models : undefined,
     ...(antBase && antKey ? { anthropicBaseUrl: antBase, anthropicApiKey: antKey } : {}),
     ...(oaiBase && oaiKey ? { openaiBaseUrl: oaiBase, openaiApiKey: oaiKey } : {}),
     ...(gemBase && gemKey ? { geminiBaseUrl: gemBase, geminiApiKey: gemKey } : {}),

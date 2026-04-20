@@ -29,6 +29,7 @@ type GatewayNode = {
   lastLatencyMs?: number;
   lastUsedAt?: string;
   creditExhaustedAt?: number;
+  models?: string[];
 };
 
 type ChatBody = {
@@ -68,6 +69,7 @@ type SelfRegisterBody = {
   anthropicApiKey?: string;
   geminiBaseUrl?: string;
   geminiApiKey?: string;
+  models?: string[];
 };
 
 // ═══ 配置 ═══════════════════════════════════════════════════════════════════
@@ -89,17 +91,45 @@ const RESEEK_OPENAI_NODE_COUNT = Math.min(24, Math.max(1, Number(process.env["RE
 // NODE_DOWN_MS: 节点失败后的冷却时间（默认 60s）。
 // 调低至 60s 是为了让 Sub2API 在添加账号后更快恢复。
 const NODE_DOWN_MS = Math.max(30_000, Number(process.env["GATEWAY_NODE_DOWN_MS"] || 60_000));
-const OPENAI_MODELS = ["gpt-5.2", "gpt-5-mini", "gpt-5-nano", "o4-mini"];
+const OPENAI_MODELS = [
+  // GPT-5 系列
+  "gpt-5.2", "gpt-5-mini", "gpt-5-nano",
+  // GPT-4.1 系列（2025-04 发布）
+  "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano",
+  // GPT-4o 系列
+  "gpt-4o", "gpt-4o-mini", "gpt-4o-2024-11-20", "gpt-4o-2024-08-06",
+  // GPT-4 旧系列
+  "gpt-4-turbo", "gpt-4-turbo-preview", "gpt-4",
+  // o 系列推理模型（需 reasoning 参数）
+  "o4-mini", "o3", "o3-mini", "o1", "o1-mini", "o1-preview",
+];
 const OPENAI_REASONING_MODELS = ["o4-mini", "o3", "o3-mini", "o1", "o1-mini"]; // 只有这些支持 reasoning 参数
 const ANTHROPIC_MODELS = [
+  // ── 网关内部命名（自动 thinking 参数注入）──────────────────────────────────
   "claude-opus-4-6", "claude-opus-4-6-thinking", "claude-opus-4-6-thinking-visible",
   "claude-opus-4-5", "claude-opus-4-5-thinking", "claude-opus-4-5-thinking-visible",
   "claude-opus-4-1", "claude-opus-4-1-thinking", "claude-opus-4-1-thinking-visible",
   "claude-sonnet-4-6", "claude-sonnet-4-6-thinking", "claude-sonnet-4-6-thinking-visible",
   "claude-sonnet-4-5", "claude-sonnet-4-5-thinking", "claude-sonnet-4-5-thinking-visible",
   "claude-haiku-4-5", "claude-haiku-4-5-thinking", "claude-haiku-4-5-thinking-visible",
+  // ── Anthropic 官方 API model ID（直透传，无 thinking 注入）─────────────────
+  "claude-opus-4-5-20251101", "claude-opus-4-1-20250514",
+  "claude-sonnet-4-5-20251101", "claude-sonnet-4-5-20250514",
+  "claude-haiku-4-5-20251101",
+  "claude-3-7-sonnet-20250219", "claude-3-5-sonnet-20241022", "claude-3-5-sonnet-20240620",
+  "claude-3-5-haiku-20241022",
+  "claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307",
 ];
-const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-3-flash-preview"];
+const GEMINI_MODELS = [
+  // Gemini 2.5 系列（2025 新）
+  "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-preview-04-17",
+  // Gemini 3 系列
+  "gemini-3-flash-preview",
+  // Gemini 2.0 系列
+  "gemini-2.0-flash", "gemini-2.0-flash-thinking-exp", "gemini-2.0-pro-exp",
+  // Gemini 1.5 系列
+  "gemini-1.5-pro", "gemini-1.5-flash", "gemini-1.5-flash-8b",
+];
 const SUB2API_GROUP_IDS = {
   openai: 2,
   anthropic: 6,
@@ -455,6 +485,7 @@ function nodeSnapshot(node: GatewayNode) {
     lastError: node.lastError,
     lastLatencyMs: node.lastLatencyMs,
     lastUsedAt: node.lastUsedAt,
+    models: node.models ?? [],
   };
 }
 
@@ -1826,6 +1857,8 @@ router.post("/self-register", async (req, res) => {
     // 更新存活时间：重置 downUntil（探测通过说明节点仍存活）
     existing.downUntil = 0;
     existing.failures = 0;
+    // 同步更新 models 能力列表
+    if (body.models && body.models.length > 0) existing.models = body.models;
     // 若节点来自 runtimeNodes（动态注册），持久化保存
     if (runtimeNodes.includes(existing)) savePersistedNodes(runtimeNodes);
     const credentialPush = await pushSelfRegisterCredentialsToSub2Api(body, baseUrl, name);
@@ -1848,6 +1881,7 @@ router.post("/self-register", async (req, res) => {
     successes: 0,
     failures: 0,
     source: "register",
+    models: (body as {models?: string[]}).models ?? [],
   };
   runtimeNodes.push(node);
   savePersistedNodes(runtimeNodes);
