@@ -51,7 +51,7 @@ type ResponsesApiResult = {
 type AnthropicResult = {
   id?: string;
   model?: string;
-  content?: Array<{ type?: string; text?: string }>;
+  content?: Array<{ type?: string; text?: string; thinking?: string }>;
 };
 
 type GeminiResult = {
@@ -91,7 +91,14 @@ const RESEEK_OPENAI_NODE_COUNT = Math.min(24, Math.max(1, Number(process.env["RE
 const NODE_DOWN_MS = Math.max(30_000, Number(process.env["GATEWAY_NODE_DOWN_MS"] || 60_000));
 const OPENAI_MODELS = ["gpt-5.2", "gpt-5-mini", "gpt-5-nano", "o4-mini"];
 const OPENAI_REASONING_MODELS = ["o4-mini", "o3", "o3-mini", "o1", "o1-mini"]; // 只有这些支持 reasoning 参数
-const ANTHROPIC_MODELS = ["claude-sonnet-4-6", "claude-haiku-4-5"];
+const ANTHROPIC_MODELS = [
+  "claude-opus-4-6", "claude-opus-4-6-thinking", "claude-opus-4-6-thinking-visible",
+  "claude-opus-4-5", "claude-opus-4-5-thinking", "claude-opus-4-5-thinking-visible",
+  "claude-opus-4-1", "claude-opus-4-1-thinking", "claude-opus-4-1-thinking-visible",
+  "claude-sonnet-4-6", "claude-sonnet-4-6-thinking", "claude-sonnet-4-6-thinking-visible",
+  "claude-sonnet-4-5", "claude-sonnet-4-5-thinking", "claude-sonnet-4-5-thinking-visible",
+  "claude-haiku-4-5", "claude-haiku-4-5-thinking", "claude-haiku-4-5-thinking-visible",
+];
 const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-3-flash-preview"];
 const SUB2API_GROUP_IDS = {
   openai: 2,
@@ -538,6 +545,29 @@ function normalizeRequestedModel(model: string) {
   return value.includes("/") ? value.split("/").pop() || value : value;
 }
 
+function parseClaudeThinkingSuffix(model: string): { baseModel: string; thinkingEnabled: boolean; thinkingVisible: boolean } {
+  if (model.endsWith("-thinking-visible")) {
+    return { baseModel: model.slice(0, -"-thinking-visible".length), thinkingEnabled: true, thinkingVisible: true };
+  }
+  if (model.endsWith("-thinking")) {
+    return { baseModel: model.slice(0, -"-thinking".length), thinkingEnabled: true, thinkingVisible: false };
+  }
+  return { baseModel: model, thinkingEnabled: false, thinkingVisible: false };
+}
+
+function claudeMaxTokens(baseModel: string, thinkingEnabled: boolean): number {
+  const table: Record<string, number> = {
+    "claude-haiku-4-5": 8096,
+    "claude-sonnet-4-5": 64000,
+    "claude-sonnet-4-6": 64000,
+    "claude-opus-4-1": 64000,
+    "claude-opus-4-5": 64000,
+    "claude-opus-4-6": 64000,
+  };
+  const modelMax = table[baseModel] ?? 32000;
+  return thinkingEnabled ? Math.max(modelMax, 32000) : modelMax;
+}
+
 function orderedCandidates(model = "") {
   const now = Date.now();
   const ready = allNodes()
@@ -612,11 +642,19 @@ function extractResponsesText(data: ResponsesApiResult) {
     .join("");
 }
 
-function extractAnthropicText(data: AnthropicResult) {
-  return (data.content ?? [])
-    .filter((content) => content.type === "text" && content.text)
-    .map((content) => content.text)
+function extractAnthropicText(data: AnthropicResult, thinkingVisible = false) {
+  const blocks = data.content ?? [];
+  const thinkingTexts = blocks
+    .filter((b) => b.type === "thinking" && b.thinking)
+    .map((b) => b.thinking ?? "");
+  const text = blocks
+    .filter((b) => b.type === "text" && b.text)
+    .map((b) => b.text ?? "")
     .join("");
+  if (thinkingVisible && thinkingTexts.length > 0) {
+    return `<thinking>\n${thinkingTexts.join("\n")}\n</thinking>\n\n${text}`;
+  }
+  return text;
 }
 
 function extractGeminiText(data: GeminiResult) {
@@ -724,6 +762,13 @@ async function callOpenAiResponsesNode(node: GatewayNode, body: ChatBody) {
 }
 
 async function callAnthropicNode(node: GatewayNode, body: ChatBody) {
+  // ── 解析 thinking suffix ──────────────────────────────────────────────────
+  const rawModel = normalizeRequestedModel(typeof body.model === "string" ? body.model : "");
+  const { baseModel, thinkingEnabled, thinkingVisible } = parseClaudeThinkingSuffix(rawModel);
+  const baseModels = ANTHROPIC_MODELS.map((m) => parseClaudeThinkingSuffix(m).baseModel);
+  const model = baseModels.includes(baseModel) ? baseModel : parseClaudeThinkingSuffix(node.model).baseModel || node.model;
+
+  // ── 消息格式转换 ──────────────────────────────────────────────────────────
   const system = (body.messages ?? [])
     .filter((message) => message["role"] === "system")
     .map(messageText)
@@ -734,7 +779,24 @@ async function callAnthropicNode(node: GatewayNode, body: ChatBody) {
       role: message["role"] === "assistant" ? "assistant" : "user",
       content: messageText(message),
     }));
-  const model = requestedModel(body, node, ANTHROPIC_MODELS);
+
+  // ── max_tokens 按模型表决定 ───────────────────────────────────────────────
+  const requestedMax = body.max_completion_tokens || body.max_tokens;
+  const modelMax = claudeMaxTokens(model, thinkingEnabled);
+  const finalMaxTokens = requestedMax ? Math.min(Number(requestedMax), modelMax) : modelMax;
+
+  // ── 构建请求体 ────────────────────────────────────────────────────────────
+  const anthropicPayload: Record<string, unknown> = {
+    model,
+    max_tokens: finalMaxTokens,
+    ...(system ? { system } : {}),
+    messages,
+  };
+  if (thinkingEnabled) {
+    anthropicPayload["thinking"] = { type: "enabled", budget_tokens: 16000 };
+    anthropicPayload["temperature"] = 1;
+  }
+
   const result = await fetchTextWithTimeout(`${node.baseUrl}/messages`, {
     method: "POST",
     headers: {
@@ -742,16 +804,11 @@ async function callAnthropicNode(node: GatewayNode, body: ChatBody) {
       "anthropic-version": "2023-06-01",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      model,
-      max_tokens: maxTokens(body),
-      ...(system ? { system } : {}),
-      messages,
-    }),
+    body: JSON.stringify(anthropicPayload),
   });
   if (!result.response.ok) return result;
   const parsed = JSON.parse(result.text || "{}") as AnthropicResult;
-  return { response: result.response, text: chatCompletionJson(node, model, extractAnthropicText(parsed), parsed.id) };
+  return { response: result.response, text: chatCompletionJson(node, rawModel || model, extractAnthropicText(parsed, thinkingVisible), parsed.id) };
 }
 
 async function callGeminiNode(node: GatewayNode, body: ChatBody) {
