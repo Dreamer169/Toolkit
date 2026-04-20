@@ -17,7 +17,7 @@ module.exports = {
         "SUB2API_ADMIN_KEY": "sk-06cf1c8b2ff7a09a1f11d7909a6d7cb7dee97e38793d630f25a3bddf2bf0ec16",
         "SUB2API_API_KEY": "sk-06cf1c8b2ff7a09a1f11d7909a6d7cb7dee97e38793d630f25a3bddf2bf0ec16",
         "LOCAL_GATEWAY_BASE_URL": "https://strive-phoney-vocalize.ngrok-free.dev/api/gateway",
-        "REPLIT_SUBNODES": "https://gh-cli-install--bandersonndz.replit.app/api/gateway"
+        "REPLIT_SUBNODES": "https://gh-cli-install--bandersonndz.replit.app/api/gateway,https://gh-cli-direct--elizabetha96.replit.app/api/gateway"
       },
       "restart_delay": 3000,
       "max_restarts": 20,
@@ -199,6 +199,24 @@ module.exports = {
       "max_restarts": 20,
       "watch": false,
       "autorestart": true
+    },
+    {
+      "name": "http-poll-bridge",
+      "script": "/root/Toolkit/http_poll_bridge.py",
+      "interpreter": "python3",
+      "cwd": "/root/Toolkit",
+      "restart_delay": 5000,
+      "max_restarts": 50,
+      "watch": false,
+      "autorestart": true,
+      "env": {
+        "SOCKS_PORT": "1092",
+        "STREAM_TOKEN": "123456",
+        "GATEWAY_API": "http://localhost:8080/api",
+        "SUBNODE_URLS": "https://gh-cli-direct--elizabetha96.replit.app,https://gh-cli-install--jessicaphilli10.replit.app,https://gh-cli-install--bandersonndz.replit.app,https://957ee4dd-b94b-4405-8373-7a1bd9558eff-00-1kr7ptb11d9tn.spock.replit.dev",
+        "REFRESH_SECS": "30",
+        "PYTHONUNBUFFERED": "1"
+      }
     }
   ]
 };

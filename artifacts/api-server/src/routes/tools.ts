@@ -2168,7 +2168,7 @@ let lastSubnodeBridgeSync = 0;
 const SOCKS5_PROBE_HOST = "login.live.com";
 const SOCKS5_PROBE_PORT = 443;
 const SOCKS5_HANDSHAKE_TIMEOUT_MS = 600;
-const SOCKS5_CONNECT_TIMEOUT_MS = 5000;
+const SOCKS5_CONNECT_TIMEOUT_MS = 12000;
 
 function testSocks5Connectivity(port: number): Promise<boolean> {
   return new Promise((resolve) => {
