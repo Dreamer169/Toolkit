@@ -2058,6 +2058,12 @@ router.post("/self-register", async (req, res) => {
     return;
   }
   const baseUrl = gatewayUrl.replace(/\/$/, "");
+  // B13 修复：注册鉴权 - 若 EXEC_SECRET 已配置则要求请求方提供正确 token
+  const regSecret = (body as Record<string, unknown>).execSecret ?? (body as Record<string, unknown>).token;
+  if (EXEC_SECRET && regSecret !== EXEC_SECRET) {
+    res.status(401).json({ ok: false, error: "注册密钥不正确，请提供正确的 execSecret" });
+    return;
+  }
   // 探测目标是否真的是 gateway
   const probe = await probeNodeUrl(baseUrl, undefined, 8000, false);
   if (!probe.ok) {

@@ -7,16 +7,19 @@ import { logger } from "../lib/logger";
 const router: IRouter = Router();
 
 const TUNNEL_TOKEN =
-  process.env["TUNNEL_TOKEN"] ??
-  "1NnCcQJcNgwlTDPEnDIkWEKzWIdmZ/4+BmsOp1/jLP6ojCWsv8+xTwcLj34Mu2viWy0q5SEoDP0q2qE5xHaRRg==";
-const VPS_GATEWAY = process.env["VPS_GATEWAY"] ?? "http://45.205.27.69:8080";
+  process.env["TUNNEL_TOKEN"] ?? "123456";
+const EXEC_SECRET_VAL = process.env["EXEC_SECRET"] || "123456";
+const VPS_GATEWAY = (process.env["VPS_GATEWAY"] || "http://45.205.27.69:8080").replace(/\/$/, "");
 const NODE_NAME = process.env["REPLIT_USER"] ?? "replit-subnode";
+
+const SESSION_IDLE_MS = 5 * 60_000; // 5 分钟无活动则清理
 
 interface Session {
   socket: net.Socket;
   readBuffer: Buffer[];
   waiters: Array<(data: Buffer | null) => void>;
   closed: boolean;
+  lastActivityAt: number;
 }
 
 const sessions = new Map<string, Session>();
@@ -62,6 +65,7 @@ function createTunnelRouter(prefix: "stream" | "tunnel") {
         readBuffer: [],
         waiters: [],
         closed: false,
+        lastActivityAt: Date.now(),
       };
       sessions.set(id, session);
 
@@ -107,6 +111,7 @@ function createTunnelRouter(prefix: "stream" | "tunnel") {
       res.status(404).json({ error: "no session" });
       return;
     }
+    session.lastActivityAt = Date.now();
 
     res.set({
       "Content-Type": "application/octet-stream",
@@ -164,6 +169,7 @@ function createTunnelRouter(prefix: "stream" | "tunnel") {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
+      session.lastActivityAt = Date.now();
       session.socket.write(Buffer.concat(chunks));
       res.json({ ok: true });
     });
@@ -203,8 +209,12 @@ createTunnelRouter("stream");
 createTunnelRouter("tunnel");
 
 setInterval(() => {
+  const now = Date.now();
   for (const [id, session] of sessions.entries()) {
-    if (session.closed) cleanupSession(id);
+    if (session.closed) { cleanupSession(id); continue; }
+    if (now - session.lastActivityAt > SESSION_IDLE_MS) {
+      cleanupSession(id); // Bug11: 清理长期空闲会话，防止内存泄漏
+    }
   }
 }, 30_000).unref();
 
@@ -292,6 +302,7 @@ export function selfRegister(attempt = 0): void {
     gatewayUrl,
     name: NODE_NAME,
     token: TUNNEL_TOKEN,
+    execSecret: EXEC_SECRET_VAL,
     source: "runtime",
     model: primaryModel,
     priority: 2,
@@ -322,8 +333,9 @@ export function selfRegister(attempt = 0): void {
           { statusCode: response.statusCode, url: gatewayUrl, attempt },
           ok ? "FriendNode registered ok" : "FriendNode register non-2xx",
         );
-        if (!ok && attempt < 5) {
-          setTimeout(() => selfRegister(attempt + 1), 30_000).unref();
+        if (!ok) {
+          const delay = Math.min(30_000 * Math.pow(2, attempt), 10 * 60_000);
+          setTimeout(() => selfRegister(attempt + 1), delay).unref();
         }
       });
     },
@@ -331,8 +343,9 @@ export function selfRegister(attempt = 0): void {
 
   request.on("error", (error) => {
     logger.warn({ err: error, attempt }, "FriendNode self-register error");
-    if (attempt < 5) {
-      setTimeout(() => selfRegister(attempt + 1), 30_000).unref();
+    {
+      const delay = Math.min(30_000 * Math.pow(2, attempt), 10 * 60_000);
+      setTimeout(() => selfRegister(attempt + 1), delay).unref();
     }
   });
   request.write(body);

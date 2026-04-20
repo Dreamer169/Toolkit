@@ -3,8 +3,9 @@ import { Router } from "express";
 const router = Router();
 
 router.get("/admin", (_req, res) => {
+  const execSecret = process.env["EXEC_SECRET"] || "123456";
   res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.send(ADMIN_HTML);
+  res.send(ADMIN_HTML.replace(/\{\{EXEC_SECRET\}\}/g, execSecret));
 });
 
 const ADMIN_HTML = /* html */`<!DOCTYPE html>
@@ -195,6 +196,26 @@ body{background:#0a0f1e;color:#cbd5e1;font-family:'Inter',system-ui,sans-serif;f
     Gateway Portal · 数据来源：<a href="/api/gateway/health" style="color:#6366f1" target="_blank">Health API</a>
   </div>
 </div>
+
+  <!-- Register Friend Node -->
+  <div class="card">
+    <div class="sec-hdr">注册友节点</div>
+    <div style="font-size:11px;color:#64748b;margin-bottom:10px">将其他 Replit 网关节点注册到节点池</div>
+    <div style="margin-bottom:8px">
+      <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px">友节点 Gateway URL</label>
+      <input class="key-input" id="reg-url" placeholder="https://your-node.replit.dev/api/gateway" style="margin-bottom:0">
+    </div>
+    <div style="margin-bottom:12px">
+      <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px">注册密钥 (execSecret)</label>
+      <input class="key-input" id="reg-secret" value="{{EXEC_SECRET}}" style="margin-bottom:0">
+    </div>
+    <div style="margin-bottom:8px">
+      <button onclick="doRegister()" style="background:#6366f1;color:#fff;border:none;border-radius:6px;padding:7px 16px;font-size:12px;cursor:pointer;font-weight:600">注册节点</button>
+      <button onclick="doRecoverAll()" style="background:#334155;color:#94a3b8;border:none;border-radius:6px;padding:7px 16px;font-size:12px;cursor:pointer;margin-left:8px">恢复全部节点</button>
+    </div>
+    <div id="reg-result" style="font-size:11px;padding:8px;border-radius:6px;display:none"></div>
+  </div>
+
 
 <script>
 var _data=null,_models=[],_cdVal=30,_cdTimer=null,_apiKey='';
@@ -466,6 +487,44 @@ function startCountdown(){
     _cdVal--;cd.textContent=_cdVal+'s 后刷新';
     if(_cdVal<=0){clearInterval(_cdTimer);load();}
   },1000);
+}
+
+
+/* ─── Register Friend Node ─── */
+async function doRegister(){
+  var url=document.getElementById('reg-url').value.trim();
+  var secret=document.getElementById('reg-secret').value.trim();
+  var el=document.getElementById('reg-result');
+  if(!url){el.style.display='block';el.style.background='#451a03';el.style.color='#fca5a5';el.textContent='请输入 Gateway URL';return;}
+  el.style.display='block';el.style.background='#1e293b';el.style.color='#94a3b8';el.textContent='注册中…';
+  try{
+    var base=window.location.origin;
+    var resp=await fetch(base+'/api/gateway/self-register',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({gatewayUrl:url,execSecret:secret})
+    });
+    var d=await resp.json();
+    if(resp.ok){
+      el.style.background='#052e16';el.style.color='#86efac';
+      el.textContent='✓ '+d.action+' | NodeID: '+(d.nodeId||d.node&&d.node.id||'?')+' | 延迟: '+(d.latencyMs||'?')+'ms';
+      load();
+    }else{
+      el.style.background='#450a0a';el.style.color='#fca5a5';
+      el.textContent='✗ '+resp.status+': '+(d.error||JSON.stringify(d));
+    }
+  }catch(e){el.style.background='#450a0a';el.style.color='#fca5a5';el.textContent='✗ 请求失败: '+e.message;}
+}
+async function doRecoverAll(){
+  var el=document.getElementById('reg-result');
+  el.style.display='block';el.style.background='#1e293b';el.style.color='#94a3b8';el.textContent='恢复中…';
+  try{
+    var resp=await fetch(window.location.origin+'/api/gateway/nodes/recover-all',{method:'POST'});
+    var d=await resp.json();
+    el.style.background='#052e16';el.style.color='#86efac';
+    el.textContent='✓ 已恢复 '+d.recovered+' 个节点';
+    load();
+  }catch(e){el.style.background='#450a0a';el.style.color='#fca5a5';el.textContent='✗ '+e.message;}
 }
 
 /* ─── Init ─── */
