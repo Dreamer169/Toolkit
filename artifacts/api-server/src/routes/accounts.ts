@@ -1294,7 +1294,7 @@ router.post("/pipeline/full", async (req, res) => {
         const deployR = await runPython(
           path.join(API_DIR, "replit_deploy_agent.py"),
           { email: acc.email, password: acc.password, outlook_token: outlookTok,
-            gateway_url: "http://45.205.27.69:8080", headless: true },
+            gateway_url: "http://45.205.27.69:8080", headless: true, source_project: "https://replit.com/@skingsbp/gh-cli-install", deploy: true },
           300_000
         );
         if (deployR.parsed.ok) {
@@ -1385,7 +1385,7 @@ router.post("/replit/deploy-subnode", async (req, res) => {
       const deployR = await runPython(
         path.join(API_DIR, "replit_deploy_agent.py"),
         { email: acc.email, password: acc.password, outlook_token: outlookTok,
-          gateway_url: "http://45.205.27.69:8080", headless: true },
+          gateway_url: "http://45.205.27.69:8080", headless: true, source_project: "https://replit.com/@skingsbp/gh-cli-install", deploy: true },
         300_000
       );
       log(`部署脚本输出: ${deployR.raw.slice(-400)}`);
