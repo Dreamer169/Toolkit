@@ -432,7 +432,10 @@ async def signup_one(identity, headless=True):
         return {"email": identity["email"], "ok": False, "error": str(e)}
 
     ua = random.choice(USER_AGENTS)
-    proxy_ports = random.sample(ALL_SOCKS_PORTS, min(MAX_RETRIES, len(ALL_SOCKS_PORTS)))
+    # poll-bridge 优先（Replit GCP IP），xray 补足
+    poll_first = POLL_BRIDGE_PORTS.copy()
+    xray_rest  = random.sample(XRAY_SOCKS_PORTS, min(MAX_RETRIES, len(XRAY_SOCKS_PORTS)))
+    proxy_ports = (poll_first + xray_rest)[:MAX_RETRIES]
 
     for attempt, port in enumerate(proxy_ports, 1):
         inf(f"  第 {attempt}/{MAX_RETRIES} 次尝试 (SOCKS:{port}, UA:{ua[30:60]}…)")
