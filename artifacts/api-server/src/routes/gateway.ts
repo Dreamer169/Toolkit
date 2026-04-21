@@ -2098,6 +2098,7 @@ router.post("/self-register", async (req, res) => {
     const newPriority = (body as {priority?: number}).priority;
     if (newPriority != null) existing.priority = newPriority;
     // 更新存活时间：重置 downUntil（探测通过说明节点仍存活）
+    existing.enabled = true; // Bug fix: 重注册时重置为 enabled（旧持久化节点可能 disabled）
     existing.downUntil = 0;
     existing.failures = 0;
     // 同步更新 models 能力列表（有明确列表时更新，空列表时清空旧列表）
