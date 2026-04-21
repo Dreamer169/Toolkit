@@ -220,18 +220,30 @@ setInterval(() => {
 
 // 友节点自注册：启动后把本实例公开 URL 注册到 VPS 网关，最多重试 6 次
 export function selfRegister(attempt = 0): void {
-  const domain =
+  // 仅使用稳定的已部署域名（REPLIT_DOMAINS 或 MY_URL），不使用临时 dev/workspace URL
+  // REPLIT_DEV_DOMAIN（picard/spock/worf/janeway.replit.dev）随 repl 重启而变化，
+  // 注册到网关后很快失效，造成 ghost 节点并导致探测持续失败。
+  const rawDomain =
     process.env["MY_URL"] ??
     (process.env["REPLIT_DOMAINS"]
       ? `https://${process.env["REPLIT_DOMAINS"].split(",")[0]?.trim()}`
-      : process.env["REPLIT_DEV_DOMAIN"]
-        ? `https://${process.env["REPLIT_DEV_DOMAIN"]}`
-        : undefined);
+      : undefined);
 
-  if (!domain) {
-    logger.debug("FriendNode self-register skipped: no public domain");
+  if (!rawDomain) {
+    logger.debug("FriendNode self-register skipped: no deployed domain (REPLIT_DOMAINS not set)");
     return;
   }
+
+  // 拒绝 Replit workspace dev URL（临时，每次重启都变化）
+  const DEV_DOMAIN_RE = /\.(picard|spock|worf|janeway|riker|troi|crusher|data|laforge)\.replit\.dev$/i;
+  let parsedHostname = "";
+  try { parsedHostname = new URL(rawDomain).hostname; } catch { /* ignore */ }
+  if (DEV_DOMAIN_RE.test(parsedHostname)) {
+    logger.debug({ domain: rawDomain }, "FriendNode self-register skipped: ephemeral dev domain, use REPLIT_DOMAINS instead");
+    return;
+  }
+
+  const domain = rawDomain;
 
   const gatewayUrl = `${domain.replace(/\/$/, "")}/api/gateway`;
   // 读取本实例所有 AI 集成 env，注册时一并上报给 VPS

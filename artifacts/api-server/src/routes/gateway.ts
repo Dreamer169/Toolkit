@@ -30,6 +30,7 @@ type GatewayNode = {
   lastUsedAt?: string;
   creditExhaustedAt?: number;
   models?: string[];
+  streamDownUntil?: number;   // stream 通道健康（独立于 AI 健康）
 };
 
 type ChatBody = {
@@ -1421,10 +1422,12 @@ router.get("/nodes/status", (_req, res) => {
       const rawBase = n.baseUrl ?? "";
       const base = rawBase.endsWith("/api/gateway") ? rawBase.slice(0, -12) : rawBase.endsWith("/api") ? rawBase.slice(0, -4) : rawBase;
       const isDown = n.downUntil > now;
+      const streamDown = (n.streamDownUntil ?? 0) > now;
       return {
         id: n.id,
         baseUrl: base.replace(/\/$/, ""),
         status: isDown ? "down" : "ready",
+        streamStatus: streamDown ? "down" : (n.streamDownUntil === 0 ? "ok" : "unknown"),
         downUntil: isDown ? new Date(n.downUntil).toISOString() : null,
         lastLatencyMs: n.lastLatencyMs ?? null,
         lastError: isDown ? (n.lastError ?? null) : null,
@@ -2212,27 +2215,73 @@ function probeBackoffMs(failCount: number): number {
   return msUntilUtcMidnight();
 }
 
+// Replit workspace 临时 dev 域名模式（随 repl 重启变化）
+const REPLIT_DEV_DOMAIN_RE = /\.(picard|spock|worf|janeway|riker|troi|crusher|data|laforge)\.replit\.dev$/i;
+
+function isEphemeralDevUrl(url: string): boolean {
+  try { return REPLIT_DEV_DOMAIN_RE.test(new URL(url).hostname); } catch { return false; }
+}
+
+async function probeStreamHealth(baseUrl: string, timeoutMs = 5_000): Promise<boolean> {
+  // 去掉 /api/gateway 或 /api 后缀，得到 stream 服务根路径
+  const streamBase = baseUrl.replace(/\/api\/gateway$/, "").replace(/\/api$/, "").replace(/\/$/, "");
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    const resp = await fetch(`${streamBase}/api/stream/health`, { signal: ctrl.signal });
+    clearTimeout(timer);
+    if (!resp.ok) return false;
+    const json = await resp.json() as Record<string, unknown>;
+    return json.ok === true;
+  } catch {
+    return false;
+  }
+}
+
 async function backgroundProbeLoop(): Promise<void> {
   const targets = allNodes().filter(
     (n) => n.enabled && (n.source === "register" || n.source === "runtime") && n.type === "friend-openai",
   );
   for (const node of targets) {
     try {
+      // ── 检测并自动禁用临时 dev URL（每次 repl 重启 URL 都会变化，注册后很快失效）──
+      if (isEphemeralDevUrl(node.baseUrl)) {
+        const devFails = (probeFailCounts.get(node.id) ?? 0);
+        if (devFails >= 3) {
+          // 连续 3 次 probe 失败的 dev URL 节点：自动禁用，防止永久污染节点池
+          node.enabled = false;
+          probeFailCounts.delete(node.id);
+          node.lastError = "自动禁用：临时 dev URL 节点连续探测失败，请使用部署后的域名重新注册";
+          if (runtimeNodes.includes(node)) savePersistedNodes(runtimeNodes);
+          continue;
+        }
+      }
+
+      // ── AI 健康探测 ──────────────────────────────────────────────────────────
       const result = await probeNodeUrl(node.baseUrl, node.apiKey, 12_000);
       if (result.ok) {
         probeFailCounts.delete(node.id);
-        node.downUntil = 0;   // 探测通过 → 立即解除惩罚，无论惩罚是否已到期
+        // 仅当节点不是因为 AI 额度耗尽而 down 时才重置 downUntil
+        // creditExhaustedAt 下次 UTC 零点过期后会自然恢复（downUntil 超时）
+        if (!node.creditExhaustedAt || Date.now() > node.downUntil) {
+          node.downUntil = 0;
+          node.creditExhaustedAt = undefined;  // 额度已恢复（零点后自然恢复）
+        }
         node.failures = 0;
-        node.lastLatencyMs = result.latencyMs;  // Bug7: 同步探测延迟
+        node.lastLatencyMs = result.latencyMs;
         const modelsChanged = result.models && result.models.length > 0 && JSON.stringify(result.models) !== JSON.stringify(node.models);
         if (result.models && result.models.length > 0) node.models = result.models;
-        if (modelsChanged) savePersistedNodes(runtimeNodes);  // Bug8: 持久化 models 变更
+        if (modelsChanged) savePersistedNodes(runtimeNodes);
       } else {
         const fails = (probeFailCounts.get(node.id) ?? 0) + 1;
         probeFailCounts.set(node.id, fails);
         node.downUntil = Date.now() + probeBackoffMs(fails);
         node.lastError = `B21探测失败(${fails}次): ${result.error ?? "无响应"}`;
       }
+
+      // ── Stream 通道健康探测（独立于 AI 状态）───────────────────────────────────
+      const streamOk = await probeStreamHealth(node.baseUrl);
+      node.streamDownUntil = streamOk ? 0 : Date.now() + 5 * 60_000;
     } catch { /* 单个节点探测异常不影响其他 */ }
   }
 }

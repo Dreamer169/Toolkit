@@ -92,9 +92,9 @@ def probe_stream(base_url):
 
 def fetch_nodes_from_gateway():
     """
-    从网关拉取所有 enabled 的 friend-openai 节点，
-    独立用 /api/stream/open 探测每个节点的代理可用性，
-    不依赖 gateway 的 AI 健康状态（down/credit-exhausted 节点只要 stream 通就可用）。
+    Pull all enabled friend-openai nodes from gateway.
+    Uses gateway streamStatus: ok=trust, down=skip, unknown=probe ourselves.
+    AI status is fully decoupled from proxy (stream) availability.
     """
     try:
         req = urllib.request.Request(f"{GATEWAY_API}/gateway/nodes/status",
@@ -102,42 +102,53 @@ def fetch_nodes_from_gateway():
         with urllib.request.urlopen(req, timeout=5) as r:
             data = json.loads(r.read())
 
-        candidates = []
+        direct_ok    = []  # gateway confirmed stream ok
+        need_probe   = []  # gateway unknown, probe ourselves
+        gateway_down = []  # gateway confirmed stream down
+
         for n in data.get("nodes", []):
             if n.get("status") == "disabled":
-                continue  # 手动关闭的跳过
+                continue
             base = (n.get("baseUrl") or "").rstrip("/")
-            if base:
-                candidates.append((base, n.get("status", "unknown")))
+            if not base:
+                continue
+            ai_st     = n.get("status", "unknown")
+            stream_st = n.get("streamStatus", "unknown")
+            if stream_st == "ok":
+                direct_ok.append((base, ai_st))
+            elif stream_st == "down":
+                gateway_down.append((base, ai_st))
+            else:
+                need_probe.append((base, ai_st))
 
-        if not candidates:
-            return []
+        urls = [base for base, _ in direct_ok]
+        for base, ai_st in direct_ok:
+            if ai_st != "ready":
+                print(f"[poll-bridge] +stream(gw-ok) AI:{ai_st} {base[:70]}", flush=True)
 
-        urls = []
-        # 并行探测所有候选节点（最多 5 并发，避免打爆节点）
-        with ThreadPoolExecutor(max_workers=min(len(candidates), 5)) as ex:
-            futs = {ex.submit(probe_stream, base): (base, ai_st)
-                    for base, ai_st in candidates}
-            for fut in as_completed(futs):
-                base, ai_st = futs[fut]
-                try:
-                    stream_ok = fut.result()
-                except Exception:
-                    stream_ok = False
-                if stream_ok:
-                    urls.append(base)
-                    if ai_st != "ready":
-                        print(f"[poll-bridge] +stream AI:{ai_st} {base[:70]}", flush=True)
-                else:
-                    if ai_st == "ready":
-                        print(f"[poll-bridge] -stream(AI ready but stream fail) {base[:70]}", flush=True)
+        for base, ai_st in gateway_down:
+            print(f"[poll-bridge] skip(gw-down) AI:{ai_st} {base[:70]}", flush=True)
+
+        if need_probe:
+            with ThreadPoolExecutor(max_workers=min(len(need_probe), 5)) as ex:
+                futs = {ex.submit(probe_stream, base): (base, ai_st)
+                        for base, ai_st in need_probe}
+                for fut in as_completed(futs):
+                    base, ai_st = futs[fut]
+                    try:
+                        stream_ok = fut.result()
+                    except Exception:
+                        stream_ok = False
+                    if stream_ok:
+                        urls.append(base)
+                        print(f"[poll-bridge] +stream(probe-ok) AI:{ai_st} {base[:70]}", flush=True)
                     else:
-                        print(f"[poll-bridge] -stream AI:{ai_st} {base[:70]}", flush=True)
+                        print(f"[poll-bridge] -stream(probe-fail) AI:{ai_st} {base[:70]}", flush=True)
+
         return urls
     except Exception as e:
         print(f"[poll-bridge] gateway sync failed: {e}", flush=True)
         return None
-
 def node_sync_loop():
     """后台线程：每 REFRESH_SECS 秒从网关同步一次子节点列表。"""
     while True:
