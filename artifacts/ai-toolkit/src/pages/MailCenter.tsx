@@ -5,6 +5,7 @@ const FOLDERS = [
   { id: "inbox",        label: "收件箱" },
   { id: "sentItems",    label: "已发送" },
   { id: "junkemail",    label: "垃圾邮件" },
+  { id: "archive",      label: "归档" },
   { id: "drafts",       label: "草稿" },
   { id: "deleteditems", label: "已删除" },
 ];
@@ -195,7 +196,7 @@ export default function MailCenter() {
     const d = await fetch(`${API}/tools/outlook/fetch-messages-by-id`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ accountId: acc.id, folder: fld, top: 50, search: q || undefined }),
+      body: JSON.stringify({ accountId: acc.id, folder: fld, top: 150, search: q || undefined }),
     }).then(r => r.json()).catch(() => null);
     if (d?.success) { setMessages(d.messages ?? []); setAutoRefreshError(""); }
     else if (d && !d.success) setAutoRefreshError(d.error ?? "刷新失败");
@@ -224,7 +225,7 @@ export default function MailCenter() {
     const d = await fetch(`${API}/tools/outlook/fetch-messages-by-id`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ accountId: acc.id, folder: fld, top: 50, search: q || undefined }),
+      body: JSON.stringify({ accountId: acc.id, folder: fld, top: 150, search: q || undefined }),
     }).then(r => r.json()).catch(() => ({ success: false, error: "网络错误" }));
     setBusy(false);
     if (d.success) {

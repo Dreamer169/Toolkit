@@ -2967,7 +2967,7 @@ async function fetchViaImap(
   // 文件夹名称映射
   const folderMap: Record<string, string> = {
     inbox: "INBOX", sentItems: "Sent", junkemail: "Junk",
-    drafts: "Drafts", deleteditems: "Deleted Items",
+    drafts: "Drafts", deleteditems: "Deleted Items", archive: "Archive",
   };
   const imapFolder = folderMap[folder] ?? "INBOX";
 
@@ -3206,7 +3206,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
     if (!acc) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
 
     const mailFolder = folder || "inbox";
-    const limit = Math.min(50, Math.max(1, top ?? 30));
+    const limit = Math.min(150, Math.max(1, top ?? 50));
 
     let accessToken = acc.token ?? "";
 
