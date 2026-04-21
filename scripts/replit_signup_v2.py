@@ -29,6 +29,8 @@ DB_URL           = os.environ.get("DATABASE_URL","postgresql://toolkit:toolkit@l
 
 # xray SOCKS5 轮转池（对应 proxy-0 … proxy-25）
 XRAY_SOCKS_PORTS = list(range(10820, 10846))   # 26 个出口
+POLL_BRIDGE_PORTS = [1092, 1093, 1094, 1095]  # Replit GCP friend-node IPs
+ALL_SOCKS_PORTS = POLL_BRIDGE_PORTS + XRAY_SOCKS_PORTS  # poll-bridge 优先
 MAX_RETRIES      = 5   # integrity check 失败最多重试次数
 
 # 常见 UA
@@ -210,7 +212,7 @@ async def _do_signup(identity, ua, proxy_port, mailtm_tok, headless=True):
             result["phase"] = "get_exit_ip"
             try:
                 await page.goto("https://api.ipify.org?format=json",
-                                wait_until="domcontentloaded", timeout=15000)
+                                wait_until="domcontentloaded", timeout=60000)
                 ip_text = await page.locator("body").inner_text()
                 result["exit_ip"] = json.loads(ip_text).get("ip","")
                 inf(f"  出口 IP: {result['exit_ip']}")
@@ -430,7 +432,7 @@ async def signup_one(identity, headless=True):
         return {"email": identity["email"], "ok": False, "error": str(e)}
 
     ua = random.choice(USER_AGENTS)
-    proxy_ports = random.sample(XRAY_SOCKS_PORTS, min(MAX_RETRIES, len(XRAY_SOCKS_PORTS)))
+    proxy_ports = random.sample(ALL_SOCKS_PORTS, min(MAX_RETRIES, len(ALL_SOCKS_PORTS)))
 
     for attempt, port in enumerate(proxy_ports, 1):
         inf(f"  第 {attempt}/{MAX_RETRIES} 次尝试 (SOCKS:{port}, UA:{ua[30:60]}…)")

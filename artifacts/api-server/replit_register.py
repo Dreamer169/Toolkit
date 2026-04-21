@@ -999,16 +999,16 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
         # Google→GitHub→replit.com 首页→signup，让 Enterprise JS 看到真实浏览历史
         try:
             log("[pre-nav] 访问 google.com 建立会话历史…")
-            await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=20000)
+            await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=65000)
             await page.wait_for_timeout(_random.randint(2500, 4000))
             log("[pre-nav] 访问 github.com…")
-            await page.goto("https://github.com", wait_until="domcontentloaded", timeout=20000)
+            await page.goto("https://github.com", wait_until="domcontentloaded", timeout=65000)
             await page.wait_for_timeout(_random.randint(2000, 3500))
         except Exception as e:
             log(f"[pre-nav] 异常(忽略): {e}")
 
         log("打开 replit.com/signup ...")
-        await page.goto("https://replit.com/signup", wait_until="domcontentloaded", timeout=45000)
+        await page.goto("https://replit.com/signup", wait_until="domcontentloaded", timeout=75000)
 
         # 页面加载后立即做 warmup（并发，让 reCAPTCHA 采集行为）
         warmup_task = asyncio.create_task(_human_warmup(page))
@@ -1267,7 +1267,7 @@ async def get_exit_ip_camoufox(proxy_cfg) -> str:
         from camoufox.async_api import AsyncCamoufox
         async with AsyncCamoufox(headless=True, proxy=proxy_cfg or None, os="windows") as browser:
             page = await browser.new_page()
-            await page.goto("https://api.ipify.org/?format=json", timeout=20000)
+            await page.goto("https://api.ipify.org/?format=json", timeout=65000)
             data = json.loads(await page.locator("body").inner_text())
             return data.get("ip", "")
     except Exception as e:
@@ -1287,14 +1287,14 @@ async def attempt_register_camoufox(proxy_cfg, exit_ip: str) -> dict:
         try:
             result["phase"] = "navigate"
             try:
-                await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=20000)
+                await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=65000)
                 await page.wait_for_timeout(_random.randint(2500, 4000))
-                await page.goto("https://github.com", wait_until="domcontentloaded", timeout=20000)
+                await page.goto("https://github.com", wait_until="domcontentloaded", timeout=65000)
                 await page.wait_for_timeout(_random.randint(2000, 3500))
             except Exception as e:
                 log(f"[pre-nav] err(ignored): {e}")
             log("[camoufox] opening replit.com/signup ...")
-            await page.goto("https://replit.com/signup", wait_until="domcontentloaded", timeout=45000)
+            await page.goto("https://replit.com/signup", wait_until="domcontentloaded", timeout=75000)
             warmup_task = asyncio.create_task(_human_warmup(page))
             t0 = await page.title()
             b0 = (await page.locator("body").inner_text())[:400]
@@ -1464,7 +1464,7 @@ async def get_exit_ip(pw_module, proxy_cfg) -> str:
         try:
             ctx  = await br.new_context()
             page = await ctx.new_page()
-            await page.goto("https://api.ipify.org/?format=json", timeout=20000)
+            await page.goto("https://api.ipify.org/?format=json", timeout=65000)
             data = json.loads(await page.locator("body").inner_text())
             return data.get("ip", "")
         finally:
