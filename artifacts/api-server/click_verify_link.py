@@ -238,17 +238,24 @@ def _try_firebase_verify(verify_url: str) -> dict:
     except Exception as e:
         return {"ok": False, "error": f"Firebase exception: {e}"}
 
-# --- 先尝试 Firebase REST API（不需要浏览器，不受代理影响）-----------
-print("[click_verify] 尝试 Firebase REST API 验证...", flush=True)
-_fb = _try_firebase_verify(verify_url)
-if _fb["ok"]:
-    print(f"[click_verify] ✅ Firebase 验证成功: {_fb.get('email', '')}", flush=True)
-    print(json.dumps({"success": True, "verify_url": verify_url,
-                      "final_url": verify_url,
-                      "title": "Email Verified via Firebase",
-                      "http_status": 200}))
-    sys.exit(0)
-print(f"[click_verify] Firebase 未成功({_fb['error']}), 降级到浏览器直连", flush=True)
+# --- Firebase REST 仅适用于纯 Firebase 托管 action 页 ---------------
+# Replit 等使用自定义 action handler（如 replit.com/action-code）的服务，
+# 必须走浏览器：Replit 前端在收到 oobCode 后还会调 Replit 后端同步用户表，
+# 仅调 Firebase REST 会消费 oobCode 但 Replit DB 不更新 → 显示未验证。
+_is_custom_action_handler = bool(re.search(r"replit\.com|reseek\.com", verify_url, re.I))
+if not _is_custom_action_handler:
+    print("[click_verify] 尝试 Firebase REST API 验证...", flush=True)
+    _fb = _try_firebase_verify(verify_url)
+    if _fb["ok"]:
+        print(f"[click_verify] ✅ Firebase 验证成功: {_fb.get('email', '')}", flush=True)
+        print(json.dumps({"success": True, "verify_url": verify_url,
+                          "final_url": verify_url,
+                          "title": "Email Verified via Firebase",
+                          "http_status": 200}))
+        sys.exit(0)
+    print(f"[click_verify] Firebase 未成功({_fb['error']}), 降级到浏览器直连", flush=True)
+else:
+    print("[click_verify] 检测到自定义 action handler（Replit 等），强制走浏览器以触发后端同步", flush=True)
 # ---------------------------------------------------------------------
 
 try:
@@ -268,8 +275,9 @@ try:
         ctx  = browser.new_context(**ctx_opts)
         page = ctx.new_page()
         print(f"[click_verify] 访问: {verify_url[:120]}", flush=True)
-        resp = page.goto(verify_url, timeout=30000, wait_until="networkidle")
-        page.wait_for_timeout(6000)
+        resp = page.goto(verify_url, timeout=30000, wait_until="domcontentloaded")
+        # Replit SPA 需要时间执行 onMount → 调 Firebase + 调 Replit 后端同步
+        page.wait_for_timeout(10000)
         final_url = page.url
         title     = page.title()
         status    = resp.status if resp else 0
