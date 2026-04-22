@@ -517,11 +517,18 @@ async function getBrowser(): Promise<Browser> {
     "--start-maximized",
     "--disable-infobars",
   ];
-  // DNS防污染：无论 headed/headless 都必须注入，避免走系统 DNS 被 GFW UDP 污染
-  // 走 SOCKS proxy 时系统 DNS 也可能 UDP 直通绕过代理 → 这里强制走代理内 DoH
+  // 代理：用命令行 --proxy-server 传，不能用 Playwright launch.proxy 选项！
+  // 后者会自动注入 --host-resolver-rules="MAP * ~NOTFOUND, EXCLUDE 127.0.0.1"，
+  // 把所有域名解析废掉，导致 DoH bootstrap 和业务 URL 全 NOTFOUND → chrome-error://chromewebdata/
+  if (proxyEnv) {
+    args.push("--proxy-server=" + proxyEnv);
+  }
+  // DNS防污染：无论 headed/headless 都必须注入，避免系统 DNS 被 GFW UDP 污染
+  // SOCKS proxy 出去的请求 DNS 也走代理内 DoH (secure 强制模式)
   args.push(
     "--proxy-resolves-dns-locally",
-    "--enable-features=AsyncDns,DnsOverHttpsUpgrade,NetworkServiceInProcess",
+    "--enable-features=AsyncDns,DnsOverHttps",
+    "--dns-over-https-mode=secure",
     "--dns-over-https-templates=https://1.1.1.1/dns-query,https://dns.google/dns-query",
   );
   if (useHeaded) {
@@ -538,7 +545,6 @@ async function getBrowser(): Promise<Browser> {
     args,
     // 砍掉默认会带的 --enable-automation 开关
     ignoreDefaultArgs: ["--enable-automation"],
-    proxy: proxyEnv ? { server: proxyEnv } : undefined,
     env: useHeaded ? { ...process.env, DISPLAY: display } as Record<string, string> : undefined,
   }).then((b) => {
     logger.info({ exe, proxy: !!proxyEnv, headed: useHeaded, display }, "[cdp-broker] browser launched");

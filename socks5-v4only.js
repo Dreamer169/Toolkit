@@ -2,8 +2,23 @@
 // listens 127.0.0.1:1193  ->  upstream 127.0.0.1:1093 (Replit ws-tunnel)
 // purpose: prevent IPv6 egress from Replit container that triggers Google captcha.
 const net = require('net');
-const dns = require('dns').promises;
+const dns = require('dns');
 const { SocksClient } = require('/root/browser-model/node_modules/.pnpm/socks@2.8.7/node_modules/socks');
+
+// 干净 DNS：TCP 模式查询 1.1.1.1 / 8.8.8.8 / 9.9.9.9，绕开 GFW UDP 污染。
+// 系统 systemd-resolved (127.0.0.53) 走 UDP 会拿到污染 IP（如 search.brave.com → Facebook IP）。
+const cleanResolver = new dns.promises.Resolver({ timeout: 4000, tries: 2 });
+cleanResolver.setServers(['1.1.1.1', '8.8.8.8', '9.9.9.9']);
+const dnsCache = new Map(); // host -> { ip, exp }
+async function cleanResolve4(host) {
+  const c = dnsCache.get(host);
+  if (c && c.exp > Date.now()) return c.ip;
+  const ips = await cleanResolver.resolve4(host);
+  if (!ips || !ips.length) throw new Error('no A record');
+  const ip = ips[Math.floor(Math.random() * ips.length)];
+  dnsCache.set(host, { ip, exp: Date.now() + 5 * 60 * 1000 });
+  return ip;
+}
 
 const LOCAL_PORT    = parseInt(process.env.LOCAL_PORT    || '1193', 10);
 const UPSTREAM_HOST = process.env.UPSTREAM_HOST          || '127.0.0.1';
@@ -55,9 +70,13 @@ const server = net.createServer(async (client) => {
     let dest = host;
     if (atyp === 3) {
       try {
-        const v4 = await dns.resolve4(host);
-        if (v4.length) dest = v4[Math.floor(Math.random() * v4.length)];
-      } catch (e) { /* keep hostname; upstream will try */ }
+        dest = await cleanResolve4(host);
+      } catch (e) {
+        console.warn('[socks5-v4only] clean DNS failed for', host, e && e.message);
+        // 退化：直接放弃（不要 fallback 到污染的系统 DNS）
+        try { client.write(Buffer.from([5,4,0,1, 0,0,0,0, 0,0])); client.end(); } catch {}
+        return;
+      }
     }
 
     const { socket: up } = await SocksClient.createConnection({
