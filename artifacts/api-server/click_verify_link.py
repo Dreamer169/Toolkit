@@ -274,16 +274,43 @@ try:
         #     ctx_opts["proxy"] = proxy_conf
         ctx  = browser.new_context(**ctx_opts)
         page = ctx.new_page()
+        # 抓取所有 XHR/fetch，便于诊断 Replit 后端是否被调用
+        _xhrs = []
+        def _on_resp(r):
+            try:
+                u = r.url
+                if any(k in u for k in ("identitytoolkit","replit.com/api","replit.com/graphql","replit.com/auth","replit.com/internal","replit.com/data")):
+                    _xhrs.append(f"{r.status} {r.request.method} {u[:160]}")
+            except Exception: pass
+        page.on("response", _on_resp)
         print(f"[click_verify] 访问: {verify_url[:120]}", flush=True)
         resp = page.goto(verify_url, timeout=30000, wait_until="domcontentloaded")
-        # Replit SPA 需要时间执行 onMount → 调 Firebase + 调 Replit 后端同步
-        page.wait_for_timeout(10000)
+        # Replit SPA：等到页面文字出现验证结果（成功/失败），最多 25s
+        body_text = ""
+        verified_marker = None
+        for _ in range(25):
+            page.wait_for_timeout(1000)
+            try:
+                body_text = page.evaluate("() => document.body ? document.body.innerText : ''") or ""
+            except Exception:
+                body_text = ""
+            low = body_text.lower()
+            if any(k in low for k in ("verified", "已验证", "verification successful", "email confirmed", "thank you")):
+                verified_marker = "success"; break
+            if any(k in low for k in ("invalid", "expired", "已过期", "无效", "已使用", "try again", "error")):
+                verified_marker = "failure"; break
         final_url = page.url
         title     = page.title()
         status    = resp.status if resp else 0
-        print(f"[click_verify] 结果={final_url[:80]} 标题={title[:60]}", flush=True)
+        body_snip = body_text.replace("\n", " ")[:300]
+        print(f"[click_verify] marker={verified_marker} url={final_url[:80]} title={title[:60]}", flush=True)
+        print(f"[click_verify] body={body_snip}", flush=True)
+        for x in _xhrs[:30]:
+            print(f"[click_verify] xhr: {x}", flush=True)
         browser.close()
-    print(json.dumps({"success": True, "verify_url": verify_url,
-                      "final_url": final_url, "title": title, "http_status": status}))
+    is_ok = (verified_marker == "success") or (verified_marker is None and status == 200)
+    print(json.dumps({"success": is_ok, "verify_url": verify_url,
+                      "final_url": final_url, "title": title, "http_status": status,
+                      "verified_marker": verified_marker, "body_snippet": body_snip}))
 except Exception as e:
     print(json.dumps({"success": False, "error": str(e), "verify_url": verify_url}))
