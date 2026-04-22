@@ -330,6 +330,9 @@ async function getBrowser(): Promise<Browser> {
     "--no-default-browser-check",
     "--no-first-run",
     "--mute-audio",
+    // 强制 UI/系统 locale 为 en-US，否则 Linux 上 LANG=zh_CN.UTF-8 会让 navigator.language
+    // 之外的部分（HTTP Accept-Language 协商内核回退、字体回退、Date toString）漏出中文
+    "--lang=en-US",
     "--disable-extensions-except",
     "--disable-component-extensions-with-background-pages",
     // Linux 上不带 --password-store=basic 会触发 keyring 报错
@@ -380,6 +383,7 @@ export class CdpSession {
   private closed = false;
   private currentUrl = "about:blank";
   private viewport = { w: 1280, h: 800 };
+  private lastStatus = 0;
 
   constructor(private ws: WebSocket) {}
 
@@ -417,12 +421,27 @@ export class CdpSession {
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": "\"Linux\"",
       },
+      // 跟时区一致：洛杉矶（Mission District 附近），地理位置/时区/locale 三者自洽
+      // 否则反爬看到 timezone=LA 但 geolocation=null 立马起疑
+      geolocation: { latitude: 37.7749, longitude: -122.4194, accuracy: 50 },
+      permissions: ["geolocation", "clipboard-read", "clipboard-write", "notifications"],
     });
     await this.ctx.addInitScript({ content: STEALTH_INIT });
     this.page = await this.ctx.newPage();
     this.cdp = await this.ctx.newCDPSession(this.page);
 
     // 监听导航变化 → 推给前端更新地址栏
+    // 主帧 document 响应状态码追踪 —— CF 第一次返回 403 + JS 挑战，挑战通过后
+    // 同一主帧再次拿到 200，UI 上想显示状态码就得拿后者
+    this.page.on("response", (r) => {
+      try {
+        if (!this.page || r.frame() !== this.page.mainFrame()) return;
+        const rt = (r.request().resourceType?.() || "").toString();
+        if (rt && rt !== "document") return;
+        this.lastStatus = r.status();
+      } catch { /* ignore */ }
+    });
+
     this.page.on("framenavigated", (frame) => {
       if (frame === this.page!.mainFrame()) {
         this.currentUrl = frame.url();
@@ -478,9 +497,41 @@ export class CdpSession {
         case "navigate":
           if (msg.url) {
             const target = normalizeUrl(msg.url);
-            await this.page.goto(target, { waitUntil: "domcontentloaded", timeout: 60_000 }).catch((e) => {
-              this.send({ type: "navError", url: target, error: String(e?.message ?? e) });
-            });
+            this.lastStatus = 0;
+            const page = this.page;
+            // 1) goto —— SPA 在 load 里 location.replace 会把当前 goto 抛错（NS_BINDING_ABORTED
+            //    / net::ERR_ABORTED），但页面 DOM 实际已经在新 URL 上。只要还有 document
+            //    就当成功，避免 Outlook/Teams/M365 这类站打不开
+            try {
+              await page.goto(target, { waitUntil: "domcontentloaded", timeout: 60_000 });
+            } catch (err) {
+              const hasDoc = await page
+                .evaluate(() => !!document && !!document.documentElement)
+                .catch(() => false);
+              if (!hasDoc) {
+                this.send({ type: "navError", url: target, error: String((err as Error)?.message ?? err) });
+                break;
+              }
+            }
+            // 2) 等 SPA 完全 idle（软超时，等不到也无所谓）
+            await page.waitForLoadState("networkidle", { timeout: 6000 }).catch(() => {});
+            // 3) Cloudflare "Just a moment..." 五秒挑战 —— 它的 JS 通过后会自己跳到真页
+            //    现在我们带了完整指纹/headed Chrome/sec-ch-ua/WebGL，绝大多数能自动通过
+            try {
+              const probe = await page.content().catch(() => "");
+              if (/<title>Just a moment|cf-browser-verification|id="challenge-form"|cdn-cgi\/challenge-platform|name="cf-turnstile-response"/i.test(probe)) {
+                this.send({ type: "cfChallenge", state: "waiting" });
+                await page
+                  .waitForFunction(
+                    () => !/Just a moment|challenge-form|cf-browser-verification/i.test(document.documentElement.outerHTML),
+                    { timeout: 15_000 },
+                  )
+                  .catch(() => {});
+                await page.waitForLoadState("networkidle", { timeout: 4000 }).catch(() => {});
+                this.send({ type: "cfChallenge", state: "done" });
+              }
+            } catch { /* ignore */ }
+            this.send({ type: "httpStatus", status: this.lastStatus });
           }
           break;
         case "back":   await this.page.goBack({ waitUntil: "domcontentloaded" }).catch(() => {}); break;
