@@ -191,6 +191,50 @@ function rewriteHtml(html: string, target: URL, proxyBase: string): string {
     var BASE = ${JSON.stringify(target.toString())};
     try { window.parent && window.parent.postMessage({ type: 'browser-model:navigated', url: BASE }, '*'); } catch(_){}
     function abs(u){ try{ return new URL(u, BASE).toString(); }catch(_){ return u; } }
+    // === 伪造 location 看起来像 BASE (即原站) ===
+    // Next.js Pages Router hydrate 前会比对 location.pathname 与 __NEXT_DATA__.page
+    // 不一致就静默 abort 不抛错. 必须让 location.{pathname,href,origin,host} 返回 BASE
+    // 的对应值. 浏览器 IDL 不允许整体替换 window.location, 但可以对 Location.prototype
+    // 的 getter 做 Object.defineProperty (Chromium 允许这层 monkey-patch).
+    try {
+      var BASE_URL = new URL(BASE);
+      var origDescs = {};
+      ["href","pathname","search","hash","host","hostname","origin","protocol","port"].forEach(function(p){
+        try { origDescs[p] = Object.getOwnPropertyDescriptor(Location.prototype, p); } catch(_){}
+      });
+      function defLoc(prop, fakeVal){
+        try {
+          var orig = origDescs[prop];
+          if (!orig || !orig.get) return;
+          Object.defineProperty(Location.prototype, prop, {
+            configurable: true,
+            enumerable: true,
+            get: function(){ return fakeVal; },
+            set: orig.set ? function(v){ return orig.set.call(this, v); } : undefined
+          });
+        } catch(_){}
+      }
+      defLoc("href", BASE_URL.href);
+      defLoc("pathname", BASE_URL.pathname);
+      defLoc("search", BASE_URL.search);
+      defLoc("hash", BASE_URL.hash);
+      defLoc("host", BASE_URL.host);
+      defLoc("hostname", BASE_URL.hostname);
+      defLoc("origin", BASE_URL.origin);
+      defLoc("protocol", BASE_URL.protocol);
+      defLoc("port", BASE_URL.port);
+      // toString 也要伪造
+      try {
+        var origToString = Location.prototype.toString;
+        Location.prototype.toString = function(){ return BASE_URL.href; };
+      } catch(_){}
+      // document.location 也指向同一对象 (天然), 但 document.URL / document.baseURI 是只读 string
+      try { Object.defineProperty(document, "URL", { configurable: true, get: function(){ return BASE_URL.href; } }); } catch(_){}
+      try { Object.defineProperty(document, "documentURI", { configurable: true, get: function(){ return BASE_URL.href; } }); } catch(_){}
+      try { Object.defineProperty(document, "baseURI", { configurable: true, get: function(){ return BASE_URL.href; } }); } catch(_){}
+      try { Object.defineProperty(document, "domain", { configurable: true, get: function(){ return BASE_URL.hostname; } }); } catch(_){}
+    } catch(_){}
+
     var PROXY_PATH = (function(){ try { return new URL(PROXY).pathname; } catch(_){ return '/api/proxy'; } })();
     function px(u){
       if(!u) return u;
