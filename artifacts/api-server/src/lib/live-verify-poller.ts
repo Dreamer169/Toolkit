@@ -222,10 +222,9 @@ async function processMessage(
 
   const _marker  = ((result as Record<string, unknown>).verified_marker as string) ?? "";
   const _bodySnip = (((result as Record<string, unknown>).body_snippet as string) ?? "").slice(0, 120);
-  // 优先用 Python 端的页面正文 marker；marker 缺失时再回落 success+title 启发式
-  const trueSuccess = _marker
-    ? _marker === "success"
-    : (result.success && !!result.title && !result.title.toLowerCase().includes("404"));
+  // 严格只认 Python 端正文 marker == "success"。marker 缺失/为 failure 一律视为非成功，
+  // 彻底消除标题启发式假阳性（"Verifying..."、"Replit"、空 title 等都会误判）。
+  const trueSuccess = _marker === "success";
 
   // 区分瞬态故障 vs 永久故障：
   //   瞬态（代理 4xx/5xx、网络、超时、未知 http_status）→ 不计入失败次数，下轮继续
