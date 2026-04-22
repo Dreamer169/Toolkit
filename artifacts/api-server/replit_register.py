@@ -13,7 +13,7 @@ replit_register.py — Replit 注册表单自动化 v7.29
   - warmup 在页面加载期间并发执行，表单填写用快速 type()（30-50ms/char）
   - token 在提交前 re-check，确保不过期
 """
-import sys, json, asyncio, os, subprocess, urllib.request, random as _random
+import sys, json, asyncio, os, re, subprocess, urllib.request, random as _random
 
 params   = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
 EMAIL    = params.get("email", "")
@@ -179,27 +179,32 @@ import socket as _socket
 
 async def ensure_tunnel(proxy_cfg: dict | None, timeout_s: float = 8.0) -> bool:
     """
-    探针：TCP 连接测试 SOCKS5 代理是否存活。
-    poll-bridge 1092-1095 优先；xray 10820-10845 备用。
+    探针：SOCKS5 握手验证代理真正可用（端口开放 + 协议正确）。
+    poll-bridge 1092-1095 / xray 10820-10845 使用前先探针检查。
     """
     if not proxy_cfg:
-        return True  # direct connection，直接放行
+        return True
     server = proxy_cfg.get("server", "")
-    _m = re.search(r'(?:socks5://)?([^:]+):(\d+)', server)
+    _m = re.search(r"(?:socks5://)?([^:]+):(\d+)", server)
     if not _m:
         return True
     host, port = _m.group(1), int(_m.group(2))
     try:
+        # 真 SOCKS5 握手：VER=5, NMETHODS=1, METHOD=0(no-auth)
         _sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
         _sock.settimeout(timeout_s)
         _sock.connect((host, port))
+        _sock.sendall(b"\x05\x01\x00")
+        _resp = _sock.recv(2)
         _sock.close()
-        log(f"[ensure_tunnel] ✅ SOCKS5:{port} OK")
-        return True
+        if len(_resp) >= 2 and _resp[0] == 5:
+            log(f"[ensure_tunnel] ✅ SOCKS5:{port} 握手OK")
+            return True
+        log(f"[ensure_tunnel] ⚠ SOCKS5:{port} 端口开放但非SOCKS5(resp={_resp.hex()})")
+        return False
     except Exception as _te:
         log(f"[ensure_tunnel] ❌ SOCKS5:{port} 不可达: {_te}")
         return False
-
 
 async def solve_recaptcha_audio(page, force_bframe: bool = False) -> str | None:
     log("[audio] ▶ 音频挑战开始")
@@ -226,7 +231,7 @@ async def solve_recaptcha_audio(page, force_bframe: bool = False) -> str | None:
 
     async def _read_token() -> str:
         for js in [
-            "() => { var el=document.querySelector('#g-recaptcha-response,[name=\"g-recaptcha-response\"],[name=\"recaptchaToken\"]'); return el?el.value:''; }",
+            "() => { var ent=document.querySelector('[name=\"recaptchaToken\"]'); if(ent&&ent.value&&ent.value.length>50) return ent.value; return ''; }",
         ]:
             try:
                 t = await page.evaluate(js)
@@ -592,22 +597,54 @@ async def fill_step1(page) -> str | None:
         except Exception as e:
             log(f"[captcha] token 注入/callback 异常(忽略): {e}")
 
-    # v7.36: 恢复 v7.28 简单策略。不手动注入/覆盖 token。
-    # 让 warmup 40-55s 自然积累 Enterprise score，button click 时 Replit JS 生成最新 token。
-    # 关键：token 注入会触发 code:1，execute() 低分触发 code:2；概率性通过取决于 warmup 质量。
-    if any_rc and not rc_token:
-        log("[captcha] Enterprise: 等待 auto-token (max 20s)…")
-        rc_token, cf_token = await _wait_for_token(page, max_s=20)
+    # v7.40: Enterprise token 策略修复
+    # rcV2 = g-recaptcha-response (checkbox token, 0cAFcWeA 前缀) → Replit server 拒绝 code:1
+    # rcEnt = recaptchaToken (Enterprise score/challenge token) → 正确格式
+    # 关键修复: 若 rcEnt 为空，即使 rcV2 存在也必须等待真正的 Enterprise token
+    if any_rc and not rcEnt:
+        # Enterprise token 还未生成，rc_token 可能是 v2，不能直接提交
+        if rc_token and not rcEnt:
+            log(f"[captcha] ⚠ 只有 v2 token({rc_token[:20]}), 非 Enterprise → 重置等待")
+            rc_token = ""
 
     if any_rc and not rc_token:
-        # Fallback: 尝试 checkbox 点击触发 Enterprise callback
-        log("[captcha] 无 auto-token → checkbox 触发 Enterprise callback")
+        log("[captcha] Enterprise: 等待 execute() score token (max 25s)…")
+        # 先尝试触发 enterprise.execute() 获取 score token
+        try:
+            ent_tok = await page.evaluate("""() => {
+                return new Promise((res) => {
+                    if (typeof grecaptcha === 'undefined' || !grecaptcha.enterprise) { res(''); return; }
+                    try {
+                        grecaptcha.enterprise.ready(() => {
+                            grecaptcha.enterprise.execute('6LfyLYUsAAAAAP0Xmu-hJvZOYJLSL7E410qvKyII', {action:'SIGNUP'})
+                                .then(t => {
+                                    var el = document.querySelector('[name="recaptchaToken"]');
+                                    if (el) { el.value = t; el.dispatchEvent(new Event('input',{bubbles:true})); }
+                                    res(t);
+                                }).catch(() => res(''));
+                        });
+                    } catch(e) { res(''); }
+                    setTimeout(() => res(''), 20000);
+                });
+            }""")
+            if ent_tok and len(ent_tok) > 50:
+                log(f"[captcha] ✅ execute() score token={len(ent_tok)}chars prefix={ent_tok[:20]}")
+                rc_token = ent_tok
+        except Exception as _ee:
+            log(f"[captcha] execute() 异常: {_ee}")
+
+    if any_rc and not rc_token:
+        rc_token, cf_token = await _wait_for_token(page, max_s=15)
+
+    if any_rc and not rc_token:
+        # Fallback: 音频挑战（checkbox Enterprise challenge token）
+        log("[captcha] 无 Enterprise score token → 音频挑战 fallback")
         audio_token = await solve_recaptcha_audio(page) or ""
         if audio_token:
-            log(f"[captcha] ✅ checkbox/音频通过 token={len(audio_token)}chars")
+            log(f"[captcha] ✅ 音频 Enterprise 挑战通过 token={len(audio_token)}chars")
             rc_token = audio_token
         else:
-            log("[captcha] checkbox 失败，继续用现有 token 或空提交")
+            log("[captcha] 音频失败，空提交尝试")
             rc_token, cf_token = await _wait_for_token(page, max_s=8)
     elif not rc_token and not cf_token:
         log("[captcha] 等待 Enterprise 自动 token (max 20s)...")
