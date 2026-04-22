@@ -45,7 +45,11 @@ export function RemoteWebView({ tab }: RemoteWebViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const readyRef = useRef(false);
   const [ready, setReady] = useState(false);
-  const lastFrameRef = useRef<HTMLImageElement | null>(null);
+  // 复用一个 Image —— 之前每帧 new Image() + 异步 onload 既泄漏又会乱序
+  const reusableImgRef = useRef<HTMLImageElement | null>(null);
+  // 最近一帧的 base64，用于在 image 还没空闲时合并丢掉中间帧
+  const pendingFrameRef = useRef<string | null>(null);
+  const drawingRef = useRef(false);
   const sizeRef = useRef({ w: 1280, h: 800 });
   // 服务端反射回来的 URL —— 用来抑制"前端收到 url 后又把同一个 url 重新 navigate
   // 给服务端"导致的反馈循环（会强制 page.goto 中断 SPA 跳转，表现为点击无反应）
@@ -53,6 +57,31 @@ export function RemoteWebView({ tab }: RemoteWebViewProps) {
   // 服务端真实当前 URL；与之相同的 tab.url 变更不需要再发 navigate
   const serverUrlRef = useRef<string>("");
   const { updateTabStatus, navigateTab, addToHistory } = useBrowserStore();
+
+  // 单 Image 流水线 —— 拉最新一帧画到 canvas，画完看队列里还有没有再画一次
+  function drawNextFrame() {
+    const data = pendingFrameRef.current;
+    if (!data) { drawingRef.current = false; return; }
+    pendingFrameRef.current = null;
+    drawingRef.current = true;
+    let img = reusableImgRef.current;
+    if (!img) { img = new Image(); reusableImgRef.current = img; }
+    img.onload = () => {
+      const c = canvasRef.current;
+      if (c) {
+        const ctx = c.getContext("2d");
+        if (ctx) ctx.drawImage(img!, 0, 0, c.width, c.height);
+      }
+      // 看看在画这帧期间又来了新帧没有
+      if (pendingFrameRef.current) drawNextFrame();
+      else drawingRef.current = false;
+    };
+    img.onerror = () => {
+      drawingRef.current = false;
+      if (pendingFrameRef.current) drawNextFrame();
+    };
+    img.src = `data:image/jpeg;base64,${data}`;
+  }
 
   // 建立 WebSocket
   useEffect(() => {
@@ -81,16 +110,11 @@ export function RemoteWebView({ tab }: RemoteWebViewProps) {
           updateTabStatus(tab.id, { isLoading: false });
           break;
         case "frame": {
-          const img = new Image();
-          img.onload = () => {
-            const c = canvasRef.current;
-            if (!c) return;
-            const ctx = c.getContext("2d");
-            if (!ctx) return;
-            ctx.drawImage(img, 0, 0, c.width, c.height);
-            lastFrameRef.current = img;
-          };
-          img.src = `data:image/jpeg;base64,${msg.data as string}`;
+          const data = msg.data as string;
+          // 把最新一帧塞进队列；如果当前没在画就触发画图，否则等画完再画
+          // 最新的（中间帧丢弃，避免乱序+堆积）
+          pendingFrameRef.current = data;
+          if (!drawingRef.current) drawNextFrame();
           break;
         }
         case "url": {
@@ -144,26 +168,38 @@ export function RemoteWebView({ tab }: RemoteWebViewProps) {
   }, [tab.url, tab.id, updateTabStatus]);
 
   // 容器尺寸变化 → 通知服务端重设 viewport
+  // 拖拽窗口时 ResizeObserver 每帧触发一次，每次都会让服务端 stop+start
+  // screencast，会卡到不能用。debounce 250ms 等用户拖完再换尺寸。
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
+    let pending: { w: number; h: number } | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const flush = () => {
+      timer = null;
+      if (!pending) return;
+      const { w: cw, h: ch } = pending;
+      pending = null;
+      if (cw === sizeRef.current.w && ch === sizeRef.current.h) return;
+      sizeRef.current = { w: cw, h: ch };
+      const c = canvasRef.current;
+      if (c) { c.width = cw; c.height = ch; }
+      const ws = wsRef.current;
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: "resize", width: cw, height: ch }));
+      }
+    };
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        const cw = Math.round(entry.contentRect.width);
-        const ch = Math.round(entry.contentRect.height);
-        if (cw < 100 || ch < 100) return;
-        if (cw === sizeRef.current.w && ch === sizeRef.current.h) return;
-        sizeRef.current = { w: cw, h: ch };
-        const c = canvasRef.current;
-        if (c) { c.width = cw; c.height = ch; }
-        const ws = wsRef.current;
-        if (ws && ws.readyState === 1) {
-          ws.send(JSON.stringify({ type: "resize", width: cw, height: ch }));
-        }
+        const cw = Math.max(320, Math.round(entry.contentRect.width));
+        const ch = Math.max(240, Math.round(entry.contentRect.height));
+        pending = { w: cw, h: ch };
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(flush, 250);
       }
     });
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => { ro.disconnect(); if (timer) clearTimeout(timer); };
   }, []);
 
   // 鼠标 / 滚轮 / 键盘 事件
@@ -202,7 +238,16 @@ export function RemoteWebView({ tab }: RemoteWebViewProps) {
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const { x, y } = canvasCoords(e);
-      send({ type: "wheel", x, y, deltaX: e.deltaX, deltaY: e.deltaY, modifiers: modBits(e) });
+      // WheelEvent.deltaMode: 0=pixel, 1=line(~40px/line), 2=page(~viewport h)
+      // CDP 期望像素，必须换算，否则 line 模式下一格滚到底
+      let dx = e.deltaX, dy = e.deltaY;
+      if (e.deltaMode === 1) { dx *= 40; dy *= 40; }
+      else if (e.deltaMode === 2) {
+        const c = canvasRef.current;
+        const vh = c?.height ?? 800;
+        dx *= vh; dy *= vh;
+      }
+      send({ type: "wheel", x, y, deltaX: dx, deltaY: dy, modifiers: modBits(e) });
     };
     const onCtxMenu = (e: Event) => e.preventDefault();
 
