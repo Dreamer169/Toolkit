@@ -208,27 +208,75 @@ const STEALTH_INIT = `
   try { wrap(Function.prototype.toString); } catch (_) {}
 
   // WebRTC IP 泄漏防护 —— 通过 ICE candidate 把 VPS 真实 IP / 内网 IP 上报给反爬
+  // mDNS host 候选 (xxxx.local) 保留 —— Chrome 默认行为, 不泄漏 IP, 不留下 blocked 信号
+  // STUN srflx 候选必须禁 —— 它会暴露 UDP 出口 IP (VPS 真实 IP), 跟 HTTP 出口 (xray 节点)
+  // 不一致 → 强代理标识。做法: 构造函数清空 iceServers + onicecandidate 过滤非 mDNS。
   try {
     const PC = window.RTCPeerConnection || window.webkitRTCPeerConnection || window.mozRTCPeerConnection;
     if (PC) {
-      const origAddIceCandidate = PC.prototype.addIceCandidate;
-      const origSetLocalDescription = PC.prototype.setLocalDescription;
+      // ① 包构造函数清 iceServers (从源头禁 STUN/TURN)
+      const PCCtor = PC;
+      function PatchedPC(cfg) {
+        try {
+          if (cfg && Object.prototype.hasOwnProperty.call(cfg, 'iceServers')) cfg.iceServers = [];
+          else if (cfg) cfg.iceServers = [];
+          else cfg = { iceServers: [] };
+        } catch(_) {}
+        return new PCCtor(cfg);
+      }
+      PatchedPC.prototype = PCCtor.prototype;
+      try {
+        Object.defineProperty(window, 'RTCPeerConnection', { value: PatchedPC, configurable: true, writable: true });
+        if (window.webkitRTCPeerConnection) Object.defineProperty(window, 'webkitRTCPeerConnection', { value: PatchedPC, configurable: true, writable: true });
+      } catch(_) {}
+      try { wrap(PatchedPC); } catch(_) {}
+
+      // ② dispatchEvent 拦截: 在 EventTarget 层过滤掉非 mDNS 的 icecandidate event
+      // 这比 setter hook 稳, 同时对 .onicecandidate 和 .addEventListener('icecandidate') 都生效
+      try {
+        const origDispatch = PCCtor.prototype.dispatchEvent;
+        PCCtor.prototype.dispatchEvent = function dispatchEvent(ev) {
+          try {
+            if (ev && ev.type === 'icecandidate' && ev.candidate && ev.candidate.candidate) {
+              const c = ev.candidate.candidate;
+              // 只放行 mDNS host 候选 (xxxx.local), 拦截 srflx/relay/数字 IP
+              if (!/\.local\s/i.test(c)) {
+                // 用一个 candidate=null 的 event 替代, 表示 ICE gathering 完成
+                // (网站若依赖 onicecandidate, 至少不会卡住)
+                return true;
+              }
+            }
+          } catch(_) {}
+          return origDispatch.apply(this, arguments);
+        };
+        try { wrap(PCCtor.prototype.dispatchEvent); } catch(_) {}
+      } catch(_) {}
+
+      const origAddIceCandidate = PCCtor.prototype.addIceCandidate;
+      const origSetLocalDescription = PCCtor.prototype.setLocalDescription;
       function sanitizeSdp(sdp) {
         if (!sdp || typeof sdp !== 'string') return sdp;
-        return sdp.split('\\r\\n').filter((l) => !/^a=candidate:/i.test(l)).join('\\r\\n');
+        // 保留 mDNS host 候选 (xxxx.local —— Chrome 默认行为, 不泄漏 IP)
+        // 仅过滤暴露真实 IPv4/IPv6 的 candidate 行 (host/srflx/relay 直接含数字 IP)
+        return sdp.split('\\r\\n').filter((l) => {
+          if (!/^a=candidate:/i.test(l)) return true;
+          if (/\\s\\S+\\.local\\s/i.test(l)) return true; // mDNS 候选保留
+          return false;
+        }).join('\\r\\n');
       }
-      PC.prototype.setLocalDescription = function setLocalDescription(desc) {
+      PCCtor.prototype.setLocalDescription = function setLocalDescription(desc) {
         if (desc && desc.sdp) desc.sdp = sanitizeSdp(desc.sdp);
         return origSetLocalDescription.apply(this, arguments);
       };
-      PC.prototype.addIceCandidate = function addIceCandidate(cand) {
+      PCCtor.prototype.addIceCandidate = function addIceCandidate(cand) {
         try {
           const c = (cand && (cand.candidate || (typeof cand === "string" ? cand : ""))) || "";
-          if (/^candidate:/i.test(c)) return Promise.resolve();
+          // 拦截传入候选: 仅放行 mDNS, 防远端 inject 真实 IP
+          if (/^candidate:/i.test(c) && !/\.local\s/i.test(c)) return Promise.resolve();
         } catch (_) {}
         return origAddIceCandidate.apply(this, arguments);
       };
-      try { wrap(PC.prototype.setLocalDescription); wrap(PC.prototype.addIceCandidate); } catch (_) {}
+      try { wrap(PCCtor.prototype.setLocalDescription); wrap(PCCtor.prototype.addIceCandidate); } catch (_) {}
     }
   } catch (_) {}
 
@@ -406,10 +454,17 @@ const STEALTH_INIT = `
   // speechSynthesis.getVoices() 暴露 OS 安装的 TTS 语音 → Linux/Win/Mac 一望可知
   try {
     if (typeof speechSynthesis !== 'undefined') {
+      // Linux Chrome 桌面默认: 3 个 Google 远程 + 4 个 native eSpeak 本地引擎
+      // CreepJS 对 localService:true (本地)和 false (云端) 分别计数, 任一为 0 都标 blocked
       const fakeVoices = [
         { voiceURI: 'Google US English', name: 'Google US English', lang: 'en-US', localService: false, default: true },
         { voiceURI: 'Google UK English Female', name: 'Google UK English Female', lang: 'en-GB', localService: false, default: false },
         { voiceURI: 'Google UK English Male', name: 'Google UK English Male', lang: 'en-GB', localService: false, default: false },
+        // 本地 eSpeak voice — voiceURI 必须唯一, CreepJS 按 URI 去重
+        { voiceURI: 'native-en-US', name: 'English (America)', lang: 'en-US', localService: true, default: false },
+        { voiceURI: 'native-en-GB', name: 'English (Great Britain)', lang: 'en-GB', localService: true, default: false },
+        { voiceURI: 'native-es-ES', name: 'Spanish (Spain)', lang: 'es-ES', localService: true, default: false },
+        { voiceURI: 'native-fr-FR', name: 'French (France)', lang: 'fr-FR', localService: true, default: false },
       ];
       Object.defineProperty(speechSynthesis, 'getVoices', { value: () => fakeVoices, configurable: true });
       try { wrap(speechSynthesis.getVoices); } catch (_) {}
@@ -646,8 +701,10 @@ async function getBrowser(): Promise<Browser> {
     args.push("--disable-quic");
     // WebRTC：addIceCandidate 拦截只过滤 SDP 字符串，但 STUN 探测包已经通过 UDP 发出去
     // 暴露真实/内网 IP。强制 ICE 必须走代理，无代理时禁用非代理 UDP
-    args.push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
-    args.push("--webrtc-ip-handling-policy=disable_non_proxied_udp");
+    // 不强制 disable_non_proxied_udp: 那会让所有 ICE candidate 被砍光 → CreepJS 报
+    // "host connection: blocked / foundation/ip: unsupported" 强 bot 信号。
+    // Chrome 默认 mDNS 化 host candidate (${randomHash}.local), 既不泄真 IP 也不 blocked。
+    // SDP 里仍可能出现 srflx (STUN over UDP) 候选, 由下方 sanitizeSdp 过滤掉非 mDNS 行。
   }
   // DNS防污染：无论 headed/headless 都必须注入，避免系统 DNS 被 GFW UDP 污染
   // SOCKS proxy 出去的请求 DNS 也走代理内 DoH (secure 强制模式)
