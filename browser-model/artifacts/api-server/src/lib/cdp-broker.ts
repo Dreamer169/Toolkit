@@ -397,21 +397,10 @@ const STEALTH_INIT = `
     try { wrap(Range.prototype.getBoundingClientRect); } catch (_) {}
   } catch (_) {}
 
-  // === 字体指纹防护 ===
-  // CanvasRenderingContext2D.measureText 能用宽度差检测某字体是否安装。
-  // 加亚像素噪声让"是/否安装"的判定不再稳定。
-  try {
-    const oMT = CanvasRenderingContext2D.prototype.measureText;
-    CanvasRenderingContext2D.prototype.measureText = function measureText() {
-      const m = oMT.apply(this, arguments);
-      try {
-        const n = (Math.random() - 0.5) * 1e-3;
-        Object.defineProperty(m, 'width', { value: m.width + n, configurable: true });
-      } catch (_) {}
-      return m;
-    };
-    try { wrap(CanvasRenderingContext2D.prototype.measureText); } catch (_) {}
-  } catch (_) {}
+  // === 字体指纹：不加 measureText 噪声 ===
+  // 装了 ttf-mscorefonts-installer (Arial/Times New Roman/Verdana/Courier New)
+  // + fonts-liberation/dejavu/noto-core 后，字体探测能报真实 Linux Chrome 字体集，
+  // 此时 measureText 噪声反而让指纹哈希漂移 → 暴露 hook 痕迹
 
   // === 语音合成指纹 ===
   // speechSynthesis.getVoices() 暴露 OS 安装的 TTS 语音 → Linux/Win/Mac 一望可知
@@ -454,6 +443,73 @@ const STEALTH_INIT = `
     patchExt(WebGLRenderingContext);
     if (typeof WebGL2RenderingContext !== 'undefined') patchExt(WebGL2RenderingContext);
   } catch (_) {}
+
+  // === Worker / SharedWorker 上下文真实化 ===
+  // 没注入 Worker 是 CDP 架构里最大穿帮点：CreepJS 在 worker 里 cross-check
+  // navigator.hardwareConcurrency / deviceMemory / userAgent / userAgentData / WebGL gpu，
+  // 主页伪装成 Chrome 145 + Intel Mesa + 8 核 8G，worker 拿到容器真实值
+  // (4 核 / 4G / SwiftShader / chromium-1208 真实小版本) → 一行不一致直接判 lie。
+  // 策略：Hook Worker constructor，把 url/Blob 替换成"先注入 worker stealth + importScripts(原 src)" 的 Blob URL
+  try {
+    const STEALTH_WORKER = '(' + (function(){
+      try { Object.defineProperty(WorkerNavigator.prototype, 'hardwareConcurrency', { get: function(){return 8;}, configurable: true }); } catch (e) {}
+      try { Object.defineProperty(WorkerNavigator.prototype, 'deviceMemory', { get: function(){return 8;}, configurable: true }); } catch (e) {}
+      try { Object.defineProperty(WorkerNavigator.prototype, 'platform', { get: function(){return 'Linux x86_64';}, configurable: true }); } catch (e) {}
+      try { Object.defineProperty(WorkerNavigator.prototype, 'language', { get: function(){return 'en-US';}, configurable: true }); } catch (e) {}
+      try { Object.defineProperty(WorkerNavigator.prototype, 'languages', { get: function(){return ['en-US','en'];}, configurable: true }); } catch (e) {}
+      try { Object.defineProperty(WorkerNavigator.prototype, 'userAgent', { get: function(){return 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36';}, configurable: true }); } catch (e) {}
+      try {
+        var brands = [{brand:'Chromium',version:'145'},{brand:'Not:A-Brand',version:'99'},{brand:'Google Chrome',version:'145'}];
+        var fullList = [{brand:'Chromium',version:'145.0.7375.0'},{brand:'Not:A-Brand',version:'99.0.0.0'},{brand:'Google Chrome',version:'145.0.7375.0'}];
+        var high = { architecture:'x86', bitness:'64', model:'', mobile:false, platform:'Linux', platformVersion:'6.5.0', uaFullVersion:'145.0.7375.0', wow64:false, formFactors:['Desktop'], fullVersionList:fullList, brands:brands };
+        var uaData = { brands: brands, mobile: false, platform: 'Linux',
+          getHighEntropyValues: function(hints){ var o={brands:brands, mobile:false, platform:'Linux'}; (hints||[]).forEach(function(h){ if(h in high) o[h]=high[h]; }); return Promise.resolve(o); },
+          toJSON: function(){ return {brands:brands, mobile:false, platform:'Linux'}; }
+        };
+        Object.defineProperty(WorkerNavigator.prototype, 'userAgentData', { get: function(){return uaData;}, configurable: true });
+      } catch (e) {}
+      try {
+        if (typeof WebGLRenderingContext !== 'undefined') {
+          var gp = WebGLRenderingContext.prototype.getParameter;
+          WebGLRenderingContext.prototype.getParameter = function(p){ if(p===37445)return 'Google Inc. (Intel)'; if(p===37446)return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)'; return gp.apply(this, arguments); };
+        }
+        if (typeof WebGL2RenderingContext !== 'undefined') {
+          var gp2 = WebGL2RenderingContext.prototype.getParameter;
+          WebGL2RenderingContext.prototype.getParameter = function(p){ if(p===37445)return 'Google Inc. (Intel)'; if(p===37446)return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)'; return gp2.apply(this, arguments); };
+        }
+      } catch (e) {}
+      try {
+        var gtoOrig = Date.prototype.getTimezoneOffset;
+        Date.prototype.getTimezoneOffset = function(){ var v = gtoOrig.call(this); if (v === 0) { var m = this.getUTCMonth(); return (m>=2 && m<=10) ? 420 : 480; } return v; };
+      } catch (e) {}
+      try {
+        var roOrig = Intl.DateTimeFormat.prototype.resolvedOptions;
+        Intl.DateTimeFormat.prototype.resolvedOptions = function(){ var r = roOrig.apply(this, arguments); if (!r.timeZone || r.timeZone === 'UTC') r.timeZone = 'America/Los_Angeles'; if (!r.locale || /^(zh|en-GB|de|fr|ja|ru|ko)/.test(r.locale)) r.locale = 'en-US'; return r; };
+      } catch (e) {}
+    }).toString() + ')();';
+
+    var wrapWorkerSrc = function(src, opts) {
+      try {
+        // module worker 不能用 importScripts，跳过（少见）
+        if (opts && opts.type === 'module') return src;
+        var urlStr = (src instanceof URL) ? src.href : String(src);
+        var body = STEALTH_WORKER + ";importScripts(" + JSON.stringify(urlStr) + ");";
+        var blob = new Blob([body], { type: 'application/javascript' });
+        return URL.createObjectURL(blob);
+      } catch (e) { return src; }
+    };
+    if (window.Worker) {
+      var OW = window.Worker;
+      window.Worker = new Proxy(OW, { construct: function(t, args){ args[0] = wrapWorkerSrc(args[0], args[1]); return Reflect.construct(t, args); } });
+      try { wrap(window.Worker); } catch (e) {}
+    }
+    if (window.SharedWorker) {
+      var OSW = window.SharedWorker;
+      window.SharedWorker = new Proxy(OSW, { construct: function(t, args){ args[0] = wrapWorkerSrc(args[0], args[1]); return Reflect.construct(t, args); } });
+      try { wrap(window.SharedWorker); } catch (e) {}
+    }
+  } catch (_) {}
+
 })();
 `;
 
