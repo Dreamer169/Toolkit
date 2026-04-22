@@ -21,6 +21,32 @@ import { logger } from "./logger.js";
 
 type CDPSession = Awaited<ReturnType<BrowserContext["newCDPSession"]>>;
 
+/**
+ * 把地址栏里随便丢进来的字符串规范成可以 page.goto 的 URL：
+ *   "google.com"          -> "https://google.com"
+ *   "localhost:3000"      -> "http://localhost:3000"
+ *   "what is rust"        -> "https://www.google.com/search?q=what%20is%20rust"
+ *   "https://x.com/y"     -> 原样
+ */
+function normalizeUrl(raw: string): string {
+  const s = raw.trim();
+  if (!s) return "about:blank";
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) return s;
+  if (/^about:|^chrome:|^data:|^javascript:|^file:/i.test(s)) return s;
+  // host[:port][/path] 形如 "x.y", "localhost", "10.0.0.1:8080"
+  const looksLikeHost = /^[\w-]+(\.[\w-]+)+(:\d+)?(\/.*)?$/.test(s)
+    || /^localhost(:\d+)?(\/.*)?$/.test(s)
+    || /^(\d{1,3}\.){3}\d{1,3}(:\d+)?(\/.*)?$/.test(s);
+  if (looksLikeHost) {
+    const proto = /^localhost|^127\.|^10\.|^192\.168\./.test(s) ? "http" : "https";
+    return `${proto}://${s}`;
+  }
+  // 没空格也不像 URL → 兜底当域名加 https
+  if (!/\s/.test(s) && /^[\w-]+\.[a-z]{2,}/i.test(s)) return `https://${s}`;
+  // 含空格 → 走 Google 搜索
+  return `https://www.google.com/search?q=${encodeURIComponent(s)}`;
+}
+
 interface ClientMsg {
   type:
     | "navigate"
@@ -187,6 +213,24 @@ export class CdpSession {
       }
     });
     this.page.on("close", () => this.close().catch(() => {}));
+    // alert / confirm / prompt / beforeunload —— 不处理会挂住主线程，
+    //   表现为：触发任意 JS 弹窗后整个页面冻住、点哪都没反应。
+    //   策略：默认全部 dismiss（confirm/prompt 视为取消），并把内容上报给前端
+    //   以便将来弹原生模态。
+    this.page.on("dialog", (dialog) => {
+      this.send({ type: "dialog", kind: dialog.type(), message: dialog.message() });
+      dialog.dismiss().catch(() => {});
+    });
+    // window.open() 弹窗页面不会画到当前 canvas —— 把它的 URL 拿出来在主页面跳转，
+    //   行为类似按住 Ctrl 点链接的反向：把"新窗口"重定向回当前 tab。
+    this.ctx.on("page", (p) => {
+      if (p === this.page) return;
+      const url = p.url();
+      p.close().catch(() => {});
+      if (url && url !== "about:blank") {
+        this.page?.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 }).catch(() => {});
+      }
+    });
 
     // 启动 CDP screencast，每帧推到前端
     await this.cdp.send("Page.enable");
@@ -215,8 +259,9 @@ export class CdpSession {
       switch (msg.type) {
         case "navigate":
           if (msg.url) {
-            await this.page.goto(msg.url, { waitUntil: "domcontentloaded", timeout: 60_000 }).catch((e) => {
-              this.send({ type: "navError", url: msg.url, error: String(e?.message ?? e) });
+            const target = normalizeUrl(msg.url);
+            await this.page.goto(target, { waitUntil: "domcontentloaded", timeout: 60_000 }).catch((e) => {
+              this.send({ type: "navError", url: target, error: String(e?.message ?? e) });
             });
           }
           break;
