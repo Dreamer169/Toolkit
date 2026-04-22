@@ -6,7 +6,7 @@
  * 替代旧 iframe + URL 重写代理方案，彻底绕开 Next.js/TurboPack 懒加载与
  * 第三方脚本 MIME 校验问题（真浏览器跑在服务端，前端只是显示器）。
  */
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useBrowserStore, type Tab } from "@/hooks/use-browser-store";
 import { Loader2 } from "lucide-react";
 
@@ -44,6 +44,7 @@ export function RemoteWebView({ tab }: RemoteWebViewProps) {
   const wsRef = useRef<WebSocket | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const readyRef = useRef(false);
+  const [ready, setReady] = useState(false);
   const lastFrameRef = useRef<HTMLImageElement | null>(null);
   const sizeRef = useRef({ w: 1280, h: 800 });
   // 服务端反射回来的 URL —— 用来抑制"前端收到 url 后又把同一个 url 重新 navigate
@@ -76,6 +77,7 @@ export function RemoteWebView({ tab }: RemoteWebViewProps) {
       switch (msg.type) {
         case "ready":
           readyRef.current = true;
+          setReady(true);
           updateTabStatus(tab.id, { isLoading: false });
           break;
         case "frame": {
@@ -114,7 +116,7 @@ export function RemoteWebView({ tab }: RemoteWebViewProps) {
       }
     };
 
-    ws.onclose = () => { readyRef.current = false; };
+    ws.onclose = () => { readyRef.current = false; setReady(false); };
     ws.onerror = () => { /* will be followed by close */ };
 
     return () => {
@@ -269,7 +271,7 @@ export function RemoteWebView({ tab }: RemoteWebViewProps) {
         style={{ width: "100%", height: "100%", outline: "none", cursor: "default" }}
         onMouseEnter={(e) => (e.currentTarget as HTMLCanvasElement).focus()}
       />
-      {!readyRef.current && (
+      {!ready && (
         <div className="absolute top-2 right-2 flex items-center gap-2 text-xs text-muted-foreground bg-background/80 px-2 py-1 rounded">
           <Loader2 className="h-3 w-3 animate-spin" />
           connecting…
