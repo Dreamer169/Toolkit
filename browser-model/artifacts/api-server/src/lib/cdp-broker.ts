@@ -514,16 +514,17 @@ async function getBrowser(): Promise<Browser> {
     "--start-maximized",
     "--disable-infobars",
   ];
+  // DNS防污染：无论 headed/headless 都必须注入，避免走系统 DNS 被 GFW UDP 污染
+  // 走 SOCKS proxy 时系统 DNS 也可能 UDP 直通绕过代理 → 这里强制走代理内 DoH
+  args.push(
+    "--proxy-resolves-dns-locally",
+    "--enable-features=AsyncDns,DnsOverHttpsUpgrade,NetworkServiceInProcess",
+    "--dns-over-https-templates=https://1.1.1.1/dns-query,https://dns.google/dns-query",
+  );
   if (useHeaded) {
     // GPU 走 ANGLE+SwiftShader：headed Chromium 在 Xvfb 上需要软件 GL 后端，
     //   否则 WebGL 直接关闭 → fingerprint 上一眼识破
     args.push("--use-gl=angle", "--use-angle=swiftshader", "--enable-webgl");
-    // 让 Chromium 自己解析 DNS（避免走系统 DNS 被污染 / 走 SOCKS proxy 时 UDP 直通）
-    args.push(
-      "--proxy-resolves-dns-locally",
-      "--enable-features=AsyncDns,DnsOverHttpsUpgrade,NetworkServiceInProcess",
-      "--dns-over-https-templates=https://1.1.1.1/dns-query,https://dns.google/dns-query",
-    );
   } else {
     args.push("--disable-gpu");
   }
