@@ -299,10 +299,12 @@ const STEALTH_INIT = `
         { deviceId: "cam1xy",  kind: "videoinput",  label: "", groupId: "g2", toJSON(){return this;} },
       ];
       const fakeEnum = function enumerateDevices() { return Promise.resolve(fakeDevices); };
-      // 真实"没插设备"状态 = NotFoundError；NotAllowedError 跟 enumerateDevices 返回设备列表
-      // 自相矛盾（既然有摄像头为何 user 没拒绝过就 not allowed？）
-      const fakeGUM  = function getUserMedia() { return Promise.reject(new DOMException("Requested device not found", "NotFoundError")); };
-      const fakeGDM  = function getDisplayMedia() { return Promise.reject(new DOMException("Permission denied by system", "NotAllowedError")); };
+      // getUserMedia/getDisplayMedia 走原生 (有 --use-fake-device-for-media-stream flag,
+      // 原生返回合成视频/音频流, 比 reject 更真实). 只把命名包成本地函数防 Function.toString 露馅.
+      const _gumOrig = navigator.mediaDevices.getUserMedia ? navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices) : null;
+      const _gdmOrig = navigator.mediaDevices.getDisplayMedia ? navigator.mediaDevices.getDisplayMedia.bind(navigator.mediaDevices) : null;
+      const fakeGUM  = function getUserMedia(c) { return _gumOrig ? _gumOrig(c) : Promise.reject(new DOMException("Requested device not found", "NotFoundError")); };
+      const fakeGDM  = function getDisplayMedia(c) { return _gdmOrig ? _gdmOrig(c) : Promise.reject(new DOMException("Permission denied by system", "NotAllowedError")); };
       try { wrap(fakeEnum); wrap(fakeGUM); wrap(fakeGDM); } catch (_) {}
       try {
         const proto = Object.getPrototypeOf(navigator.mediaDevices);
@@ -573,6 +575,105 @@ const STEALTH_INIT = `
       try { wrap(window.SharedWorker); } catch (e) {}
     }
     // [SW register hook moved to server-side context.route] 
+
+
+    // === MediaStreamTrack.label: Chrome --use-fake-device flag 会泄露 "fake_device_0" 字样 ===
+    try {
+      if (typeof MediaStreamTrack !== 'undefined') {
+        var lblDesc = Object.getOwnPropertyDescriptor(MediaStreamTrack.prototype, 'label');
+        if (lblDesc && lblDesc.get) {
+          var origLblGet = lblDesc.get;
+          Object.defineProperty(MediaStreamTrack.prototype, 'label', {
+            configurable: true,
+            get: function() {
+              try {
+                var v = origLblGet.call(this);
+                // 真实未授权状态 label 是空字符串; 反爬看到 fake_/Fake 关键字直接判 bot
+                if (typeof v === 'string' && /(^fake_|^Fake )/.test(v)) return '';
+                return v;
+              } catch (_) { return ''; }
+            }
+          });
+        }
+      }
+    } catch (_) {}
+
+    // === 设备 API 一致性: Linux Chrome 145 实际暴露这些命名空间 (即使没硬件) ===
+    // 反爬检测: 现代 Chrome 必有 navigator.bluetooth/usb/hid/serial 命名空间, undefined 即异常
+    try {
+      var ensureNs = function(name, ctor) {
+        if (!(name in navigator)) {
+          try { Object.defineProperty(Navigator.prototype, name, { get: function(){ return ctor; }, configurable: true }); } catch(_) {}
+        }
+      };
+      // Linux Chrome 默认: bluetooth 存在, usb 存在, hid 存在, serial 存在
+      var fakeBluetooth = { getAvailability: function(){ return Promise.resolve(false); }, getDevices: function(){ return Promise.resolve([]); }, requestDevice: function(){ return Promise.reject(new DOMException('User cancelled the requestDevice() chooser.', 'NotFoundError')); } };
+      var fakeUsb = { getDevices: function(){ return Promise.resolve([]); }, requestDevice: function(){ return Promise.reject(new DOMException('No device selected.', 'NotFoundError')); } };
+      var fakeHid = { getDevices: function(){ return Promise.resolve([]); }, requestDevice: function(){ return Promise.resolve([]); } };
+      var fakeSerial = { getPorts: function(){ return Promise.resolve([]); }, requestPort: function(){ return Promise.reject(new DOMException('No port selected by the user.', 'NotFoundError')); } };
+      ensureNs('bluetooth', fakeBluetooth);
+      ensureNs('usb', fakeUsb);
+      ensureNs('hid', fakeHid);
+      ensureNs('serial', fakeSerial);
+      try { wrap(fakeBluetooth.requestDevice); wrap(fakeUsb.requestDevice); wrap(fakeHid.requestDevice); wrap(fakeSerial.requestPort); } catch(_) {}
+    } catch (_) {}
+
+    // === Gamepad: 真实未连接手柄返回 4 个 null slot, 不是空数组 ===
+    try {
+      if (typeof navigator.getGamepads === 'function') {
+        var origGp = navigator.getGamepads;
+        var fakeGp = function(){ return [null, null, null, null]; };
+        Object.defineProperty(Navigator.prototype, 'getGamepads', { value: fakeGp, configurable: true, writable: true });
+        try { wrap(fakeGp); } catch(_) {}
+      }
+    } catch (_) {}
+
+    // === Storage estimate: 报告典型 SSD/笔记本可用空间 (无 hook 时容器里只有几百 MB → 反爬识别 sandbox) ===
+    try {
+      if (navigator.storage && navigator.storage.estimate) {
+        var fakeEstimate = function(){
+          return Promise.resolve({
+            quota: 296352743424, // ~276 GiB
+            usage: 12345678,
+            usageDetails: { indexedDB: 0, caches: 0, serviceWorkerRegistrations: 0 }
+          });
+        };
+        Object.defineProperty(Object.getPrototypeOf(navigator.storage), 'estimate', { value: fakeEstimate, configurable: true, writable: true });
+        try { wrap(fakeEstimate); } catch(_) {}
+      }
+    } catch (_) {}
+
+    // === Permissions API: camera/microphone/geolocation 等所有标准权限名都得返回 prompt ===
+    // 之前只覆盖了 notifications, 反爬会扫一遍标准权限名表对比一致性
+    try {
+      if (navigator.permissions && navigator.permissions.query) {
+        var permKnown = ['accelerometer','accessibility-events','ambient-light-sensor','background-fetch','background-sync','bluetooth','camera','clipboard-read','clipboard-write','device-info','display-capture','geolocation','gyroscope','magnetometer','microphone','midi','nfc','notifications','payment-handler','periodic-background-sync','persistent-storage','push','screen-wake-lock','speaker-selection','storage-access','window-management','window-placement'];
+        var permOrig = navigator.permissions.query.bind(navigator.permissions);
+        var permWrap = function(p) {
+          try {
+            if (p && permKnown.indexOf(p.name) !== -1) {
+              if (p.name === 'notifications') return Promise.resolve({ state: (typeof Notification !== 'undefined' ? Notification.permission : 'default') === 'denied' ? 'prompt' : (Notification.permission === 'granted' ? 'granted' : 'prompt'), name: p.name, onchange: null });
+              if (p.name === 'geolocation' || p.name === 'clipboard-read' || p.name === 'clipboard-write') return Promise.resolve({ state: 'granted', name: p.name, onchange: null });
+              return Promise.resolve({ state: 'prompt', name: p.name, onchange: null });
+            }
+          } catch(_) {}
+          return permOrig(p);
+        };
+        Object.defineProperty(Object.getPrototypeOf(navigator.permissions), 'query', { value: permWrap, configurable: true, writable: true });
+        try { Object.defineProperty(navigator.permissions, 'query', { value: permWrap, configurable: true, writable: true }); } catch(_) {}
+        try { wrap(permWrap); } catch(_) {}
+      }
+    } catch (_) {}
+
+    // === Notification: requestPermission 总是 default → 真用户没点过 ===
+    try {
+      if (typeof Notification !== 'undefined' && Notification.requestPermission) {
+        var nrp = function() { return Promise.resolve('default'); };
+        try { Notification.requestPermission = nrp; } catch(_) {}
+        try { wrap(nrp); } catch(_) {}
+      }
+    } catch (_) {}
+
   } catch (_) {}
 
 })();
@@ -700,6 +801,19 @@ async function getBrowser(): Promise<Browser> {
     "--window-position=0,0",
     "--start-maximized",
     "--disable-infobars",
+    // === 假摄像头/麦克风：getUserMedia 自动同意, 返回 1 个 video + 1 个 audio fake 设备 ===
+    // 不加这两个 flag, getUserMedia() 在容器里直接 NotFoundError, 导致 enumerateDevices 跟
+    // 我们伪造的设备列表对不上 (我们说有 cam/mic, 实际 getUserMedia 取不到 → 一致性破)
+    "--use-fake-ui-for-media-stream",
+    "--use-fake-device-for-media-stream",
+    // HTTP Accept-Language header: 不加 Chrome 默认按 LANG 派生
+    "--accept-lang=en-US,en;q=0.9",
+    // 禁用某些自动化指示器
+    "--disable-features=GlobalMediaControls,MediaRouter,DialMediaRouteProvider,OptimizationHints,InterestFeedContentSuggestions",
+    "--disable-background-networking",
+    "--disable-breakpad",
+    "--disable-sync",
+    "--metrics-recording-only",
   ];
   // 代理：用命令行 --proxy-server 传，不能用 Playwright launch.proxy 选项！
   // 后者会自动注入 --host-resolver-rules="MAP * ~NOTFOUND, EXCLUDE 127.0.0.1"，
