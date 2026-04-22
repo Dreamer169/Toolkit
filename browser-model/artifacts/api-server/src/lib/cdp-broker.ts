@@ -22,6 +22,216 @@ import { logger } from "./logger.js";
 type CDPSession = Awaited<ReturnType<BrowserContext["newCDPSession"]>>;
 
 /**
+ * 反指纹 init script —— 在每个页面 JS 之前注入。
+ * 移植自旧 renderer.ts，覆盖 reCAPTCHA / hCaptcha / Cloudflare BM / Datadome /
+ * Akamai BM / PerimeterX 这些反爬常查的所有点：navigator.* / WebGL / chrome.*
+ * / WebRTC IP 泄漏 / mediaDevices / Intl 时区一致性 / Function.toString 泄漏。
+ */
+const STEALTH_INIT = `
+(() => {
+  // navigator.webdriver
+  try { Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => undefined, configurable: true }); } catch (_) {}
+  // 删 CDP 注入的全局变量（Selenium/Playwright 检测套路）
+  try { delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array; } catch(_) {}
+  try { delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise; } catch(_) {}
+  try { delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol; } catch(_) {}
+
+  try { Object.defineProperty(Navigator.prototype, 'languages', { get: () => ['en-US', 'en'], configurable: true }); } catch (_) {}
+  try { Object.defineProperty(Navigator.prototype, 'language',  { get: () => 'en-US', configurable: true }); } catch (_) {}
+  try { Object.defineProperty(Navigator.prototype, 'platform', { get: () => 'Linux x86_64', configurable: true }); } catch (_) {}
+  try { Object.defineProperty(Navigator.prototype, 'hardwareConcurrency', { get: () => 8, configurable: true }); } catch (_) {}
+  try { Object.defineProperty(Navigator.prototype, 'deviceMemory', { get: () => 8, configurable: true }); } catch (_) {}
+  try { Object.defineProperty(Navigator.prototype, 'maxTouchPoints', { get: () => 0, configurable: true }); } catch (_) {}
+
+  // PluginArray —— 真 Chrome 至少 5 个 PDF Viewer plugin，没有就是 headless 信号
+  try {
+    const makePlugin = (name, filename, desc) => {
+      const p = Object.create(Plugin.prototype);
+      Object.defineProperties(p, {
+        name: { value: name }, filename: { value: filename },
+        description: { value: desc }, length: { value: 1 },
+      });
+      return p;
+    };
+    const plugins = [
+      makePlugin('PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+      makePlugin('Chrome PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+      makePlugin('Chromium PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+      makePlugin('Microsoft Edge PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+      makePlugin('WebKit built-in PDF', 'internal-pdf-viewer', 'Portable Document Format'),
+    ];
+    const arr = Object.create(PluginArray.prototype);
+    plugins.forEach((p, i) => { arr[i] = p; arr[p.name] = p; });
+    Object.defineProperty(arr, 'length', { value: plugins.length });
+    Object.defineProperty(Navigator.prototype, 'plugins', { get: () => arr, configurable: true });
+  } catch (_) {}
+
+  // chrome.* —— 没有 chrome.runtime/app/csi/loadTimes 是经典 headless 指纹
+  try {
+    if (!window.chrome) window.chrome = {};
+    window.chrome.runtime = window.chrome.runtime || { OnInstalledReason: {}, OnRestartRequiredReason: {}, PlatformArch: {}, PlatformOs: {}, RequestUpdateCheckStatus: {} };
+    window.chrome.app = window.chrome.app || { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } };
+    window.chrome.csi = window.chrome.csi || function(){return{};};
+    window.chrome.loadTimes = window.chrome.loadTimes || function(){return{requestTime: Date.now()/1000, startLoadTime: Date.now()/1000, commitLoadTime: Date.now()/1000, finishDocumentLoadTime: 0, finishLoadTime: 0, firstPaintTime: 0, firstPaintAfterLoadTime: 0, navigationType: 'Other', wasFetchedViaSpdy: false, wasNpnNegotiated: true, npnNegotiatedProtocol: 'h2', wasAlternateProtocolAvailable: false, connectionInfo: 'h2'};};
+  } catch (_) {}
+
+  // permissions: notifications quirk
+  try {
+    const origQuery = window.navigator.permissions && window.navigator.permissions.query;
+    if (origQuery) {
+      window.navigator.permissions.query = (params) =>
+        params && params.name === 'notifications'
+          ? Promise.resolve({ state: Notification.permission, name: 'notifications', onchange: null })
+          : origQuery.call(window.navigator.permissions, params);
+    }
+  } catch (_) {}
+
+  // WebGL vendor/renderer —— 默认 SwiftShader 太典型，伪装成 Mesa Intel Iris
+  try {
+    const getParam = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function (p) {
+      if (p === 37445) return 'Intel Inc.';
+      if (p === 37446) return 'Intel Iris OpenGL Engine';
+      return getParam.apply(this, arguments);
+    };
+    if (typeof WebGL2RenderingContext !== 'undefined') {
+      const getParam2 = WebGL2RenderingContext.prototype.getParameter;
+      WebGL2RenderingContext.prototype.getParameter = function (p) {
+        if (p === 37445) return 'Intel Inc.';
+        if (p === 37446) return 'Intel Iris OpenGL Engine';
+        return getParam2.apply(this, arguments);
+      };
+    }
+  } catch (_) {}
+
+  // headless 经典泄漏：window.outer{Width,Height} 为 0
+  try {
+    if (!window.outerWidth)  Object.defineProperty(window, 'outerWidth',  { get: () => window.innerWidth });
+    if (!window.outerHeight) Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight });
+  } catch (_) {}
+
+  // screen 属性
+  try {
+    Object.defineProperty(screen, 'availWidth',  { get: () => 1920, configurable: true });
+    Object.defineProperty(screen, 'availHeight', { get: () => 1040, configurable: true });
+    Object.defineProperty(screen, 'width',  { get: () => 1920, configurable: true });
+    Object.defineProperty(screen, 'height', { get: () => 1080, configurable: true });
+    Object.defineProperty(screen, 'colorDepth', { get: () => 24, configurable: true });
+    Object.defineProperty(screen, 'pixelDepth', { get: () => 24, configurable: true });
+  } catch (_) {}
+
+  // 电池
+  try {
+    if (navigator.getBattery) {
+      const _gb = navigator.getBattery.bind(navigator);
+      navigator.getBattery = () => _gb().then((b) => b).catch(() => ({
+        charging: true, chargingTime: 0, dischargingTime: Infinity, level: 0.99,
+        addEventListener(){}, removeEventListener(){}, dispatchEvent(){return true;},
+      }));
+    }
+  } catch (_) {}
+
+  // 网络连接（NetworkInformation）
+  try {
+    Object.defineProperty(Navigator.prototype, 'connection', {
+      get: () => ({ effectiveType: '4g', rtt: 50, downlink: 10, saveData: false, addEventListener(){}, removeEventListener(){} }),
+      configurable: true,
+    });
+  } catch (_) {}
+
+  try { if (window.Notification && Notification.permission === 'denied') Object.defineProperty(Notification, 'permission', { get: () => 'default' }); } catch (_) {}
+
+  // toString 泄漏：被改写过的函数 toString 必须仍返回 '[native code]'
+  const nativeToString = Function.prototype.toString;
+  const fakeFns = new WeakSet();
+  const wrap = (fn) => { fakeFns.add(fn); return fn; };
+  Function.prototype.toString = function () {
+    if (fakeFns.has(this)) return 'function ' + (this.name || '') + '() { [native code] }';
+    return nativeToString.call(this);
+  };
+  try { wrap(WebGLRenderingContext.prototype.getParameter); } catch (_) {}
+  try { wrap(window.navigator.permissions.query); } catch (_) {}
+  try { wrap(Function.prototype.toString); } catch (_) {}
+
+  // WebRTC IP 泄漏防护 —— 通过 ICE candidate 把 VPS 真实 IP / 内网 IP 上报给反爬
+  try {
+    const PC = window.RTCPeerConnection || window.webkitRTCPeerConnection || window.mozRTCPeerConnection;
+    if (PC) {
+      const origAddIceCandidate = PC.prototype.addIceCandidate;
+      const origSetLocalDescription = PC.prototype.setLocalDescription;
+      function sanitizeSdp(sdp) {
+        if (!sdp || typeof sdp !== 'string') return sdp;
+        return sdp.split('\\r\\n').filter((l) => !/^a=candidate:/i.test(l)).join('\\r\\n');
+      }
+      PC.prototype.setLocalDescription = function setLocalDescription(desc) {
+        if (desc && desc.sdp) desc.sdp = sanitizeSdp(desc.sdp);
+        return origSetLocalDescription.apply(this, arguments);
+      };
+      PC.prototype.addIceCandidate = function addIceCandidate(cand) {
+        try {
+          const c = (cand && (cand.candidate || (typeof cand === "string" ? cand : ""))) || "";
+          if (/^candidate:/i.test(c)) return Promise.resolve();
+        } catch (_) {}
+        return origAddIceCandidate.apply(this, arguments);
+      };
+      try { wrap(PC.prototype.setLocalDescription); wrap(PC.prototype.addIceCandidate); } catch (_) {}
+    }
+  } catch (_) {}
+
+  // mediaDevices —— 没设备列表本身就可疑，给典型笔记本配置
+  try {
+    if (navigator.mediaDevices) {
+      const fakeDevices = [
+        { deviceId: "default", kind: "audioinput",  label: "", groupId: "g1", toJSON(){return this;} },
+        { deviceId: "8a1bcf",  kind: "audioinput",  label: "", groupId: "g1", toJSON(){return this;} },
+        { deviceId: "default", kind: "audiooutput", label: "", groupId: "g1", toJSON(){return this;} },
+        { deviceId: "cam1xy",  kind: "videoinput",  label: "", groupId: "g2", toJSON(){return this;} },
+      ];
+      const fakeEnum = function enumerateDevices() { return Promise.resolve(fakeDevices); };
+      const fakeGUM  = function getUserMedia() { return Promise.reject(new DOMException("Permission denied", "NotAllowedError")); };
+      const fakeGDM  = function getDisplayMedia() { return Promise.reject(new DOMException("Permission denied", "NotAllowedError")); };
+      try { wrap(fakeEnum); wrap(fakeGUM); wrap(fakeGDM); } catch (_) {}
+      try {
+        const proto = Object.getPrototypeOf(navigator.mediaDevices);
+        Object.defineProperty(proto, "enumerateDevices", { value: fakeEnum, configurable: true, writable: true });
+        Object.defineProperty(proto, "getUserMedia",     { value: fakeGUM,  configurable: true, writable: true });
+        Object.defineProperty(proto, "getDisplayMedia",  { value: fakeGDM,  configurable: true, writable: true });
+      } catch (_) {}
+      try {
+        Object.defineProperty(navigator.mediaDevices, "enumerateDevices", { value: fakeEnum, configurable: true, writable: true });
+        Object.defineProperty(navigator.mediaDevices, "getUserMedia",     { value: fakeGUM,  configurable: true, writable: true });
+        Object.defineProperty(navigator.mediaDevices, "getDisplayMedia",  { value: fakeGDM,  configurable: true, writable: true });
+      } catch (_) {}
+    }
+  } catch (_) {}
+
+  // Intl/timezone 一致性 —— 上下文 pin 了 LA 时区，加固 SPA bundles 在 init 之前的 Date 调用
+  try {
+    const origRO = Intl.DateTimeFormat.prototype.resolvedOptions;
+    Intl.DateTimeFormat.prototype.resolvedOptions = function resolvedOptions() {
+      const r = origRO.apply(this, arguments);
+      if (!r.timeZone || r.timeZone === "UTC") r.timeZone = "America/Los_Angeles";
+      if (!r.locale || r.locale === "en-GB") r.locale = "en-US";
+      return r;
+    };
+    try { wrap(Intl.DateTimeFormat.prototype.resolvedOptions); } catch (_) {}
+  } catch (_) {}
+  try {
+    const origGTO = Date.prototype.getTimezoneOffset;
+    Date.prototype.getTimezoneOffset = function getTimezoneOffset() {
+      const v = origGTO.call(this);
+      if (v === 0) {
+        const month = this.getUTCMonth();
+        return (month >= 2 && month <= 10) ? 420 : 480;
+      }
+      return v;
+    };
+    try { wrap(Date.prototype.getTimezoneOffset); } catch (_) {}
+  } catch (_) {}
+})();
+`;
+
+/**
  * 把地址栏里随便丢进来的字符串规范成可以 page.goto 的 URL：
  *   "google.com"          -> "https://google.com"
  *   "localhost:3000"      -> "http://localhost:3000"
@@ -115,23 +325,42 @@ async function getBrowser(): Promise<Browser> {
   const args = [
     "--no-sandbox",
     "--disable-dev-shm-usage",
-    "--disable-extensions",
-    "--mute-audio",
     "--disable-blink-features=AutomationControlled",
+    "--disable-features=IsolateOrigins,site-per-process,AutomationControlled,Translate",
     "--no-default-browser-check",
     "--no-first-run",
-    "--disable-features=IsolateOrigins,site-per-process",
-    "--disable-site-isolation-trials",
-    // 反爬识别项
-    "--exclude-switches=enable-automation",
+    "--mute-audio",
+    "--disable-extensions-except",
+    "--disable-component-extensions-with-background-pages",
+    // Linux 上不带 --password-store=basic 会触发 keyring 报错
+    "--password-store=basic",
+    "--use-mock-keychain",
+    // 窗口尺寸跟 Xvfb 屏一致 + 真实定位
+    "--window-size=1920,1080",
+    "--window-position=0,0",
+    "--start-maximized",
     "--disable-infobars",
   ];
-  if (!useHeaded) args.push("--disable-gpu");
+  if (useHeaded) {
+    // GPU 走 ANGLE+SwiftShader：headed Chromium 在 Xvfb 上需要软件 GL 后端，
+    //   否则 WebGL 直接关闭 → fingerprint 上一眼识破
+    args.push("--use-gl=angle", "--use-angle=swiftshader", "--enable-webgl");
+    // 让 Chromium 自己解析 DNS（避免走系统 DNS 被污染 / 走 SOCKS proxy 时 UDP 直通）
+    args.push(
+      "--proxy-resolves-dns-locally",
+      "--enable-features=AsyncDns,DnsOverHttpsUpgrade,NetworkServiceInProcess",
+      "--dns-over-https-templates=https://1.1.1.1/dns-query,https://dns.google/dns-query",
+    );
+  } else {
+    args.push("--disable-gpu");
+  }
 
   _browserPromise = chromium.launch({
     headless: !useHeaded,
     executablePath: exe,
     args,
+    // 砍掉默认会带的 --enable-automation 开关
+    ignoreDefaultArgs: ["--enable-automation"],
     proxy: proxyEnv ? { server: proxyEnv } : undefined,
     env: useHeaded ? { ...process.env, DISPLAY: display } as Record<string, string> : undefined,
   }).then((b) => {
@@ -163,44 +392,33 @@ export class CdpSession {
   async start(opts: SessionOpts) {
     const browser = await getBrowser();
     this.viewport = { w: opts.width, h: opts.height };
-    // 用 Linux UA —— 跟服务端真实 platform 对得上，避免 navigator.platform 与
-    // userAgent 互相矛盾被反爬识别
+    // UA 必须 (a) Linux 平台 (b) Chrome 145（playwright 1.59 / chromium-1208 实际版本）
+    // 否则 sec-ch-ua 客户端提示和 UA 不一致 → 现代反爬 (Cloudflare BM, Akamai BMP) 立刻识破
     const ua = opts.userAgent || (
       "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-      + "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+      + "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
     );
     this.ctx = await browser.newContext({
       viewport: { width: opts.width, height: opts.height },
+      // 真物理屏 1920x1080，window.screen.* 和这里要对齐
+      screen: { width: 1920, height: 1080 },
       deviceScaleFactor: opts.deviceScaleFactor ?? 1,
+      isMobile: false,
+      hasTouch: false,
       userAgent: ua,
       locale: "en-US",
       timezoneId: "America/Los_Angeles",
+      colorScheme: "light",
       ignoreHTTPSErrors: true,
+      // Client Hints —— 现代反爬必查项，必须跟 UA 串自洽
+      extraHTTPHeaders: {
+        "Accept-Language": "en-US,en;q=0.9",
+        "sec-ch-ua": "\"Chromium\";v=\"145\", \"Not?A_Brand\";v=\"24\", \"Google Chrome\";v=\"145\"",
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": "\"Linux\"",
+      },
     });
-    // 反爬指纹修整：抹掉 navigator.webdriver、伪造 chrome.runtime、修整 plugins/languages
-    await this.ctx.addInitScript(() => {
-      try {
-        Object.defineProperty(navigator, "webdriver", { get: () => false });
-      } catch { /* ignore */ }
-      try {
-        // @ts-expect-error - chrome 对象在非 Chrome 启动时可能缺失
-        if (!window.chrome) window.chrome = { runtime: {} };
-      } catch { /* ignore */ }
-      try {
-        Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
-      } catch { /* ignore */ }
-      try {
-        const orig = navigator.permissions?.query?.bind(navigator.permissions);
-        if (orig) {
-          // @ts-expect-error - 重写以避开 notifications 检测套路
-          navigator.permissions.query = (p: { name: string }) => (
-            p && p.name === "notifications"
-              ? Promise.resolve({ state: Notification.permission } as PermissionStatus)
-              : orig(p)
-          );
-        }
-      } catch { /* ignore */ }
-    });
+    await this.ctx.addInitScript({ content: STEALTH_INIT });
     this.page = await this.ctx.newPage();
     this.cdp = await this.ctx.newCDPSession(this.page);
 
