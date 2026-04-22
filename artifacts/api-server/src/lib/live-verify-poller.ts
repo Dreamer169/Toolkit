@@ -155,13 +155,17 @@ async function runOnce() {
           const gr2 = await microsoftFetch(fallbackUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
           if (!gr2.ok) { stats.skipped++; continue; }
           const gd2 = await gr2.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
-          const msgs2 = (gd2.value ?? []).filter(m => !m.isRead && m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase()));
+          const msgs2 = (gd2.value ?? [])
+            .filter(m => !m.isRead && m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase()))
+            .filter(m => !/replit/i.test(m.subject));
           if (!msgs2.length) continue;
           for (const msg of msgs2) { if (!_enabled) break; await processMessage(acc, msg, accessToken, stats); }
           continue;
         }
         const gd = await gr.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
-        const msgs = (gd.value ?? []).filter(m => m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase()));
+        const msgs = (gd.value ?? [])
+          .filter(m => m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase()))
+          .filter(m => !/replit/i.test(m.subject));
         if (!msgs.length) continue;
         logger.info({ email: acc.email, count: msgs.length }, "[live-verify] 发现未读验证邮件");
         for (const msg of msgs) { if (!_enabled) break; await processMessage(acc, msg, accessToken, stats); }
