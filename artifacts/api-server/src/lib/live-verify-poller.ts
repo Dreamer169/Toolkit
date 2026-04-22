@@ -220,7 +220,12 @@ async function processMessage(
     setTimeout(() => { try { child.kill(); } catch {} _inflightChildren.delete(child); resolve({ success: false, error: "timeout" }); }, 45_000);
   });
 
-  const trueSuccess = result.success && !!result.title && !result.title.toLowerCase().includes("404");
+  const _marker  = ((result as Record<string, unknown>).verified_marker as string) ?? "";
+  const _bodySnip = (((result as Record<string, unknown>).body_snippet as string) ?? "").slice(0, 120);
+  // 优先用 Python 端的页面正文 marker；marker 缺失时再回落 success+title 启发式
+  const trueSuccess = _marker
+    ? _marker === "success"
+    : (result.success && !!result.title && !result.title.toLowerCase().includes("404"));
 
   // 区分瞬态故障 vs 永久故障：
   //   瞬态（代理 4xx/5xx、网络、超时、未知 http_status）→ 不计入失败次数，下轮继续
@@ -248,6 +253,8 @@ async function processMessage(
     email: acc.email,
     subject: msg.subject,
     trueSuccess,
+    marker: _marker,
+    bodySnip: _bodySnip,
     finalUrl: result.final_url?.slice(0, 120),
     title: result.title,
     httpStatus: result.http_status,
@@ -256,13 +263,12 @@ async function processMessage(
   }, "[live-verify] 点击验证结果");
 
   // oobCode 是单次使用的，已用/无效/过期类失败一定是终态，立即放弃
-  const bodySnip = (((result as Record<string, unknown>).body_snippet as string) ?? "").toLowerCase();
-  const marker   = ((result as Record<string, unknown>).verified_marker as string) ?? "";
+  const _bodyLow = _bodySnip.toLowerCase();
   const isTerminalUsed = !trueSuccess && (
-    marker === "failure" ||
-    bodySnip.includes("invalid or has been used") ||
-    bodySnip.includes("已使用") || bodySnip.includes("已过期") || bodySnip.includes("无效") ||
-    bodySnip.includes("expired") || bodySnip.includes("invalid")
+    _marker === "failure" ||
+    _bodyLow.includes("invalid or has been used") ||
+    _bodyLow.includes("已使用") || _bodyLow.includes("已过期") || _bodyLow.includes("无效") ||
+    _bodyLow.includes("expired") || _bodyLow.includes("invalid")
   );
 
   if (trueSuccess) {
@@ -271,7 +277,7 @@ async function processMessage(
     markHandled(msg.id);
     stats.clicked++;
   } else if (isTerminalUsed) {
-    logger.warn({ email: acc.email, msgId: msg.id.slice(0, 20), bodySnip: bodySnip.slice(0, 80) }, "[live-verify] oobCode 已用/无效，立即放弃并标记已读");
+    logger.warn({ email: acc.email, msgId: msg.id.slice(0, 20), bodySnip: _bodySnip.slice(0, 80) }, "[live-verify] oobCode 已用/无效，立即放弃并标记已读");
     await markAsRead(accessToken, msg.id);
     failCounts.delete(msg.id);
     markHandled(msg.id);
