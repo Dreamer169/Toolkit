@@ -1639,7 +1639,17 @@ class CamoufoxController(BaseController):
 
     def launch(self, headless=True):
         from camoufox.sync_api import Camoufox
-        proxy_str = self.proxy if self.proxy else None
+        # camoufox 需要 proxy 为 dict (server / username / password)
+        proxy_arg = None
+        if self.proxy:
+            m = re.match(r"(socks5h?|http|https)://(?:([^:]+):([^@]+)@)?([^:]+):(\d+)", self.proxy)
+            if m:
+                scheme, u, pw, host, port = m.groups()
+                proxy_arg = {"server": f"{scheme}://{host}:{port}"}
+                if u and pw:
+                    proxy_arg["username"] = u; proxy_arg["password"] = pw
+            else:
+                proxy_arg = {"server": self.proxy}
 
         class _PwCompat:
             """Wraps camoufox context manager to expose p.stop() like sync_playwright()."""
@@ -1649,7 +1659,7 @@ class CamoufoxController(BaseController):
                 try: self_._cm.__exit__(None, None, None)
                 except Exception: pass
 
-        cm = Camoufox(headless=headless, proxy=proxy_str, os="windows", geoip=True)
+        cm = Camoufox(headless=headless, proxy=proxy_arg, os="windows", geoip=True)
         browser = cm.__enter__()
         return _PwCompat(cm), browser
 

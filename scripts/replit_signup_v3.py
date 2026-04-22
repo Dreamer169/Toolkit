@@ -63,61 +63,77 @@ warn= lambda s: print(f"{Y}!{X} {s}")
 inf = lambda s: print(f"{C}·{X} {s}")
 hdr = lambda s: print(f"\n{B}{s}{X}")
 
-# ── 身份生成 ──────────────────────────────────────────────────────────────────
-def gen_identity():
-    fn, ln = random.choice(FIRST), random.choice(LAST)
-    user = f"{fn.capitalize()}{ln[:3].capitalize()}{random.randint(1000,9999)}"
-    pwd  = "".join(random.choices(string.ascii_letters,k=4)) + \
-           "".join(random.choices(string.digits,k=4)) + \
-           "".join(random.choices("!@#$%&",k=2)) + \
-           "".join(random.choices(string.ascii_letters+string.digits,k=6))
-    pwd = "".join(random.sample(pwd,len(pwd)))
-    email = f"{user.lower()}@deltajohnsons.com"
-    return {"username":user,"password":pwd,"email":email,"first":fn,"last":ln}
+# ── 身份生成 (实时新建 Outlook + Graph API) ──────────────────────────────────
+sys.path.insert(0, "/root/Toolkit/artifacts/api-server")
+try:
+    from outlook_graph import wait_for_replit_verify
+except Exception:
+    wait_for_replit_verify = None
 
-# ── mail.tm ───────────────────────────────────────────────────────────────────
-MAILTM_API="https://api.mail.tm"
-def _http(method,url,data=None,token=None):
-    h={"Content-Type":"application/json","Accept":"application/json"}
-    if token: h["Authorization"]=f"Bearer {token}"
-    body=json.dumps(data).encode() if data else None
-    req=urllib.request.Request(url,data=body,headers=h,method=method)
+OUTLOOK_REG_SCRIPT = "/root/Toolkit/artifacts/api-server/outlook_register.py"
+OUTLOOK_PROXY_PORTS = [int(x) for x in os.environ.get("OUTLOOK_PROXY_PORTS","1092,1093,1094,1095").split(",")]
+
+def mint_outlook(timeout=720):
+    """实时调用 outlook_register.py 新建一个 Outlook 账号；解析 stdout JSON 取 token"""
+    import subprocess, pathlib as _pl
+    proxy_port = random.choice(OUTLOOK_PROXY_PORTS)
+    proxy = f"socks5://127.0.0.1:{proxy_port}"
+    inf(f"  [outlook] 通过 {proxy} 调用 outlook_register.py 新建账号 (timeout={timeout}s)…")
+    cmd = ["python3","-u",OUTLOOK_REG_SCRIPT,
+           "--count","1","--engine","camoufox",
+           "--headless","false","--proxy",proxy]
     try:
-        with urllib.request.urlopen(req,timeout=15) as r:
-            return r.status,json.loads(r.read() or b"{}")
-    except urllib.error.HTTPError as e:
-        try: return e.code,json.loads(e.read())
-        except: return e.code,{}
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=timeout,
+                              env={**os.environ, "DISPLAY": os.environ.get("DISPLAY",":99")})
+    except subprocess.TimeoutExpired:
+        warn(f"  [outlook] 超时 {timeout}s")
+        return None
+    out = (proc.stdout or "") + "\n----STDERR----\n" + (proc.stderr or "")
+    log_p = f"/tmp/outlook_mint_{int(time.time())}.log"
+    _pl.Path(log_p).write_text(out)
+    inf(f"  [outlook] 子进程结束 (rc={proc.returncode}), log={log_p}")
+    m = re.search(r"── JSON 结果 ──\s*(\[.*\])\s*\Z", out, re.S)
+    if not m:
+        m = re.search(r"(\[\s*\{[^\[\]]*?\"email\".*?\}\s*\])", out, re.S)
+    if not m:
+        warn("  [outlook] 无法解析 JSON 结果"); return None
+    try:
+        arr = json.loads(m.group(1))
     except Exception as e:
-        return 0,{"error":str(e)}
+        warn(f"  [outlook] JSON 解析失败: {e}"); return None
+    for r in arr:
+        if r.get("success") and r.get("refresh_token"):
+            ok(f"  [outlook] 新账号: {r['email']}")
+            return {"email": r["email"], "password": r["password"],
+                    "refresh_token": r["refresh_token"]}
+    # 即使没有 refresh_token，只要邮箱注册成功也返回（IMAP 兜底）
+    for r in arr:
+        if r.get("success"):
+            warn(f"  [outlook] 账号已注册但缺 refresh_token: {r['email']}")
+            return {"email": r["email"], "password": r["password"], "refresh_token": ""}
+    warn("  [outlook] 全部子任务失败"); return None
 
-def mailtm_create(addr,pwd):
-    return _http("POST",f"{MAILTM_API}/accounts",{"address":addr,"password":pwd})
-
-def mailtm_token(addr,pwd):
-    s,d=_http("POST",f"{MAILTM_API}/token",{"address":addr,"password":pwd})
-    return d.get("token") if s==200 else None
-
-def mailtm_poll(token,timeout=220):
-    deadline=time.time()+timeout
-    while time.time()<deadline:
-        s,d=_http("GET",f"{MAILTM_API}/messages?page=1",token=token)
-        items=(d.get("hydra:member") if isinstance(d,dict) else []) or []
-        for m in items:
-            mid=m.get("id")
-            if not mid: continue
-            s2,full=_http("GET",f"{MAILTM_API}/messages/{mid}",token=token)
-            html=full.get("html") or full.get("text") or ""
-            if isinstance(html,list): html="".join(html)
-            if "replit" in html.lower() or "verify" in html.lower():
-                return html
-        time.sleep(4)
-    return ""
+def gen_identity():
+    o = mint_outlook()
+    if not o: return None
+    email = o["email"]; login = email.split("@")[0]
+    user = re.sub(r"[^a-zA-Z0-9_]", "", login)[:24]
+    if len(user) < 3: user = (login + "xxx")[:8]
+    pwd = ("".join(random.choices(string.ascii_letters, k=4))
+         + "".join(random.choices(string.digits, k=4))
+         + "".join(random.choices("!@#$%&", k=2))
+         + "".join(random.choices(string.ascii_letters + string.digits, k=6)))
+    pwd = "".join(random.sample(pwd, len(pwd)))
+    return {"username": user, "password": pwd, "email": email,
+            "login": login, "domain": email.split("@")[1],
+            "refresh_token": o.get("refresh_token",""),
+            "outlook_password": o["password"], "first": "", "last": ""}
 
 def extract_verify_url(html):
-    m=re.search(r'https?://[^"\s<>]*replit[^"\s<>]*(?:verify|confirm|activate)[^"\s<>]*',html,re.I)
+    m = re.search(r'https?://[^"\s<>]*replit[^"\s<>]*(?:verify|confirm|activate)[^"\s<>]*', html, re.I)
     if m: return m.group(0)
-    m=re.search(r'https?://replit\.com/[^"\s<>]+',html,re.I)
+    m = re.search(r'https?://replit\.com/[^"\s<>]+', html, re.I)
     return m.group(0) if m else ""
 
 # ── Xvfb / PulseAudio 管理 ────────────────────────────────────────────────────
@@ -154,60 +170,92 @@ def ensure_tunnel(port,timeout=15):
     return False
 
 # ── reCAPTCHA 音频挑战绕过 ───────────────────────────────────────────────────
+async def dump_frames(page,tag=""):
+    urls=[f.url for f in page.frames if f.url and f.url!="about:blank"]
+    inf(f"[frames{tag}] " + " | ".join(u[:90] for u in urls) if urls else f"[frames{tag}] (no iframes)")
+
+async def detect_captcha(page):
+    for f in page.frames:
+        u=f.url or ""
+        if "recaptcha/api2/anchor" in u or "recaptcha/enterprise/anchor" in u: return "recaptcha"
+        if "hcaptcha.com" in u and ("checkbox" in u or "challenge" in u): return "hcaptcha"
+        if "challenges.cloudflare.com" in u or "turnstile" in u: return "turnstile"
+    return None
+
 async def solve_audio_recaptcha(page,timeout=180):
-    """
-    完整音频挑战流程。返回 True 表示拿到 token / 已绕过。
-    page 必须包含 g-recaptcha 控件 (anchor iframe)。
-    """
     inf("[recaptcha] 探测 anchor iframe…")
     deadline=time.time()+timeout
     anchor=None
     while time.time()<deadline:
         for f in page.frames:
-            if "/anchor" in (f.url or ""):
+            u=f.url or ""
+            if "recaptcha/api2/anchor" in u or "recaptcha/enterprise/anchor" in u:
                 anchor=f; break
         if anchor: break
         await page.wait_for_timeout(800)
     if not anchor:
+        await dump_frames(page," recaptcha-not-found")
         warn("[recaptcha] 未发现 anchor frame (可能本次未触发)")
-        return True   # 无挑战即视为通过
-
+        return True
+    inf(f"[recaptcha] anchor frame: {anchor.url[:80]}")
     inf("[recaptcha] 点击 checkbox…")
+    clicked=False
     try:
-        await anchor.locator("#recaptcha-anchor").click(timeout=8000)
-    except Exception as e:
-        warn(f"[recaptcha] checkbox 点击失败: {e}")
-
+        for el in await page.query_selector_all('iframe'):
+            sa = await el.get_attribute("src") or ""
+            if "recaptcha/api2/anchor" in sa or "recaptcha/enterprise/anchor" in sa:
+                try:
+                    await el.scroll_into_view_if_needed(timeout=4000)
+                except Exception: pass
+                await page.wait_for_timeout(400)
+                box = await el.bounding_box()
+                if box:
+                    vh = await page.evaluate("window.innerHeight")
+                    if box["y"] + box["height"] > vh:
+                        await page.evaluate(f"window.scrollTo(0, {box[y]-100})")
+                        await page.wait_for_timeout(500)
+                        box = await el.bounding_box()
+                    cx = box["x"] + 30; cy = box["y"] + box["height"]/2
+                    await page.mouse.move(cx-20, cy-10, steps=8)
+                    await page.wait_for_timeout(180)
+                    await page.mouse.click(cx, cy)
+                    clicked = True
+                    inf(f"[recaptcha] 已点击 iframe checkbox 区域 ({cx:.0f},{cy:.0f}, vh={vh})")
+                    await page.wait_for_timeout(2800)
+                    break
+    except Exception as _e:
+        warn(f"[recaptcha] iframe 直接点击失败: {_e}")
+    for sel in ([] if clicked else ["#recaptcha-anchor", "div.recaptcha-checkbox", "[role='checkbox']", ".recaptcha-checkbox-border"]):
+        try:
+            await anchor.locator(sel).first.wait_for(state="visible", timeout=12000)
+            await anchor.locator(sel).first.click(timeout=5000)
+            clicked=True; break
+        except Exception as e:
+            inf(f"[recaptcha] 选择器 {sel} 失败: {str(e)[:50]}")
+    if not clicked:
+        warn("[recaptcha] 全部 checkbox 选择器失败")
     await page.wait_for_timeout(2500)
-    # 检查是否直接通过（无挑战）
     try:
         cls=await anchor.locator("#recaptcha-anchor").get_attribute("aria-checked")
         if cls=="true":
-            ok("[recaptcha] 一次性通过，无音频挑战")
-            return True
+            ok("[recaptcha] 一次性通过，无音频挑战"); return True
     except: pass
-
-    # 寻找 bframe (挑战 iframe)
     bframe=None
     for _ in range(20):
         for f in page.frames:
-            if "/bframe" in (f.url or ""):
+            u=f.url or ""
+            if "recaptcha/api2/bframe" in u or "recaptcha/enterprise/bframe" in u:
                 bframe=f; break
         if bframe: break
         await page.wait_for_timeout(500)
     if not bframe:
-        warn("[recaptcha] 未发现 bframe")
-        return False
-
+        warn("[recaptcha] 未发现 bframe"); return False
     inf("[recaptcha] 切换到音频挑战…")
     try:
         await bframe.locator("#recaptcha-audio-button").click(timeout=8000)
     except Exception as e:
-        warn(f"[recaptcha] 音频按钮失败: {e}")
-        return False
+        warn(f"[recaptcha] 音频按钮失败: {e}"); return False
     await page.wait_for_timeout(2500)
-
-    # 取音频源
     audio_url=""
     for _ in range(15):
         try:
@@ -218,62 +266,41 @@ async def solve_audio_recaptcha(page,timeout=180):
         if audio_url: break
         await page.wait_for_timeout(700)
     if not audio_url:
-        warn("[recaptcha] 无法获取音频 URL")
-        return False
+        warn("[recaptcha] 无法获取音频 URL"); return False
     inf(f"[recaptcha] 音频 URL: {audio_url[:80]}")
-
-    # 下载音频
     tmpdir=tempfile.mkdtemp(prefix="recap_")
     mp3=os.path.join(tmpdir,"a.mp3"); wav=os.path.join(tmpdir,"a.wav")
-    try:
-        urllib.request.urlretrieve(audio_url,mp3)
+    try: urllib.request.urlretrieve(audio_url,mp3)
     except Exception as e:
-        warn(f"[recaptcha] 下载音频失败: {e}")
-        return False
-
-    # ffmpeg 16kHz 单声道 wav
+        warn(f"[recaptcha] 下载音频失败: {e}"); return False
     rc=subprocess.call(["ffmpeg","-y","-i",mp3,"-ar","16000","-ac","1",wav],
                        stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     if rc!=0:
-        warn("[recaptcha] ffmpeg 转换失败")
-        return False
-
-    # whisper 转录
+        warn("[recaptcha] ffmpeg 转换失败"); return False
     inf(f"[recaptcha] whisper 转录 (model={WHISPER_MODEL})…")
     try:
         import whisper
         model=whisper.load_model(WHISPER_MODEL)
         text=model.transcribe(wav,language="en",fp16=False)["text"].strip()
     except Exception as e:
-        warn(f"[recaptcha] whisper 失败: {e}")
-        return False
+        warn(f"[recaptcha] whisper 失败: {e}"); return False
     text=re.sub(r"[^a-zA-Z0-9 ]","",text).strip().lower()
     inf(f"[recaptcha] 识别: '{text}'")
-    if not text:
-        warn("[recaptcha] 空转录")
-        return False
-
-    # 填入答案
+    if not text: return False
     try:
         box=bframe.locator("#audio-response")
-        await box.click()
-        await box.type(text,delay=80)
+        await box.click(); await box.type(text,delay=80)
         await page.wait_for_timeout(600)
         await bframe.locator("#recaptcha-verify-button").click()
     except Exception as e:
-        warn(f"[recaptcha] 提交答案失败: {e}")
-        return False
-
-    # 等待结果
+        warn(f"[recaptcha] 提交答案失败: {e}"); return False
     await page.wait_for_timeout(3500)
     try:
         cls=await anchor.locator("#recaptcha-anchor").get_attribute("aria-checked")
         if cls=="true":
-            ok("[recaptcha] 音频挑战通过 ✓")
-            return True
+            ok("[recaptcha] 音频挑战通过 ✓"); return True
     except: pass
-    warn("[recaptcha] 音频挑战未通过，可能需要重试")
-    return False
+    warn("[recaptcha] 音频挑战未通过"); return False
 
 # ── 人类化交互 ────────────────────────────────────────────────────────────────
 async def human_mouse(page,x,y,steps=18):
@@ -380,14 +407,8 @@ async def _do_signup(identity,ua,proxy_port,mailtm_tok,headless=False):
             await page.wait_for_timeout(900)
             await page.screenshot(path=f"/tmp/v3_{identity['username']}_form.png")
 
-            # 4. 解 reCAPTCHA (如果存在)
-            result["phase"]="recaptcha"
-            try:
-                await solve_audio_recaptcha(page,timeout=160)
-            except Exception as e:
-                warn(f"  recaptcha 流程异常: {e}")
-
-            # 5. 提交
+            # 4. 提交 (captcha 在提交后才会出现)
+            submit_ts = time.time()
             result["phase"]="submit"
             for sel in ['button[type="submit"]','button:has-text("Create Account")',
                         'button:has-text("Sign up")','button:has-text("Continue")']:
@@ -396,27 +417,47 @@ async def _do_signup(identity,ua,proxy_port,mailtm_tok,headless=False):
                     await btn.first.click(); break
             else:
                 await page.keyboard.press("Enter")
-            await page.wait_for_timeout(7000)
+            await page.wait_for_timeout(5000)
             inf(f"  提交后 URL: {page.url[:70]}")
+            await dump_frames(page," post-submit")
+            ctype=await detect_captcha(page)
+            if ctype:
+                inf(f"  [captcha] 检测到 {ctype}")
+                if ctype=="recaptcha":
+                    await solve_audio_recaptcha(page,timeout=160)
+                    for sel in ['button[type="submit"]','button:has-text("Continue")','button:has-text("Verify")','button:has-text("Create Account")']:
+                        b=page.locator(sel)
+                        if await b.count():
+                            try: await b.first.click(); break
+                            except: pass
+                    await page.wait_for_timeout(5000)
+                else:
+                    warn(f"  [captcha] {ctype} 暂未实现，等待手动")
             await page.screenshot(path=f"/tmp/v3_{identity['username']}_after.png")
 
             body2=await page.locator("body").inner_text()
             if "failed to evaluate" in body2.lower():
                 result["error"]="integrity_after_submit"; return result
 
-            # 6. 邮件验证
+            # 6. 邮件验证 (Outlook Graph)
             result["phase"]="email_verify"
-            html=mailtm_poll(mailtm_tok,timeout=220)
-            if html:
-                vurl=extract_verify_url(html)
+            rtok = identity.get("refresh_token")
+            if rtok and wait_for_replit_verify:
+                inf(f"  Graph 轮询 Outlook 收件箱 (after_ts={submit_ts:.0f})…")
+                vurl = wait_for_replit_verify(rtok, timeout=240, after_ts=submit_ts)
                 if vurl:
                     inf(f"  验证链接: {vurl[:70]}")
                     try:
-                        await page.goto(vurl,wait_until="load",timeout=30000)
+                        await page.goto(vurl, wait_until="load", timeout=30000)
                         await page.wait_for_timeout(5000)
                         ok(f"  邮件验证完成 → {page.url[:60]}")
+                        result["verified"] = True
                     except Exception as ve:
                         warn(f"  验证链接失败: {ve}")
+                else:
+                    warn("  Graph 240s 内未取到 Replit 验证邮件")
+            else:
+                warn("  无 refresh_token，跳过邮件验证")
 
             # 7. cookies
             result["phase"]="cookies"
@@ -450,13 +491,11 @@ def db_save(identity,status="registered",extra="{}"):
 # ── 主流程 ────────────────────────────────────────────────────────────────────
 async def signup_one(headless=False):
     ident=gen_identity()
+    if not ident:
+        return {"ok":False, "error":"no_outlook_available"}
     hdr(f"账号: {ident['username']}  <{ident['email']}>")
-    inf("建立 mail.tm 邮箱…")
-    mailtm_create(ident["email"],ident["password"])
-    tok=mailtm_token(ident["email"],ident["password"])
-    if not tok:
-        er("mail.tm token 获取失败"); return {"ok":False,"email":ident["email"]}
-    ok(f"mail.tm 就绪")
+    inf(f"邮箱: {ident['email']}  (Outlook池, refresh_token len={len(ident.get('refresh_token',''))})")
+    tok = None
 
     ua=random.choice(USER_AGENTS)
     ports=(POLL_BRIDGE_PORTS+random.sample(XRAY_SOCKS_PORTS,
