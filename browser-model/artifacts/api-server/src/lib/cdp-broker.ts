@@ -228,6 +228,176 @@ const STEALTH_INIT = `
     };
     try { wrap(Date.prototype.getTimezoneOffset); } catch (_) {}
   } catch (_) {}
+
+  // === Canvas 指纹防护 ===
+  // FingerprintJS / CreepJS 通过 toDataURL/getImageData 拿到画布像素哈希。
+  // 给每帧像素加 ±1 微噪音（per-session 固定种子），既能破坏哈希一致性，
+  // 又不影响视觉。注意必须 in-place 改 ImageData，因为 toDataURL 内部直读。
+  try {
+    const seed = (Math.random() * 0xffffffff) >>> 0;
+    let s = seed || 1;
+    const rng = () => { s = (s * 1664525 + 1013904223) >>> 0; return s; };
+    const noisify = (canvas) => {
+      try {
+        const ctx = canvas.getContext && canvas.getContext('2d');
+        if (!ctx) return;
+        const w = canvas.width, h = canvas.height;
+        if (!w || !h) return;
+        const img = ctx.getImageData(0, 0, w, h);
+        const d = img.data;
+        // 只动 RGB，alpha 不动；每像素 1/32 概率 ±1
+        for (let i = 0; i < d.length; i += 4) {
+          const r = rng();
+          if ((r & 31) === 0) d[i]   = (d[i]   + ((r >> 5) & 1 ? 1 : -1)) & 255;
+          if ((r & 31) === 1) d[i+1] = (d[i+1] + ((r >> 5) & 1 ? 1 : -1)) & 255;
+          if ((r & 31) === 2) d[i+2] = (d[i+2] + ((r >> 5) & 1 ? 1 : -1)) & 255;
+        }
+        ctx.putImageData(img, 0, 0);
+      } catch (_) {}
+    };
+    const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = function toDataURL() {
+      noisify(this);
+      return origToDataURL.apply(this, arguments);
+    };
+    const origToBlob = HTMLCanvasElement.prototype.toBlob;
+    if (origToBlob) {
+      HTMLCanvasElement.prototype.toBlob = function toBlob() {
+        noisify(this);
+        return origToBlob.apply(this, arguments);
+      };
+    }
+    const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+    CanvasRenderingContext2D.prototype.getImageData = function getImageData() {
+      const r = origGetImageData.apply(this, arguments);
+      try {
+        const d = r.data;
+        for (let i = 0; i < d.length; i += 4) {
+          const x = rng();
+          if ((x & 31) === 0) d[i]   = (d[i]   + ((x >> 5) & 1 ? 1 : -1)) & 255;
+          if ((x & 31) === 1) d[i+1] = (d[i+1] + ((x >> 5) & 1 ? 1 : -1)) & 255;
+          if ((x & 31) === 2) d[i+2] = (d[i+2] + ((x >> 5) & 1 ? 1 : -1)) & 255;
+        }
+      } catch (_) {}
+      return r;
+    };
+    try {
+      wrap(HTMLCanvasElement.prototype.toDataURL);
+      if (origToBlob) wrap(HTMLCanvasElement.prototype.toBlob);
+      wrap(CanvasRenderingContext2D.prototype.getImageData);
+    } catch (_) {}
+  } catch (_) {}
+
+  // === AudioContext 指纹防护 ===
+  // CreepJS 用 OfflineAudioContext 渲染正弦波 → getChannelData 哈希。
+  // 给每个采样加 ±1e-7 噪声，破坏哈希但听不出来。
+  try {
+    const arrNoise = (arr) => {
+      for (let i = 0; i < arr.length; i++) arr[i] = arr[i] + (Math.random() - 0.5) * 1e-7;
+      return arr;
+    };
+    if (typeof AnalyserNode !== 'undefined') {
+      const o1 = AnalyserNode.prototype.getFloatFrequencyData;
+      AnalyserNode.prototype.getFloatFrequencyData = function () {
+        const r = o1.apply(this, arguments);
+        try { arrNoise(arguments[0]); } catch (_) {}
+        return r;
+      };
+      try { wrap(AnalyserNode.prototype.getFloatFrequencyData); } catch (_) {}
+    }
+    if (typeof AudioBuffer !== 'undefined') {
+      const o2 = AudioBuffer.prototype.getChannelData;
+      AudioBuffer.prototype.getChannelData = function () {
+        const r = o2.apply(this, arguments);
+        try { arrNoise(r); } catch (_) {}
+        return r;
+      };
+      try { wrap(AudioBuffer.prototype.getChannelData); } catch (_) {}
+    }
+  } catch (_) {}
+
+  // === ClientRects 指纹防护 ===
+  // 子像素布局测量在不同 GPU/字体 hinting 下不一样 → 给宽度加纳米级噪声
+  try {
+    const noise = () => (Math.random() - 0.5) * 1e-4;
+    const wrapRect = (r) => {
+      try {
+        Object.defineProperty(r, 'x',     { value: r.x     + noise(), configurable: true });
+        Object.defineProperty(r, 'y',     { value: r.y     + noise(), configurable: true });
+        Object.defineProperty(r, 'width', { value: r.width + noise(), configurable: true });
+        Object.defineProperty(r, 'height',{ value: r.height+ noise(), configurable: true });
+      } catch (_) {}
+      return r;
+    };
+    const oG = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = function () {
+      return wrapRect(oG.apply(this, arguments));
+    };
+    const oR = Range.prototype.getBoundingClientRect;
+    Range.prototype.getBoundingClientRect = function () {
+      return wrapRect(oR.apply(this, arguments));
+    };
+    try { wrap(Element.prototype.getBoundingClientRect); } catch (_) {}
+    try { wrap(Range.prototype.getBoundingClientRect); } catch (_) {}
+  } catch (_) {}
+
+  // === 字体指纹防护 ===
+  // CanvasRenderingContext2D.measureText 能用宽度差检测某字体是否安装。
+  // 加亚像素噪声让"是/否安装"的判定不再稳定。
+  try {
+    const oMT = CanvasRenderingContext2D.prototype.measureText;
+    CanvasRenderingContext2D.prototype.measureText = function measureText() {
+      const m = oMT.apply(this, arguments);
+      try {
+        const n = (Math.random() - 0.5) * 1e-3;
+        Object.defineProperty(m, 'width', { value: m.width + n, configurable: true });
+      } catch (_) {}
+      return m;
+    };
+    try { wrap(CanvasRenderingContext2D.prototype.measureText); } catch (_) {}
+  } catch (_) {}
+
+  // === 语音合成指纹 ===
+  // speechSynthesis.getVoices() 暴露 OS 安装的 TTS 语音 → Linux/Win/Mac 一望可知
+  try {
+    if (typeof speechSynthesis !== 'undefined') {
+      const fakeVoices = [
+        { voiceURI: 'Google US English', name: 'Google US English', lang: 'en-US', localService: false, default: true },
+        { voiceURI: 'Google UK English Female', name: 'Google UK English Female', lang: 'en-GB', localService: false, default: false },
+        { voiceURI: 'Google UK English Male', name: 'Google UK English Male', lang: 'en-GB', localService: false, default: false },
+      ];
+      Object.defineProperty(speechSynthesis, 'getVoices', { value: () => fakeVoices, configurable: true });
+      try { wrap(speechSynthesis.getVoices); } catch (_) {}
+    }
+  } catch (_) {}
+
+  // === navigator.pdfViewerEnabled ===
+  // 现代 Chrome 默认 true；headless/某些容器里是 false
+  try { Object.defineProperty(Navigator.prototype, 'pdfViewerEnabled', { get: () => true, configurable: true }); } catch (_) {}
+
+  // === WebGL 额外参数 ===
+  // 除 vendor/renderer 外，反爬还会查 MAX_TEXTURE_SIZE / 着色器精度等
+  try {
+    const patchExt = (Proto) => {
+      const oExts = Proto.prototype.getSupportedExtensions;
+      Proto.prototype.getSupportedExtensions = function () {
+        // 真 Chrome / Intel Iris 典型扩展集
+        return [
+          'ANGLE_instanced_arrays','EXT_blend_minmax','EXT_color_buffer_half_float','EXT_disjoint_timer_query',
+          'EXT_float_blend','EXT_frag_depth','EXT_shader_texture_lod','EXT_texture_compression_bptc',
+          'EXT_texture_compression_rgtc','EXT_texture_filter_anisotropic','EXT_sRGB','OES_element_index_uint',
+          'OES_fbo_render_mipmap','OES_standard_derivatives','OES_texture_float','OES_texture_float_linear',
+          'OES_texture_half_float','OES_texture_half_float_linear','OES_vertex_array_object',
+          'WEBGL_color_buffer_float','WEBGL_compressed_texture_s3tc','WEBGL_compressed_texture_s3tc_srgb',
+          'WEBGL_debug_renderer_info','WEBGL_debug_shaders','WEBGL_depth_texture','WEBGL_draw_buffers',
+          'WEBGL_lose_context','WEBGL_multi_draw',
+        ];
+      };
+      try { wrap(Proto.prototype.getSupportedExtensions); } catch (_) {}
+    };
+    patchExt(WebGLRenderingContext);
+    if (typeof WebGL2RenderingContext !== 'undefined') patchExt(WebGL2RenderingContext);
+  } catch (_) {}
 })();
 `;
 
