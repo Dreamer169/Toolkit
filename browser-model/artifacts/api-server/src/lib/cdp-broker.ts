@@ -81,22 +81,35 @@ async function getBrowser(): Promise<Browser> {
     || process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
     || undefined;
   const proxyEnv = process.env.BROWSER_PROXY;
+  // 如果有 DISPLAY（生产环境的 Xvfb :99），就跑 headed Chromium —— 真 X 显示器
+  // 上的 Chrome 比 headless Chromium 难被反爬检测（Cloudflare / hCaptcha 等）
+  const display = process.env.DISPLAY;
+  const useHeaded = !!display && process.platform === "linux";
+
+  const args = [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-extensions",
+    "--mute-audio",
+    "--disable-blink-features=AutomationControlled",
+    "--no-default-browser-check",
+    "--no-first-run",
+    "--disable-features=IsolateOrigins,site-per-process",
+    "--disable-site-isolation-trials",
+    // 反爬识别项
+    "--exclude-switches=enable-automation",
+    "--disable-infobars",
+  ];
+  if (!useHeaded) args.push("--disable-gpu");
+
   _browserPromise = chromium.launch({
-    headless: true,
+    headless: !useHeaded,
     executablePath: exe,
-    args: [
-      "--no-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--disable-extensions",
-      "--mute-audio",
-      "--disable-blink-features=AutomationControlled",
-      "--no-default-browser-check",
-      "--no-first-run",
-    ],
+    args,
     proxy: proxyEnv ? { server: proxyEnv } : undefined,
+    env: useHeaded ? { ...process.env, DISPLAY: display } as Record<string, string> : undefined,
   }).then((b) => {
-    logger.info({ exe, proxy: !!proxyEnv }, "[cdp-broker] browser launched");
+    logger.info({ exe, proxy: !!proxyEnv, headed: useHeaded, display }, "[cdp-broker] browser launched");
     return b;
   }).catch((err) => {
     _browserPromise = null;
@@ -124,13 +137,43 @@ export class CdpSession {
   async start(opts: SessionOpts) {
     const browser = await getBrowser();
     this.viewport = { w: opts.width, h: opts.height };
+    // 用 Linux UA —— 跟服务端真实 platform 对得上，避免 navigator.platform 与
+    // userAgent 互相矛盾被反爬识别
+    const ua = opts.userAgent || (
+      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+      + "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    );
     this.ctx = await browser.newContext({
       viewport: { width: opts.width, height: opts.height },
       deviceScaleFactor: opts.deviceScaleFactor ?? 1,
-      userAgent: opts.userAgent || (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        + "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-      ),
+      userAgent: ua,
+      locale: "en-US",
+      timezoneId: "America/Los_Angeles",
+      ignoreHTTPSErrors: true,
+    });
+    // 反爬指纹修整：抹掉 navigator.webdriver、伪造 chrome.runtime、修整 plugins/languages
+    await this.ctx.addInitScript(() => {
+      try {
+        Object.defineProperty(navigator, "webdriver", { get: () => false });
+      } catch { /* ignore */ }
+      try {
+        // @ts-expect-error - chrome 对象在非 Chrome 启动时可能缺失
+        if (!window.chrome) window.chrome = { runtime: {} };
+      } catch { /* ignore */ }
+      try {
+        Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
+      } catch { /* ignore */ }
+      try {
+        const orig = navigator.permissions?.query?.bind(navigator.permissions);
+        if (orig) {
+          // @ts-expect-error - 重写以避开 notifications 检测套路
+          navigator.permissions.query = (p: { name: string }) => (
+            p && p.name === "notifications"
+              ? Promise.resolve({ state: Notification.permission } as PermissionStatus)
+              : orig(p)
+          );
+        }
+      } catch { /* ignore */ }
     });
     this.page = await this.ctx.newPage();
     this.cdp = await this.ctx.newCDPSession(this.page);
