@@ -968,6 +968,160 @@ _CANVAS_WEBGL_NOISE_JS = """
 """
 
 # ── 单次 browser attempt ──────────────────────────────────────────────────────
+
+async def _fetch_replit_verify_url(email_addr: str, password: str, timeout_s: int = 90,
+                                    proxy_cfg=None) -> str | None:
+    """
+    读取outlook inbox中的Replit验证链接。
+    方法1: Microsoft Graph API ROPC
+    方法2: Playwright headless 登录 Outlook Web
+    """
+    import urllib.request, urllib.parse, json as _json, time as _t, re as _re
+
+    _domain = email_addr.lower().split("@")[-1] if "@" in email_addr else ""
+    if _domain not in ("outlook.com", "hotmail.com", "live.com", "msn.com"):
+        log(f"[mail] 非outlook邮箱({_domain}), 跳过"); return None
+
+    _URL_PAT = r'https://replit\.com/action-code[^\s"\'<>]+'
+
+    # ── 方法1: Graph API ROPC ────────────────────────────────────────────────
+    for _cid in ["04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+                 "1fec8e78-bce4-4aaf-ab1b-5451cc387264"]:
+        try:
+            _tdata = urllib.parse.urlencode({
+                "client_id": _cid,
+                "scope": "https://graph.microsoft.com/.default",
+                "username": email_addr, "password": password,
+                "grant_type": "password",
+            }).encode()
+            _tr = urllib.request.Request(
+                "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
+                data=_tdata, headers={"Content-Type": "application/x-www-form-urlencoded"})
+            _tok = _json.loads(urllib.request.urlopen(_tr, timeout=12).read()).get("access_token", "")
+            if not _tok:
+                continue
+            log(f"[graph] ROPC OK cid={_cid[:8]}...")
+            _deadline = _t.time() + timeout_s
+            while _t.time() < _deadline:
+                try:
+                    _gurl = ("https://graph.microsoft.com/v1.0/me/messages"
+                             "?$filter=from/emailAddress/address eq 'noreply@replit.com'"
+                             "&$select=body,subject&$orderby=receivedDateTime desc&$top=5")
+                    _gr = urllib.request.Request(_gurl, headers={
+                        "Authorization": f"Bearer {_tok}", "Accept": "application/json"})
+                    _msgs = _json.loads(urllib.request.urlopen(_gr, timeout=12).read()).get("value", [])
+                    for _msg in _msgs:
+                        _body = _msg.get("body", {}).get("content", "")
+                        _m = _re.search(_URL_PAT, _body)
+                        if _m:
+                            log(f"[graph] \u2705 验证链接: {_m.group(0)[:80]}")
+                            return _m.group(0).rstrip(".,)")
+                    log(f"[graph] 未找到邮件, 剩余{int(_deadline-_t.time())}s")
+                except Exception as _ge:
+                    log(f"[graph] poll err: {_ge}")
+                await asyncio.sleep(6)
+            return None
+        except Exception as _re_e:
+            log(f"[graph] ROPC cid={_cid[:8]} err: {str(_re_e)[:80]}")
+
+    # ── 方法2: Outlook Web via Playwright ────────────────────────────────────
+    log("[mail] Graph失败 → Outlook Web登录读取邮件...")
+    try:
+        try:
+            from playwright.async_api import async_playwright as _ow_apw
+        except ImportError:
+            from rebrowser_playwright.async_api import async_playwright as _ow_apw
+        async with _ow_apw() as _pw2:
+            _br2 = await _pw2.chromium.launch(
+                headless=True, proxy=proxy_cfg,
+                args=["--no-sandbox", "--disable-dev-shm-usage"])
+            _ctx2 = await _br2.new_context(locale="en-US",
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+            _pg2 = await _ctx2.new_page()
+            try:
+                await _pg2.goto("https://login.live.com", wait_until="domcontentloaded", timeout=30000)
+                await _pg2.wait_for_timeout(1500)
+                for _es in ['input[type="email"]', 'input[name="loginfmt"]', '#i0116']:
+                    _ef = _pg2.locator(_es)
+                    if await _ef.count():
+                        await _ef.fill(email_addr); await _pg2.wait_for_timeout(500)
+                        for _ns in ['input[type="submit"]', '#idSIButton9']:
+                            _nb = _pg2.locator(_ns)
+                            if await _nb.count(): await _nb.first.click(); break
+                        await _pg2.wait_for_timeout(2000); break
+                for _ps in ['input[type="password"]', 'input[name="passwd"]', '#i0118']:
+                    _pf = _pg2.locator(_ps)
+                    if await _pf.count():
+                        await _pf.fill(password); await _pg2.wait_for_timeout(500)
+                        for _ss2 in ['input[type="submit"]', '#idSIButton9']:
+                            _sb2 = _pg2.locator(_ss2)
+                            if await _sb2.count(): await _sb2.first.click(); break
+                        await _pg2.wait_for_timeout(3000); break
+                try:
+                    _no = _pg2.locator('#idBtn_Back, input[value="No"]')
+                    if await _no.count(): await _no.first.click(); await _pg2.wait_for_timeout(2000)
+                except Exception: pass
+                await _pg2.goto("https://outlook.live.com/mail/0/inbox",
+                                wait_until="domcontentloaded", timeout=30000)
+                await _pg2.wait_for_timeout(3000)
+                _dl2 = _t.time() + timeout_s
+                while _t.time() < _dl2:
+                    _c2 = await _pg2.content()
+                    _m2 = _re.search(_URL_PAT, _c2)
+                    if _m2:
+                        _u2 = _m2.group(0).rstrip(".,)")
+                        log(f"[outlook-web] \u2705 {_u2[:80]}")
+                        return _u2
+                    try:
+                        for _row in await _pg2.locator('[data-convid], [role="option"]').all():
+                            _rtxt = (await _row.inner_text())[:100].lower()
+                            if "replit" in _rtxt:
+                                await _row.click(); await _pg2.wait_for_timeout(2000)
+                                _c3 = await _pg2.content()
+                                _m3 = _re.search(_URL_PAT, _c3)
+                                if _m3:
+                                    _u3 = _m3.group(0).rstrip(".,)")
+                                    log(f"[outlook-web] \u2705 {_u3[:80]}")
+                                    return _u3
+                    except Exception: pass
+                    log(f"[outlook-web] 未找到邮件, 剩余{int(_dl2-_t.time())}s")
+                    await asyncio.sleep(8)
+                    try: await _pg2.reload(wait_until="domcontentloaded", timeout=20000)
+                    except Exception: pass
+            finally:
+                try: await _br2.close()
+                except: pass
+    except Exception as _owe:
+        log(f"[outlook-web] 异常: {_owe}")
+
+    log("[mail] 所有方法均失败"); return None
+
+
+
+async def _complete_via_verify_url(page, verify_url: str, close_fn=None) -> dict | None:
+    """导航到Replit action-code URL，完成邮件验证+username填写。返回result dict或None。"""
+    try:
+        await page.goto(verify_url, wait_until="domcontentloaded", timeout=45000)
+        await page.wait_for_timeout(3000)
+        try:
+            await page.wait_for_selector(
+                'input[name="username"], input[placeholder*="username" i], #username',
+                timeout=30000)
+            log("[verify] ✅ username字段出现 → fill_step2")
+            err_v = await fill_step2(page)
+            if err_v:
+                return {"ok": False, "error": err_v, "phase": "verify_step2_err"}
+            log("[verify] ✅ 注册+邮件验证完成")
+            return {"ok": True, "phase": "done"}
+        except Exception:
+            url_v = page.url
+            log(f"[verify] username字段未出现, url={url_v[:80]}")
+            if any(x in url_v.lower() for x in ("dashboard","home","~","/@","replit.com/@")):
+                return {"ok": True, "phase": "done_via_verify"}
+    except Exception as _gv:
+        log(f"[verify] 导航失败: {_gv}")
+    return None
+
 async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> dict:
     result = {"ok": False, "phase": "init", "error": "", "exit_ip": exit_ip}
 
@@ -1218,7 +1372,13 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
             SUCCESS_HINTS = ("verify your email","check your email","we sent","sent you",
                              "verification email","confirm your email","sent an email")
             if any(h in body_check.lower() for h in SUCCESS_HINTS):
-                log("[step2-miss] 实际是单步表单，已发送验证邮件 ✅")
+                log("[step2-miss] 验证邮件已发送 → IMAP读取验证链接...")
+                _vurl = await _fetch_replit_verify_url(EMAIL, PASSWORD, proxy_cfg=proxy_cfg)
+                if _vurl:
+                    _vres = await _complete_via_verify_url(page, _vurl)
+                    if _vres:
+                        _vres["exit_ip"] = result.get("exit_ip","")
+                        await browser.close(); return _vres
                 result["ok"] = True
                 result["phase"] = "verify_email_sent"
                 await browser.close(); return result
@@ -1441,7 +1601,12 @@ async def attempt_register_camoufox(proxy_cfg, exit_ip: str) -> dict:
                 log(f"[step2-miss] url={url_ck[:80]}")
                 SUCCESS_HINTS = ("verify your email","check your email","we sent","sent you","verification email","confirm your email","sent an email")
                 if any(h in bck.lower() for h in SUCCESS_HINTS):
-                    log("[step2-miss] single-step form, verify email sent")
+                    log("[step2-miss] 验证邮件已发送 → IMAP读取验证链接...")
+                    _vurl = await _fetch_replit_verify_url(EMAIL, PASSWORD, proxy_cfg=proxy_cfg)
+                    if _vurl:
+                        _vres = await _complete_via_verify_url(page, _vurl)
+                        if _vres:
+                            _vres["exit_ip"] = result.get("exit_ip",""); return _vres
                     result["ok"] = True; result["phase"] = "verify_email_sent"; return result
                 if is_rate_limited(bck): result["error"] = "account_rate_limited"; return result
                 if is_captcha_invalid(bck): result["error"] = "captcha_token_invalid"; return result
