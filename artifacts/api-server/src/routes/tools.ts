@@ -1355,9 +1355,9 @@ router.post("/tools/outlook/register", async (req, res) => {
     count    = 1,
     proxy: proxyInput = "",
     proxies: proxiesInput = "",   // 多代理轮换：逗号或换行分隔
-    headless = true,
+    headless = false,
     delay    = 5,
-    engine   = "patchright",
+    engine   = "camoufox",
     wait     = 11,
     retries  = 2,
     autoProxy = false,
@@ -1370,7 +1370,7 @@ router.post("/tools/outlook/register", async (req, res) => {
   };
 
   const n   = Math.min(999, Math.max(1, Math.floor(Number(count) || 1)));
-  const eng = ["patchright", "playwright"].includes(engine) ? engine : "patchright";
+  const eng = ["patchright", "playwright", "camoufox"].includes(engine) ? engine : "camoufox";
   const jobId = `reg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
   // 解析多代理列表（支持换行或逗号分隔）

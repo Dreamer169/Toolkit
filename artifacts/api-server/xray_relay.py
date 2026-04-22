@@ -97,12 +97,36 @@ class XrayRelay:
                 s.settimeout(0.5)
                 s.connect(('127.0.0.1', self.socks_port))
                 s.close()
-                return True
+                if self.ensure_tunnel(probe_timeout=4.0):
+                    return True
+                else:
+                    time.sleep(0.4)
+                    continue
             except Exception:
                 time.sleep(0.3)
 
         self.stop()
         return False
+
+    def ensure_tunnel(self, probe_timeout: float = 4.0,
+                      probe_host: str = '1.1.1.1', probe_port: int = 443) -> bool:
+        """端到端隐道探针: SOCKS5 + CONNECT 到上游"""
+        try:
+            s = socket.socket()
+            s.settimeout(probe_timeout)
+            s.connect(('127.0.0.1', self.socks_port))
+            s.sendall(b"\x05\x01\x00")
+            r = s.recv(2)
+            if r != b"\x05\x00":
+                s.close(); return False
+            host_b = probe_host.encode()
+            req = b"\x05\x01\x00\x03" + bytes([len(host_b)]) + host_b + probe_port.to_bytes(2, "big")
+            s.sendall(req)
+            r = s.recv(10)
+            s.close()
+            return len(r) >= 2 and r[1] == 0x00
+        except Exception:
+            return False
 
     def stop(self):
         """关闭 xray 进程"""
