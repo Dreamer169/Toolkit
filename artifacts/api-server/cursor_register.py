@@ -93,17 +93,37 @@ def _psql_json(sql: str):
 
 
 def pick_outlook_accounts(limit: int) -> list[dict]:
+    """
+    选取可用于 Replit 注册的 Outlook 账号。
+    过滤条件：
+      1. 未标记 replit_used（已知 Replit 侧邮箱已存在）
+      2. 未标记 token_invalid / inbox_error / abuse_mode
+      3. 数据库中不存在同邮箱的 replit 账号（NOT EXISTS）
+      4. 有 refresh_token（用于邮箱验证读取）
+    """
     sql = f"""
         SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json)
         FROM (
-            SELECT id, email, password
+            SELECT id, email, password, refresh_token
             FROM accounts
             WHERE platform='outlook'
               AND status='active'
               AND COALESCE(email,'') <> ''
               AND COALESCE(password,'') <> ''
-              AND (COALESCE(token,'') <> '' OR COALESCE(refresh_token,'') <> '')
-            ORDER BY updated_at DESC NULLS LAST, id DESC
+              AND refresh_token IS NOT NULL
+              AND COALESCE(refresh_token,'') <> ''
+              AND COALESCE(tags,'') NOT LIKE '%replit_used%'
+              AND COALESCE(tags,'') NOT LIKE '%token_invalid%'
+              AND COALESCE(tags,'') NOT LIKE '%inbox_error%'
+              AND COALESCE(tags,'') NOT LIKE '%abuse_mode%'
+              AND NOT EXISTS (
+                SELECT 1 FROM accounts r
+                WHERE r.platform = 'replit'
+                  AND r.email = accounts.email
+              )
+            ORDER BY
+              CASE WHEN COALESCE(tags,'') LIKE '%inbox_verified%' THEN 0 ELSE 1 END,
+              updated_at DESC NULLS LAST, id DESC
             LIMIT {max(1, int(limit))}
         ) t;
     """
