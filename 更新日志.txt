@@ -87,3 +87,27 @@
     浏览器指纹、Outlook OAuth2 工作流
 
 ================================================================
+
+----------------------------------------------------------------
+[2026-04-22] v7.36 — 友节点注册深度反检测 + reCAPTCHA 音频绕过
+----------------------------------------------------------------
+新增
+  + scripts/replit_signup_v3.py — 全新自动化注册管线
+  + Camoufox (Firefox 反指纹) 替代 Chromium-stealth，整体评分大幅提升
+  + Xvfb :99 1366x768x24 真实虚拟显示 (headful) → reCAPTCHA token 评分提升
+  + PulseAudio 虚拟接收槽，避免浏览器 audio 被静音
+  + reCAPTCHA v2 音频挑战自动绕过：
+      anchor.iframe checkbox → bframe.iframe 切音频
+      → 下载 mp3 → ffmpeg 转 16kHz wav
+      → openai-whisper 本地转录 → audio-response 提交
+      token 在真实 session 内生成，服务端验证通过
+  + 隧道端口 nohup 持久 + readiness 探针 (ensure_tunnel)
+  + 贝塞尔曲线鼠标轨迹 + 滚动停留，提升行为评分
+  + Playwright 代理改用 args=[--proxy-server=…]，绕过 CDP 探针
+  + HTTP 服务模式 --serve PORT 供 api-server 调用
+  + 0 邮箱起步：mail.tm 自动建箱 → 自动收信 → 自动验证
+
+修复
+  ! v2 chromium-stealth 路径 reCAPTCHA 几乎必中挑战且评分低
+  ! 没有正确使用 xvfb，headless 模式严重影响 token 评分
+  ! proxy 选项走 CDP 探针易被检测，改命令行 args
