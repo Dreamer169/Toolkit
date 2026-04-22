@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import json
 import random
+import re
 import secrets
 import string
 import sys
