@@ -66,6 +66,14 @@ def _with_local_proxy_auth(proxy):
 
 proxy_url = _with_local_proxy_auth(proxy_url)
 
+# 把 HTTP(S)_PROXY 从环境中清除：
+#   - Graph API 调用走自定义 open_url()，已显式带 Proxy-Authorization
+#   - Firebase REST / patchright 直连即可（VPS 出口可达 googleapis.com 与 replit.com）
+#   - 留着 env 反而让 urllib/Chromium 走代理但不会带 auth → 407
+for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+           "ALL_PROXY", "all_proxy"):
+    os.environ.pop(_k, None)
+
 
 def open_url(req, timeout):
     """发起 HTTP/HTTPS 请求，HTTPS 通过手动 CONNECT 隧道（正确携带 Proxy-Authorization）"""
