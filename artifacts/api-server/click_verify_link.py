@@ -288,6 +288,18 @@ try:
         # Replit SPA：等到页面文字出现验证结果（成功/失败），最多 25s
         body_text = ""
         verified_marker = None
+        # 收紧 success 关键词：避免与 "verifying..."、"please verify your email" 等加载/请求页冲突
+        SUCCESS_KWS = (
+            "email verified", "email has been verified", "successfully verified",
+            "verification successful", "email confirmed", "已验证邮箱", "邮箱已验证",
+            "your email is now verified", "you have verified",
+        )
+        # 收紧 failure 关键词：去掉过于通用的 "error"，加上明确的 oobCode 已用/过期措辞
+        FAILURE_KWS = (
+            "invalid or has been used", "link is invalid", "link has expired",
+            "code is invalid", "code has expired", "already been used",
+            "expired", "已过期", "无效", "已使用", "try again",
+        )
         for _ in range(25):
             page.wait_for_timeout(1000)
             try:
@@ -295,9 +307,9 @@ try:
             except Exception:
                 body_text = ""
             low = body_text.lower()
-            if any(k in low for k in ("verified", "已验证", "verification successful", "email confirmed", "thank you")):
+            if any(k in low for k in SUCCESS_KWS):
                 verified_marker = "success"; break
-            if any(k in low for k in ("invalid", "expired", "已过期", "无效", "已使用", "try again", "error")):
+            if any(k in low for k in FAILURE_KWS):
                 verified_marker = "failure"; break
         final_url = page.url
         title     = page.title()
@@ -308,7 +320,9 @@ try:
         for x in _xhrs[:30]:
             print(f"[click_verify] xhr: {x}", flush=True)
         browser.close()
-    is_ok = (verified_marker == "success") or (verified_marker is None and status == 200)
+    # 严格：仅 marker == "success" 才视为成功；status==200+marker==None 不再算成功
+    # （多数失败页面 HTTP 状态也是 200，旧逻辑会把"未匹配任何关键词"误判成功）
+    is_ok = (verified_marker == "success")
     print(json.dumps({"success": is_ok, "verify_url": verify_url,
                       "final_url": final_url, "title": title, "http_status": status,
                       "verified_marker": verified_marker, "body_snippet": body_snip}))
