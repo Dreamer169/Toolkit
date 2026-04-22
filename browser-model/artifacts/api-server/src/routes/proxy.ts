@@ -171,6 +171,16 @@ function rewriteHtml(html: string, target: URL, proxyBase: string): string {
     return `srcset="${rewritten}"`;
   });
 
+  // === <style>...</style> 内 url(...) 重写: Replit 用 inline <style> 注 @font-face,
+  //     相对 URL 默认相对当前页面 (我们的代理域名), 必须重写到原站
+  out = out.replace(/<style\b([^>]*)>([\s\S]*?)<\/style>/gi, (full, attrs, css) => {
+    const rewritten = rewriteCss(css, target, proxyBase);
+    return `<style${attrs}>${rewritten}</style>`;
+  });
+  // === inline style="..." 属性内 url(...) ===
+  out = out.replace(/\bstyle\s*=\s*"([^"]*)"/gi, (_m, css) => `style="${rewriteCss(css, target, proxyBase)}"`);
+  out = out.replace(/\bstyle\s*=\s*'([^']*)'/gi, (_m, css) => `style='${rewriteCss(css, target, proxyBase)}'`);
+
   // Inject navigation interceptor: rewrites runtime location/href changes,
   // window.open calls, and form submissions to route through the proxy.
   // Without this, JS like `window.location = "https://example.com"` makes
@@ -319,6 +329,45 @@ function rewriteHtml(html: string, target: URL, proxyBase: string): string {
           }
         });
       }
+    } catch(_){}
+    // === HOOK: 运行时动态设置 .src/.href 的元素 ===
+    // 例: FB Pixel snippet 创建 script 元素后 t.src='/js/fbevents.js'.
+    // 没这个 hook → 浏览器把 /js/fbevents.js 解析为相对当前(代理)域名 → 404 HTML →
+    // <script> 解析报 SyntaxError "Unexpected token '<'" → 中断 React hydration →
+    // 按钮 onClick 完全不工作.
+    function hookSrcProp(Ctor, prop){
+      try {
+        var d = Object.getOwnPropertyDescriptor(Ctor.prototype, prop);
+        if(!d || !d.set || !d.get) return;
+        Object.defineProperty(Ctor.prototype, prop, {
+          configurable: true,
+          enumerable: d.enumerable,
+          get: function(){ return d.get.call(this); },
+          set: function(v){ try { v = px(v); } catch(_){} return d.set.call(this, v); }
+        });
+      } catch(_){}
+    }
+    hookSrcProp(HTMLScriptElement, "src");
+    hookSrcProp(HTMLImageElement, "src");
+    hookSrcProp(HTMLIFrameElement, "src");
+    hookSrcProp(HTMLSourceElement, "src");
+    hookSrcProp(HTMLMediaElement, "src");
+    hookSrcProp(HTMLLinkElement, "href");
+    hookSrcProp(HTMLAnchorElement, "href");
+    // setAttribute 兜底 (有的代码用 el.setAttribute('src', ...) 而非赋值器)
+    try {
+      var origSetAttr = Element.prototype.setAttribute;
+      var SRC_ATTRS = { src:1, href:1, poster:1, "data-src":1, formaction:1, action:1 };
+      Element.prototype.setAttribute = function(name, value){
+        try {
+          if (name && SRC_ATTRS[String(name).toLowerCase()]) {
+            var tag = (this.tagName||"").toUpperCase();
+            // 跳过 <a href> 链接 — click 处理已经接管, 提前重写会让 SPA 路由判断 origin 出错
+            if (!(name.toLowerCase()==="href" && tag==="A")) value = px(value);
+          }
+        } catch(_){}
+        return origSetAttr.call(this, name, value);
+      };
     } catch(_){}
   })();</script>`;
   if (/<head[^>]*>/i.test(out)) {
@@ -513,6 +562,29 @@ router.all("/proxy", async (req: Request, res: Response) => {
 
     res.status(upstream.status);
 
+    // === 兜底: 请求目标是 .js/.css/.font 但上游回了 HTML (常见: 4xx 错误页 content-type=text/html) ===
+    // 必须放在 HTML 重写分支之前, 否则 4xx HTML 会被当 HTML 重写返回 → <script> 解析报 SyntaxError
+    // → React hydration 死 → 按钮 onClick 失效.
+    {
+      const pathExt = (target.pathname.match(/\.([a-z0-9]+)(?:$|\?)/i) || [,""])[1].toLowerCase();
+      const ctIsHtml = /text\/html/i.test(contentType);
+      if (ctIsHtml && /^(js|mjs|cjs|jsx?)$/.test(pathExt)) {
+        res.setHeader("content-type", "application/javascript; charset=utf-8");
+        res.status(200).send("/* proxy: " + upstream.status + " for " + target.pathname.slice(0,160) + " */");
+        return;
+      }
+      if (ctIsHtml && pathExt === "css") {
+        res.setHeader("content-type", "text/css; charset=utf-8");
+        res.status(200).send("/* proxy: " + upstream.status + " for " + target.pathname.slice(0,160) + " */");
+        return;
+      }
+      if (ctIsHtml && /^(woff2?|ttf|eot|otf)$/.test(pathExt)) {
+        res.setHeader("content-type", "font/" + pathExt);
+        res.status(200).send(Buffer.alloc(0));
+        return;
+      }
+    }
+
     if (/text\/html/i.test(contentType)) {
       let text = await upstream.text();
       let effectiveFinal = finalUrl;
@@ -546,6 +618,32 @@ router.all("/proxy", async (req: Request, res: Response) => {
     }
 
     const buf = Buffer.from(await upstream.arrayBuffer());
+    // === 防 SyntaxError 中断 React hydration ===
+    // 真实场景: <script src="...recaptcha/releases//recaptcha__en.js"> (release hash 还没下来,
+    // 双斜杠) → gstatic 返 404 + content-type=text/html + body=<html>...<. 浏览器 <script> 标签
+    // 不论 content-type 都按响应内容当 JS 解析 → "Unexpected token '<'" 抛在主线程 → React
+    // 全局 try-catch 兜不住 hydration 内部异常 → 整个 SPA event handler 装不上 (button onClick
+    // 无效, 用户点 "Email & password" 没反应就是这).
+    // 修: 看 *请求目标 URL 的扩展名* (而非上游 content-type, 因 4xx 错误页通常是 HTML),
+    // 若是 js/mjs/css 且 body 是 HTML → 替换为空 JS / 空 CSS.
+    const pathExt = (target.pathname.match(/\.([a-z0-9]+)(?:$|\?)/i) || [,""])[1].toLowerCase();
+    const looksHtml = buf.length > 0 && (buf[0] === 0x3c /* '<' */);
+    if (looksHtml && /^(js|mjs|cjs|jsx?)$/.test(pathExt)) {
+      res.setHeader("content-type", "application/javascript; charset=utf-8");
+      res.status(200).send("/* proxy: upstream " + upstream.status + " for " + target.pathname.slice(0,200) + " */");
+      return;
+    }
+    if (looksHtml && /^css$/.test(pathExt)) {
+      res.setHeader("content-type", "text/css; charset=utf-8");
+      res.status(200).send("/* proxy: upstream " + upstream.status + " for " + target.pathname.slice(0,200) + " */");
+      return;
+    }
+    if (looksHtml && /^(woff2?|ttf|eot|otf)$/.test(pathExt)) {
+      // 字体: 给 1 字节空 binary, 浏览器 OTS 直接放弃, 不再刷 OTS parsing error 错误风暴
+      res.setHeader("content-type", "font/" + pathExt);
+      res.status(200).send(Buffer.alloc(0));
+      return;
+    }
     res.setHeader("content-type", contentType);
     res.send(buf);
   } catch (err) {
