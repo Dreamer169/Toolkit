@@ -284,7 +284,7 @@ try:
             except Exception: pass
         page.on("response", _on_resp)
         print(f"[click_verify] 访问: {verify_url[:120]}", flush=True)
-        resp = page.goto(verify_url, timeout=30000, wait_until="domcontentloaded")
+        resp = page.goto(verify_url, timeout=60000, wait_until="domcontentloaded")
         # Replit SPA：等到页面文字出现验证结果（成功/失败），最多 25s
         body_text = ""
         verified_marker = None

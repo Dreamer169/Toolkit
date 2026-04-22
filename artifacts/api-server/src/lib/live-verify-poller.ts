@@ -14,8 +14,25 @@ let _intervalId: ReturnType<typeof setInterval> | null = null;
 let _lastRun: string | null = null;
 let _lastStats: { total: number; clicked: number; skipped: number; failed: number } = { total: 0, clicked: 0, skipped: 0, failed: 0 };
 
-/** msgId → 失败次数；失败3次才放弃（标记已读） */
+/** msgId → 失败次数；永久失败3次/瞬态失败5次才放弃（标记已读） */
 const failCounts = new Map<string, number>();
+/** msgId → 处理时间戳；24h 内同一邮件视为已处理，避免 Graph 索引滞后导致重复扫描 */
+const recentlyHandled = new Map<string, number>();
+const RECENT_TTL_MS = 24 * 60 * 60 * 1000;
+function markHandled(msgId: string) {
+  recentlyHandled.set(msgId, Date.now());
+  // 顺手清理过期项，防止内存膨胀
+  if (recentlyHandled.size > 500) {
+    const cutoff = Date.now() - RECENT_TTL_MS;
+    for (const [k, t] of recentlyHandled) if (t < cutoff) recentlyHandled.delete(k);
+  }
+}
+function isRecentlyHandled(msgId: string): boolean {
+  const t = recentlyHandled.get(msgId);
+  if (!t) return false;
+  if (Date.now() - t > RECENT_TTL_MS) { recentlyHandled.delete(msgId); return false; }
+  return true;
+}
 
 /** 当前正在执行的 python 子进程集合，关闭时统一 kill */
 const _inflightChildren = new Set<import("child_process").ChildProcess>();
@@ -155,13 +172,13 @@ async function runOnce() {
           const gr2 = await microsoftFetch(fallbackUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
           if (!gr2.ok) { stats.skipped++; continue; }
           const gd2 = await gr2.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
-          const msgs2 = (gd2.value ?? []).filter(m => !m.isRead && m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase()));
+          const msgs2 = (gd2.value ?? []).filter(m => !m.isRead && m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase())).filter(m => !isRecentlyHandled(m.id));
           if (!msgs2.length) continue;
           for (const msg of msgs2) { if (!_enabled) break; await processMessage(acc, msg, accessToken, stats); }
           continue;
         }
         const gd = await gr.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
-        const msgs = (gd.value ?? []).filter(m => m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase()));
+        const msgs = (gd.value ?? []).filter(m => m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase())).filter(m => !isRecentlyHandled(m.id));
         if (!msgs.length) continue;
         logger.info({ email: acc.email, count: msgs.length }, "[live-verify] 发现未读验证邮件");
         for (const msg of msgs) { if (!_enabled) break; await processMessage(acc, msg, accessToken, stats); }
@@ -238,14 +255,42 @@ async function processMessage(
     transient: isTransient,
   }, "[live-verify] 点击验证结果");
 
+  // oobCode 是单次使用的，已用/无效/过期类失败一定是终态，立即放弃
+  const bodySnip = (((result as Record<string, unknown>).body_snippet as string) ?? "").toLowerCase();
+  const marker   = ((result as Record<string, unknown>).verified_marker as string) ?? "";
+  const isTerminalUsed = !trueSuccess && (
+    marker === "failure" ||
+    bodySnip.includes("invalid or has been used") ||
+    bodySnip.includes("已使用") || bodySnip.includes("已过期") || bodySnip.includes("无效") ||
+    bodySnip.includes("expired") || bodySnip.includes("invalid")
+  );
+
   if (trueSuccess) {
     await markAsRead(accessToken, msg.id);
     failCounts.delete(msg.id);
+    markHandled(msg.id);
     stats.clicked++;
+  } else if (isTerminalUsed) {
+    logger.warn({ email: acc.email, msgId: msg.id.slice(0, 20), bodySnip: bodySnip.slice(0, 80) }, "[live-verify] oobCode 已用/无效，立即放弃并标记已读");
+    await markAsRead(accessToken, msg.id);
+    failCounts.delete(msg.id);
+    markHandled(msg.id);
+    stats.failed++;
   } else if (isTransient) {
-    // 瞬态错误：不计失败、不标已读，等代理/网络恢复后下轮再试
-    logger.info({ email: acc.email, httpStatus: status, error: result.error }, "[live-verify] 瞬态故障，下轮继续重试（不计入失败次数）");
-    stats.skipped++;
+    // 瞬态错误：仍然封顶，避免同一邮件无限重试导致 Replit 限流
+    const prev = failCounts.get(msg.id) ?? 0;
+    const next = prev + 1;
+    failCounts.set(msg.id, next);
+    if (next >= 5) {
+      logger.warn({ email: acc.email, msgId: msg.id.slice(0, 20), attempts: next }, "[live-verify] 连续5次瞬态失败，放弃并标记已读（避免拖累其他邮件）");
+      await markAsRead(accessToken, msg.id);
+      failCounts.delete(msg.id);
+      markHandled(msg.id);
+      stats.failed++;
+    } else {
+      logger.info({ email: acc.email, httpStatus: status, error: result.error, attempts: next }, "[live-verify] 瞬态故障，下轮重试");
+      stats.skipped++;
+    }
   } else {
     const prev = failCounts.get(msg.id) ?? 0;
     const next  = prev + 1;
@@ -254,6 +299,7 @@ async function processMessage(
       logger.warn({ email: acc.email, msgId: msg.id.slice(0, 20), attempts: next }, "[live-verify] 连续3次失败，放弃并标记已读");
       await markAsRead(accessToken, msg.id);
       failCounts.delete(msg.id);
+      markHandled(msg.id);
     } else {
       logger.info({ email: acc.email, attempts: next }, "[live-verify] 点击失败，下轮重试");
     }
