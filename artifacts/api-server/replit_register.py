@@ -1574,10 +1574,28 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
     return result
 
 
+
+def _probe_geoip_ok(proxy_cfg) -> bool:
+    """用代理实际请求 ipify 一次，能拿到 IP 才允许 camoufox geoip=True (避免 InvalidIP 崩溃)"""
+    try:
+        import requests
+        proxies = None
+        if proxy_cfg and isinstance(proxy_cfg, dict):
+            srv = proxy_cfg.get("server") or ""
+            if srv:
+                proxies = {"http": srv, "https": srv}
+        r = requests.get("https://api.ipify.org/?format=json", proxies=proxies, timeout=8)
+        ok = bool(r.ok and r.json().get("ip"))
+        if not ok: log(f"[geoip-probe] no ip via proxy={proxy_cfg}")
+        return ok
+    except Exception as e:
+        log(f"[geoip-probe] failed via proxy={proxy_cfg}: {e}")
+        return False
+
 async def get_exit_ip_camoufox(proxy_cfg) -> str:
     try:
         from camoufox.async_api import AsyncCamoufox
-        async with AsyncCamoufox(headless=True, proxy=proxy_cfg or None, geoip=True, os="windows") as browser:
+        async with AsyncCamoufox(headless=True, proxy=proxy_cfg or None, geoip=_probe_geoip_ok(proxy_cfg), os="windows") as browser:
             page = await browser.new_page()
             await page.goto("https://api.ipify.org/?format=json", timeout=65000)
             data = json.loads(await page.locator("body").inner_text())
@@ -1589,7 +1607,7 @@ async def get_exit_ip_camoufox(proxy_cfg) -> str:
 async def attempt_register_camoufox(proxy_cfg, exit_ip: str) -> dict:
     from camoufox.async_api import AsyncCamoufox
     result = {"ok": False, "phase": "init", "error": "", "exit_ip": exit_ip}
-    async with AsyncCamoufox(headless=HEADLESS, proxy=proxy_cfg or None, geoip=True, os="windows") as browser:
+    async with AsyncCamoufox(headless=HEADLESS, proxy=proxy_cfg or None, geoip=_probe_geoip_ok(proxy_cfg), os="windows") as browser:
         page = await browser.new_page()
         try:
             await page.add_init_script(_CANVAS_WEBGL_NOISE_JS)
@@ -1606,7 +1624,28 @@ async def attempt_register_camoufox(proxy_cfg, exit_ip: str) -> dict:
             except Exception as e:
                 log(f"[pre-nav] err(ignored): {e}")
             log("[camoufox] opening replit.com/signup ...")
-            await page.goto("https://replit.com/signup", wait_until="domcontentloaded", timeout=75000)
+            # 监听主导航响应：Replit 直接 403 → 立即识别 CF 封 IP，避免硬等到 timeout
+            _nav_status = {"code": 0}
+            def _on_main_nav(resp):
+                try:
+                    if resp.url.startswith("https://replit.com/signup") and resp.request.resource_type == "document":
+                        _nav_status["code"] = resp.status
+                except Exception: pass
+            page.on("response", _on_main_nav)
+            try:
+                await page.goto("https://replit.com/signup", wait_until="domcontentloaded", timeout=30000)
+            except Exception as _ge:
+                _code = _nav_status["code"]
+                if _code in (403, 429, 503):
+                    log("[camoufox] navigation status=" + str(_code) + " -> cf_ip_banned (fast-fail)")
+                    result["error"] = "signup_cf_ip_banned"
+                    return result
+                raise
+            _code = _nav_status["code"]
+            if _code in (403, 429, 503):
+                log("[camoufox] navigation status=" + str(_code) + " -> cf_ip_banned (fast-fail)")
+                result["error"] = "signup_cf_ip_banned"
+                return result
             warmup_task = asyncio.create_task(_human_warmup(page))
             t0 = await page.title()
             b0 = (await page.locator("body").inner_text())[:400]

@@ -14,7 +14,7 @@ const VPS_GATEWAY = process.env.VPS_GATEWAY_URL || "http://45.205.27.69:8080/api
 // All quarkip 10820-10845 confirmed datacenter IPs → CF JS challenge all → removed
 // Only port 1090 (WS-proxy bridge: VPS → http_ws_bridge.py → Replit repl WS → internet, exit: Replit cloud IP) remains
 const XRAY_PORTS_DEAD = new Set(Array.from({ length: 26 }, (_, i) => 10820 + i));  // all quarkip dead
-const XRAY_PORTS  = [1094, 1095, 1093, 1092, 1090];  // http-poll bridges first, WS bridge last
+const XRAY_PORTS  = [1094, 1095, 1093, 1092, 1090];  // 友节点出口端口（http-poll bridges + WS bridge）
 const DEAD_PORTS  = XRAY_PORTS_DEAD;
 const TOR_SOCKS_PORT = 9050;  // Tor SOCKS5 (already running on VPS), exit = non-CF/non-GCP
 const DIRECT_PORT    = 0;     // Direct VPS IP (AS8796 FASTNET DATA), exit = 45.205.27.69
@@ -304,13 +304,8 @@ async function checkAndRefillReplitPool(
     if (cur < MIN_REPLIT_POOL) {
       const need = MIN_REPLIT_POOL - cur;
       log(`[pool-check] replit 账号数 ${cur} < ${MIN_REPLIT_POOL}，自动触发补充 ${need} 个`);
-      autoRefillRunning = true;
-      const port = process.env.PORT ?? "8080";
-      fetch(`http://127.0.0.1:${port}/api/replit/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ count: need, headless: true }),
-      }).catch(() => {}).finally(() => { autoRefillRunning = false; });
+      // [policy] 关闭自动补充：必须由用户从「完整工作流」→「邮件中心」→ 友节点注册手工触发
+      log(`[pool-check] 已禁用自动补充（need=${need}），请走完整工作流人工触发`);
     } else {
       log(`[pool-check] replit 账号数 ${cur} ✅ (>= ${MIN_REPLIT_POOL})`);
     }
@@ -731,10 +726,16 @@ router.post("/replit/register", (req, res) => {
 
             log(`    ✗ Attempt ${attempt}: ${lastErr.slice(0, 100)}`);
 
-            // 邮箱已被用 → 标记并换下一个 Outlook 账号
+            // 邮箱已被用 → 落 placeholder 保留 outlook→replit 映射关系，再标 replit_used
             if (lastErr.toLowerCase().includes("already") && lastErr.toLowerCase().includes("use")) {
               portLastGood.set(tryPort, Date.now()); // port got form response → mark good
-              log(`    Email already on Replit → marking replit_used`);
+              log(`    Email already on Replit → 写 placeholder + marking replit_used`);
+              await dbE(
+                `INSERT INTO accounts (platform, email, password, username, status, notes, tags, exit_ip, proxy_port)
+                 VALUES ('replit', $1, NULL, NULL, 'exists_no_password', 'email already on Replit, password not captured', 'replit,exists_no_password', $2, $3)
+                 ON CONFLICT (platform, email) DO NOTHING`,
+                [outlook.email, exitIp, tryPort]
+              ).catch(e => log(`    placeholder insert warn: ${e}`));
               await dbE(
                 "UPDATE accounts SET tags = CASE WHEN string_to_array(COALESCE(tags,''), ',') @> ARRAY['replit_used'] THEN tags ELSE NULLIF(TRIM(BOTH ',' FROM COALESCE(tags,'') || ',replit_used'), ',') END, updated_at = NOW() WHERE id = $1",
                 [outlook.id]
@@ -805,7 +806,7 @@ router.post("/replit/register", (req, res) => {
               }
               // Inject Tor first as non-CF/non-GCP exit (free, diverse exit nodes)
               if (!torRateLimited && !portQueue.includes(TOR_SOCKS_PORT)) {
-                portQueue.unshift(TOR_SOCKS_PORT);
+                log("      [policy] 已禁用 Tor 出口（仅友节点）");
                 log(`    → pre-queued Tor SOCKS5:9050 (non-CF/non-GCP exit, tries before CF xray)`);
               }
               // Spawn a fresh xray VLESS relay with a new CF IP (different exit IP)
@@ -830,14 +831,14 @@ router.post("/replit/register", (req, res) => {
               if (cfBlockedCount === 1) {
                 if (!torRateLimited) {
                   log(`    ⛔ cf_api_blocked (exit: ${exitIp}) → inject Tor SOCKS5:9050`);
-                  portQueue.unshift(TOR_SOCKS_PORT);
+                  log("      [policy] 已禁用 Tor 出口（仅友节点）");
                 } else {
                   log(`    ⛔ cf_api_blocked (exit: ${exitIp}) → Tor rate-limited, inject VPS direct`);
-                  portQueue.unshift(DIRECT_PORT);
+                  log("      [policy] 已禁用直连 VPS 出口（仅友节点）");
                 }
               } else if (cfBlockedCount === 2) {
                 log(`    ⛔ cf_api_blocked x2 → inject VPS direct (port 0, AS8796)`);
-                portQueue.unshift(DIRECT_PORT);
+                log("      [policy] 已禁用直连 VPS 出口（仅友节点）");
               } else {
                 log(`    ⛔ cf_api_blocked x${cfBlockedCount} → Tor+direct both tried, skip Outlook`);
                 break;
@@ -897,14 +898,14 @@ router.post("/replit/register", (req, res) => {
                     }
                     if (cfJsTimeoutCount >= 3 && !torRateLimited && !portQueue.includes(TOR_SOCKS_PORT)) {
                       log(`    [cf-js x${cfJsTimeoutCount}] All static ports CF-challenged → inject Tor SOCKS5:9050 (non-CF exit)`);
-                      portQueue.unshift(TOR_SOCKS_PORT);
+                      log("      [policy] 已禁用 Tor 出口（仅友节点）");
                     } else if (cfJsTimeoutCount >= 3 && torRateLimited && !portQueue.includes(DIRECT_PORT)) {
                       log(`    [cf-js x${cfJsTimeoutCount}] All static ports CF-challenged, Tor blocked → inject VPS direct (port 0)`);
-                      portQueue.unshift(DIRECT_PORT);
+                      log("      [policy] 已禁用直连 VPS 出口（仅友节点）");
                     } else if (torRateLimited && !portQueue.includes(DIRECT_PORT) && tryPort === TOR_SOCKS_PORT) {
                       // Tor just got blocked → inject VPS direct immediately
                       log(`    [tor] Tor CF-blocked → inject VPS direct (port 0)`);
-                      portQueue.unshift(DIRECT_PORT);
+                      log("      [policy] 已禁用直连 VPS 出口（仅友节点）");
                     }
                   }
                   const cfIp = xrayPortCfIp.get(tryPort);
@@ -921,7 +922,7 @@ router.post("/replit/register", (req, res) => {
                 // Inject Tor as non-CF, non-GCP exit IP alternative (once per email)
                 if (lastErr.includes("cf_js_challenge_timeout") && tryPort > 19999 && !torRateLimited && !portQueue.includes(TOR_SOCKS_PORT)) {
                   log(`    [dyn-xray:${tryPort} cf-timeout] → inject Tor SOCKS5:9050 (non-CF exit)`);
-                  portQueue.unshift(TOR_SOCKS_PORT);
+                  log("      [policy] 已禁用 Tor 出口（仅友节点）");
                 }
               }
               log(`    → instant port switch`);
@@ -961,23 +962,39 @@ router.post("/replit/register", (req, res) => {
           }
           if (!verified) log("  Verification timed out (account may still be usable)");
 
-          // ── Step 4: 写入 DB ──────────────────────────────────────────
+          // ── Step 4: 写入 DB（必须成功，否则不允许标 outlook=replit_used，避免账号黑洞）
           log("  Step4: Saving to DB...");
-          await dbE(
-            `INSERT INTO accounts (platform, email, password, username, status, notes, tags, exit_ip, proxy_port)
-             VALUES ('replit', $1, $2, $3, $4, $5, 'replit,subnode', $6, $7)
-             ON CONFLICT (platform, email) DO UPDATE
-               SET status = EXCLUDED.status, username = EXCLUDED.username, updated_at = NOW()`,
-            [outlook.email, password, username,
-             verified ? "registered" : "unverified",
-             outlook.email, exitIp, pick(XRAY_PORTS)]
-          ).catch(e => log(`  DB warn: ${e}`));
+          let dbInsertOk = false;
+          try {
+            await dbE(
+              `INSERT INTO accounts (platform, email, password, username, status, notes, tags, exit_ip, proxy_port)
+               VALUES ('replit', $1, $2, $3, $4, $5, 'replit,subnode', $6, $7)
+               ON CONFLICT (platform, email) DO UPDATE
+                 SET status = EXCLUDED.status,
+                     username = EXCLUDED.username,
+                     password = EXCLUDED.password,
+                     exit_ip = EXCLUDED.exit_ip,
+                     proxy_port = EXCLUDED.proxy_port,
+                     updated_at = NOW()`,
+              [outlook.email, password, username,
+               verified ? "registered" : "unverified",
+               outlook.email, exitIp, pick(XRAY_PORTS)]
+            );
+            dbInsertOk = true;
+            log(`  Step4 ✅ replit account saved (email=${outlook.email}, user=${username}, status=${verified ? 'registered' : 'unverified'})`);
+          } catch (e) {
+            log(`  Step4 ❌ DB INSERT 失败 (replit account NOT saved): ${String(e).slice(0,200)}`);
+          }
 
-          // 标记 Outlook 已使用
-          await dbE(
-            "UPDATE accounts SET tags = CASE WHEN string_to_array(COALESCE(tags,''), ',') @> ARRAY['replit_used'] THEN tags ELSE NULLIF(TRIM(BOTH ',' FROM COALESCE(tags,'') || ',replit_used'), ',') END, updated_at = NOW() WHERE id = $1",
-            [outlook.id]
-          ).catch(() => {});
+          // 仅当 replit account 已落库时才标 outlook=replit_used，否则保持可用避免账号黑洞
+          if (dbInsertOk) {
+            await dbE(
+              "UPDATE accounts SET tags = CASE WHEN string_to_array(COALESCE(tags,''), ',') @> ARRAY['replit_used'] THEN tags ELSE NULLIF(TRIM(BOTH ',' FROM COALESCE(tags,'') || ',replit_used'), ',') END, updated_at = NOW() WHERE id = $1",
+              [outlook.id]
+            ).catch(e => log(`  outlook tag update warn: ${e}`));
+          } else {
+            log(`  Outlook id=${outlook.id} 未标 replit_used — DB 落库失败，保持候选可重试`);
+          }
 
           log(`  ✅ Account ${i + 1} done: ${outlook.email} verified=${verified}`);
           results.push({ ok: true, email: outlook.email, username, verified, exit_ip: exitIp });

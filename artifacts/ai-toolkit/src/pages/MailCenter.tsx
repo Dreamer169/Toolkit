@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 
 const API = "/api";
 const FOLDERS = [
+  { id: "all",          label: "全部邮件" },
   { id: "inbox",        label: "收件箱" },
   { id: "sentItems",    label: "已发送" },
   { id: "junkemail",    label: "垃圾邮件" },

@@ -3206,7 +3206,8 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
     if (!acc) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
 
     const mailFolder = folder || "inbox";
-    const limit = Math.min(150, Math.max(1, top ?? 50));
+    const isAllFolder = mailFolder === "all";
+    const limit = Math.min(250, Math.max(1, top ?? 50));
 
     let accessToken = acc.token ?? "";
 
@@ -3247,9 +3248,19 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
 
     // 有 accessToken → Graph API
     if (accessToken) {
+      // "全部邮件"：直接走全局 /me/messages，跨所有文件夹（含垃圾邮件、归档等）
+      if (isAllFolder) {
+        const allRes = await fetchGraphMessages(accessToken, mailFolder, limit, search, true);
+        if (allRes.ok) {
+          if (allRes.messages.length > 0) { try { await addAccountTags(accountId, ["inbox_verified"]); } catch {} }
+          res.json({ success: true, messages: allRes.messages, count: allRes.messages.length, email: acc.email, via: "graph_all" });
+          return;
+        }
+      }
       const primary = await fetchGraphMessages(accessToken, mailFolder, limit, search, false);
       if (primary.ok) {
         if (primary.messages.length > 0 || mailFolder !== "inbox") {
+          if (primary.messages.length > 0) { try { await addAccountTags(accountId, ["inbox_verified"]); } catch {} }
           res.json({ success: true, messages: primary.messages, count: primary.messages.length, email: acc.email, via: "graph" });
           return;
         }
@@ -3257,6 +3268,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
         // 只查 mailFolders/inbox 会误显示为“空邮箱”。
         const globalResult = await fetchGraphMessages(accessToken, mailFolder, limit, search, true);
         if (globalResult.ok && globalResult.messages.length > 0) {
+          try { await addAccountTags(accountId, ["inbox_verified"]); } catch {}
           res.json({ success: true, messages: globalResult.messages, count: globalResult.messages.length, email: acc.email, via: "graph_all", folderFallback: true });
           return;
         }
@@ -3273,6 +3285,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
       // Graph API 失败但 token 有效 → 尝试 XOAUTH2 IMAP
       const xoauthResult = await fetchViaImap(acc.email, acc.password ?? "", mailFolder, limit, search ?? "", accessToken);
       if (xoauthResult.success) {
+        if ((xoauthResult.messages as unknown[]).length > 0) { try { await addAccountTags(accountId, ["inbox_verified"]); } catch {} }
         res.json({ success: true, messages: xoauthResult.messages, count: (xoauthResult.messages as unknown[]).length, email: acc.email, via: "imap_xoauth2" });
         return;
       }
@@ -3283,6 +3296,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
     }
     const imapResult = await fetchViaImap(acc.email, acc.password, mailFolder, limit, search ?? "");
     if (imapResult.success) {
+      if ((imapResult.messages as unknown[]).length > 0) { try { await addAccountTags(accountId, ["inbox_verified"]); } catch {} }
       res.json({ success: true, messages: imapResult.messages, count: (imapResult.messages as unknown[]).length, email: acc.email, via: "imap" });
     } else {
       res.json({ success: false, error: imapResult.error ?? "IMAP 失败", via: "imap" });
