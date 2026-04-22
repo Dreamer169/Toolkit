@@ -46,6 +46,11 @@ export function RemoteWebView({ tab }: RemoteWebViewProps) {
   const readyRef = useRef(false);
   const lastFrameRef = useRef<HTMLImageElement | null>(null);
   const sizeRef = useRef({ w: 1280, h: 800 });
+  // 服务端反射回来的 URL —— 用来抑制"前端收到 url 后又把同一个 url 重新 navigate
+  // 给服务端"导致的反馈循环（会强制 page.goto 中断 SPA 跳转，表现为点击无反应）
+  const reflectedUrlRef = useRef<string | null>(null);
+  // 服务端真实当前 URL；与之相同的 tab.url 变更不需要再发 navigate
+  const serverUrlRef = useRef<string>("");
   const { updateTabStatus, navigateTab, addToHistory } = useBrowserStore();
 
   // 建立 WebSocket
@@ -88,7 +93,10 @@ export function RemoteWebView({ tab }: RemoteWebViewProps) {
         }
         case "url": {
           const newUrl = msg.url as string;
+          serverUrlRef.current = newUrl;
           if (newUrl && newUrl !== tab.url) {
+            // 标记这个 URL 是服务端反射，下面的 useEffect 不要再回送 navigate
+            reflectedUrlRef.current = newUrl;
             navigateTab(tab.id, newUrl);
             addToHistory(newUrl, tab.title || newUrl);
           }
@@ -116,11 +124,19 @@ export function RemoteWebView({ tab }: RemoteWebViewProps) {
   }, [tab.id]);
 
   // tab.url 变化（地址栏输入）→ 发 navigate
+  // 关键：如果这次变化是服务端刚反射回来的（页面内点击/SPA 路由跳转引起），
+  //   就不要再 page.goto 一次，否则会打断真浏览器正在执行的跳转，表现为
+  //   "点击没反应"。
   useEffect(() => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== 1) return;
     if (!readyRef.current) return;
     if (!tab.url || tab.url.startsWith("browser://")) return;
+    if (reflectedUrlRef.current && reflectedUrlRef.current === tab.url) {
+      reflectedUrlRef.current = null;
+      return;
+    }
+    if (tab.url === serverUrlRef.current) return;
     ws.send(JSON.stringify({ type: "navigate", url: tab.url }));
     updateTabStatus(tab.id, { isLoading: true });
   }, [tab.url, tab.id, updateTabStatus]);
