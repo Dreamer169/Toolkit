@@ -107,7 +107,7 @@ module.exports = {
     {
       "name": "ngrok",
       "script": "/usr/local/bin/ngrok",
-      "args": "http 3000 --log=stdout",
+      "args": "http 8081 --domain=recycling-tragedy-projector.ngrok-free.dev --request-header-add ngrok-skip-browser-warning:true --log=stdout",
       "interpreter": "none",
       "cwd": "/root/Toolkit",
       "restart_delay": 5000,
