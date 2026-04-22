@@ -45,7 +45,7 @@ node /workspaces/Toolkit/xray-update-ip.js 2>/dev/null || true
 echo "[4/5] 启动 ngrok..."
 pkill ngrok 2>/dev/null || true
 sleep 1
-nohup ngrok http 3000 --domain=tried-habitant-kindly.ngrok-free.dev \
+nohup ngrok http 3000 --domain=recycling-tragedy-projector.ngrok-free.dev \
   --request-header-add "ngrok-skip-browser-warning:true" \
   --log=stdout > /tmp/toolkit_logs/ngrok.log 2>&1 &
 echo "  ngrok 启动中..."
@@ -67,5 +67,5 @@ pm2 list
 echo ""
 curl -sf http://localhost:8080/api/healthz && echo "API OK" || echo "API 启动中..."
 NGROK_URL=$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null | grep -o public_url:[^]*' | head -1 | cut -d' -f4)
-echo "访问地址: ${NGROK_URL:-https://tried-habitant-kindly.ngrok-free.dev}"
+echo "访问地址: ${NGROK_URL:-https://recycling-tragedy-projector.ngrok-free.dev}"
 echo "[$(date)] === 启动完成 ==="

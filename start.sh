@@ -138,7 +138,7 @@ cd /workspaces/Toolkit
 echo "[4/6] 启动 ngrok..."
 pkill ngrok 2>/dev/null || true
 sleep 1
-nohup ngrok http $FRONTEND_PORT --domain=tried-habitant-kindly.ngrok-free.dev --request-header-add 'ngrok-skip-browser-warning:true' --log=stdout > $LOG_DIR/ngrok.log 2>&1 &
+nohup ngrok http $FRONTEND_PORT --domain=recycling-tragedy-projector.ngrok-free.dev --request-header-add 'ngrok-skip-browser-warning:true' --log=stdout > $LOG_DIR/ngrok.log 2>&1 &
 sleep 5
 NGROK_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | grep -o '"public_url":"[^"]*"' | head -1 | cut -d'"' -f4)
 echo "  ngrok OK: $NGROK_URL"
