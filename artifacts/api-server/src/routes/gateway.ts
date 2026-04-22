@@ -2082,12 +2082,14 @@ router.post("/self-register", async (req, res) => {
     }
   }
   // 仅对新节点探测连通性；已注册节点重新上报时无需重探（节点刚启动 URL 可能尚未就绪）
+  let probeLatencyMs: number | undefined;
   if (!existing) {
     const probe = await probeNodeUrl(baseUrl, undefined, 8000, false);
     if (!probe.ok) {
       res.status(422).json({ ok: false, error: "探测失败，URL 不可达", detail: probe.error });
       return;
     }
+    probeLatencyMs = probe.latencyMs;
   }
   if (existing) {
     if (name) existing.name = name;
@@ -2130,7 +2132,7 @@ router.post("/self-register", async (req, res) => {
   runtimeNodes.push(node);
   savePersistedNodes(runtimeNodes);
   const credentialPush = await pushSelfRegisterCredentialsToSub2Api(body, baseUrl, name);
-  res.json({ ok: true, action: "registered", nodeId: id, node: nodeSnapshot(node), latencyMs: probe.latencyMs, credentialPush });
+  res.json({ ok: true, action: "registered", nodeId: id, node: nodeSnapshot(node), latencyMs: probeLatencyMs, credentialPush });
 });
 
 // ── 对等节点列表 (peers) ───────────────────────────────────────────────────────

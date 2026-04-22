@@ -1265,7 +1265,7 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
 async def get_exit_ip_camoufox(proxy_cfg) -> str:
     try:
         from camoufox.async_api import AsyncCamoufox
-        async with AsyncCamoufox(headless=True, proxy=proxy_cfg or None, os="windows") as browser:
+        async with AsyncCamoufox(headless=True, proxy=proxy_cfg or None, geoip=True, os="windows") as browser:
             page = await browser.new_page()
             await page.goto("https://api.ipify.org/?format=json", timeout=65000)
             data = json.loads(await page.locator("body").inner_text())
