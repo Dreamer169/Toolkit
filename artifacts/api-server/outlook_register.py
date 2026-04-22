@@ -2174,6 +2174,7 @@ def main():
     print(f"   入口URL: {REGISTER_URL}\n{'─'*60}")
 
     results = []
+    _used_proxy_indices = set()  # 已使用代理下标，避免重复（严格 1IP1账号）
     for i in range(args.count):
         xray_relay_inst = None
         ip_info = None
