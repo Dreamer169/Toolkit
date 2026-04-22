@@ -438,6 +438,7 @@ interface ClientMsg {
     | "key"
     | "type"
     | "resize"
+    | "evaluate"
     | "ack";
   // navigate
   url?: string;
@@ -464,6 +465,8 @@ interface ClientMsg {
   keyAction?: "keyDown" | "keyUp" | "rawKeyDown" | "char";
   // type
   textBlock?: string;
+  // evaluate
+  expression?: string;
   // resize
   width?: number;
   height?: number;
@@ -588,7 +591,7 @@ export class CdpSession {
       // Client Hints —— 现代反爬必查项，必须跟 UA 串自洽
       extraHTTPHeaders: {
         "Accept-Language": "en-US,en;q=0.9",
-        "sec-ch-ua": "\"Chromium\";v=\"145\", \"Not?A_Brand\";v=\"24\", \"Google Chrome\";v=\"145\"",
+        "sec-ch-ua": "\"Chromium\";v=\"145\", \"Not:A-Brand\";v=\"99\", \"Google Chrome\";v=\"145\"",
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": "\"Linux\"",
       },
@@ -746,6 +749,16 @@ export class CdpSession {
             isKeypad: msg.isKeypad ?? false,
             isSystemKey: msg.isSystemKey ?? false,
           });
+          break;
+        case "evaluate":
+          if (msg.expression) {
+            try {
+              const val = await this.page.evaluate(msg.expression as string);
+              this.send({ type: "evaluateResult", result: val });
+            } catch (e) {
+              this.send({ type: "evaluateResult", error: String(e) });
+            }
+          }
           break;
         case "type":
           if (msg.textBlock) {
