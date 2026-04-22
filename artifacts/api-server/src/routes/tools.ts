@@ -3438,7 +3438,7 @@ router.patch("/tools/outlook/message/:accountId/:messageId/read", async (req, re
     }
     if (!token) { res.status(400).json({ success: false, error: "无可用 token" }); return; }
 
-    const gr = await microsoftFetch(`https://graph.microsoft.com/v1.0/me/messages/${messageId}`, {
+    const gr = await microsoftFetch(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(messageId)}`, {
       method: "PATCH",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ isRead }),

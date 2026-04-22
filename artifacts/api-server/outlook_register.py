@@ -2211,6 +2211,7 @@ def main():
                 )
                 break
             cur_proxy = proxy_list[i]
+            _used_proxy_indices.add(i)
             if len(proxy_list) > 1:
                 print(f"\n[{i+1}/{args.count}] 开始注册… 节点 [{i+1}/{len(proxy_list)}]: {cur_proxy[:40]}...")
             else:
@@ -2285,13 +2286,22 @@ def main():
                 "验证码" in _err_str
                 or "CAPTCHA" in _err_str.upper()
                 or "IP质量不佳" in _err_str
+                or "频率过快" in _err_str
+                or "ERR_TUNNEL_CONNECTION_FAILED" in _err_str
                 or ("Timeout" in _err_str and "注册界面" in _err_str)
             )
             if (not r["success"] and use_cf_pool and ip_info and _cf_pool
                     and _should_retry
                     and cf_ip_retry < MAX_CF_IP_RETRIES):
                 cf_ip_retry += 1
-                _reason = "CAPTCHA" if ("验证码" in _err_str or "CAPTCHA" in _err_str.upper()) else "IP质量/Timeout"
+                if "验证码" in _err_str or "CAPTCHA" in _err_str.upper():
+                    _reason = "CAPTCHA"
+                elif "频率过快" in _err_str:
+                    _reason = "IP频率限制"
+                elif "ERR_TUNNEL_CONNECTION_FAILED" in _err_str:
+                    _reason = "代理隧道断开"
+                else:
+                    _reason = "IP质量/Timeout"
                 print(f"  ⚠ {_reason} 失败（IP={ip_info['ip']}），换新CF IP重试 ({cf_ip_retry}/{MAX_CF_IP_RETRIES})…", flush=True)
                 _cf_pool.ban_ip(ip_info["ip"])
                 continue
