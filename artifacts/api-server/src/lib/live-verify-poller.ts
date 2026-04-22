@@ -17,7 +17,19 @@ let _lastStats: { total: number; clicked: number; skipped: number; failed: numbe
 /** msgId → 失败次数；失败3次才放弃（标记已读） */
 const failCounts = new Map<string, number>();
 
-export function setLiveVerifyEnabled(val: boolean) { _enabled = val; }
+/** 当前正在执行的 python 子进程集合，关闭时统一 kill */
+const _inflightChildren = new Set<import("child_process").ChildProcess>();
+
+export function setLiveVerifyEnabled(val: boolean) {
+  _enabled = val;
+  if (!val) {
+    for (const c of _inflightChildren) {
+      try { c.kill("SIGTERM"); } catch {}
+    }
+    _inflightChildren.clear();
+    logger.info("[live-verify] 已关闭，强制中断所有在飞子进程");
+  }
+}
 export function getLiveVerifyStatus() { return { enabled: _enabled, lastRun: _lastRun, lastStats: _lastStats }; }
 
 /** 给账号追加 tag 并更新状态（幂等：tag 已存在不重复写） */
@@ -101,6 +113,7 @@ async function runOnce() {
     logger.info({ count: rows.length }, "[live-verify] 开始本轮扫描");
 
     for (const acc of rows) {
+      if (!_enabled) { logger.info("[live-verify] 检测到关闭信号，提前结束本轮"); break; }
       try {
         let accessToken = "";
 
@@ -144,14 +157,14 @@ async function runOnce() {
           const gd2 = await gr2.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
           const msgs2 = (gd2.value ?? []).filter(m => !m.isRead && m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase()));
           if (!msgs2.length) continue;
-          for (const msg of msgs2) await processMessage(acc, msg, accessToken, stats);
+          for (const msg of msgs2) { if (!_enabled) break; await processMessage(acc, msg, accessToken, stats); }
           continue;
         }
         const gd = await gr.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
         const msgs = (gd.value ?? []).filter(m => m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase()));
         if (!msgs.length) continue;
         logger.info({ email: acc.email, count: msgs.length }, "[live-verify] 发现未读验证邮件");
-        for (const msg of msgs) await processMessage(acc, msg, accessToken, stats);
+        for (const msg of msgs) { if (!_enabled) break; await processMessage(acc, msg, accessToken, stats); }
       } catch (e) {
         logger.warn({ email: acc.email, err: String(e) }, "[live-verify] 账号处理出错");
         stats.skipped++;
@@ -178,14 +191,16 @@ async function processMessage(
   const params = JSON.stringify({ token: accessToken, message_id: msg.id, verify_url: "", proxy: getMicrosoftBrowserProxy(proxy) });
   const result = await new Promise<{ success: boolean; verify_url?: string; final_url?: string; title?: string; http_status?: number; error?: string }>((resolve) => {
     const child = spawn("python3", [scriptPath, params], { env: { ...process.env, ...getMicrosoftProxyEnv(proxy), PYTHONUNBUFFERED: "1" } });
+    _inflightChildren.add(child);
     let out = "";
     child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
     child.on("close", () => {
+      _inflightChildren.delete(child);
       const last = out.trim().split("\n").at(-1) ?? "";
       try { resolve(JSON.parse(last)); } catch { resolve({ success: false, error: last.slice(0, 200) }); }
     });
-    child.on("error", (e) => resolve({ success: false, error: e.message }));
-    setTimeout(() => { child.kill(); resolve({ success: false, error: "timeout" }); }, 45_000);
+    child.on("error", (e) => { _inflightChildren.delete(child); resolve({ success: false, error: e.message }); });
+    setTimeout(() => { try { child.kill(); } catch {} _inflightChildren.delete(child); resolve({ success: false, error: "timeout" }); }, 45_000);
   });
 
   const trueSuccess = result.success && !!result.title && !result.title.toLowerCase().includes("404");
@@ -248,7 +263,7 @@ async function processMessage(
 
 export function startLiveVerifyPoller(intervalMs = 10_000) {
   if (_intervalId) clearInterval(_intervalId);
-  runOnce().catch(() => {});
+  if (_enabled) runOnce().catch(() => {});
   _intervalId = setInterval(() => {
     if (_enabled) runOnce().catch(() => {});
   }, intervalMs);
