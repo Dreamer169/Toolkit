@@ -22,6 +22,7 @@ PASSWORD = params.get("password", "")
 PROXY    = params.get("proxy", "")
 UA       = params.get("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 HEADLESS = params.get("headless", True)
+OUTLOOK_REFRESH_TOKEN = params.get("outlook_refresh_token", "")
 
 def log(msg): print(f"[replit_reg] {msg}", flush=True)
 
@@ -156,6 +157,49 @@ def _whisper_stt(mp3_bytes: bytes) -> str | None:
         return text or None
     except Exception as e:
         log(f"[audio] Whisper 异常: {e}"); return None
+
+# ── 环境初始化：DISPLAY + PulseAudio ─────────────────────────────────────────
+def _setup_display_audio():
+    """确保 Xvfb :99 和 PulseAudio 已注入到环境变量"""
+    import os
+    # Xvfb :99 — 服务器上已由 PM2/systemd 预启动
+    if not os.environ.get("DISPLAY"):
+        os.environ["DISPLAY"] = ":99"
+        log("[env] DISPLAY=:99 (Xvfb)")
+    # PulseAudio — 防止 headful 音频静音（音频挑战需要）
+    if not os.environ.get("PULSE_SERVER"):
+        for _sock in ["/tmp/pulse/native", "/run/user/0/pulse/native"]:
+            if os.path.exists(_sock):
+                os.environ["PULSE_SERVER"] = f"unix:{_sock}"
+                log(f"[env] PULSE_SERVER={os.environ['PULSE_SERVER']}")
+                break
+    return os.environ.get("DISPLAY", ":99")
+
+import socket as _socket
+
+async def ensure_tunnel(proxy_cfg: dict | None, timeout_s: float = 8.0) -> bool:
+    """
+    探针：TCP 连接测试 SOCKS5 代理是否存活。
+    poll-bridge 1092-1095 优先；xray 10820-10845 备用。
+    """
+    if not proxy_cfg:
+        return True  # direct connection，直接放行
+    server = proxy_cfg.get("server", "")
+    _m = re.search(r'(?:socks5://)?([^:]+):(\d+)', server)
+    if not _m:
+        return True
+    host, port = _m.group(1), int(_m.group(2))
+    try:
+        _sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        _sock.settimeout(timeout_s)
+        _sock.connect((host, port))
+        _sock.close()
+        log(f"[ensure_tunnel] ✅ SOCKS5:{port} OK")
+        return True
+    except Exception as _te:
+        log(f"[ensure_tunnel] ❌ SOCKS5:{port} 不可达: {_te}")
+        return False
+
 
 async def solve_recaptcha_audio(page, force_bframe: bool = False) -> str | None:
     log("[audio] ▶ 音频挑战开始")
@@ -970,132 +1014,203 @@ _CANVAS_WEBGL_NOISE_JS = """
 # ── 单次 browser attempt ──────────────────────────────────────────────────────
 
 async def _fetch_replit_verify_url(email_addr: str, password: str, timeout_s: int = 90,
-                                    proxy_cfg=None) -> str | None:
+                                    proxy_cfg=None,
+                                    outlook_refresh_token: str = "") -> str | None:
     """
-    读取outlook inbox中的Replit验证链接。
-    方法1: Microsoft Graph API ROPC
-    方法2: Playwright headless 登录 Outlook Web
+    读取 outlook inbox 中的 Replit 验证链接。
+    方法1: Microsoft Graph API — refresh_token grant (需外部传入 token)
+    方法2: Playwright headless 登录 Outlook Web (login.microsoftonline.com)
+    注意: ROPC (password grant) 已被 Microsoft 全面封禁，不再尝试。
     """
-    import urllib.request, urllib.parse, json as _json, time as _t, re as _re
+    import urllib.request, urllib.parse, json as _json, time as _t, re as _re, os as _os
 
     _domain = email_addr.lower().split("@")[-1] if "@" in email_addr else ""
     if _domain not in ("outlook.com", "hotmail.com", "live.com", "msn.com"):
         log(f"[mail] 非outlook邮箱({_domain}), 跳过"); return None
 
     _URL_PAT = r'https://replit\.com/action-code[^\s"\'<>]+'
+    # 全局 outlook_refresh_token 作为默认值
+    _rt = outlook_refresh_token or OUTLOOK_REFRESH_TOKEN
 
-    # ── 方法1: Graph API ROPC ────────────────────────────────────────────────
-    for _cid in ["04b07795-8ddb-461a-bbee-02f9e1bf7b46",
-                 "1fec8e78-bce4-4aaf-ab1b-5451cc387264"]:
-        try:
-            _tdata = urllib.parse.urlencode({
-                "client_id": _cid,
-                "scope": "https://graph.microsoft.com/.default",
-                "username": email_addr, "password": password,
-                "grant_type": "password",
-            }).encode()
-            _tr = urllib.request.Request(
-                "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
-                data=_tdata, headers={"Content-Type": "application/x-www-form-urlencoded"})
-            _tok = _json.loads(urllib.request.urlopen(_tr, timeout=12).read()).get("access_token", "")
-            if not _tok:
-                continue
-            log(f"[graph] ROPC OK cid={_cid[:8]}...")
-            _deadline = _t.time() + timeout_s
-            while _t.time() < _deadline:
-                try:
-                    _gurl = ("https://graph.microsoft.com/v1.0/me/messages"
-                             "?$filter=from/emailAddress/address eq 'noreply@replit.com'"
-                             "&$select=body,subject&$orderby=receivedDateTime desc&$top=5")
-                    _gr = urllib.request.Request(_gurl, headers={
-                        "Authorization": f"Bearer {_tok}", "Accept": "application/json"})
-                    _msgs = _json.loads(urllib.request.urlopen(_gr, timeout=12).read()).get("value", [])
-                    for _msg in _msgs:
-                        _body = _msg.get("body", {}).get("content", "")
-                        _m = _re.search(_URL_PAT, _body)
-                        if _m:
-                            log(f"[graph] \u2705 验证链接: {_m.group(0)[:80]}")
-                            return _m.group(0).rstrip(".,)")
-                    log(f"[graph] 未找到邮件, 剩余{int(_deadline-_t.time())}s")
-                except Exception as _ge:
-                    log(f"[graph] poll err: {_ge}")
-                await asyncio.sleep(6)
-            return None
-        except Exception as _re_e:
-            log(f"[graph] ROPC cid={_cid[:8]} err: {str(_re_e)[:80]}")
+    # ── 方法1: Graph API refresh_token grant ─────────────────────────────────
+    if _rt:
+        log("[graph] 尝试 refresh_token grant...")
+        # 使用 accounts.ts 中相同的自定义 app client_id
+        for _cid in ["9e5f94bc-e8a4-4e73-b8be-63364c29d753",
+                     "d3590ed6-52b3-4102-aeff-aad2292ab01c"]:
+            try:
+                _tdata = urllib.parse.urlencode({
+                    "client_id": _cid,
+                    "grant_type": "refresh_token",
+                    "refresh_token": _rt,
+                    "scope": "https://graph.microsoft.com/Mail.Read offline_access",
+                }).encode()
+                _tr = urllib.request.Request(
+                    "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
+                    data=_tdata,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"})
+                _resp = urllib.request.urlopen(_tr, timeout=12)
+                _tok_data = _json.loads(_resp.read())
+                _tok = _tok_data.get("access_token", "")
+                if not _tok:
+                    log(f"[graph] cid={_cid[:8]} 无 token: {list(_tok_data.keys())}"); continue
+                log(f"[graph] ✅ refresh_token OK cid={_cid[:8]}")
 
-    # ── 方法2: Outlook Web via Playwright ────────────────────────────────────
-    log("[mail] Graph失败 → Outlook Web登录读取邮件...")
+                _deadline = _t.time() + timeout_s
+                while _t.time() < _deadline:
+                    try:
+                        _gurl = ("https://graph.microsoft.com/v1.0/me/messages"
+                                 "?$filter=from/emailAddress/address eq 'noreply@replit.com'"
+                                 "&$select=body,subject&$orderby=receivedDateTime desc&$top=5")
+                        _gr = urllib.request.Request(_gurl, headers={
+                            "Authorization": f"Bearer {_tok}", "Accept": "application/json"})
+                        _msgs = _json.loads(urllib.request.urlopen(_gr, timeout=12).read()).get("value", [])
+                        for _msg in _msgs:
+                            _body = _msg.get("body", {}).get("content", "")
+                            _m = _re.search(_URL_PAT, _body)
+                            if _m:
+                                log(f"[graph] ✅ 验证链接: {_m.group(0)[:80]}")
+                                return _m.group(0).rstrip(".,)")
+                        log(f"[graph] 未找到邮件, 剩余{int(_deadline - _t.time())}s")
+                    except Exception as _ge:
+                        log(f"[graph] poll err: {_ge}")
+                    await asyncio.sleep(6)
+                return None
+            except Exception as _re_e:
+                log(f"[graph] refresh_token cid={_cid[:8]} err: {str(_re_e)[:100]}")
+    else:
+        log("[graph] 无 outlook_refresh_token → 跳过 Graph API")
+
+    # ── 方法2: Playwright headless 登录 Outlook Web ──────────────────────────
+    log("[mail] → Playwright Outlook Web 登录读取邮件...")
     try:
         try:
             from playwright.async_api import async_playwright as _ow_apw
         except ImportError:
             from rebrowser_playwright.async_api import async_playwright as _ow_apw
+
+        _launch_args = ["--no-sandbox", "--disable-dev-shm-usage",
+                        "--disable-blink-features=AutomationControlled"]
+        if proxy_cfg and proxy_cfg.get("server"):
+            _srv = proxy_cfg["server"].replace("socks5://", "")
+            _launch_args.append(f"--proxy-server=socks5://{_srv}")
+
         async with _ow_apw() as _pw2:
-            _br2 = await _pw2.chromium.launch(
-                headless=True, proxy=proxy_cfg,
-                args=["--no-sandbox", "--disable-dev-shm-usage"])
-            _ctx2 = await _br2.new_context(locale="en-US",
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+            _br2 = await _pw2.chromium.launch(headless=True, args=_launch_args)
+            _ctx2 = await _br2.new_context(
+                locale="en-US",
+                user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                            " AppleWebKit/537.36 (KHTML, like Gecko)"
+                            " Chrome/131.0.0.0 Safari/537.36"))
             _pg2 = await _ctx2.new_page()
             try:
-                await _pg2.goto("https://login.live.com", wait_until="domcontentloaded", timeout=30000)
+                # ── 步骤1: 登录 login.microsoftonline.com ────────────────────
+                log("[outlook-web] 导航到登录页...")
+                await _pg2.goto(
+                    "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize"
+                    "?client_id=d3590ed6-52b3-4102-aeff-aad2292ab01c"
+                    "&response_type=token&scope=openid+profile"
+                    "&redirect_uri=https://outlook.live.com&nonce=12345",
+                    wait_until="domcontentloaded", timeout=30000)
                 await _pg2.wait_for_timeout(1500)
-                for _es in ['input[type="email"]', 'input[name="loginfmt"]', '#i0116']:
+
+                # 如果跳转失败，尝试直接 live.com
+                if "login" not in _pg2.url and "microsoft" not in _pg2.url:
+                    await _pg2.goto("https://login.live.com",
+                                    wait_until="domcontentloaded", timeout=30000)
+                    await _pg2.wait_for_timeout(1500)
+
+                # 填邮箱
+                for _es in ['input[type="email"]', 'input[name="loginfmt"]',
+                             '#i0116', 'input[name="login"]']:
                     _ef = _pg2.locator(_es)
                     if await _ef.count():
-                        await _ef.fill(email_addr); await _pg2.wait_for_timeout(500)
-                        for _ns in ['input[type="submit"]', '#idSIButton9']:
+                        await _ef.first.fill(email_addr)
+                        await _pg2.wait_for_timeout(800)
+                        # 点击 Next
+                        for _ns in ['input[type="submit"]', '#idSIButton9',
+                                    'button:has-text("Next")', '[data-testid="primaryButton"]']:
                             _nb = _pg2.locator(_ns)
-                            if await _nb.count(): await _nb.first.click(); break
-                        await _pg2.wait_for_timeout(2000); break
-                for _ps in ['input[type="password"]', 'input[name="passwd"]', '#i0118']:
+                            if await _nb.count():
+                                await _nb.first.click(); break
+                        await _pg2.wait_for_timeout(2500)
+                        break
+
+                # 填密码
+                for _ps in ['input[type="password"]', 'input[name="passwd"]',
+                             '#i0118', 'input[name="password"]']:
                     _pf = _pg2.locator(_ps)
                     if await _pf.count():
-                        await _pf.fill(password); await _pg2.wait_for_timeout(500)
-                        for _ss2 in ['input[type="submit"]', '#idSIButton9']:
+                        await _pf.first.fill(password)
+                        await _pg2.wait_for_timeout(800)
+                        for _ss2 in ['input[type="submit"]', '#idSIButton9',
+                                     'button:has-text("Sign in")', '[data-testid="primaryButton"]']:
                             _sb2 = _pg2.locator(_ss2)
                             if await _sb2.count(): await _sb2.first.click(); break
-                        await _pg2.wait_for_timeout(3000); break
-                try:
-                    _no = _pg2.locator('#idBtn_Back, input[value="No"]')
-                    if await _no.count(): await _no.first.click(); await _pg2.wait_for_timeout(2000)
-                except Exception: pass
+                        await _pg2.wait_for_timeout(3500)
+                        break
+
+                # 处理 "Stay signed in?" / "Keep me signed in?"
+                for _no_sel in ['#idBtn_Back', 'button:has-text("No")',
+                                 'input[value="No"]', '[data-testid="secondaryButton"]']:
+                    try:
+                        _no = _pg2.locator(_no_sel)
+                        if await _no.count():
+                            await _no.first.click(); await _pg2.wait_for_timeout(2000); break
+                    except Exception: pass
+
+                log(f"[outlook-web] 登录完成, 当前URL: {_pg2.url[:60]}")
+
+                # ── 步骤2: 进入收件箱轮询 ────────────────────────────────────
                 await _pg2.goto("https://outlook.live.com/mail/0/inbox",
-                                wait_until="domcontentloaded", timeout=30000)
-                await _pg2.wait_for_timeout(3000)
+                                wait_until="domcontentloaded", timeout=35000)
+                await _pg2.wait_for_timeout(4000)
+                log("[outlook-web] 进入收件箱, 开始轮询...")
+
                 _dl2 = _t.time() + timeout_s
                 while _t.time() < _dl2:
+                    # 先扫全页 HTML
                     _c2 = await _pg2.content()
                     _m2 = _re.search(_URL_PAT, _c2)
                     if _m2:
                         _u2 = _m2.group(0).rstrip(".,)")
-                        log(f"[outlook-web] \u2705 {_u2[:80]}")
+                        log(f"[outlook-web] ✅ 从页面HTML找到: {_u2[:80]}")
                         return _u2
+
+                    # 点击含 "replit" 的邮件行
                     try:
-                        for _row in await _pg2.locator('[data-convid], [role="option"]').all():
-                            _rtxt = (await _row.inner_text())[:100].lower()
-                            if "replit" in _rtxt:
-                                await _row.click(); await _pg2.wait_for_timeout(2000)
-                                _c3 = await _pg2.content()
-                                _m3 = _re.search(_URL_PAT, _c3)
-                                if _m3:
-                                    _u3 = _m3.group(0).rstrip(".,)")
-                                    log(f"[outlook-web] \u2705 {_u3[:80]}")
-                                    return _u3
+                        _rows = await _pg2.locator(
+                            '[data-convid], [role="option"], .customScrollBar div[class*="row"]'
+                        ).all()
+                        for _row in _rows:
+                            try:
+                                _rtxt = (await _row.inner_text())[:150].lower()
+                                if "replit" in _rtxt or "verify" in _rtxt:
+                                    await _row.click()
+                                    await _pg2.wait_for_timeout(2500)
+                                    _c3 = await _pg2.content()
+                                    _m3 = _re.search(_URL_PAT, _c3)
+                                    if _m3:
+                                        _u3 = _m3.group(0).rstrip(".,)")
+                                        log(f"[outlook-web] ✅ 点击邮件获取: {_u3[:80]}")
+                                        return _u3
+                            except Exception: pass
                     except Exception: pass
-                    log(f"[outlook-web] 未找到邮件, 剩余{int(_dl2-_t.time())}s")
+
+                    log(f"[outlook-web] 未找到验证邮件, 剩余{int(_dl2 - _t.time())}s")
                     await asyncio.sleep(8)
-                    try: await _pg2.reload(wait_until="domcontentloaded", timeout=20000)
+                    try:
+                        await _pg2.reload(wait_until="domcontentloaded", timeout=20000)
+                        await _pg2.wait_for_timeout(3000)
                     except Exception: pass
+
             finally:
                 try: await _br2.close()
                 except: pass
     except Exception as _owe:
         log(f"[outlook-web] 异常: {_owe}")
 
-    log("[mail] 所有方法均失败"); return None
-
+    log("[mail] 所有方法均失败，返回 None"); return None
 
 
 async def _complete_via_verify_url(page, verify_url: str, close_fn=None) -> dict | None:
@@ -1373,7 +1488,7 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                              "verification email","confirm your email","sent an email")
             if any(h in body_check.lower() for h in SUCCESS_HINTS):
                 log("[step2-miss] 验证邮件已发送 → IMAP读取验证链接...")
-                _vurl = await _fetch_replit_verify_url(EMAIL, PASSWORD, proxy_cfg=proxy_cfg)
+                _vurl = await _fetch_replit_verify_url(EMAIL, PASSWORD, proxy_cfg=proxy_cfg, outlook_refresh_token=OUTLOOK_REFRESH_TOKEN)
                 if _vurl:
                     _vres = await _complete_via_verify_url(page, _vurl)
                     if _vres:
@@ -1602,7 +1717,7 @@ async def attempt_register_camoufox(proxy_cfg, exit_ip: str) -> dict:
                 SUCCESS_HINTS = ("verify your email","check your email","we sent","sent you","verification email","confirm your email","sent an email")
                 if any(h in bck.lower() for h in SUCCESS_HINTS):
                     log("[step2-miss] 验证邮件已发送 → IMAP读取验证链接...")
-                    _vurl = await _fetch_replit_verify_url(EMAIL, PASSWORD, proxy_cfg=proxy_cfg)
+                    _vurl = await _fetch_replit_verify_url(EMAIL, PASSWORD, proxy_cfg=proxy_cfg, outlook_refresh_token=OUTLOOK_REFRESH_TOKEN)
                     if _vurl:
                         _vres = await _complete_via_verify_url(page, _vurl)
                         if _vres:
@@ -1640,7 +1755,15 @@ async def get_exit_ip(pw_module, proxy_cfg) -> str:
 # ── 主流程 ────────────────────────────────────────────────────────────────────
 async def run() -> dict:
     final = {"ok": False, "phase": "init", "error": "", "exit_ip": ""}
+    # ── 初始化 Xvfb/PulseAudio 环境 ──────────────────────────────────────────
+    _setup_display_audio()
+
     proxy_cfg = {"server": PROXY} if PROXY else None
+
+    # ── 探针：验证代理是否存活 ──────────────────────────────────────────────────
+    if proxy_cfg and not await ensure_tunnel(proxy_cfg):
+        log("[run] 代理不可达，直接返回 tunnel_dead")
+        return {"ok": False, "phase": "ensure_tunnel", "error": "tunnel_dead", "exit_ip": ""}
     # v7.32: camoufox primary (Firefox native fingerprint, passes integrity check)
     camoufox_available = False
     try:

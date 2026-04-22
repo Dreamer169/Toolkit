@@ -713,6 +713,7 @@ router.post("/replit/register", (req, res) => {
               headless,
               max_wait: 90,
               capsolver_key: process.env.CAPSOLVER_KEY ?? "",
+              outlook_refresh_token: outlook.refresh_token ?? "",
             });
 
             // 记录代理使用（成功/失败均记录）
