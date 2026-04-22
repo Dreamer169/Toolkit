@@ -39,13 +39,16 @@ def check_auth(headers: str) -> bool:
 def pipe(src, dst, label):
     try:
         while True:
-            r, _, x = select.select([src], [], [src], 5)
-            if x or not r:
+            try:
+                data = src.recv(4096)
+            except (ConnectionResetError, BrokenPipeError, OSError):
                 break
-            data = src.recv(4096)
             if not data:
                 break
-            dst.sendall(data)
+            try:
+                dst.sendall(data)
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                break
     except Exception:
         pass
     finally:
