@@ -29,8 +29,13 @@ type CDPSession = Awaited<ReturnType<BrowserContext["newCDPSession"]>>;
  */
 const STEALTH_INIT = `
 (() => {
-  // navigator.webdriver
-  try { Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => false, configurable: true }); } catch (_) {}
+  // navigator.webdriver: 必须在 prototype 上"无此属性"才能过 fpscanner.WEBDRIVER.
+  // 真实 Chrome 145 没有 Navigator.prototype.webdriver. Playwright 默认注入了一个 getter,
+  // 我们之前又 defineProperty 一次 -> getOwnPropertyDescriptor 不为 undefined -> FAIL.
+  try { delete Navigator.prototype.webdriver; } catch (_) {}
+  try { delete navigator.__proto__.webdriver; } catch (_) {}
+  // 在 navigator 自身上保留 false 取值, 让 navigator.webdriver 仍然返回 false
+  try { Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true }); } catch (_) {}
   // 删 CDP 注入的全局变量（Selenium/Playwright 检测套路）
   try { delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array; } catch(_) {}
   try { delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise; } catch(_) {}
@@ -563,6 +568,37 @@ const STEALTH_INIT = `
       window.SharedWorker = new Proxy(OSW, { construct: function(t, args){ args[0] = wrapWorkerSrc(args[0], args[1]); return Reflect.construct(t, args); } });
       try { wrap(window.SharedWorker); } catch (e) {}
     }
+    // === ServiceWorker hook: 包装 register() 让 SW 内也跑 STEALTH_WORKER ===
+    // SW 内 navigator/WebGL/Intl 必须跟主页一致. CreepJS / incolumitas 跨上下文比对.
+    // SW 必须 same-origin, 不能直接用 cross-origin URL; Blob URL 同源, 浏览器允许.
+    try {
+      if (navigator.serviceWorker && navigator.serviceWorker.register) {
+        var origRegister = navigator.serviceWorker.register;
+        var wrapSWRegister = function(scriptURL, options) {
+          try {
+            // module worker 跳过 (importScripts 不可用)
+            if (options && options.type === 'module') return origRegister.call(this, scriptURL, options);
+            var u = new URL(String(scriptURL), location.href);
+            // 同源 Blob URL: 注入 stealth + importScripts 原 SW 脚本
+            var body = STEALTH_WORKER + ";importScripts(" + JSON.stringify(u.href) + ");";
+            var blob = new Blob([body], { type: 'application/javascript' });
+            var blobUrl = URL.createObjectURL(blob);
+            return origRegister.call(this, blobUrl, options);
+          } catch (e) { return origRegister.call(this, scriptURL, options); }
+        };
+        try { wrap(wrapSWRegister); } catch (_) {}
+        try {
+          Object.defineProperty(Object.getPrototypeOf(navigator.serviceWorker), 'register', {
+            value: wrapSWRegister, configurable: true, writable: true
+          });
+        } catch (_) {}
+        try {
+          Object.defineProperty(navigator.serviceWorker, 'register', {
+            value: wrapSWRegister, configurable: true, writable: true
+          });
+        } catch (_) {}
+      }
+    } catch (_) {}
   } catch (_) {}
 
 })();
