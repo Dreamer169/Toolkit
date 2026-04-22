@@ -30,7 +30,7 @@ type CDPSession = Awaited<ReturnType<BrowserContext["newCDPSession"]>>;
 const STEALTH_INIT = `
 (() => {
   // navigator.webdriver
-  try { Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => undefined, configurable: true }); } catch (_) {}
+  try { Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => false, configurable: true }); } catch (_) {}
   // 删 CDP 注入的全局变量（Selenium/Playwright 检测套路）
   try { delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array; } catch(_) {}
   try { delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise; } catch(_) {}
@@ -69,10 +69,64 @@ const STEALTH_INIT = `
   // chrome.* —— 没有 chrome.runtime/app/csi/loadTimes 是经典 headless 指纹
   try {
     if (!window.chrome) window.chrome = {};
-    window.chrome.runtime = window.chrome.runtime || { OnInstalledReason: {}, OnRestartRequiredReason: {}, PlatformArch: {}, PlatformOs: {}, RequestUpdateCheckStatus: {} };
+    if (!window.chrome.runtime) {
+      window.chrome.runtime = {
+        OnInstalledReason: { CHROME_UPDATE: 'chrome_update', INSTALL: 'install', SHARED_MODULE_UPDATE: 'shared_module_update', UPDATE: 'update' },
+        OnRestartRequiredReason: { APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' },
+        PlatformArch: { ARM: 'arm', ARM64: 'arm64', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },
+        PlatformOs: { ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', OPENBSD: 'openbsd', WIN: 'win' },
+        PlatformNaclArch: { ARM: 'arm', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },
+        RequestUpdateCheckStatus: { NO_UPDATE: 'no_update', THROTTLED: 'throttled', UPDATE_AVAILABLE: 'update_available' },
+        // 注意：未装扩展时 chrome.runtime.id 是 undefined（不是 null），sendMessage/connect 调用会抛
+        id: undefined,
+        sendMessage: function(){ throw new Error('Cannot read properties of undefined'); },
+        connect: function(){ throw new Error('Cannot read properties of undefined'); },
+      };
+    }
     window.chrome.app = window.chrome.app || { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } };
     window.chrome.csi = window.chrome.csi || function(){return{};};
     window.chrome.loadTimes = window.chrome.loadTimes || function(){return{requestTime: Date.now()/1000, startLoadTime: Date.now()/1000, commitLoadTime: Date.now()/1000, finishDocumentLoadTime: 0, finishLoadTime: 0, firstPaintTime: 0, firstPaintAfterLoadTime: 0, navigationType: 'Other', wasFetchedViaSpdy: false, wasNpnNegotiated: true, npnNegotiatedProtocol: 'h2', wasAlternateProtocolAvailable: false, connectionInfo: 'h2'};};
+  } catch (_) {}
+
+  // === navigator.userAgentData (UA-CH High Entropy) ===
+  // UA 串说 Chrome 145，但 Sec-CH-UA / userAgentData 还报老版本就一眼穿帮。
+  // 真 Chrome 145 + Linux 应回这套品牌串和高熵字段。
+  try {
+    const brands = [
+      { brand: 'Chromium',           version: '145' },
+      { brand: 'Not:A-Brand',        version: '99'  },
+      { brand: 'Google Chrome',      version: '145' },
+    ];
+    const fullVerList = [
+      { brand: 'Chromium',           version: '145.0.7375.0' },
+      { brand: 'Not:A-Brand',        version: '99.0.0.0' },
+      { brand: 'Google Chrome',      version: '145.0.7375.0' },
+    ];
+    const high = {
+      architecture: 'x86', bitness: '64', model: '', mobile: false,
+      platform: 'Linux', platformVersion: '6.5.0', uaFullVersion: '145.0.7375.0',
+      wow64: false, formFactors: ['Desktop'], fullVersionList: fullVerList,
+      brands: brands,
+    };
+    const uaData = {
+      brands: brands, mobile: false, platform: 'Linux',
+      getHighEntropyValues: function(hints) {
+        const out = { brands: brands, mobile: false, platform: 'Linux' };
+        (hints || []).forEach((h) => { if (h in high) out[h] = high[h]; });
+        return Promise.resolve(out);
+      },
+      toJSON: function(){ return { brands: brands, mobile: false, platform: 'Linux' }; },
+    };
+    Object.defineProperty(Navigator.prototype, 'userAgentData', { get: () => uaData, configurable: true });
+    try { wrap(uaData.getHighEntropyValues); wrap(uaData.toJSON); } catch (_) {}
+  } catch (_) {}
+
+  // === navigator.gpu (WebGPU) ===
+  // Chrome 113+ 有 navigator.gpu。Linux + SwiftShader 实际能 requestAdapter 但 adapter.info
+  // 直接报 'Google SwiftShader' → 一望识破是无头/容器。让它返回 null（Linux 桌面 Chrome
+  // 在很多发行版上 WebGPU 也是默认禁的，null 不可疑）。
+  try {
+    Object.defineProperty(Navigator.prototype, 'gpu', { get: () => null, configurable: true });
   } catch (_) {}
 
   // permissions: notifications quirk
@@ -90,15 +144,15 @@ const STEALTH_INIT = `
   try {
     const getParam = WebGLRenderingContext.prototype.getParameter;
     WebGLRenderingContext.prototype.getParameter = function (p) {
-      if (p === 37445) return 'Intel Inc.';
-      if (p === 37446) return 'Intel Iris OpenGL Engine';
+      if (p === 37445) return 'Google Inc. (Intel)';
+      if (p === 37446) return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)';
       return getParam.apply(this, arguments);
     };
     if (typeof WebGL2RenderingContext !== 'undefined') {
       const getParam2 = WebGL2RenderingContext.prototype.getParameter;
       WebGL2RenderingContext.prototype.getParameter = function (p) {
-        if (p === 37445) return 'Intel Inc.';
-        if (p === 37446) return 'Intel Iris OpenGL Engine';
+        if (p === 37445) return 'Google Inc. (Intel)';
+        if (p === 37446) return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)';
         return getParam2.apply(this, arguments);
       };
     }
@@ -188,8 +242,10 @@ const STEALTH_INIT = `
         { deviceId: "cam1xy",  kind: "videoinput",  label: "", groupId: "g2", toJSON(){return this;} },
       ];
       const fakeEnum = function enumerateDevices() { return Promise.resolve(fakeDevices); };
-      const fakeGUM  = function getUserMedia() { return Promise.reject(new DOMException("Permission denied", "NotAllowedError")); };
-      const fakeGDM  = function getDisplayMedia() { return Promise.reject(new DOMException("Permission denied", "NotAllowedError")); };
+      // 真实"没插设备"状态 = NotFoundError；NotAllowedError 跟 enumerateDevices 返回设备列表
+      // 自相矛盾（既然有摄像头为何 user 没拒绝过就 not allowed？）
+      const fakeGUM  = function getUserMedia() { return Promise.reject(new DOMException("Requested device not found", "NotFoundError")); };
+      const fakeGDM  = function getDisplayMedia() { return Promise.reject(new DOMException("Permission denied by system", "NotAllowedError")); };
       try { wrap(fakeEnum); wrap(fakeGUM); wrap(fakeGDM); } catch (_) {}
       try {
         const proto = Object.getPrototypeOf(navigator.mediaDevices);
@@ -211,7 +267,7 @@ const STEALTH_INIT = `
     Intl.DateTimeFormat.prototype.resolvedOptions = function resolvedOptions() {
       const r = origRO.apply(this, arguments);
       if (!r.timeZone || r.timeZone === "UTC") r.timeZone = "America/Los_Angeles";
-      if (!r.locale || r.locale === "en-GB") r.locale = "en-US";
+      if (!r.locale || /^(zh|en-GB|de|fr|ja|ru|ko)/.test(r.locale)) r.locale = "en-US";
       return r;
     };
     try { wrap(Intl.DateTimeFormat.prototype.resolvedOptions); } catch (_) {}
@@ -485,6 +541,13 @@ interface SessionOpts {
 let _browserPromise: Promise<Browser> | null = null;
 
 async function getBrowser(): Promise<Browser> {
+  // 健康检查：浏览器进程死了/崩了，重置 promise 让下个 session 重新启
+  if (_browserPromise) {
+    try {
+      const b = await _browserPromise;
+      if (!b.isConnected()) { _browserPromise = null; }
+    } catch { _browserPromise = null; }
+  }
   if (_browserPromise) return _browserPromise;
   const exe = process.env.REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE
     || process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
@@ -522,6 +585,13 @@ async function getBrowser(): Promise<Browser> {
   // 把所有域名解析废掉，导致 DoH bootstrap 和业务 URL 全 NOTFOUND → chrome-error://chromewebdata/
   if (proxyEnv) {
     args.push("--proxy-server=" + proxyEnv);
+    // QUIC 走 UDP，--proxy-server 只代理 TCP！google/cloudfront 默认走 QUIC →
+    // 直接从 VPS 真实 IP 出去 → 反爬看到的 IP 跟 SOCKS5 出口不一致 → 立即识破 + IP 泄漏
+    args.push("--disable-quic");
+    // WebRTC：addIceCandidate 拦截只过滤 SDP 字符串，但 STUN 探测包已经通过 UDP 发出去
+    // 暴露真实/内网 IP。强制 ICE 必须走代理，无代理时禁用非代理 UDP
+    args.push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
+    args.push("--webrtc-ip-handling-policy=disable_non_proxied_udp");
   }
   // DNS防污染：无论 headed/headless 都必须注入，避免系统 DNS 被 GFW UDP 污染
   // SOCKS proxy 出去的请求 DNS 也走代理内 DoH (secure 强制模式)
@@ -545,7 +615,15 @@ async function getBrowser(): Promise<Browser> {
     args,
     // 砍掉默认会带的 --enable-automation 开关
     ignoreDefaultArgs: ["--enable-automation"],
-    env: useHeaded ? { ...process.env, DISPLAY: display } as Record<string, string> : undefined,
+    // LANG/LC_ALL 强制 en_US.UTF-8：容器默认 zh_CN.UTF-8 会让 Chrome 字体回退/Intl.format
+    // 实际渲染中文 fallback、Date.toString() 输出"二〇二六年" → 一眼识破不是美国机
+    env: {
+      ...process.env,
+      LANG: "en_US.UTF-8",
+      LC_ALL: "en_US.UTF-8",
+      LANGUAGE: "en_US:en",
+      ...(useHeaded ? { DISPLAY: display } : {}),
+    } as Record<string, string>,
   }).then((b) => {
     logger.info({ exe, proxy: !!proxyEnv, headed: useHeaded, display }, "[cdp-broker] browser launched");
     return b;
