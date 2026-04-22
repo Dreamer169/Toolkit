@@ -27,6 +27,10 @@ type CDPSession = Awaited<ReturnType<BrowserContext["newCDPSession"]>>;
  * Akamai BM / PerimeterX 这些反爬常查的所有点：navigator.* / WebGL / chrome.*
  * / WebRTC IP 泄漏 / mediaDevices / Intl 时区一致性 / Function.toString 泄漏。
  */
+
+export const STEALTH_WORKER_BODY = "\n      try { Object.defineProperty(WorkerNavigator.prototype, 'hardwareConcurrency', { get: function(){return 8;}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'deviceMemory', { get: function(){return 8;}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'platform', { get: function(){return 'Linux x86_64';}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'language', { get: function(){return 'en-US';}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'languages', { get: function(){return ['en-US','en'];}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'userAgent', { get: function(){return 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36';}, configurable: true }); } catch (e) {}\n      try {\n        var brands = [{brand:'Chromium',version:'145'},{brand:'Not:A-Brand',version:'99'},{brand:'Google Chrome',version:'145'}];\n        var fullList = [{brand:'Chromium',version:'145.0.7375.0'},{brand:'Not:A-Brand',version:'99.0.0.0'},{brand:'Google Chrome',version:'145.0.7375.0'}];\n        var high = { architecture:'x86', bitness:'64', model:'', mobile:false, platform:'Linux', platformVersion:'6.5.0', uaFullVersion:'145.0.7375.0', wow64:false, formFactors:['Desktop'], fullVersionList:fullList, brands:brands };\n        var uaData = { brands: brands, mobile: false, platform: 'Linux',\n          getHighEntropyValues: function(hints){ var o={brands:brands, mobile:false, platform:'Linux'}; (hints||[]).forEach(function(h){ if(h in high) o[h]=high[h]; }); return Promise.resolve(o); },\n          toJSON: function(){ return {brands:brands, mobile:false, platform:'Linux'}; }\n        };\n        Object.defineProperty(WorkerNavigator.prototype, 'userAgentData', { get: function(){return uaData;}, configurable: true });\n      } catch (e) {}\n      try {\n        if (typeof WebGLRenderingContext !== 'undefined') {\n          var gp = WebGLRenderingContext.prototype.getParameter;\n          WebGLRenderingContext.prototype.getParameter = function(p){ if(p===37445)return 'Google Inc. (Intel)'; if(p===37446)return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)'; return gp.apply(this, arguments); };\n        }\n        if (typeof WebGL2RenderingContext !== 'undefined') {\n          var gp2 = WebGL2RenderingContext.prototype.getParameter;\n          WebGL2RenderingContext.prototype.getParameter = function(p){ if(p===37445)return 'Google Inc. (Intel)'; if(p===37446)return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)'; return gp2.apply(this, arguments); };\n        }\n      } catch (e) {}\n      try {\n        var gtoOrig = Date.prototype.getTimezoneOffset;\n        Date.prototype.getTimezoneOffset = function(){ var v = gtoOrig.call(this); if (v === 0) { var m = this.getUTCMonth(); return (m>=2 && m<=10) ? 420 : 480; } return v; };\n      } catch (e) {}\n      try {\n        var roOrig = Intl.DateTimeFormat.prototype.resolvedOptions;\n        Intl.DateTimeFormat.prototype.resolvedOptions = function(){ var r = roOrig.apply(this, arguments); if (!r.timeZone || r.timeZone === 'UTC') r.timeZone = 'America/Los_Angeles'; if (!r.locale || /^(zh|en-GB|de|fr|ja|ru|ko)/.test(r.locale)) r.locale = 'en-US'; return r; };\n      } catch (e) {}\n    ";
+export const STEALTH_WORKER_IIFE = '(function(){' + STEALTH_WORKER_BODY + '})();';
+
 const STEALTH_INIT = `
 (() => {
   // navigator.webdriver: 必须在 prototype 上"无此属性"才能过 fpscanner.WEBDRIVER.
@@ -568,37 +572,7 @@ const STEALTH_INIT = `
       window.SharedWorker = new Proxy(OSW, { construct: function(t, args){ args[0] = wrapWorkerSrc(args[0], args[1]); return Reflect.construct(t, args); } });
       try { wrap(window.SharedWorker); } catch (e) {}
     }
-    // === ServiceWorker hook: 包装 register() 让 SW 内也跑 STEALTH_WORKER ===
-    // SW 内 navigator/WebGL/Intl 必须跟主页一致. CreepJS / incolumitas 跨上下文比对.
-    // SW 必须 same-origin, 不能直接用 cross-origin URL; Blob URL 同源, 浏览器允许.
-    try {
-      if (navigator.serviceWorker && navigator.serviceWorker.register) {
-        var origRegister = navigator.serviceWorker.register;
-        var wrapSWRegister = function(scriptURL, options) {
-          try {
-            // module worker 跳过 (importScripts 不可用)
-            if (options && options.type === 'module') return origRegister.call(this, scriptURL, options);
-            var u = new URL(String(scriptURL), location.href);
-            // 同源 Blob URL: 注入 stealth + importScripts 原 SW 脚本
-            var body = STEALTH_WORKER + ";importScripts(" + JSON.stringify(u.href) + ");";
-            var blob = new Blob([body], { type: 'application/javascript' });
-            var blobUrl = URL.createObjectURL(blob);
-            return origRegister.call(this, blobUrl, options);
-          } catch (e) { return origRegister.call(this, scriptURL, options); }
-        };
-        try { wrap(wrapSWRegister); } catch (_) {}
-        try {
-          Object.defineProperty(Object.getPrototypeOf(navigator.serviceWorker), 'register', {
-            value: wrapSWRegister, configurable: true, writable: true
-          });
-        } catch (_) {}
-        try {
-          Object.defineProperty(navigator.serviceWorker, 'register', {
-            value: wrapSWRegister, configurable: true, writable: true
-          });
-        } catch (_) {}
-      }
-    } catch (_) {}
+    // [SW register hook moved to server-side context.route] 
   } catch (_) {}
 
 })();
@@ -834,6 +808,27 @@ export class CdpSession {
       permissions: ["geolocation", "clipboard-read", "clipboard-write", "notifications"],
     });
     await this.ctx.addInitScript({ content: STEALTH_INIT });
+    // === 服务端拦截 ServiceWorker 主脚本: prepend stealth ===
+    // SW spec 禁止 blob:/data: URL, 同源 Blob hook 必失败. 必须在 HTTP 响应层注入.
+    // SW 主脚本请求带必填 header "service-worker: script". 同源, 内容前面拼 STEALTH_WORKER_IIFE.
+    await this.ctx.route("**/*", async (route, request) => {
+      try {
+        const isSW = (request.headers()["service-worker"] || "") === "script";
+        if (!isSW) { await route.continue(); return; }
+        const resp = await route.fetch();
+        const ct = resp.headers()["content-type"] || "application/javascript";
+        const orig = await resp.text();
+        const patched = STEALTH_WORKER_IIFE + "\n;" + orig;
+        await route.fulfill({
+          status: resp.status(),
+          headers: { ...resp.headers(), "content-type": ct, "content-length": String(Buffer.byteLength(patched)) },
+          body: patched,
+        });
+      } catch (e) {
+        try { await route.continue(); } catch {}
+      }
+    });
+
     this.page = await this.ctx.newPage();
     this.cdp = await this.ctx.newCDPSession(this.page);
 
