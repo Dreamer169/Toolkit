@@ -190,6 +190,28 @@ async function processMessage(
 
   const trueSuccess = result.success && !!result.title && !result.title.toLowerCase().includes("404");
 
+  // 区分瞬态故障 vs 永久故障：
+  //   瞬态（代理 4xx/5xx、网络、超时、未知 http_status）→ 不计入失败次数，下轮继续
+  //   永久（请求确实送到目标且 http_status 在 200-399，但页面非验证成功）→ 计入失败次数
+  const status = typeof result.http_status === "number" ? result.http_status : 0;
+  const errStr = (result.error ?? "").toLowerCase();
+  const isTransient = !trueSuccess && (
+    status === 0 ||
+    status === 407 ||
+    status === 408 ||
+    status === 429 ||
+    status >= 500 ||
+    errStr.includes("timeout") ||
+    errStr.includes("proxy") ||
+    errStr.includes("network") ||
+    errStr.includes("connect") ||
+    errStr.includes("reset") ||
+    errStr.includes("refused") ||
+    errStr.includes("econnrefused") ||
+    errStr.includes("econnreset") ||
+    errStr.includes("etimedout")
+  );
+
   logger.info({
     email: acc.email,
     subject: msg.subject,
@@ -198,12 +220,17 @@ async function processMessage(
     title: result.title,
     httpStatus: result.http_status,
     error: result.error,
+    transient: isTransient,
   }, "[live-verify] 点击验证结果");
 
   if (trueSuccess) {
     await markAsRead(accessToken, msg.id);
     failCounts.delete(msg.id);
     stats.clicked++;
+  } else if (isTransient) {
+    // 瞬态错误：不计失败、不标已读，等代理/网络恢复后下轮再试
+    logger.info({ email: acc.email, httpStatus: status, error: result.error }, "[live-verify] 瞬态故障，下轮继续重试（不计入失败次数）");
+    stats.skipped++;
   } else {
     const prev = failCounts.get(msg.id) ?? 0;
     const next  = prev + 1;
