@@ -697,7 +697,9 @@ async function harvestGoogleCookiesFresh(): Promise<CK[]> {
         await page.evaluate((d) => window.scrollBy(0, d), 200 + Math.floor(Math.random() * 600)).catch(() => {});
         await page.waitForTimeout(dwell);
       } catch (e) {
-        console.error(`[google-warmup] visit ${u} failed:`, (e as Error).message);
+        const _wm = (e as Error).message;
+        if (!/SOCKS|ERR_PROXY|chrome-error|timeout|interrupted by another navigation/i.test(_wm))
+          console.error(`[google-warmup] visit ${u} failed:`, _wm);
       }
     };
     await visit("https://www.google.com/", 1500);
