@@ -77,6 +77,16 @@ class _CDPChromiumShim:
                 return self._cached
             except Exception:
                 self._cached = None
+        # v7.42: HTTP /json/version 3s 探针 + 30s WS timeout 避免 180s 死锁
+        import urllib.request as _ureq
+        def _probe_cdp_http(url: str, timeout: float = 3.0) -> bool:
+            try:
+                _u = url.rstrip("/") + "/json/version"
+                with _ureq.urlopen(_u, timeout=timeout) as _r:
+                    return _r.status == 200
+            except Exception:
+                return False
+
         # Try direct connect first; on failure, spawn broker chromium via warmup then retry
         last_exc = None
         for tri in range(3):
@@ -695,44 +705,63 @@ async def fill_step1(page) -> str | None:
             log(f"[captcha] ⚠ 只有 v2 token({rc_token[:20]}), 非 Enterprise → 重置等待")
             rc_token = ""
 
+    # v7.43 (2026-04-23): 恢复 7d89395+0391f15+9536bc3 的 execute() Enterprise 评分链
+    # 用户确认: execute() 是正确路径 (非 audio fallback)。
+    # 7d89395 时段 score token 2425chars one-shot pass，依赖：
+    #   1) cf-warmup 阶段 broker 加载 replit.com/signup → reCAPTCHA Enterprise 自动初始化，
+    #      .google.com 域 NID/SID/HSID/SAPISID/OTZ/__Secure-* trust cookies 落到 broker jar
+    #   2) 9536bc3 cookie 清理只针对 replit.com auth blacklist，保留 Google trust cookies
+    #   3) 0391f15 的 google_proxy_route 池子已剔除 10827/10829 GCP 端口，纯非 GCP 出口
+    #   4) execute() 在 broker chrome JS 内调用 → ctx.route 拦截 reCAPTCHA POST → 经 xray 干净出口
     if any_rc and not rc_token:
-        log("[captcha] Enterprise: 等待 execute() score token (max 25s)…")
-        # 先尝试触发 enterprise.execute() 获取 score token
+        log("[captcha] Enterprise: 触发 execute() 取 score token (max 25s)…")
         try:
-            ent_tok = await page.evaluate("""() => {
+            ent_result = await page.evaluate("""() => {
                 return new Promise((res) => {
-                    if (typeof grecaptcha === 'undefined' || !grecaptcha.enterprise) { res(''); return; }
+                    if (typeof grecaptcha === 'undefined') { res({ok:false,err:'grecaptcha undefined'}); return; }
+                    if (!grecaptcha.enterprise) { res({ok:false,err:'enterprise undefined'}); return; }
                     try {
                         grecaptcha.enterprise.ready(() => {
                             grecaptcha.enterprise.execute('6LfyLYUsAAAAAP0Xmu-hJvZOYJLSL7E410qvKyII', {action:'SIGNUP'})
                                 .then(t => {
                                     var el = document.querySelector('[name="recaptchaToken"]');
-                                    if (el) { el.value = t; el.dispatchEvent(new Event('input',{bubbles:true})); }
-                                    res(t);
-                                }).catch(() => res(''));
+                                    if (el) {
+                                        var desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+                                        if (desc && desc.set) desc.set.call(el, t);
+                                        el.dispatchEvent(new Event('input',{bubbles:true}));
+                                        el.dispatchEvent(new Event('change',{bubbles:true}));
+                                    }
+                                    res({ok:true, token:t, len:t?t.length:0});
+                                })
+                                .catch(e => res({ok:false, err:'execute_rejected:'+(e&&e.message?e.message:String(e))}));
                         });
-                    } catch(e) { res(''); }
-                    setTimeout(() => res(''), 20000);
+                    } catch(e) { res({ok:false, err:'try_catch:'+(e&&e.message?e.message:String(e))}); }
+                    setTimeout(() => res({ok:false, err:'timeout_22s'}), 22000);
                 });
             }""")
-            if ent_tok and len(ent_tok) > 50:
-                log(f"[captcha] ✅ execute() score token={len(ent_tok)}chars prefix={ent_tok[:20]}")
-                rc_token = ent_tok
+            if isinstance(ent_result, dict):
+                if ent_result.get("ok") and ent_result.get("token") and ent_result.get("len", 0) > 50:
+                    rc_token = ent_result["token"]
+                    log(f"[captcha] ✅ execute() Enterprise score token len={ent_result['len']} prefix={rc_token[:20]}")
+                else:
+                    log(f"[captcha] ⚠ execute() 失败: {ent_result.get('err','unknown')[:200]}")
+            else:
+                log(f"[captcha] ⚠ execute() 返回非dict: {str(ent_result)[:100]}")
         except Exception as _ee:
-            log(f"[captcha] execute() 异常: {_ee}")
+            log(f"[captcha] execute() Python 侧异常: {_ee}")
 
     if any_rc and not rc_token:
+        log("[captcha] execute() 无 token → 等待页面自动注入 (max 15s)")
         rc_token, cf_token = await _wait_for_token(page, max_s=15)
 
     if any_rc and not rc_token:
-        # Fallback: 音频挑战（checkbox Enterprise challenge token）
-        log("[captcha] 无 Enterprise score token → 音频挑战 fallback")
+        log("[captcha] 仍无 Enterprise token → 音频挑战兜底")
         audio_token = await solve_recaptcha_audio(page) or ""
         if audio_token:
-            log(f"[captcha] ✅ 音频 Enterprise 挑战通过 token={len(audio_token)}chars")
+            log(f"[captcha] ✅ 音频兜底 token len={len(audio_token)} prefix={audio_token[:20]}")
             rc_token = audio_token
         else:
-            log("[captcha] 音频失败，空提交尝试")
+            log("[captcha] 音频兜底失败，空提交")
             rc_token, cf_token = await _wait_for_token(page, max_s=8)
     elif not rc_token and not cf_token:
         log("[captcha] 等待 Enterprise 自动 token (max 20s)...")
