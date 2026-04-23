@@ -1540,7 +1540,10 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
         # so CF accepts the cf_clearance cookie issued there. Any drift in
         # UA / viewport / timezone / Accept-Language / sec-ch-ua hints
         # forces CF to re-challenge.
+        # v7.52: proxy=proxy_cfg 让该 ctx 走干净 SOCKS 出口 (10822-10845 池),
+        # 不再继承 broker chromium 的 WARP 默认出口
         ctx = await browser.new_context(
+            proxy=proxy_cfg,
             user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
             viewport={"width": 1920, "height": 1040},
             screen={"width": 1920, "height": 1080},
@@ -2303,7 +2306,12 @@ async def run() -> dict:
             _shim = _CDPPwShim(_pw_cdp, CDP_WS)
             for _att in range(1, 4):
                 log(f"[CDP] attempt {_att}/3 (no proxy, no stealth — broker chromium handles it)")
-                _res = await attempt_register(_shim, None, None, final["exit_ip"])
+                # v7.52: 真把 SOCKS proxy 传给 new_context — 之前注释 "no proxy, broker handles it"
+                # 是 bug, 因为 broker chromium 默认走 :40000 = WARP 104.28.x, replit reCAPTCHA
+                # Enterprise 给 WARP IP 低分 → code:2. 改为传入 proxy_cfg 让 new_context 创建
+                # 带独立 SOCKS 出口的 ctx (Playwright connect_over_cdp 后 new_context 仍支持
+                # per-context proxy via Target.createBrowserContext + proxyServer 参数)
+                _res = await attempt_register(_shim, proxy_cfg, None, final["exit_ip"])
                 _res["exit_ip"] = final["exit_ip"]
                 final = _res
                 if _res["ok"]:
