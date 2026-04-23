@@ -67,9 +67,9 @@ function runPy(
   });
 }
 
-// POST /api/replit/register
+// POST /replit/register
 //   body: { email, password, outlook_refresh_token?, proxy?, username? }
-router.post("/api/replit/register", async (req: Request, res: Response) => {
+router.post("/replit/register", async (req: Request, res: Response) => {
   const body = (req.body || {}) as Record<string, unknown>;
   if (!body["email"] || !body["password"]) {
     return res.status(400).json({ ok: false, error: "email/password required" });
@@ -84,9 +84,9 @@ router.post("/api/replit/register", async (req: Request, res: Response) => {
   return res.json(r.data);
 });
 
-// POST /api/replit/login
+// POST /replit/login
 //   body: { username?, email?, password?, force_password? }
-router.post("/api/replit/login", async (req: Request, res: Response) => {
+router.post("/replit/login", async (req: Request, res: Response) => {
   const body = (req.body || {}) as Record<string, unknown>;
   if (!body["username"] && !body["email"]) {
     return res.status(400).json({ ok: false, error: "username or email required" });
@@ -100,8 +100,8 @@ router.post("/api/replit/login", async (req: Request, res: Response) => {
   return res.json(r.data);
 });
 
-// GET /api/replit/sessions  — list saved storage_state files
-router.get("/api/replit/sessions", async (_req: Request, res: Response) => {
+// GET /replit/sessions  — list saved storage_state files
+router.get("/replit/sessions", async (_req: Request, res: Response) => {
   const fs = await import("node:fs/promises");
   const dir = "/root/Toolkit/.state/replit";
   try {
