@@ -1787,8 +1787,44 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                         log(f"[CDP] google cookies 注入失败: {_gie}")
                 else:
                     log("[CDP] ⚠ broker 没回传 googleCookies (warmupGoogleSession 可能失败)")
+                # v7.56 real-human storage_state seed: prefer cookies captured from a real signup.
+                # Falls back to v7.53 fake generated cookies if the seed file is absent or empty.
+                _real_seed_loaded = False
+                _real_seed_names = set()
+                try:
+                    import json as _js, os as _os
+                    _seed_path = _os.environ.get("REPLIT_TRUST_SEED_PATH", "/root/.replit-trust-seed.json")
+                    if _os.path.exists(_seed_path):
+                        with open(_seed_path) as _sf:
+                            _seed_doc = _js.load(_sf)
+                        _seed_cookies = []
+                        for _sc in _seed_doc.get("cookies", []):
+                            _name = _sc.get("name")
+                            if not _name: continue
+                            # Skip post-auth + short-lived CF cookies even if file has them (defensive)
+                            if _name in ("connect.sid", "__Host-session-sig", "replit_authed",
+                                         "ld_uid", "__Host-wr-tc", "__cf_bm", "cf_clearance",
+                                         "__stripe_sid", "_dd_s"):
+                                continue
+                            _ck = {
+                                "name": _name,
+                                "value": str(_sc.get("value", "")),
+                                "domain": _sc.get("domain", ".replit.com"),
+                                "path": _sc.get("path", "/"),
+                                "secure": bool(_sc.get("secure", True)),
+                                "sameSite": _sc.get("sameSite", "Lax"),
+                            }
+                            _seed_cookies.append(_ck)
+                            _real_seed_names.add(_name)
+                        if _seed_cookies:
+                            await ctx.add_cookies(_seed_cookies)
+                            _real_seed_loaded = True
+                            log(f"[CDP] ✅ 注入 {len(_seed_cookies)} real-human seed cookies (source={_seed_doc.get('source','?')}): {sorted(_real_seed_names)}")
+                except Exception as _rse:
+                    log(f"[CDP] real-human seed 注入失败 (fallback to fake): {_rse}")
                 # v7.53 trust seed: pre-age cookies so replit treats us as returning visitor
                 # Reference: successful signup cookie jar had _fbp 9d old + matching marketing_attribution
+                # v7.56: only inject names NOT already covered by real seed (avoids overwriting real values)
                 try:
                     import uuid as _u, time as _t, random as _r
                     _nm = int(_t.time() * 1000)
@@ -1798,16 +1834,29 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                     _gat = str(_u.uuid4())
                     _smid = f"{_u.uuid4()}{_r.randbytes(4).hex()[:8]}"
                     _attr = '{"first_fbp":"' + _fbp + '","last_fbp":"' + _fbp + '"}'
-                    _seed = [
-                        {"name":"_fbp","value":_fbp,"domain":".replit.com","path":"/","secure":True,"sameSite":"Lax"},
-                        {"name":"marketing_attribution","value":_attr,"domain":".replit.com","path":"/","secure":True,"sameSite":"Lax"},
-                        {"name":"replit_statsig_stable_id","value":_stb,"domain":".replit.com","path":"/","secure":True,"sameSite":"Lax"},
-                        {"name":"gating_id","value":_gat,"domain":".replit.com","path":"/","secure":True,"sameSite":"Lax"},
-                        {"name":"__stripe_mid","value":_smid,"domain":".replit.com","path":"/","secure":True,"sameSite":"Lax"},
-                        {"name":"gfa_ref","value":"https://outlook.live.com/","domain":".replit.com","path":"/","secure":True,"sameSite":"Lax"},
+                    _seed_all = [
+                        ("_fbp", _fbp),
+                        ("marketing_attribution", _attr),
+                        # v7.56: always re-randomize statsig_stable_id and gating_id per-session so
+                        # each new signup looks like a distinct returning visitor, not the same one.
+                        ("replit_statsig_stable_id", _stb),
+                        ("gating_id", _gat),
+                        ("__stripe_mid", _smid),
+                        ("gfa_ref", "https://outlook.live.com/"),
                     ]
-                    await ctx.add_cookies(_seed)
-                    log(f"[CDP] ✅ 注入 6 trust seed cookies (_fbp aged {(_nm - _am)//86400000}d, stable_id={_stb[:8]}…)")
+                    _force_re = {"replit_statsig_stable_id", "gating_id"}
+                    _seed = []
+                    _skipped = []
+                    for _sn, _sv in _seed_all:
+                        if _real_seed_loaded and _sn in _real_seed_names and _sn not in _force_re:
+                            _skipped.append(_sn)
+                            continue
+                        _seed.append({"name":_sn,"value":_sv,"domain":".replit.com","path":"/","secure":True,"sameSite":"Lax"})
+                    if _seed:
+                        await ctx.add_cookies(_seed)
+                        log(f"[CDP] ✅ 注入 {len(_seed)} fake-seed cookies (_fbp aged {(_nm - _am)//86400000}d, stable_id={_stb[:8]}…); 跳过 real-seed 覆盖: {_skipped}")
+                    else:
+                        log(f"[CDP] fake-seed 全部被 real-seed 覆盖，跳过")
                 except Exception as _se:
                     log(f"[CDP] trust seed 注入失败: {_se}")
                 if _skipped_auth:
