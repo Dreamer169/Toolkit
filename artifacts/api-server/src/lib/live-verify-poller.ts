@@ -271,6 +271,20 @@ async function processMessage(
   );
 
   if (trueSuccess) {
+    // 把 verify_url 落到共享缓存，让 python 注册端的同会话能直接接管 username 步骤
+    // (避免 python 自己再读 inbox 时邮件已被 poller 消费的竞态)
+    try {
+      if (result.verify_url) {
+        const fs = await import("fs");
+        const dir = "/tmp/replit_verify_cache";
+        try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+        const safeKey = acc.email.toLowerCase().replace(/[^a-z0-9._@+-]/g, "_");
+        const payload = JSON.stringify({ verify_url: result.verify_url, ts: Date.now(), source: "live-verify-poller" });
+        fs.writeFileSync(`${dir}/${safeKey}.json`, payload);
+      }
+    } catch (e) {
+      logger.warn({ email: acc.email, err: String(e) }, "[live-verify] verify_url 缓存落盘失败 (非致命)");
+    }
     await markAsRead(accessToken, msg.id);
     failCounts.delete(msg.id);
     markHandled(msg.id);
