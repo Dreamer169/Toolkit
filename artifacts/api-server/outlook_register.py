@@ -377,17 +377,18 @@ class PatchrightController(BaseController):
         Enter键法（与 PlaywrightController._try_enter_challenge 相同逻辑，
         但在 patchright 下执行）。
         等待视觉 CAPTCHA 的 blob URL 加载，然后 Enter 键通过。
-        对 CF IP 模式：blob URL 通常不出现，使用短超时(5s)快速跳过。
+        历史教训：曾改成 5s "快速跳过" 反而把 captcha iframe 提前杀掉，
+        后续无障碍 fallback 扫到的全是 about:blank 导致 0/N。恢复 22s。
         """
         print("[captcha] 尝试Enter键法（等待blob URL）…", flush=True)
         try:
             page.wait_for_event(
                 "request",
                 lambda req: req.url.startswith("blob:https://iframe.hsprotect.net/"),
-                timeout=5000,
+                timeout=22000,
             )
         except Exception:
-            print("[captcha] ⚠ 5s内未检测到blob URL，Enter键法跳过", flush=True)
+            print("[captcha] ⚠ 22s内未检测到blob URL，Enter键法跳过", flush=True)
             return False
 
         print("[captcha] ✅ 检测到blob URL，开始Enter键法", flush=True)
