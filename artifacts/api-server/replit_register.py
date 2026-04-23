@@ -1585,7 +1585,7 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 import urllib.request as _ur, json as _json
                 log("[CDP] cf-warmup → replit.com/signup …")
                 with _ur.urlopen(
-                    "http://localhost:8092/api/cf-warmup?url=https%3A%2F%2Freplit.com%2Fsignup&timeoutMs=90000",
+                    "http://localhost:8092/api/cf-warmup?url=https%3A%2F%2Freplit.com%2Fsignup&googleWarmup=1&timeoutMs=90000",
                     timeout=120,
                 ) as _r:
                     _wd = _json.loads(_r.read())
@@ -1658,6 +1658,36 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                     log(f"[CDP] cookie cleanup err (忽略): {_ce}")
                 if _inj:
                     await ctx.add_cookies(_inj)
+                # v7.49 — 注入 broker 回传的 .google/.gstatic/.youtube/.recaptcha 跨域信任 cookies
+                # (NID/AEC/SOCS/LOGIN_INFO 等, harvest 自 warmupGoogleSession sticky context)
+                _g_inj = []
+                for _gc in (_wd.get("googleCookies") or []):
+                    _gname = _gc.get("name", "")
+                    if not _gname: continue
+                    _gck = {
+                        "name": _gname,
+                        "value": _gc.get("value", ""),
+                        "domain": _gc.get("domain") or ".google.com",
+                        "path": _gc.get("path", "/"),
+                        "secure": bool(_gc.get("secure", True)),
+                        "httpOnly": bool(_gc.get("httpOnly", False)),
+                    }
+                    _gss = _gc.get("sameSite")
+                    if _gss in ("Lax", "Strict", "None"):
+                        _gck["sameSite"] = _gss
+                    _gexp = _gc.get("expires")
+                    if isinstance(_gexp, (int, float)) and _gexp > 0:
+                        _gck["expires"] = _gexp
+                    _g_inj.append(_gck)
+                if _g_inj:
+                    try:
+                        await ctx.add_cookies(_g_inj)
+                        _names = sorted({c["name"] for c in _g_inj})
+                        log(f"[CDP] ✅ 注入 {len(_g_inj)} 个 google trust cookies: {_names}")
+                    except Exception as _gie:
+                        log(f"[CDP] google cookies 注入失败: {_gie}")
+                else:
+                    log("[CDP] ⚠ broker 没回传 googleCookies (warmupGoogleSession 可能失败)")
                 if _skipped_auth:
                     log(f"[CDP] ⚠ 跳过 broker 给的 auth cookies: {_skipped_auth}")
                 if _domain_cleared:

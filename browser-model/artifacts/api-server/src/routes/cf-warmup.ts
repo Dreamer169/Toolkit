@@ -1,5 +1,5 @@
 import { Router, type IRouter, type Request, type Response } from "express";
-import { renderWithBrowser, getStickyCookies, STEALTH_INIT, warmupGoogleSession } from "../lib/renderer.js";
+import { renderWithBrowser, getStickyCookies, getStickyAllCookies, readCachedGoogleCookies, STEALTH_INIT, warmupGoogleSession } from "../lib/renderer.js";
 
 const router: IRouter = Router();
 
@@ -50,6 +50,33 @@ router.get("/cf-warmup", async (req: Request, res: Response) => {
     const cookies = await getStickyCookies(url);
     const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
     const hasClearance = cookies.some((c) => /^cf_clearance$/i.test(c.name));
+    // v7.49 — 额外回传 sticky context 中所有 .google/.gstatic/.youtube/.recaptcha 域 cookies
+    // 这些是 warmupGoogleSession() harvest 后注入到 sticky 的 NID/AEC/SOCS/LOGIN_INFO 信任 cookies
+    // getStickyCookies(url) 只返回 url 域 (replit.com) 可用的 cookies, 跨域 google cookies 必须单独导出
+    // v7.50 — sticky context 注入 google cookies 静默失败 (Playwright addCookies 对 __Secure- 前缀
+    // + 跨域 cookie 的 sameSite/secure 校验严格)。直接读 readCachedGoogleCookies() 返回 harvest cache,
+    // 这是 warmupGoogleSession() 已经 harvest 过的 NID/AEC/SOCS 等信任 cookies, 给外部 CDP attacher
+    // 自己注入到 patchright ctx 里 (patchright addCookies 容忍度更高)
+    let googleCookies: typeof cookies = [];
+    try {
+      const cached = readCachedGoogleCookies();
+      if (cached && cached.length > 0) {
+        googleCookies = cached.map((c) => ({
+          name: c.name, value: c.value, domain: c.domain, path: c.path,
+          expires: c.expires, httpOnly: c.httpOnly, secure: c.secure, sameSite: c.sameSite,
+        }));
+      } else {
+        // fallback: try sticky context (in case patches lifted addCookies issue)
+        const allCks = await getStickyAllCookies(url);
+        googleCookies = allCks.filter((c) =>
+          /(^|\.)google\.com$/i.test(c.domain) ||
+          /(^|\.)gstatic\.com$/i.test(c.domain) ||
+          /(^|\.)youtube\.com$/i.test(c.domain) ||
+          /(^|\.)recaptcha\.net$/i.test(c.domain) ||
+          /(^|\.)googleapis\.com$/i.test(c.domain)
+        );
+      }
+    } catch (_e) { /* best effort */ }
     res.json({
       ok: warmedOk && hasClearance,
       url,
@@ -57,6 +84,7 @@ router.get("/cf-warmup", async (req: Request, res: Response) => {
       htmlBytes: html ? html.length : 0,
       cfClearance: hasClearance,
       cookies,
+      googleCookies,
       cookieHeader,
       stealthInit: STEALTH_INIT,
       googleWarmup: googleInfo,

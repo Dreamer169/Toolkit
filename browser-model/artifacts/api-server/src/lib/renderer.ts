@@ -554,6 +554,21 @@ export async function getStickyCookieHeader(url: string): Promise<string> {
   }
 }
 
+// v7.49 — 返回 sticky context 中所有域的 cookies (无 url 域过滤)
+// 用于把 warmupGoogleSession() harvest 的 .google.com NID/AEC/SOCS 等跨域信任 cookie 导出给外部 CDP attacher
+export async function getStickyAllCookies(url: string): Promise<Array<{name:string;value:string;domain:string;path:string;expires?:number;httpOnly?:boolean;secure?:boolean;sameSite?:"Lax"|"Strict"|"None"}>> {
+  try {
+    const u = new URL(url);
+    const key = siteKey(u.hostname);
+    const cached = stickyContexts.get(key);
+    if (!cached) return [];
+    const ctx = await cached;
+    return await ctx.cookies(); // no url filter -> all cookies in context
+  } catch {
+    return [];
+  }
+}
+
 export async function getStickyCookies(url: string): Promise<Array<{name:string;value:string;domain:string;path:string;expires?:number;httpOnly?:boolean;secure?:boolean;sameSite?:"Lax"|"Strict"|"None"}>> {
   try {
     const u = new URL(url);
@@ -651,7 +666,7 @@ type CK = {
   expires: number; httpOnly: boolean; secure: boolean; sameSite: "Strict"|"Lax"|"None";
 };
 
-function readCachedGoogleCookies(): CK[] | null {
+export function readCachedGoogleCookies(): CK[] | null {
   try {
     if (!fs.existsSync(GOOGLE_COOKIE_CACHE)) return null;
     const raw = JSON.parse(fs.readFileSync(GOOGLE_COOKIE_CACHE, "utf8"));
@@ -697,7 +712,9 @@ async function harvestGoogleCookiesFresh(): Promise<CK[]> {
         await page.evaluate((d) => window.scrollBy(0, d), 200 + Math.floor(Math.random() * 600)).catch(() => {});
         await page.waitForTimeout(dwell);
       } catch (e) {
-        console.error(`[google-warmup] visit ${u} failed:`, (e as Error).message);
+        const _wm = (e as Error).message;
+        if (!/SOCKS|ERR_PROXY|chrome-error|timeout|interrupted by another navigation/i.test(_wm))
+          console.error(`[google-warmup] visit ${u} failed:`, _wm);
       }
     };
     await visit("https://www.google.com/", 1500);
