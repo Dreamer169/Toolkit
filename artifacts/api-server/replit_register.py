@@ -1464,12 +1464,16 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 # Per-host route: divert *.google.com / *.gstatic.com / *.recaptcha.net /
                 # *.youtube.com requests through clean non-GCP SOCKS5 exits so
                 # reCAPTCHA Enterprise sees a fresh IP instead of WARP-via-GCP.
-                if _attach_google_route is not None:
-                    try:
-                        await _attach_google_route(ctx, log)
-                        log("[CDP] google-route attached (non-GCP exits)")
-                    except Exception as _ge:
-                        log(f"[CDP] google-route attach failed: {_ge}")
+                try:
+                    import sys as _sys, os as _os
+                    _here = _os.path.dirname(_os.path.abspath(__file__))
+                    if _here not in _sys.path:
+                        _sys.path.insert(0, _here)
+                    from google_proxy_route import attach_google_proxy_routing as _agr
+                    await _agr(ctx, log)
+                    log("[CDP] google-route attached (non-GCP exits for *.google/*.gstatic/*.recaptcha)")
+                except Exception as _ge:
+                    log(f"[CDP] google-route attach failed: {_ge}")
             except Exception as _we:
                 log(f"[CDP] cf-warmup err (continuing): {_we}")
         else:
@@ -2122,9 +2126,5 @@ async def run() -> dict:
 
 if __name__ == "__main__":
     import asyncio
-try:
-    from google_proxy_route import attach_google_proxy_routing as _attach_google_route
-except Exception as _e:
-    _attach_google_route = None
     res = asyncio.run(run())
     print(json.dumps(res))

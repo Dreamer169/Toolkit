@@ -21,6 +21,11 @@ try:
     from httpx_socks import AsyncProxyTransport  # type: ignore
 except Exception:  # pragma: no cover
     AsyncProxyTransport = None  # type: ignore
+try:
+    import h2  # noqa: F401
+    _HAS_H2 = True
+except Exception:
+    _HAS_H2 = False
 
 DEFAULT_POOL = [
     "socks5://127.0.0.1:10820",
@@ -70,7 +75,7 @@ def _get_client(proxy: str) -> Optional[httpx.AsyncClient]:
         timeout=httpx.Timeout(20.0, connect=8.0),
         follow_redirects=False,
         verify=False,
-        http2=True,
+        http2=_HAS_H2,
     )
     _client_cache[proxy] = c
     return c
