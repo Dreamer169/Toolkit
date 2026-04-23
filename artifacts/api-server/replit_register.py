@@ -1874,8 +1874,6 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
         err2 = await fill_step2(page)
         if err2:
             result["error"] = err2
-            if err2 in ("signup_username_field_not_found",):
-                pass
             await browser.close(); return result
 
         if is_integrity_error((await page.locator("body").inner_text())[:300]):
@@ -1885,6 +1883,12 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
         result["ok"] = True
         result["phase"] = "done"
         log("✅ 注册完成（验证邮件发送阶段）")
+        try:
+            _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path": "step2_done"})
+            if _sp: result["state_path"] = _sp
+        except Exception as _se:
+            log(f"[state] ⚠ step2-done save_state failed: {_se}")
+        await browser.close(); return result
 
     except Exception as e:
         log(f"attempt 异常: {e}")
@@ -2137,6 +2141,11 @@ async def attempt_register_camoufox(proxy_cfg, exit_ip: str) -> dict:
                 result["error"] = "integrity_check_failed_at_step2"; return result
             result["ok"] = True; result["phase"] = "done"
             log("[camoufox] registration complete (verify email phase)")
+            try:
+                _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path": "step2_done_camoufox"})
+                if _sp: result["state_path"] = _sp
+            except Exception as _se:
+                log(f"[camoufox][state] ⚠ step2-done save_state failed: {_se}")
         except Exception as e:
             log(f"[camoufox] attempt err: {e}"); result["error"] = str(e)
         return result
