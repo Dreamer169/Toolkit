@@ -731,17 +731,9 @@ async def fill_step1(page) -> str | None:
                                         el.dispatchEvent(new Event('input',{bubbles:true}));
                                         el.dispatchEvent(new Event('change',{bubbles:true}));
                                     }
-                                    // v7.45 monkey-patch execute: 后续重复调用都立即 resolve OUR token
-                                    // 防止 _pre_wait 期间页面 auto-execute 拿到低分 token 经 data-callback 写入 React state
-                                    try {
-                                        window.__lockedRcToken = t;
-                                        // v7.54 save original execute so fast-retry can call it for fresh score token
-                                        if (!window.__origExecute) {
-                                            window.__origExecute = grecaptcha.enterprise.execute.bind(grecaptcha.enterprise);
-                                        }
-                                        grecaptcha.enterprise.execute = function() { return Promise.resolve(window.__lockedRcToken); };
-                                        if (grecaptcha.execute) grecaptcha.execute = grecaptcha.enterprise.execute;
-                                    } catch(_pe) {}
+                                    // v7.57 撤销 v7.45 monkey-patch：改写 grecaptcha.enterprise.execute
+                                    // 会被 reCAPTCHA Enterprise 内部完整性自检命中，进一步压低评分。
+                                    // 7d89395 时段不做 monkey-patch，让 page 自己 auto-execute 也能拿高分。
                                     res({ok:true, token:t, len:t?t.length:0});
                                 })
                                 .catch(e => res({ok:false, err:'execute_rejected:'+(e&&e.message?e.message:String(e))}));
@@ -754,8 +746,9 @@ async def fill_step1(page) -> str | None:
                 if ent_result.get("ok") and ent_result.get("token") and ent_result.get("len", 0) > 50:
                     rc_token = ent_result["token"]
                     log(f"[captcha] ✅ execute() Enterprise score token len={ent_result['len']} prefix={rc_token[:20]}")
-                    # v7.44 锁死字段 - 防 grecaptcha 后续 auto-execute 覆盖低分 token
-                    await _inject_and_trigger(rc_token)
+                    # v7.57 撤销 v7.44 _inject_and_trigger：Object.defineProperty 锁死 value
+                    # 是 Enterprise 完整性检测的强信号。execute() 内部 .then 里已通过 native
+                    # setter 写入 React state，无需再做 DOM 强写。
                 else:
                     log(f"[captcha] ⚠ execute() 失败: {ent_result.get('err','unknown')[:200]}")
             else:
@@ -789,14 +782,8 @@ async def fill_step1(page) -> str | None:
     _pre_wait = _random.randint(5000, 8000)
     log(f"[submit] 等待 {_pre_wait}ms → Enterprise 最终评分")
     await page.wait_for_timeout(_pre_wait)
-    # v7.44 提交前 re-lock - _pre_wait 期间 grecaptcha 可能重新 execute 写入低分 token
-    if rc_token and len(rc_token) > 50:
-        await _inject_and_trigger(rc_token)
-        try:
-            cur = await page.evaluate("() => { var e=document.querySelector('[name=\"recaptchaToken\"]'); return e?e.value.length:0; }")
-            log(f"[submit] re-lock 后 DOM recaptchaToken value len={cur}")
-        except Exception:
-            pass
+    # v7.57 撤销 v7.44 提交前 re-lock：再次跑 _inject_and_trigger 会留下
+    # Object.defineProperty 痕迹 + 多次触发 React onChange，被 Enterprise 视为脚本行为。
     # 顺便检查按钮状态
     try:
         btn_check = page.locator('[data-cy="signup-create-account"]')
@@ -825,27 +812,11 @@ async def fill_step1(page) -> str | None:
     except Exception:
         pass
 
-    # v7.46 在 click 前注册 route 拦截器：强制把 sign-up POST 体里的 recaptchaToken 替换为 OUR rc_token
-    # 防止 React state 因页面 auto-execute 持有低分 token，提交时发出去
-    if rc_token and len(rc_token) > 50:
-        _locked_rc = rc_token
-        async def _signup_force_token(route, request):
-            try:
-                import json as _jft
-                bd = _jft.loads(request.post_data or "{}")
-                _orig_t = bd.get("recaptchaToken", "")
-                if _orig_t != _locked_rc:
-                    bd["recaptchaToken"] = _locked_rc
-                    log(f"[route-force] recaptchaToken 替换 orig={len(_orig_t)}chars→locked={len(_locked_rc)}chars")
-                await route.continue_(post_data=_jft.dumps(bd))
-            except Exception as _re:
-                log(f"[route-force] err: {_re}")
-                await route.continue_()
-        try:
-            await page.route("**/api/v1/auth/sign-up**", _signup_force_token)
-            log(f"[route-force] 已挂载 sign-up POST 拦截器，将强制 token={len(_locked_rc)}chars")
-        except Exception as _ro:
-            log(f"[route-force] 挂载失败: {_ro}")
+    # v7.57 撤销 v7.46 sign-up POST route-force 拦截器。原意是防止 React state
+    # 持有低分 token 被 auto-execute 覆盖；但在恢复 broker WARP 出口（v7.57 反 v7.52）
+    # 后页面自身 execute() 已能拿到高分 token，无需强替换；强替换的副作用是
+    # request payload 里 recaptchaToken 与浏览器侧最近一次 execute() 返回值不一致，
+    # Replit server 端有可能比对失败而判 code:1。
 
     # 先注册 response+request 拦截器（在 click 前）避免漏掉快速响应
     _api_resp: dict = {}
@@ -1636,10 +1607,10 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
         # so CF accepts the cf_clearance cookie issued there. Any drift in
         # UA / viewport / timezone / Accept-Language / sec-ch-ua hints
         # forces CF to re-challenge.
-        # v7.52: proxy=proxy_cfg 让该 ctx 走干净 SOCKS 出口 (10822-10845 池),
-        # 不再继承 broker chromium 的 WARP 默认出口
+        # v7.57 revert v7.52: 不再强行 proxy=proxy_cfg。CDP 路径继承 broker WARP 出口，
+        # 与 cf_clearance 来源 IP / Google NID trust cookies 起源 IP 保持一致，
+        # 恢复 7d89395 时段 reCAPTCHA Enterprise 高分拓扑。
         ctx = await browser.new_context(
-            proxy=proxy_cfg,
             user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
             viewport={"width": 1920, "height": 1040},
             screen={"width": 1920, "height": 1080},
@@ -1899,13 +1870,9 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
             except Exception as e:
                 log(f"[pre-nav] 异常(忽略): {e}")
 
-        # v7.47 CDP path 也做 google.com 预热 — 让 patchright context 与 google.com 建立 IP 一致性
-        try:
-            log("[pre-nav] (CDP) 访问 google.com 建立 IP/cookie 一致性…")
-            await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=45000)
-            await page.wait_for_timeout(_random.randint(1800, 3000))
-        except Exception as _pne:
-            log(f"[pre-nav] (CDP) google.com 失败(忽略): {_pne}")
+        # v7.57 移除 v7.47 patchright 侧 google.com 预热：本地 goto 会触发 .google.com
+        # 域 NID 重写，覆盖 broker WARP 时段累积的高信任 cookie，反而拉低 execute() 评分。
+        # broker cf-warmup 内部已对 google reCAPTCHA 资源做过预热并把 cookie 同步过来。
 
         log("打开 replit.com/signup ...")
         await page.goto("https://replit.com/signup", wait_until="domcontentloaded", timeout=75000)
