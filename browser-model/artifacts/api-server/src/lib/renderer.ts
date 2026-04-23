@@ -1,4 +1,5 @@
 import { chromium, Browser, BrowserContext } from "playwright";
+import { attachGoogleProxyRouting, googleProxyPoolInfo } from "./google-route.js";
 
 let browserPromise: Promise<Browser> | null = null;
 
@@ -384,6 +385,7 @@ async function getStickyContext(hostname: string): Promise<BrowserContext> {
   }).then(async (c) => {
     c.on("close", () => { closedContexts.add(c); });
     await c.addInitScript(STEALTH_INIT);
+    try { await attachGoogleProxyRouting(c); } catch (e) { console.error("[google-route] attach failed:", (e as Error).message); }
     return c;
   });
   stickyContexts.set(key, p);
@@ -642,7 +644,7 @@ import * as path from "node:path";
 const GOOGLE_COOKIE_CACHE = process.env.GOOGLE_COOKIE_CACHE || "/root/.google-cookies.json";
 const GOOGLE_COOKIE_TTL_MS = 24 * 3600 * 1000;
 // Free non-WARP SOCKS5 (cf-pool xray) — google reachable.
-const GOOGLE_HARVEST_PROXY = process.env.GOOGLE_HARVEST_PROXY || "socks5://127.0.0.1:1093";
+const GOOGLE_HARVEST_PROXY = process.env.GOOGLE_HARVEST_PROXY || "socks5://127.0.0.1:10831";
 
 type CK = {
   name: string; value: string; domain: string; path: string;
@@ -679,6 +681,7 @@ async function harvestGoogleCookiesFresh(): Promise<CK[]> {
   });
   try {
     await ctx.addInitScript(STEALTH_INIT);
+    try { await attachGoogleProxyRouting(ctx); } catch {}
     const page = await ctx.newPage();
     const visit = async (u: string, dwell: number) => {
       try {
