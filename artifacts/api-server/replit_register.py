@@ -735,6 +735,10 @@ async def fill_step1(page) -> str | None:
                                     // 防止 _pre_wait 期间页面 auto-execute 拿到低分 token 经 data-callback 写入 React state
                                     try {
                                         window.__lockedRcToken = t;
+                                        // v7.54 save original execute so fast-retry can call it for fresh score token
+                                        if (!window.__origExecute) {
+                                            window.__origExecute = grecaptcha.enterprise.execute.bind(grecaptcha.enterprise);
+                                        }
                                         grecaptcha.enterprise.execute = function() { return Promise.resolve(window.__lockedRcToken); };
                                         if (grecaptcha.execute) grecaptcha.execute = grecaptcha.enterprise.execute;
                                     } catch(_pe) {}
@@ -976,7 +980,99 @@ async def fill_step1(page) -> str | None:
         log(f"[step1] CF API 拦截 ({_api_status}) → cf_api_blocked")
         return "cf_api_blocked"
     if _api_status == 400 and "captcha" in _api_body_r.lower():
-        log(f"[step1] API captcha 400 → captcha_token_invalid")
+        log(f"[step1] API captcha 400 → v7.54 fast-retry (同 ctx 内 port-rotate + 重做 execute)")
+        # re-attach response listener (was removed above) so we can read new responses
+        page.on("response", _on_response)
+        try:
+            for _fr in range(3):  # v7.54-rl: 3 rounds, each preceded by 35s backoff to dodge replit 429
+                try:
+                    # replit per-(IP,email) rate-limit window ~30s. Sleep BEFORE retry submit to avoid 429.
+                    _bw = 35 + (_fr * 5)
+                    log(f"[fast-retry {_fr+1}/3] 等 {_bw}s 避开 replit 429 速率窗口…")
+                    await page.wait_for_timeout(_bw * 1000)
+                    _api_resp.clear()
+                    _new = await page.evaluate("""
+                        () => new Promise((res) => {
+                            try {
+                                var fn = window.__origExecute;
+                                if (!fn) {
+                                    if (window.grecaptcha && grecaptcha.enterprise && grecaptcha.enterprise.execute) {
+                                        fn = grecaptcha.enterprise.execute.bind(grecaptcha.enterprise);
+                                    }
+                                }
+                                if (!fn) { res({ok:false, err:'no_execute'}); return; }
+                                fn('6LfyLYUsAAAAAP0Xmu-hJvZOYJLSL7E410qvKyII', {action:'SIGNUP'})
+                                    .then(t => {
+                                        window.__lockedRcToken = t;
+                                        var el = document.querySelector('[name="recaptchaToken"]');
+                                        if (el) {
+                                            var d = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+                                            if (d && d.set) d.set.call(el, t);
+                                            el.dispatchEvent(new Event('input',{bubbles:true}));
+                                            el.dispatchEvent(new Event('change',{bubbles:true}));
+                                        }
+                                        res({ok:true, token:t, len:t?t.length:0});
+                                    })
+                                    .catch(e => res({ok:false, err:String(e&&e.message||e)}));
+                                setTimeout(() => res({ok:false, err:'execute_timeout_20s'}), 20000);
+                            } catch(e) { res({ok:false, err:String(e&&e.message||e)}); }
+                        })
+                    """)
+                    if not (isinstance(_new, dict) and _new.get("ok")):
+                        log(f"[fast-retry {_fr+1}/3] execute 失败: {(_new or {}).get('err','?')[:120]}")
+                        break
+                    log(f"[fast-retry {_fr+1}/3] 新 token len={_new.get('len')} prefix={_new.get('token','')[:20]}")
+                    _clicked = False
+                    for _sel in ('[data-cy="signup-create-account"]', 'button[type="submit"]'):
+                        _b = page.locator(_sel)
+                        if await _b.count():
+                            try:
+                                await page.evaluate(
+                                    "(s) => { var b=document.querySelector(s); if (b) { b.removeAttribute('disabled'); b.removeAttribute('aria-disabled'); } }",
+                                    _sel
+                                )
+                                await _b.first.click(timeout=4000)
+                                _clicked = True
+                                break
+                            except Exception:
+                                try:
+                                    await _b.first.click(force=True, timeout=2000)
+                                    _clicked = True
+                                    break
+                                except Exception:
+                                    pass
+                    if not _clicked:
+                        log(f"[fast-retry {_fr+1}/3] submit click 失败")
+                        break
+                    for _ww in range(8):
+                        await page.wait_for_timeout(2000)
+                        if _api_resp.get("status"): break
+                    _s2 = _api_resp.get("status", 0)
+                    _b2 = _api_resp.get("body", "")
+                    log(f"[fast-retry {_fr+1}/3] API={_s2} body={_b2[:140]}")
+                    if _s2 in (200, 201, 204):
+                        log(f"[fast-retry {_fr+1}/3] ✅ 成功")
+                        return None
+                    _b2l = _b2.lower()
+                    if _s2 == 400 and "captcha" in _b2l:
+                        continue
+                    if is_integrity_error(_b2):
+                        return "integrity_check_failed_after_step1"
+                    if _s2 in (400, 422) and any(kw in _b2l for kw in (
+                        "already in use","already registered","already exists","already been used","email is taken"
+                    )):
+                        return "Email already in use on Replit"
+                    if _s2 in (403, 429, 503) and ("just a moment" in _b2l or "challenge" in _b2l or "cloudflare" in _b2l):
+                        return "cf_api_blocked"
+                    log(f"[fast-retry {_fr+1}/3] 非 captcha 错误 → 退出循环")
+                    break
+                except Exception as _fre:
+                    log(f"[fast-retry {_fr+1}/3] 异常: {_fre}")
+                    break
+        finally:
+            try: page.remove_listener("response", _on_response)
+            except Exception: pass
+        log("[step1] fast-retry 3 轮全部失败 → captcha_token_invalid")
         return "captcha_token_invalid"
     if is_integrity_error(_api_body_r):
         log(f"[step1] API body integrity error: {_api_body_r[:120]}")
@@ -1691,6 +1787,29 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                         log(f"[CDP] google cookies 注入失败: {_gie}")
                 else:
                     log("[CDP] ⚠ broker 没回传 googleCookies (warmupGoogleSession 可能失败)")
+                # v7.53 trust seed: pre-age cookies so replit treats us as returning visitor
+                # Reference: successful signup cookie jar had _fbp 9d old + matching marketing_attribution
+                try:
+                    import uuid as _u, time as _t, random as _r
+                    _nm = int(_t.time() * 1000)
+                    _am = _nm - _r.randint(7, 14) * 86400 * 1000
+                    _fbp = f"fb.1.{_am}.{_r.randint(10**14, 10**15-1)}"
+                    _stb = str(_u.uuid4())
+                    _gat = str(_u.uuid4())
+                    _smid = f"{_u.uuid4()}{_r.randbytes(4).hex()[:8]}"
+                    _attr = '{"first_fbp":"' + _fbp + '","last_fbp":"' + _fbp + '"}'
+                    _seed = [
+                        {"name":"_fbp","value":_fbp,"domain":".replit.com","path":"/","secure":True,"sameSite":"Lax"},
+                        {"name":"marketing_attribution","value":_attr,"domain":".replit.com","path":"/","secure":True,"sameSite":"Lax"},
+                        {"name":"replit_statsig_stable_id","value":_stb,"domain":".replit.com","path":"/","secure":True,"sameSite":"Lax"},
+                        {"name":"gating_id","value":_gat,"domain":".replit.com","path":"/","secure":True,"sameSite":"Lax"},
+                        {"name":"__stripe_mid","value":_smid,"domain":".replit.com","path":"/","secure":True,"sameSite":"Lax"},
+                        {"name":"gfa_ref","value":"https://outlook.live.com/","domain":".replit.com","path":"/","secure":True,"sameSite":"Lax"},
+                    ]
+                    await ctx.add_cookies(_seed)
+                    log(f"[CDP] ✅ 注入 6 trust seed cookies (_fbp aged {(_nm - _am)//86400000}d, stable_id={_stb[:8]}…)")
+                except Exception as _se:
+                    log(f"[CDP] trust seed 注入失败: {_se}")
                 if _skipped_auth:
                     log(f"[CDP] ⚠ 跳过 broker 给的 auth cookies: {_skipped_auth}")
                 if _domain_cleared:
