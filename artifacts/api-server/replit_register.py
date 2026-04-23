@@ -812,11 +812,31 @@ async def fill_step1(page) -> str | None:
     except Exception:
         pass
 
-    # v7.57 撤销 v7.46 sign-up POST route-force 拦截器。原意是防止 React state
-    # 持有低分 token 被 auto-execute 覆盖；但在恢复 broker WARP 出口（v7.57 反 v7.52）
-    # 后页面自身 execute() 已能拿到高分 token，无需强替换；强替换的副作用是
-    # request payload 里 recaptchaToken 与浏览器侧最近一次 execute() 返回值不一致，
-    # Replit server 端有可能比对失败而判 code:1。
+    # v7.58 恢复 v7.46 route-force 拦截器：日志证明 page auto-re-execute 在 pre-wait 期间
+    # 将 React state 中的 recaptchaToken 覆盖为不同 token，导致 POST body 与我们
+    # execute() 拿到的高分 token 不一致，Replit 返回 code:1。WARP 模式下我们的
+    # execute() token 才是高分来源，route-force 确保 POST 使用它。
+    if rc_token and len(rc_token) > 50:
+        _locked_rc = rc_token
+        async def _signup_force_token(route, request):
+            try:
+                import json as _jft
+                bd = _jft.loads(request.post_data or "{}")
+                _orig_t = bd.get("recaptchaToken", "")
+                if _orig_t != _locked_rc:
+                    bd["recaptchaToken"] = _locked_rc
+                    log(f"[route-force] recaptchaToken 替换 orig={len(_orig_t)}chars→locked={len(_locked_rc)}chars")
+                else:
+                    log(f"[route-force] token 一致 ({len(_orig_t)}chars), 不替换")
+                await route.continue_(post_data=_jft.dumps(bd))
+            except Exception as _re:
+                log(f"[route-force] err: {_re}")
+                await route.continue_()
+        try:
+            await page.route("**/api/v1/auth/sign-up**", _signup_force_token)
+            log(f"[route-force] v7.58 已挂载 sign-up POST 拦截器，将强制 token={len(rc_token)}chars")
+        except Exception as _ro:
+            log(f"[route-force] 挂载失败: {_ro}")
 
     # 先注册 response+request 拦截器（在 click 前）避免漏掉快速响应
     _api_resp: dict = {}
@@ -1033,8 +1053,11 @@ async def fill_step1(page) -> str | None:
                         "already in use","already registered","already exists","already been used","email is taken"
                     )):
                         return "Email already in use on Replit"
-                    if _s2 in (403, 429, 503) and ("just a moment" in _b2l or "challenge" in _b2l or "cloudflare" in _b2l):
+                    if _s2 in (403, 503) and ("just a moment" in _b2l or "challenge" in _b2l or "cloudflare" in _b2l):
                         return "cf_api_blocked"
+                    if _s2 == 429:
+                        log(f"[fast-retry {_fr+1}/3] 429 速率限制 → 继续等待下轮")
+                        continue
                     log(f"[fast-retry {_fr+1}/3] 非 captcha 错误 → 退出循环")
                     break
                 except Exception as _fre:
