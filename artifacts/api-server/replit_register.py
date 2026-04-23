@@ -1381,15 +1381,60 @@ async def _complete_via_verify_url(page, verify_url: str, close_fn=None) -> dict
             if err_v:
                 return {"ok": False, "error": err_v, "phase": "verify_step2_err"}
             log("[verify] ✅ 注册+邮件验证完成")
-            return {"ok": True, "phase": "done"}
+            try:
+                _u = USERNAME if 'USERNAME' in globals() else ""
+                _e = EMAIL if 'EMAIL' in globals() else ""
+                _sp = await _save_replit_state(page.context, _u, _e, {"path":"verify_done"})
+                return {"ok": True, "phase": "done", "state_path": _sp or ""}
+            except Exception as _se:
+                log(f"[state] ⚠ {_se}")
+                return {"ok": True, "phase": "done"}
         except Exception:
             url_v = page.url
             log(f"[verify] username字段未出现, url={url_v[:80]}")
             if any(x in url_v.lower() for x in ("dashboard","home","~","/@","replit.com/@")):
-                return {"ok": True, "phase": "done_via_verify"}
+                try:
+                    _u = USERNAME if 'USERNAME' in globals() else ""
+                    _e = EMAIL if 'EMAIL' in globals() else ""
+                    _sp = await _save_replit_state(page.context, _u, _e, {"path":"done_via_verify"})
+                    return {"ok": True, "phase": "done_via_verify", "state_path": _sp or ""}
+                except Exception as _se:
+                    log(f"[state] ⚠ {_se}")
+                    return {"ok": True, "phase": "done_via_verify"}
     except Exception as _gv:
         log(f"[verify] 导航失败: {_gv}")
     return None
+
+
+# ── session 持久化 ─────────────────────────────────────────────────────────
+# 注册/登录成功时把 cookies+localStorage 落到 .state/replit/<username>.json,
+# 下次 replit_login.py 直接 load_state 进 context, 0 captcha 0 cf_challenge,
+# 复用直到 connect.sid 过期 (Replit cookieExpiresAt ≈ 7 天).
+STATE_DIR = "/root/Toolkit/.state/replit"
+
+async def _save_replit_state(ctx, username: str, email: str = "", extra: dict | None = None):
+    """Persist context.storage_state to disk keyed by username."""
+    if not username:
+        return None
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        path = os.path.join(STATE_DIR, f"{username}.json")
+        st = await ctx.storage_state()
+        # decorate with metadata for downstream tooling
+        st["_meta"] = {
+            "username": username,
+            "email": email,
+            "saved_at": int(__import__("time").time()),
+            **(extra or {}),
+        }
+        import json as _j
+        with open(path, "w") as f:
+            _j.dump(st, f, indent=2)
+        log(f"[state] ✅ saved {len(st.get('cookies',[]))} cookies → {path}")
+        return path
+    except Exception as e:
+        log(f"[state] ⚠ save failed: {e}")
+        return None
 
 async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> dict:
     result = {"ok": False, "phase": "init", "error": "", "exit_ip": exit_ip}
@@ -1737,6 +1782,11 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                         await browser.close(); return _vres
                 result["ok"] = True
                 result["phase"] = "verify_email_sent"
+                try:
+                    _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path":"verify_email_sent"})
+                    if _sp: result["state_path"] = _sp
+                except Exception as _se:
+                    log(f"[state] ⚠ {_se}")
                 await browser.close(); return result
             log(f"[step2-miss][rl-debug] body_check len={len(body_check)} has_tq={'too quickly' in body_check.lower()} has_wait={'please wait a bit' in body_check.lower()}")
             if is_rate_limited(body_check):
