@@ -2,7 +2,7 @@ import { chromium, Browser, BrowserContext } from "playwright";
 
 let browserPromise: Promise<Browser> | null = null;
 
-const STEALTH_INIT = `
+export const STEALTH_INIT = `
 // === Anti-fingerprint init script (runs before any page JS) ===
 (() => {
   // navigator.webdriver
@@ -549,6 +549,19 @@ export async function getStickyCookieHeader(url: string): Promise<string> {
     return cookies.map((c) => `${c.name}=${c.value}`).join("; ");
   } catch {
     return "";
+  }
+}
+
+export async function getStickyCookies(url: string): Promise<Array<{name:string;value:string;domain:string;path:string;expires?:number;httpOnly?:boolean;secure?:boolean;sameSite?:"Lax"|"Strict"|"None"}>> {
+  try {
+    const u = new URL(url);
+    const key = siteKey(u.hostname);
+    const cached = stickyContexts.get(key);
+    if (!cached) return [];
+    const ctx = await cached;
+    return await ctx.cookies(url);
+  } catch {
+    return [];
   }
 }
 

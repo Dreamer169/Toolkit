@@ -1370,7 +1370,31 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
         args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
               "--disable-blink-features=AutomationControlled", "--disable-web-security"],
     )
-    ctx  = await browser.new_context(viewport={"width": 1280, "height": 800}, locale="en-US", user_agent=UA)
+    if USE_CDP:
+        # Mirror broker sticky context (browser-model renderer.ts) EXACTLY
+        # so CF accepts the cf_clearance cookie issued there. Any drift in
+        # UA / viewport / timezone / Accept-Language / sec-ch-ua hints
+        # forces CF to re-challenge.
+        ctx = await browser.new_context(
+            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1040},
+            screen={"width": 1920, "height": 1080},
+            device_scale_factor=1,
+            is_mobile=False,
+            has_touch=False,
+            locale="en-US",
+            timezone_id="America/Los_Angeles",
+            color_scheme="light",
+            ignore_https_errors=True,
+            extra_http_headers={
+                "Accept-Language": "en-US,en;q=0.9",
+                "sec-ch-ua": "\"Chromium\";v=\"145\", \"Not:A-Brand\";v=\"99\", \"Google Chrome\";v=\"145\"",
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": "\"Linux\"",
+            },
+        )
+    else:
+        ctx  = await browser.new_context(viewport={"width": 1280, "height": 800}, locale="en-US", user_agent=UA)
     page = await ctx.new_page()
 
     # playwright_stealth 注入（chrome_runtime=True + webgl_vendor=True）
@@ -1400,22 +1424,43 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                     timeout=120,
                 ) as _r:
                     _wd = _json.loads(_r.read())
+                # Mirror broker's STEALTH_INIT into our CDP-attached context so
+                # navigator.webdriver / canvas / WebGL fingerprint match the
+                # context that originally got cf_clearance from CF.
+                _stealth = _wd.get("stealthInit") or ""
+                if _stealth:
+                    try:
+                        await ctx.add_init_script(_stealth)
+                        log(f"[CDP] stealth init script applied ({len(_stealth)}B)")
+                    except Exception as _se:
+                        log(f"[CDP] stealth init apply failed: {_se}")
                 _cks = _wd.get("cookies") or []
                 _inj = []
                 for _c in _cks:
-                    if not _c:
+                    if not _c or not _c.get("name"):
                         continue
                     _dom = _c.get("domain") or "replit.com"
-                    if not _dom.startswith("."):
-                        _dom = "." + _dom
-                    _inj.append({
-                        "name": _c["name"], "value": _c["value"],
-                        "domain": _dom, "path": _c.get("path", "/"),
-                        "secure": True, "sameSite": "Lax",
-                    })
+                    # Playwright accepts leading-dot domains; normalize to
+                    # match how the broker stored them so CF sees the exact
+                    # cookie scope it issued.
+                    _ck = {
+                        "name": _c["name"],
+                        "value": _c.get("value", ""),
+                        "domain": _dom,
+                        "path": _c.get("path", "/"),
+                        "secure": bool(_c.get("secure", True)),
+                        "httpOnly": bool(_c.get("httpOnly", False)),
+                    }
+                    _ss = _c.get("sameSite")
+                    if _ss in ("Lax", "Strict", "None"):
+                        _ck["sameSite"] = _ss
+                    _exp = _c.get("expires")
+                    if isinstance(_exp, (int, float)) and _exp > 0:
+                        _ck["expires"] = _exp
+                    _inj.append(_ck)
                 if _inj:
                     await ctx.add_cookies(_inj)
-                log(f"[CDP] cf_clearance={_wd.get('cfClearance')} cookies_injected={len(_inj)} warmup_ms={_wd.get('ms')}")
+                log(f"[CDP] cf_clearance={_wd.get('cfClearance')} cookies_injected={len(_inj)} warmup_ms={_wd.get('ms')} attrs=full")
             except Exception as _we:
                 log(f"[CDP] cf-warmup err (continuing): {_we}")
         else:

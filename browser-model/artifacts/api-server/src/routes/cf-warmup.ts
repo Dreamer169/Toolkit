@@ -1,13 +1,14 @@
 import { Router, type IRouter, type Request, type Response } from "express";
-import { renderWithBrowser, getStickyCookieHeader } from "../lib/renderer.js";
+import { renderWithBrowser, getStickyCookies, STEALTH_INIT } from "../lib/renderer.js";
 
 const router: IRouter = Router();
 
-// GET /api/cf-warmup?url=https://replit.com/signup
+// GET /api/cf-warmup?url=...
 // Drives the headed-Chromium sticky context through the URL so the CF JS
-// challenge auto-resolves; returns the resulting cookie jar (cf_clearance et al)
-// in a Playwright-compatible cookies[] shape so external tools (Camoufox /
-// chromium / Puppeteer) can inject and skip CF on subsequent visits.
+// challenge auto-resolves; returns cookies[] (full Playwright shape with
+// correct domain/path/secure/httpOnly/sameSite/expires) plus the same
+// stealth init script the sticky context uses, so external CDP attachers
+// can reproduce the JS-fingerprint env that CF originally validated.
 router.get("/cf-warmup", async (req: Request, res: Response) => {
   const url = String(req.query.url || "");
   if (!/^https?:\/\//i.test(url)) {
@@ -26,21 +27,13 @@ router.get("/cf-warmup", async (req: Request, res: Response) => {
       warmedOk = false;
       html = String((e as Error).message || e);
     }
-    const cookieHeader = await getStickyCookieHeader(url);
-    const cookies = cookieHeader
-      .split(/;\s*/)
-      .filter(Boolean)
-      .map((p) => {
-        const i = p.indexOf("=");
-        if (i < 0) return null;
-        const name = p.slice(0, i).trim();
-        const value = p.slice(i + 1).trim();
-        let domain: string;
-        try { domain = new URL(url).hostname; } catch { domain = ""; }
-        return { name, value, domain, path: "/", secure: true, httpOnly: false, sameSite: "Lax" as const };
-      })
-      .filter(Boolean);
-    const hasClearance = cookies.some((c) => c && /^cf_clearance$/i.test(c.name));
+    // Full-attribute cookies (preserves SameSite=None / Secure / HttpOnly /
+    // expires / true domain). The previous header-parse path lost all of
+    // that and CF rejected the re-injected cf_clearance.
+    const cookies = await getStickyCookies(url);
+    // Legacy field for any old caller still parsing cookieHeader.
+    const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+    const hasClearance = cookies.some((c) => /^cf_clearance$/i.test(c.name));
     res.json({
       ok: warmedOk && hasClearance,
       url,
@@ -49,6 +42,7 @@ router.get("/cf-warmup", async (req: Request, res: Response) => {
       cfClearance: hasClearance,
       cookies,
       cookieHeader,
+      stealthInit: STEALTH_INIT,
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: String((e as Error).message || e), ms: Date.now() - t0 });
