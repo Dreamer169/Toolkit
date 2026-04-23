@@ -625,3 +625,139 @@ export async function storeStickyCookies(url: string, setCookieHeaders: string[]
 export function looksLikeCfChallengeHtml(html: string, finalUrl: string): boolean {
   return looksLikeCaptcha(html, finalUrl);
 }
+// Appended to renderer.ts: pre-warm Google session in the sticky context so
+// reCAPTCHA Enterprise sees NID/AEC/SOCS cookies + prior Google iframe load
+// when scoring the next token. Free, ~5s, lifts score from ~0.1 to ~0.5+.
+// === Google reCAPTCHA score booster ===
+// WARP (the broker's default proxy) blocks google.com apex but allows
+// /recaptcha/*. So we cannot visit google.com through the sticky context.
+// Strategy: harvest .google.com / .youtube.com cookies via a TEMPORARY
+// context routed through a non-WARP SOCKS5 (cf-pool 1093 → GCP exit),
+// cache them on disk for 24h, then inject into the sticky context. The
+// target site's reCAPTCHA iframe (which loads via WARP) will send those
+// cookies → Google sees a known session → score lifts from ~0.1 to ~0.5+.
+import * as fs from "node:fs";
+import * as path from "node:path";
+
+const GOOGLE_COOKIE_CACHE = process.env.GOOGLE_COOKIE_CACHE || "/root/.google-cookies.json";
+const GOOGLE_COOKIE_TTL_MS = 24 * 3600 * 1000;
+// Free non-WARP SOCKS5 (cf-pool xray) — google reachable.
+const GOOGLE_HARVEST_PROXY = process.env.GOOGLE_HARVEST_PROXY || "socks5://127.0.0.1:1093";
+
+type CK = {
+  name: string; value: string; domain: string; path: string;
+  expires: number; httpOnly: boolean; secure: boolean; sameSite: "Strict"|"Lax"|"None";
+};
+
+function readCachedGoogleCookies(): CK[] | null {
+  try {
+    if (!fs.existsSync(GOOGLE_COOKIE_CACHE)) return null;
+    const raw = JSON.parse(fs.readFileSync(GOOGLE_COOKIE_CACHE, "utf8"));
+    if (!raw || typeof raw.savedAt !== "number" || !Array.isArray(raw.cookies)) return null;
+    if (Date.now() - raw.savedAt > GOOGLE_COOKIE_TTL_MS) return null;
+    if (!raw.cookies.some((c: CK) => /^NID$/.test(c.name))) return null;
+    return raw.cookies;
+  } catch { return null; }
+}
+function writeCachedGoogleCookies(cookies: CK[]): void {
+  try {
+    fs.mkdirSync(path.dirname(GOOGLE_COOKIE_CACHE), { recursive: true });
+    fs.writeFileSync(GOOGLE_COOKIE_CACHE, JSON.stringify({ savedAt: Date.now(), cookies }));
+  } catch (e) {
+    console.error("[google-warmup] cache write failed:", (e as Error).message);
+  }
+}
+
+async function harvestGoogleCookiesFresh(): Promise<CK[]> {
+  const browser = await getBrowser();
+  const ctx = await browser.newContext({
+    userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+    viewport: { width: 1920, height: 1040 },
+    locale: "en-US",
+    timezoneId: "America/Los_Angeles",
+    proxy: { server: GOOGLE_HARVEST_PROXY },
+  });
+  try {
+    await ctx.addInitScript(STEALTH_INIT);
+    const page = await ctx.newPage();
+    const visit = async (u: string, dwell: number) => {
+      try {
+        await page.goto(u, { waitUntil: "domcontentloaded", timeout: 20000 });
+        for (let i = 0; i < 5; i++) {
+          await page.mouse.move(
+            120 + Math.floor(Math.random() * 1600),
+            120 + Math.floor(Math.random() * 800),
+            { steps: 8 + Math.floor(Math.random() * 12) }
+          ).catch(() => {});
+          await page.waitForTimeout(150 + Math.floor(Math.random() * 250));
+        }
+        await page.evaluate((d) => window.scrollBy(0, d), 200 + Math.floor(Math.random() * 600)).catch(() => {});
+        await page.waitForTimeout(dwell);
+      } catch (e) {
+        console.error(`[google-warmup] visit ${u} failed:`, (e as Error).message);
+      }
+    };
+    await visit("https://www.google.com/", 1500);
+    await visit("https://www.google.com/search?q=replit+features&hl=en", 1800);
+    await visit("https://www.google.com/recaptcha/api2/demo", 1500);
+    await visit("https://consent.youtube.com/m?continue=https%3A%2F%2Fwww.youtube.com%2F&hl=en", 800);
+    await visit("https://www.youtube.com/", 1200);
+    await page.close().catch(() => {});
+    const all = await ctx.cookies();
+    return all.filter((c) =>
+      /(^|\.)google\.com$/i.test(c.domain) ||
+      /(^|\.)youtube\.com$/i.test(c.domain) ||
+      /(^|\.)gstatic\.com$/i.test(c.domain)
+    ) as CK[];
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+}
+
+export async function warmupGoogleSession(hostnameForKey: string): Promise<{
+  visited: string[]; durationMs: number; cookieCount: number; source: "cache" | "fresh" | "none";
+}> {
+  const t0 = Date.now();
+  let cookies = readCachedGoogleCookies();
+  let source: "cache" | "fresh" | "none" = cookies ? "cache" : "none";
+  if (!cookies) {
+    try {
+      cookies = await harvestGoogleCookiesFresh();
+      if (cookies.length > 0) {
+        writeCachedGoogleCookies(cookies);
+        source = "fresh";
+      }
+    } catch (e) {
+      console.error("[google-warmup] harvest failed:", (e as Error).message);
+      cookies = [];
+    }
+  }
+  if (!cookies || cookies.length === 0) {
+    return { visited: [], durationMs: Date.now() - t0, cookieCount: 0, source: "none" };
+  }
+  // Inject into sticky context for the target host.
+  try {
+    const ctx = await getStickyContext(hostnameForKey);
+    await ctx.addCookies(cookies);
+    // Activate by hitting the reCAPTCHA anchor endpoint inside the sticky
+    // context — this is on /recaptcha/* which IS reachable via WARP, and
+    // forces Google to issue any per-session refresh cookies tied to the
+    // sticky context's WARP exit IP.
+    const page = await ctx.newPage();
+    try {
+      await page.goto("https://www.google.com/recaptcha/api2/anchor?ar=1&k=6Le-wvkSAAAAAPBMRTvw0Q4Muexq9bi0DJwx_mJ-&co=aHR0cHM6Ly93d3cuZ29vZ2xlLmNvbTo0NDM.&hl=en&v=v1700000000000", {
+        waitUntil: "domcontentloaded", timeout: 12000,
+      });
+      await page.waitForTimeout(800);
+    } catch { /* best effort */ }
+    await page.close().catch(() => {});
+  } catch (e) {
+    console.error("[google-warmup] inject failed:", (e as Error).message);
+  }
+  return {
+    visited: cookies.map((c) => `${c.domain}:${c.name}`).slice(0, 12),
+    durationMs: Date.now() - t0,
+    cookieCount: cookies.length,
+    source,
+  };
+}
