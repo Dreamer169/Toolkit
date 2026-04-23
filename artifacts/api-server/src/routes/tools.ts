@@ -3647,7 +3647,7 @@ router.post("/tools/outlook/auto-verify-emails", async (req, res) => {
     const rows = await dbQ<{ id: number; email: string; token: string | null; refresh_token: string | null }>(
       accountIds?.length
         ? "SELECT id, email, token, refresh_token FROM accounts WHERE platform='outlook' AND id = ANY($1::int[])"
-        : "SELECT id, email, token, refresh_token FROM accounts WHERE platform='outlook' AND (token IS NOT NULL OR refresh_token IS NOT NULL)",
+        : "SELECT id, email, token, refresh_token FROM accounts WHERE platform='outlook' AND status='active' AND (token IS NOT NULL OR refresh_token IS NOT NULL) AND COALESCE(tags,'') NOT LIKE '%replit_used%' AND COALESCE(tags,'') NOT LIKE '%token_invalid%' AND COALESCE(tags,'') NOT LIKE '%inbox_error%' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%'",
       accountIds?.length ? [accountIds] : []
     );
     const results: Array<{ accountId: number; email: string; status: string; error?: string; verifyUrl?: string }> = [];
