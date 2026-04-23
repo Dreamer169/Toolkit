@@ -645,10 +645,10 @@ router.all("/proxy", async (req: Request, res: Response) => {
           console.log("[proxy] CF challenge bypassed via browser:", target.toString());
         } catch (e) {
           if (/Target page, context or browser has been closed/i.test((e as Error).message)) {
-      console.warn("[proxy] CF retry skip (context closed)");
-      break;
-    }
-    console.error("[proxy] CF retry failed:", (e as Error).message);
+            console.warn("[proxy] CF retry skip (context closed)");
+            return;
+          }
+          console.error("[proxy] CF retry failed:", (e as Error).message);
         }
       }
       const rewritten = rewriteHtml(text, effectiveFinal, proxyBase);
