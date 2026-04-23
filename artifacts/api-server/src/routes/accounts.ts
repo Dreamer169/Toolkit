@@ -690,7 +690,7 @@ router.post("/replit/register", (req, res) => {
             continue; // skip to next Outlook
           }
 
-          for (let attempt = 1; attempt <= 10; attempt++) {
+          for (let attempt = 1; attempt <= 3; attempt++) {
             const livePorts = availablePorts();
             if (livePorts.length === 0) {
               log(`    No live SOCKS ports available, stop retrying this Outlook`);
@@ -705,7 +705,7 @@ router.post("/replit/register", (req, res) => {
             }
             portQueue = portQueue.filter((p) => p !== tryPort);
             if (portQueue.length === 0) portQueue = sortedByReputation(availablePorts()).filter((p) => p !== tryPort);
-            log(`    Attempt ${attempt}/10 via SOCKS5:${tryPort}`);
+            log(`    Attempt ${attempt}/3 via SOCKS5:${tryPort}`);
 
             const { parsed } = await runPython(regScript, {
               email: outlook.email,
