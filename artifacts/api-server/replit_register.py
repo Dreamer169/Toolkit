@@ -1618,6 +1618,14 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
             )
         except Exception:
             t2 = await page.title(); b2 = (await page.locator("body").inner_text())[:300]
+            url2 = page.url
+            log(f"[step1-miss] url={url2[:120]} title={t2[:80]!r} body={b2.replace(chr(10),' ')[:200]!r}")
+            # 截屏到磁盘以供肉眼诊断 (覆盖式, 不会涨盘)
+            try:
+                await page.screenshot(path="/tmp/replit_signup_miss.png", full_page=False)
+                log(f"[step1-miss] screenshot → /tmp/replit_signup_miss.png")
+            except Exception as _se:
+                log(f"[step1-miss] screenshot failed: {_se}")
             if is_cf_blocked(t2, b2):
                 result["error"] = "signup_cf_ip_banned"
             else:
