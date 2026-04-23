@@ -1532,16 +1532,26 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                     except Exception as _se:
                         log(f"[CDP] stealth init apply failed: {_se}")
                 _cks = _wd.get("cookies") or []
+                # ⚠ broker chromium 可能有残留登录态 (e.g. connect.sid),
+                # 注入会让 /signup 自动跳到该用户 dashboard, 导致 signup_email_field_timeout.
+                # 只放行 CF / 反爬必要 cookies, 剔除一切 Replit 会话/认证 cookies.
+                _AUTH_COOKIE_BLACKLIST = {
+                    "connect.sid", "replit_authed", "replit-user", "replit_user",
+                    "replit-session", "replit_session", "sid", "__session",
+                    "REPL_AUTH", "ajs_anonymous_id", "ajs_user_id",
+                }
                 _inj = []
+                _skipped_auth = []
                 for _c in _cks:
                     if not _c or not _c.get("name"):
                         continue
+                    _name = _c["name"]
+                    if _name in _AUTH_COOKIE_BLACKLIST:
+                        _skipped_auth.append(_name)
+                        continue
                     _dom = _c.get("domain") or "replit.com"
-                    # Playwright accepts leading-dot domains; normalize to
-                    # match how the broker stored them so CF sees the exact
-                    # cookie scope it issued.
                     _ck = {
-                        "name": _c["name"],
+                        "name": _name,
                         "value": _c.get("value", ""),
                         "domain": _dom,
                         "path": _c.get("path", "/"),
@@ -1555,8 +1565,15 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                     if isinstance(_exp, (int, float)) and _exp > 0:
                         _ck["expires"] = _exp
                     _inj.append(_ck)
+                # 防御性: 即便 broker 没给 auth cookies, 也确保 context 完全干净
+                try:
+                    await ctx.clear_cookies()
+                except Exception:
+                    pass
                 if _inj:
                     await ctx.add_cookies(_inj)
+                if _skipped_auth:
+                    log(f"[CDP] ⚠ 已剔除 broker 残留登录态 cookies: {_skipped_auth}")
                 log(f"[CDP] cf_clearance={_wd.get('cfClearance')} cookies_injected={len(_inj)} warmup_ms={_wd.get('ms')} attrs=full")
                 # Per-host route: divert *.google.com / *.gstatic.com / *.recaptcha.net /
                 # *.youtube.com requests through clean non-GCP SOCKS5 exits so
