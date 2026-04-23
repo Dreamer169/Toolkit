@@ -22,94 +22,6 @@ PASSWORD = params.get("password", "")
 PROXY    = params.get("proxy", "")
 UA       = params.get("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 HEADLESS = params.get("headless", True)
-USE_CDP  = params.get("use_cdp", True)
-CDP_WS   = params.get("cdp_ws", "http://127.0.0.1:9222")
-
-# ── CDP shim ────────────────────────────────────────────────────────────────
-# Lets attempt_register() reuse the headed-Chromium owned by browser-model
-# (port 9222) instead of launching its own. Bypasses CF + Camoufox detection
-# combo that fails on datacenter SOCKS5 from this VPS.
-class _CDPBrowserShim:
-    def __init__(self, real_browser):
-        self._b = real_browser
-        self._owned = []
-    def __getattr__(self, name):
-        return getattr(self._b, name)
-    @property
-    def contexts(self):
-        return self._b.contexts
-    async def new_context(self, **kw):
-        # WORKAROUND: chromium contexts created via CDP do NOT inherit
-        # --proxy-server flag. Reuse the broker default context (which has
-        # proxy applied) when proxy isn't explicitly set.
-        kw.pop("proxy", None)
-        if self._b.contexts:
-            ctx = self._b.contexts[0]
-            try:
-                ua = kw.get("user_agent")
-                if ua:
-                    await ctx.set_extra_http_headers({"User-Agent": ua})
-            except Exception:
-                pass
-            return ctx
-        ctx = await self._b.new_context(**kw)
-        self._owned.append(ctx)
-        return ctx
-    async def new_page(self, **kw):
-        ctx = await self.new_context(**kw)
-        return await ctx.new_page()
-    async def close(self):
-        for ctx in list(self._owned):
-            try: await ctx.close()
-            except Exception: pass
-        self._owned.clear()
-        # NEVER call self._b.close() — that would kill the broker chromium.
-
-class _CDPChromiumShim:
-    def __init__(self, real_chromium, ws_endpoint):
-        self._c = real_chromium
-        self._ws = ws_endpoint
-        self._cached = None
-    async def _attach(self):
-        if self._cached is not None:
-            try:
-                _ = self._cached.contexts
-                return self._cached
-            except Exception:
-                self._cached = None
-        # Try direct connect first; on failure, spawn broker chromium via warmup then retry
-        last_exc = None
-        for tri in range(3):
-            try:
-                b = await self._c.connect_over_cdp(self._ws)
-                self._cached = _CDPBrowserShim(b)
-                return self._cached
-            except Exception as e:
-                last_exc = e
-                log(f"[CDP] attach try {tri+1}/3 failed: {e}; pinging broker /api/cf-warmup to spawn chromium…")
-                try:
-                    subprocess.run(
-                        ["curl", "-s", "--max-time", "35",
-                         "http://localhost:8092/api/cf-warmup?url=https%3A%2F%2Fexample.com&timeoutMs=25000"],
-                        capture_output=True, timeout=40,
-                    )
-                except Exception as _we:
-                    log(f"[CDP] warmup ping err: {_we}")
-                await asyncio.sleep(2)
-        raise last_exc
-    async def launch(self, **_kw):
-        return await self._attach()
-    async def connect_over_cdp(self, ws_endpoint, **_kw):
-        return await self._attach()
-
-class _CDPPwShim:
-    def __init__(self, real_pw, ws_endpoint):
-        self._pw = real_pw
-        self._ws = ws_endpoint
-        self.chromium = _CDPChromiumShim(real_pw.chromium, ws_endpoint)
-    def __getattr__(self, name):
-        return getattr(self._pw, name)
-
 OUTLOOK_REFRESH_TOKEN = params.get("outlook_refresh_token", "")
 
 def log(msg): print(f"[replit_reg] {msg}", flush=True)
@@ -1389,46 +1301,17 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
 
     try:
         result["phase"] = "navigate"
-        # CDP path: pre-warm broker sticky context to obtain cf_clearance,
-        # then inject cookies into our context so signup goto returns 200.
-        if USE_CDP:
-            try:
-                import urllib.request as _ur, json as _json
-                log("[CDP] cf-warmup → replit.com/signup …")
-                with _ur.urlopen(
-                    "http://localhost:8092/api/cf-warmup?url=https%3A%2F%2Freplit.com%2Fsignup&timeoutMs=90000",
-                    timeout=120,
-                ) as _r:
-                    _wd = _json.loads(_r.read())
-                _cks = _wd.get("cookies") or []
-                _inj = []
-                for _c in _cks:
-                    if not _c:
-                        continue
-                    _dom = _c.get("domain") or "replit.com"
-                    if not _dom.startswith("."):
-                        _dom = "." + _dom
-                    _inj.append({
-                        "name": _c["name"], "value": _c["value"],
-                        "domain": _dom, "path": _c.get("path", "/"),
-                        "secure": True, "sameSite": "Lax",
-                    })
-                if _inj:
-                    await ctx.add_cookies(_inj)
-                log(f"[CDP] cf_clearance={_wd.get('cfClearance')} cookies_injected={len(_inj)} warmup_ms={_wd.get('ms')}")
-            except Exception as _we:
-                log(f"[CDP] cf-warmup err (continuing): {_we}")
-        else:
-            # legacy SOCKS5 path: original pre-nav warmup
-            try:
-                log("[pre-nav] 访问 google.com 建立会话历史…")
-                await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=65000)
-                await page.wait_for_timeout(_random.randint(2500, 4000))
-                log("[pre-nav] 访问 github.com…")
-                await page.goto("https://github.com", wait_until="domcontentloaded", timeout=65000)
-                await page.wait_for_timeout(_random.randint(2000, 3500))
-            except Exception as e:
-                log(f"[pre-nav] 异常(忽略): {e}")
+        # v7.27：pre-navigation warmup —— 先访问可信站点建立浏览历史
+        # Google→GitHub→replit.com 首页→signup，让 Enterprise JS 看到真实浏览历史
+        try:
+            log("[pre-nav] 访问 google.com 建立会话历史…")
+            await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=65000)
+            await page.wait_for_timeout(_random.randint(2500, 4000))
+            log("[pre-nav] 访问 github.com…")
+            await page.goto("https://github.com", wait_until="domcontentloaded", timeout=65000)
+            await page.wait_for_timeout(_random.randint(2000, 3500))
+        except Exception as e:
+            log(f"[pre-nav] 异常(忽略): {e}")
 
         log("打开 replit.com/signup ...")
         await page.goto("https://replit.com/signup", wait_until="domcontentloaded", timeout=75000)
@@ -1954,43 +1837,6 @@ async def run() -> dict:
     proxy_cfg = {"server": PROXY} if PROXY else None
 
     # ── 探针：验证代理是否存活 ──────────────────────────────────────────────────
-    # ─── CDP attach path (v7.33) ───────────────────────────────────────────
-    # Headed broker chromium passes CF on this VPS; reuse it via remote-debugging.
-    if USE_CDP:
-        log(f"[CDP] use_cdp=True → attaching to broker chromium @ {CDP_WS}")
-        from playwright.async_api import async_playwright as _apw_cdp
-        try:
-            _ip_cdp = subprocess.check_output(
-                ["curl", "-s", "--max-time", "5", "https://api.ipify.org"],
-                text=True,
-            ).strip()
-            final["exit_ip"] = _ip_cdp
-            log(f"[CDP] direct exit_ip={_ip_cdp}")
-        except Exception as _e:
-            log(f"[CDP] exit_ip probe err: {_e}")
-        INTEGRITY_ERRORS_CDP = {
-            "integrity_check_failed_on_load", "integrity_check_failed_after_click",
-            "integrity_check_failed_after_step1", "integrity_check_failed_at_step2",
-            "integrity_check_failed_after_step2",
-        }
-        async with _apw_cdp() as _pw_cdp:
-            _shim = _CDPPwShim(_pw_cdp, CDP_WS)
-            for _att in range(1, 4):
-                log(f"[CDP] attempt {_att}/3 (no proxy, no stealth — broker chromium handles it)")
-                _res = await attempt_register(_shim, None, None, final["exit_ip"])
-                _res["exit_ip"] = final["exit_ip"]
-                final = _res
-                if _res["ok"]:
-                    break
-                if _res["error"] in ("signup_cf_js_challenge_timeout", "signup_cf_ip_banned"):
-                    log(f"[CDP] CF 失败({_res[error]}) → bail out (broker也过不了，需要IP轮换)")
-                    break
-                if _res["error"] not in INTEGRITY_ERRORS_CDP:
-                    break
-                log(f"[CDP] integrity 失败({_res[error]}) → 重试")
-                await asyncio.sleep(2)
-        return final
-
     if proxy_cfg and not await ensure_tunnel(proxy_cfg):
         log("[run] 代理不可达，直接返回 tunnel_dead")
         return {"ok": False, "phase": "ensure_tunnel", "error": "tunnel_dead", "exit_ip": ""}

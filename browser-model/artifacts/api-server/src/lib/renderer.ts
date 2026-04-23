@@ -264,6 +264,8 @@ async function getBrowser(): Promise<Browser> {
           "--no-first-run",
           "--password-store=basic",
           "--use-mock-keychain",
+          "--remote-debugging-port=9222",
+          "--remote-debugging-address=127.0.0.1",
           // Window/screen
           "--window-size=1920,1080",
           "--window-position=0,0",

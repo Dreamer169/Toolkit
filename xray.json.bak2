@@ -1,0 +1,1262 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "socks-main",
+      "port": 10808,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "http-main",
+      "port": 10809,
+      "protocol": "http"
+    },
+    {
+      "tag": "in-socks-0",
+      "port": 10820,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-1",
+      "port": 10821,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-2",
+      "port": 10822,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-3",
+      "port": 10823,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-4",
+      "port": 10824,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-5",
+      "port": 10825,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-6",
+      "port": 10826,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-7",
+      "port": 10827,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-8",
+      "port": 10828,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-9",
+      "port": 10829,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-10",
+      "port": 10830,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-11",
+      "port": 10831,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-12",
+      "port": 10832,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-13",
+      "port": 10833,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-14",
+      "port": 10834,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-15",
+      "port": 10835,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-16",
+      "port": 10836,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-17",
+      "port": 10837,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-18",
+      "port": 10838,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-19",
+      "port": 10839,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-20",
+      "port": 10840,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-21",
+      "port": 10841,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-22",
+      "port": 10842,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-23",
+      "port": 10843,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-24",
+      "port": 10844,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-25",
+      "port": 10845,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "proxy-0",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.67.199.22",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-1",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.21.21.136",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-2",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.67.199.22",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-3",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.21.21.136",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-4",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.67.199.22",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-5",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.21.21.136",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-6",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.67.199.22",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-7",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.21.21.136",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-8",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.67.199.22",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-9",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.21.21.136",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-10",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.67.199.22",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-11",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.21.21.136",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-12",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.67.199.22",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-13",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.21.21.136",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-14",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.67.199.22",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-15",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.21.21.136",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-16",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.67.199.22",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-17",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.21.21.136",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-18",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.67.199.22",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-19",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.21.21.136",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-20",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.67.199.22",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-21",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.21.21.136",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-22",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.67.199.22",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-23",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.21.21.136",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-24",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.67.199.22",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "proxy-25",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.21.21.136",
+            "port": 443,
+            "users": [
+              {
+                "id": "b3be1361-709c-4cad-824a-732e434ea06f",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.qzz.io",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.qzz.io"
+        }
+      }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-0"
+        ],
+        "outboundTag": "proxy-0"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-1"
+        ],
+        "outboundTag": "proxy-1"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-2"
+        ],
+        "outboundTag": "proxy-2"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-3"
+        ],
+        "outboundTag": "proxy-3"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-4"
+        ],
+        "outboundTag": "proxy-4"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-5"
+        ],
+        "outboundTag": "proxy-5"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-6"
+        ],
+        "outboundTag": "proxy-6"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-7"
+        ],
+        "outboundTag": "proxy-7"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-8"
+        ],
+        "outboundTag": "proxy-8"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-9"
+        ],
+        "outboundTag": "proxy-9"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-10"
+        ],
+        "outboundTag": "proxy-10"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-11"
+        ],
+        "outboundTag": "proxy-11"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-12"
+        ],
+        "outboundTag": "proxy-12"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-13"
+        ],
+        "outboundTag": "proxy-13"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-14"
+        ],
+        "outboundTag": "proxy-14"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-15"
+        ],
+        "outboundTag": "proxy-15"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-16"
+        ],
+        "outboundTag": "proxy-16"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-17"
+        ],
+        "outboundTag": "proxy-17"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-18"
+        ],
+        "outboundTag": "proxy-18"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-19"
+        ],
+        "outboundTag": "proxy-19"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-20"
+        ],
+        "outboundTag": "proxy-20"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-21"
+        ],
+        "outboundTag": "proxy-21"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-22"
+        ],
+        "outboundTag": "proxy-22"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-23"
+        ],
+        "outboundTag": "proxy-23"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-24"
+        ],
+        "outboundTag": "proxy-24"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-25"
+        ],
+        "outboundTag": "proxy-25"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "socks-main",
+          "http-main"
+        ],
+        "outboundTag": "proxy-0"
+      }
+    ]
+  }
+}

@@ -440,7 +440,7 @@ function normalizeUrls(input: unknown): string[] {
   return [];
 }
 
-function runPython(script: string, arg: unknown, timeoutMs = 130_000): Promise<{
+function runPython(script: string, arg: unknown, timeoutMs = 240_000): Promise<{
   ok: boolean; raw: string; parsed: Record<string, unknown>;
 }> {
   return new Promise((resolve) => {
