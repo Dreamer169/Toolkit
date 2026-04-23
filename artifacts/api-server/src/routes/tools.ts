@@ -1382,7 +1382,7 @@ router.post("/tools/outlook/register", async (req, res) => {
   const preJobLogs: Array<{ type: string; message: string }> = [];
   let effectiveProxyMode = proxyList.length > 0 ? "" : (proxyMode === "cf" ? "cf" : "");
 
-  if (!proxy && autoProxy && proxyMode !== "cf") {
+  if (!proxy && autoProxy && proxyMode === "shared") {
     try {
       const picked = await pickSharedProxyPool(n, "outlook");
       if (picked.length > 0) {
