@@ -1841,17 +1841,11 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
             SUCCESS_HINTS = ("verify your email","check your email","we sent","sent you",
                              "verification email","confirm your email","sent an email")
             if any(h in body_check.lower() for h in SUCCESS_HINTS):
-                log("[step2-miss] 验证邮件已发送 → IMAP读取验证链接...")
-                _vurl = await _fetch_replit_verify_url(EMAIL, PASSWORD, proxy_cfg=proxy_cfg, outlook_refresh_token=OUTLOOK_REFRESH_TOKEN)
-                if _vurl:
-                    _vres = await _complete_via_verify_url(page, _vurl)
-                    if _vres:
-                        _vres["exit_ip"] = result.get("exit_ip","")
-                        if "verify_url" not in _vres: _vres["verify_url"] = _vurl
-                        await browser.close(); return _vres
+                log("[step2-miss] 验证邮件已发送 → 交还 TS orchestrator (Graph API + click-verify-link)")
                 result["ok"] = True
                 result["phase"] = "verify_email_sent"
-                if _vurl: result["verify_url"] = _vurl  # 让 TS 直接 HTTP 点击, 跳过收件箱轮询
+                # 不再 in-python _fetch_replit_verify_url / _complete_via_verify_url
+                # TS Graph API (accounts.ts L900-940) 全权负责拉链接 + 点击, 避免 replit_register 污染
                 try:
                     _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path":"verify_email_sent"})
                     if _sp: result["state_path"] = _sp
@@ -2120,16 +2114,14 @@ async def attempt_register_camoufox(proxy_cfg, exit_ip: str) -> dict:
                 log(f"[step2-miss] url={url_ck[:80]}")
                 SUCCESS_HINTS = ("verify your email","check your email","we sent","sent you","verification email","confirm your email","sent an email")
                 if any(h in bck.lower() for h in SUCCESS_HINTS):
-                    log("[step2-miss] 验证邮件已发送 → IMAP读取验证链接...")
-                    _vurl = await _fetch_replit_verify_url(EMAIL, PASSWORD, proxy_cfg=proxy_cfg, outlook_refresh_token=OUTLOOK_REFRESH_TOKEN)
-                    if _vurl:
-                        _vres = await _complete_via_verify_url(page, _vurl)
-                        if _vres:
-                            _vres["exit_ip"] = result.get("exit_ip","")
-                            if "verify_url" not in _vres: _vres["verify_url"] = _vurl
-                            return _vres
+                    log("[camoufox][step2-miss] 验证邮件已发送 → 交还 TS orchestrator (Graph API + click-verify-link)")
                     result["ok"] = True; result["phase"] = "verify_email_sent"
-                    if _vurl: result["verify_url"] = _vurl
+                    # 不再 in-python _fetch / _complete, TS Graph API 全权负责
+                    try:
+                        _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path":"verify_email_sent_camoufox"})
+                        if _sp: result["state_path"] = _sp
+                    except Exception as _se:
+                        log(f"[camoufox][state] ⚠ {_se}")
                     return result
                 if is_rate_limited(bck): result["error"] = "account_rate_limited"; return result
                 if is_captcha_invalid(bck): result["error"] = "captcha_token_invalid"; return result
