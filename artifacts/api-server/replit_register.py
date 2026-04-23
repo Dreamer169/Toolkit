@@ -1779,9 +1779,11 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                     _vres = await _complete_via_verify_url(page, _vurl)
                     if _vres:
                         _vres["exit_ip"] = result.get("exit_ip","")
+                        if "verify_url" not in _vres: _vres["verify_url"] = _vurl
                         await browser.close(); return _vres
                 result["ok"] = True
                 result["phase"] = "verify_email_sent"
+                if _vurl: result["verify_url"] = _vurl  # 让 TS 直接 HTTP 点击, 跳过收件箱轮询
                 try:
                     _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path":"verify_email_sent"})
                     if _sp: result["state_path"] = _sp
@@ -2051,8 +2053,12 @@ async def attempt_register_camoufox(proxy_cfg, exit_ip: str) -> dict:
                     if _vurl:
                         _vres = await _complete_via_verify_url(page, _vurl)
                         if _vres:
-                            _vres["exit_ip"] = result.get("exit_ip",""); return _vres
-                    result["ok"] = True; result["phase"] = "verify_email_sent"; return result
+                            _vres["exit_ip"] = result.get("exit_ip","")
+                            if "verify_url" not in _vres: _vres["verify_url"] = _vurl
+                            return _vres
+                    result["ok"] = True; result["phase"] = "verify_email_sent"
+                    if _vurl: result["verify_url"] = _vurl
+                    return result
                 if is_rate_limited(bck): result["error"] = "account_rate_limited"; return result
                 if is_captcha_invalid(bck): result["error"] = "captcha_token_invalid"; return result
                 result["error"] = "signup_username_field_missing"; return result
