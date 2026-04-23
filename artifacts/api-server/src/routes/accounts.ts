@@ -682,6 +682,7 @@ router.post("/replit/register", (req, res) => {
           let exitIp = "";
           let lastErr = "";
           const dynXrayCleanups: Array<() => void> = []; // cleanup fns for dynamic xray instances
+          let parsed: Record<string, unknown> = {}; // v7.57 lifted out of attempt loop so post-loop verify_url access works
 
           // 每个Outlook账号：信誉好的端口优先，避免重复
           let portQueue = sortedByReputation(availablePorts());
@@ -707,7 +708,7 @@ router.post("/replit/register", (req, res) => {
             if (portQueue.length === 0) portQueue = sortedByReputation(availablePorts()).filter((p) => p !== tryPort);
             log(`    Attempt ${attempt}/3 via SOCKS5:${tryPort}`);
 
-            const { parsed } = await runPython(regScript, {
+            ({ parsed } = await runPython(regScript, {
               email: outlook.email,
               username,
               password,
@@ -717,7 +718,7 @@ router.post("/replit/register", (req, res) => {
               capsolver_key: process.env.CAPSOLVER_KEY ?? "",
               outlook_refresh_token: outlook.refresh_token ?? "",
               use_cdp: useCdp,
-            });
+            }));
 
             // 记录代理使用（成功/失败均记录）
             await recordXrayProxyUsage(tryPort, dbE as unknown as (sql: string, params?: unknown[]) => Promise<unknown>);
