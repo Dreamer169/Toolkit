@@ -1154,6 +1154,29 @@ async def _fetch_replit_verify_url(email_addr: str, password: str, timeout_s: in
         log(f"[mail] 非outlook邮箱({_domain}), 跳过"); return None
 
     _URL_PAT = r'https://replit\.com/action-code[^\s"\'<>]+'
+
+    # ── 方法0: 共享缓存 (live-verify-poller 抢先拿到时落盘的 verify_url) ────
+    # poller 和我们抢同一封邮件, 谁先消费谁拿走; 落盘共享让 python 同会话也能接管.
+    import re as _re_pre
+    _safe_key = _re_pre.sub(r'[^a-z0-9._@+-]', '_', email_addr.lower())
+    _cache_path = f"/tmp/replit_verify_cache/{_safe_key}.json"
+    _cache_deadline = _t.time() + min(60, timeout_s)  # 最多等60s共享缓存
+    while _t.time() < _cache_deadline:
+        try:
+            if _os.path.exists(_cache_path):
+                with open(_cache_path) as _cf:
+                    _cd = _json.loads(_cf.read())
+                _cu = (_cd.get("verify_url") or "").strip()
+                _ct = int(_cd.get("ts") or 0)
+                # 10 分钟内的缓存才算新鲜 (oobCode 通常 1h, 但宁可保守)
+                if _cu and (_t.time() * 1000 - _ct) < 600_000:
+                    log(f"[cache] ✅ 命中共享 verify_url (来源={_cd.get('source','?')}): {_cu[:80]}")
+                    return _cu
+        except Exception as _ce:
+            log(f"[cache] 读取失败 (非致命): {str(_ce)[:80]}")
+        await asyncio.sleep(2)
+    log(f"[cache] 等待 {min(60,timeout_s)}s 未命中, 走自己的 Graph/Web fallback")
+
     # 全局 outlook_refresh_token 作为默认值
     _rt = outlook_refresh_token or OUTLOOK_REFRESH_TOKEN
 
