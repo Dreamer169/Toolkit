@@ -22,7 +22,7 @@ PASSWORD = params.get("password", "")
 PROXY    = params.get("proxy", "")
 UA       = params.get("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 HEADLESS = params.get("headless", True)
-USE_CDP  = params.get("use_cdp", True)
+USE_CDP  = params.get("use_cdp", False)
 CDP_WS   = params.get("cdp_ws", "http://127.0.0.1:9222")
 
 # ── CDP shim ────────────────────────────────────────────────────────────────
@@ -434,8 +434,8 @@ async def solve_recaptcha_audio(page, force_bframe: bool = False) -> str | None:
 
 # ── CF Turnstile 等待 ─────────────────────────────────────────────────────────
 async def wait_cf(page) -> str | None:
-    # 10s max (0.5s*20) — CF JS challenge 不会自行清除，快速失败节省时间
-    for _w in range(20):
+    # 35s max (0.5s*70) — give CF JS challenge time to self-resolve
+    for _w in range(70):
         await page.wait_for_timeout(500)
         try:
             title = await page.title()
@@ -1983,11 +1983,11 @@ async def run() -> dict:
                 if _res["ok"]:
                     break
                 if _res["error"] in ("signup_cf_js_challenge_timeout", "signup_cf_ip_banned"):
-                    log(f"[CDP] CF 失败({_res[error]}) → bail out (broker也过不了，需要IP轮换)")
+                    log(f"[CDP] CF 失败({_res['error']}) → bail out (broker也过不了，需要IP轮换)")
                     break
                 if _res["error"] not in INTEGRITY_ERRORS_CDP:
                     break
-                log(f"[CDP] integrity 失败({_res[error]}) → 重试")
+                log(f"[CDP] integrity 失败({_res['error']}) → 重试")
                 await asyncio.sleep(2)
         return final
 
