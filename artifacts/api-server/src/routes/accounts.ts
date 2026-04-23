@@ -592,6 +592,7 @@ router.post("/replit/register", (req, res) => {
   const count = Math.min(Math.max(Number.isFinite(parsedCount) ? parsedCount : 1, 1), 3);
   const headless = req.body?.headless !== false;
   const requestedEmail = typeof req.body?.email === "string" && req.body.email.trim() ? req.body.email.trim().toLowerCase() : null;
+  const useCdp = req.body?.useCdp === true || req.body?.use_cdp === true;
   const jobId    = makeJobId();
   const job: Job = { id: jobId, status: "running", started: Date.now(), logs: [], result: null };
   jobs.set(jobId, job);
@@ -709,6 +710,7 @@ router.post("/replit/register", (req, res) => {
               max_wait: 90,
               capsolver_key: process.env.CAPSOLVER_KEY ?? "",
               outlook_refresh_token: outlook.refresh_token ?? "",
+              use_cdp: useCdp,
             });
 
             // 记录代理使用（成功/失败均记录）
