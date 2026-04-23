@@ -695,20 +695,45 @@ async def fill_step1(page) -> str | None:
             log(f"[captcha] ⚠ 只有 v2 token({rc_token[:20]}), 非 Enterprise → 重置等待")
             rc_token = ""
 
-    # v7.41 (2026-04-23 hotfix): 直接走 checkbox+音频挑战，跳过 execute()
-    # 根因：grecaptcha.enterprise.execute() 在 datacenter/VPS IP 上 score 极低，
-    #      生成的 token 服务端 100% 以 code:2 "captcha token invalid" 拒绝。
-    # 修复：始终先用 solve_recaptcha_audio (checkbox → challenge token)，
-    #      challenge token 绑定真实浏览器 IP，服务端可接受。
     if any_rc and not rc_token:
-        log("[captcha] datacenter IP → 直接 checkbox+音频挑战 (跳过 execute())")
+        log("[captcha] Enterprise: 等待 execute() score token (max 25s)…")
+        # 先尝试触发 enterprise.execute() 获取 score token
+        try:
+            ent_tok = await page.evaluate("""() => {
+                return new Promise((res) => {
+                    if (typeof grecaptcha === 'undefined' || !grecaptcha.enterprise) { res(''); return; }
+                    try {
+                        grecaptcha.enterprise.ready(() => {
+                            grecaptcha.enterprise.execute('6LfyLYUsAAAAAP0Xmu-hJvZOYJLSL7E410qvKyII', {action:'SIGNUP'})
+                                .then(t => {
+                                    var el = document.querySelector('[name="recaptchaToken"]');
+                                    if (el) { el.value = t; el.dispatchEvent(new Event('input',{bubbles:true})); }
+                                    res(t);
+                                }).catch(() => res(''));
+                        });
+                    } catch(e) { res(''); }
+                    setTimeout(() => res(''), 20000);
+                });
+            }""")
+            if ent_tok and len(ent_tok) > 50:
+                log(f"[captcha] ✅ execute() score token={len(ent_tok)}chars prefix={ent_tok[:20]}")
+                rc_token = ent_tok
+        except Exception as _ee:
+            log(f"[captcha] execute() 异常: {_ee}")
+
+    if any_rc and not rc_token:
+        rc_token, cf_token = await _wait_for_token(page, max_s=15)
+
+    if any_rc and not rc_token:
+        # Fallback: 音频挑战（checkbox Enterprise challenge token）
+        log("[captcha] 无 Enterprise score token → 音频挑战 fallback")
         audio_token = await solve_recaptcha_audio(page) or ""
         if audio_token:
-            log(f"[captcha] ✅ challenge token={len(audio_token)}chars prefix={audio_token[:20]}")
+            log(f"[captcha] ✅ 音频 Enterprise 挑战通过 token={len(audio_token)}chars")
             rc_token = audio_token
         else:
-            log("[captcha] checkbox/音频未拿到 token → 等自动 token (max 15s)")
-            rc_token, cf_token = await _wait_for_token(page, max_s=15)
+            log("[captcha] 音频失败，空提交尝试")
+            rc_token, cf_token = await _wait_for_token(page, max_s=8)
     elif not rc_token and not cf_token:
         log("[captcha] 等待 Enterprise 自动 token (max 20s)...")
         rc_token, cf_token = await _wait_for_token(page, max_s=20)
@@ -1540,15 +1565,35 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                     if isinstance(_exp, (int, float)) and _exp > 0:
                         _ck["expires"] = _exp
                     _inj.append(_ck)
-                # 防御性: 即便 broker 没给 auth cookies, 也确保 context 完全干净
+                # ⚠ 关键：只清 replit.com 域的 cookies (移除任何残留 connect.sid/__session 等),
+                # 绝不能清 .google.com / .gstatic.com / .recaptcha.net — broker 在 cf-warmup 时
+                # 加载 reCAPTCHA Enterprise 积累的 NID/SID/HSID/SAPISID/OTZ/__Secure-* trust cookies
+                # 是 execute() score 的关键证据，全清会让 score 跌到 0.1 → server code:2 拒绝。
+                _domain_cleared = []
                 try:
-                    await ctx.clear_cookies()
-                except Exception:
-                    pass
+                    cur_cks = await ctx.cookies()
+                    # 用 expires=0 让 replit 域的 auth blacklist cookies 立即过期
+                    _to_expire = []
+                    for _ck in cur_cks:
+                        _ck_dom = (_ck.get("domain") or "").lstrip(".").lower()
+                        _ck_name = _ck.get("name") or ""
+                        if _ck_dom.endswith("replit.com") and _ck_name in _AUTH_COOKIE_BLACKLIST:
+                            _to_expire.append({
+                                "name": _ck_name, "value": "",
+                                "domain": _ck.get("domain"), "path": _ck.get("path", "/"),
+                                "expires": 0,
+                            })
+                            _domain_cleared.append(_ck_name)
+                    if _to_expire:
+                        await ctx.add_cookies(_to_expire)
+                except Exception as _ce:
+                    log(f"[CDP] cookie cleanup err (忽略): {_ce}")
                 if _inj:
                     await ctx.add_cookies(_inj)
                 if _skipped_auth:
-                    log(f"[CDP] ⚠ 已剔除 broker 残留登录态 cookies: {_skipped_auth}")
+                    log(f"[CDP] ⚠ 跳过 broker 给的 auth cookies: {_skipped_auth}")
+                if _domain_cleared:
+                    log(f"[CDP] ⚠ 已过期 broker 残留 replit auth cookies: {_domain_cleared}")
                 log(f"[CDP] cf_clearance={_wd.get('cfClearance')} cookies_injected={len(_inj)} warmup_ms={_wd.get('ms')} attrs=full")
                 # Per-host route: divert *.google.com / *.gstatic.com / *.recaptcha.net /
                 # *.youtube.com requests through clean non-GCP SOCKS5 exits so
