@@ -592,7 +592,7 @@ router.post("/replit/register", (req, res) => {
   const count = Math.min(Math.max(Number.isFinite(parsedCount) ? parsedCount : 1, 1), 3);
   const headless = req.body?.headless !== false;
   const requestedEmail = typeof req.body?.email === "string" && req.body.email.trim() ? req.body.email.trim().toLowerCase() : null;
-  const useCdp = req.body?.useCdp === true || req.body?.use_cdp === true;
+  const useCdp = req.body?.useCdp !== false && req.body?.use_cdp !== false; // default true: drive CDP+broker+warmup path
   const jobId    = makeJobId();
   const job: Job = { id: jobId, status: "running", started: Date.now(), logs: [], result: null };
   jobs.set(jobId, job);
