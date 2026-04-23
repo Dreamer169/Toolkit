@@ -229,7 +229,7 @@ export default function FullWorkflow() {
           const ok = accts.length > 0;
           const email = accts[0]?.email ?? data?.outlook.email;
           const password = accts[0]?.password ?? data?.outlook.password;
-          setResult({ ok, email, password, accounts: accts, msg: ok ? `✅ 注册成功！${accts.length > 1 ? `共 ${accts.length} 个账号` : "账号已激活"}，已自动保存到账号库和邮箱库；如日志出现设备码，请打开链接输入完成授权。` : "❌ 注册失败（CAPTCHA 无法通过——需要住宅代理）" });
+          setResult({ ok, email, password, accounts: accts, msg: ok ? `✅ 注册成功！${accts.length > 1 ? `共 ${accts.length} 个账号` : "账号已激活"}，已自动保存到账号库和邮箱库；如日志出现设备码，请打开链接输入完成授权。` : "❌ 注册失败" });
           if (ok) {
             setSaved(true);
             setSaveMsg(`✅ ${accts.length} 个账号已自动入库`);

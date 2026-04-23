@@ -1681,7 +1681,7 @@ router.post("/tools/outlook/register", async (req, res) => {
 
     job.logs.push({
       type: "done",
-      message: `注册任务完成 · 成功 ${okCount} 个 / 共 ${n} 个` + (okCount > 0 ? ` ✅` : ` (需要住宅代理才能通过 CAPTCHA)`),
+      message: `注册任务完成 · 成功 ${okCount} 个 / 共 ${n} 个` + (okCount > 0 ? ` ✅` : ``),
     });
     await jobQueue.finish(jobId, code ?? -1, "done");
   });
