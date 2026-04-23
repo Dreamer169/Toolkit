@@ -12,16 +12,18 @@ import * as tls from "node:tls";
 import type { BrowserContext } from "playwright";
 
 const DEFAULT_POOL = [
-  "socks5://127.0.0.1:10820", // FD-298 / 198.12.74.78
-  "socks5://127.0.0.1:10822", // First Server / 107.173.165.210
-  "socks5://127.0.0.1:10823", // HOSTKEY-USA NY
-  "socks5://127.0.0.1:10825", // ColoCrossing Buffalo
-  "socks5://127.0.0.1:10827", // ColoCrossing Buffalo
-  "socks5://127.0.0.1:10828", // ColoCrossing Dallas
-  "socks5://127.0.0.1:10831", // DigitalOcean Santa Clara
-  "socks5://127.0.0.1:10836", // HOSTKEY-USA NY
-  "socks5://127.0.0.1:10837", // MULTA-ASN1 LA
-  "socks5://127.0.0.1:10845", // HVC-AS Netherlands
+  "socks5://127.0.0.1:10820",
+  "socks5://127.0.0.1:10822",
+  "socks5://127.0.0.1:10823",
+  "socks5://127.0.0.1:10824",
+  "socks5://127.0.0.1:10825",
+  "socks5://127.0.0.1:10826",
+  "socks5://127.0.0.1:10828",
+  "socks5://127.0.0.1:10830",
+  "socks5://127.0.0.1:10831",
+  "socks5://127.0.0.1:10836",
+  "socks5://127.0.0.1:10837",
+  "socks5://127.0.0.1:10845",
 ];
 
 function loadPool(): URL[] {

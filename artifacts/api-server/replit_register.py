@@ -1138,7 +1138,7 @@ _CANVAS_WEBGL_NOISE_JS = """
 
 # ── 单次 browser attempt ──────────────────────────────────────────────────────
 
-async def _fetch_replit_verify_url(email_addr: str, password: str, timeout_s: int = 90,
+async def _fetch_replit_verify_url(email_addr: str, password: str, timeout_s: int = 180,
                                     proxy_cfg=None,
                                     outlook_refresh_token: str = "") -> str | None:
     """
@@ -1147,7 +1147,7 @@ async def _fetch_replit_verify_url(email_addr: str, password: str, timeout_s: in
     方法2: Playwright headless 登录 Outlook Web (login.microsoftonline.com)
     注意: ROPC (password grant) 已被 Microsoft 全面封禁，不再尝试。
     """
-    import urllib.request, urllib.parse, json as _json, time as _t, re as _re, os as _os
+    import urllib.request, urllib.parse, json as _json, time as _t, re as _re, os as _os, html as _html
 
     _domain = email_addr.lower().split("@")[-1] if "@" in email_addr else ""
     if _domain not in ("outlook.com", "hotmail.com", "live.com", "msn.com"):
@@ -1182,23 +1182,32 @@ async def _fetch_replit_verify_url(email_addr: str, password: str, timeout_s: in
                 log(f"[graph] ✅ refresh_token OK cid={_cid[:8]}")
 
                 _deadline = _t.time() + timeout_s
+                # 真实发件人是 verify@replit.com (不是 noreply@), $filter 命中 0 条 + URL 编码后还 400.
+                # 改成: 拉前 10 封, 代码侧按 sender/subject/body 匹配. Inbox + JunkEmail 双轮询.
+                _qs = urllib.parse.quote(
+                    "$select=subject,from,body&$orderby=receivedDateTime desc&$top=10",
+                    safe="=&$/'")
+                _folders = ("Inbox", "JunkEmail")
                 while _t.time() < _deadline:
-                    try:
-                        _gurl = ("https://graph.microsoft.com/v1.0/me/messages"
-                                 "?$filter=from/emailAddress/address eq 'noreply@replit.com'"
-                                 "&$select=body,subject&$orderby=receivedDateTime desc&$top=5")
-                        _gr = urllib.request.Request(_gurl, headers={
-                            "Authorization": f"Bearer {_tok}", "Accept": "application/json"})
-                        _msgs = _json.loads(urllib.request.urlopen(_gr, timeout=12).read()).get("value", [])
-                        for _msg in _msgs:
-                            _body = _msg.get("body", {}).get("content", "")
-                            _m = _re.search(_URL_PAT, _body)
-                            if _m:
-                                log(f"[graph] ✅ 验证链接: {_m.group(0)[:80]}")
-                                return _m.group(0).rstrip(".,)")
-                        log(f"[graph] 未找到邮件, 剩余{int(_deadline - _t.time())}s")
-                    except Exception as _ge:
-                        log(f"[graph] poll err: {_ge}")
+                    for _fld in _folders:
+                        try:
+                            _url = f"https://graph.microsoft.com/v1.0/me/mailFolders/{_fld}/messages?{_qs}"
+                            _gr = urllib.request.Request(_url, headers={
+                                "Authorization": f"Bearer {_tok}", "Accept": "application/json"})
+                            _msgs = _json.loads(urllib.request.urlopen(_gr, timeout=12).read()).get("value", [])
+                            for _msg in _msgs:
+                                _subj = (_msg.get("subject") or "").lower()
+                                _frm  = ((_msg.get("from") or {}).get("emailAddress") or {}).get("address", "").lower()
+                                if not ("replit" in _frm or "replit" in _subj or "verify" in _subj):
+                                    continue
+                                _body = (_msg.get("body") or {}).get("content", "")
+                                _m = _re.search(_URL_PAT, _body)
+                                if _m:
+                                    log(f"[graph] ✅ {_fld} 验证链接: {_m.group(0)[:80]}")
+                                    return _html.unescape(_m.group(0)).rstrip(".,)")
+                        except Exception as _ge:
+                            log(f"[graph] {_fld} poll err: {str(_ge)[:120]}")
+                    log(f"[graph] 未找到, 剩余{int(_deadline - _t.time())}s (Inbox+Junk)")
                     await asyncio.sleep(6)
                 return None
             except Exception as _re_e:
@@ -1290,9 +1299,17 @@ async def _fetch_replit_verify_url(email_addr: str, password: str, timeout_s: in
                 await _pg2.goto("https://outlook.live.com/mail/0/inbox",
                                 wait_until="domcontentloaded", timeout=35000)
                 await _pg2.wait_for_timeout(4000)
-                log("[outlook-web] 进入收件箱, 开始轮询...")
+                log("[outlook-web] 进入收件箱, 开始轮询 (Inbox/Other/Junk + Search)...")
 
+                # 全新 Outlook 账号: Replit 验证邮件常进 Junk Email 或 Other(Focused/Other 切换);
+                # 用 search?q=replit 一次扫所有 folder, 再轮 inbox / junkemail 兜底.
+                _SEARCH_URLS = [
+                    "https://outlook.live.com/mail/0/?searchquery=replit",
+                    "https://outlook.live.com/mail/0/junkemail",
+                    "https://outlook.live.com/mail/0/inbox",
+                ]
                 _dl2 = _t.time() + timeout_s
+                _folder_idx = 0
                 while _t.time() < _dl2:
                     # 先扫全页 HTML
                     _c2 = await _pg2.content()
@@ -1300,17 +1317,17 @@ async def _fetch_replit_verify_url(email_addr: str, password: str, timeout_s: in
                     if _m2:
                         _u2 = _m2.group(0).rstrip(".,)")
                         log(f"[outlook-web] ✅ 从页面HTML找到: {_u2[:80]}")
-                        return _u2
+                        return _html.unescape(_u2)
 
-                    # 点击含 "replit" 的邮件行
+                    # 点击含 "replit" / "verify" 的邮件行 (任何当前 folder)
                     try:
                         _rows = await _pg2.locator(
                             '[data-convid], [role="option"], .customScrollBar div[class*="row"]'
                         ).all()
                         for _row in _rows:
                             try:
-                                _rtxt = (await _row.inner_text())[:150].lower()
-                                if "replit" in _rtxt or "verify" in _rtxt:
+                                _rtxt = (await _row.inner_text())[:200].lower()
+                                if "replit" in _rtxt or "verify" in _rtxt or "verification" in _rtxt:
                                     await _row.click()
                                     await _pg2.wait_for_timeout(2500)
                                     _c3 = await _pg2.content()
@@ -1318,15 +1335,27 @@ async def _fetch_replit_verify_url(email_addr: str, password: str, timeout_s: in
                                     if _m3:
                                         _u3 = _m3.group(0).rstrip(".,)")
                                         log(f"[outlook-web] ✅ 点击邮件获取: {_u3[:80]}")
-                                        return _u3
+                                        return _html.unescape(_u3)
                             except Exception: pass
                     except Exception: pass
 
-                    log(f"[outlook-web] 未找到验证邮件, 剩余{int(_dl2 - _t.time())}s")
-                    await asyncio.sleep(8)
+                    # 尝试切换 Focused/Other tab (如果有)
                     try:
-                        await _pg2.reload(wait_until="domcontentloaded", timeout=20000)
-                        await _pg2.wait_for_timeout(3000)
+                        _other = _pg2.locator('button[role="tab"]:has-text("Other"), button[role="tab"]:has-text("其他"), [aria-label*="Other"]').first
+                        if await _other.count() > 0:
+                            await _other.click(timeout=2000)
+                            await _pg2.wait_for_timeout(1500)
+                            log("[outlook-web] 切到 Other tab")
+                    except Exception: pass
+
+                    _remain = int(_dl2 - _t.time())
+                    _next_folder = _SEARCH_URLS[_folder_idx % len(_SEARCH_URLS)]
+                    _folder_idx += 1
+                    log(f"[outlook-web] 未找到, 剩余{_remain}s → 轮换到 {_next_folder.split('/')[-1] or 'search'}")
+                    await asyncio.sleep(6)
+                    try:
+                        await _pg2.goto(_next_folder, wait_until="domcontentloaded", timeout=20000)
+                        await _pg2.wait_for_timeout(3500)
                     except Exception: pass
 
             finally:

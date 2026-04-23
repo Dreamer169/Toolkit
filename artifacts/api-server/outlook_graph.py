@@ -61,8 +61,14 @@ def _load_token() -> str:
 
 
 def _graph_get(path: str, token: str) -> dict:
+    if "?" in path:
+        base, qs = path.split("?", 1)
+        qs = urllib.parse.quote(qs, safe="=&$/'")
+        url = f"https://graph.microsoft.com/v1.0{base}?{qs}"
+    else:
+        url = f"https://graph.microsoft.com/v1.0{path}"
     req = urllib.request.Request(
-        f"https://graph.microsoft.com/v1.0{path}",
+        url,
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
     )
     return json.loads(urllib.request.urlopen(req, timeout=20).read())
@@ -70,8 +76,14 @@ def _graph_get(path: str, token: str) -> dict:
 
 def _graph_get_with_token(path: str, access_token: str) -> dict:
     """用已有 access_token 直接查询（不走文件）"""
+    if "?" in path:
+        base, qs = path.split("?", 1)
+        qs = urllib.parse.quote(qs, safe="=&$/'")
+        url = f"https://graph.microsoft.com/v1.0{base}?{qs}"
+    else:
+        url = f"https://graph.microsoft.com/v1.0{path}"
     req = urllib.request.Request(
-        f"https://graph.microsoft.com/v1.0{path}",
+        url,
         headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
     )
     return json.loads(urllib.request.urlopen(req, timeout=20).read())
@@ -161,6 +173,25 @@ def wait_for_replit_verify(
     print(f"[replit_graph] 开始轮询收件箱 (最多 {timeout}s)…", flush=True)
     while time.time() < deadline:
         try:
+            # NEW: also poll JunkEmail (Replit verify mail often lands there for fresh accounts)
+            try:
+                _junk = _graph_get_with_token(
+                    "/me/mailFolders/JunkEmail/messages?$select=subject,from,id&$orderby=receivedDateTime desc&$top=10",
+                    token,
+                )
+                for _jm in _junk.get("value", []):
+                    _jsubj = (_jm.get("subject") or "").lower()
+                    _jfrom = ((_jm.get("from") or {}).get("emailAddress") or {}).get("address", "").lower()
+                    if any(k in _jsubj for k in REPLIT_KWS) or "replit" in _jfrom:
+                        _jid = _jm.get("id")
+                        _jdetail = _graph_get_with_token(f"/me/messages/{_jid}?$select=body", token)
+                        _jurl = _extract_verify_url((_jdetail.get("body") or {}).get("content", ""))
+                        if _jurl:
+                            print(f"[replit_graph] ✅ (Junk) 验证链接: {_jurl[:80]}", flush=True)
+                            return _jurl
+            except Exception as _je:
+                pass
+
             msgs = _graph_get_with_token(
                 "/me/mailFolders/Inbox/messages"
                 "?$top=20&$orderby=receivedDateTime+desc"
