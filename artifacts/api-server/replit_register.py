@@ -821,6 +821,28 @@ async def fill_step1(page) -> str | None:
     except Exception:
         pass
 
+    # v7.46 在 click 前注册 route 拦截器：强制把 sign-up POST 体里的 recaptchaToken 替换为 OUR rc_token
+    # 防止 React state 因页面 auto-execute 持有低分 token，提交时发出去
+    if rc_token and len(rc_token) > 50:
+        _locked_rc = rc_token
+        async def _signup_force_token(route, request):
+            try:
+                import json as _jft
+                bd = _jft.loads(request.post_data or "{}")
+                _orig_t = bd.get("recaptchaToken", "")
+                if _orig_t != _locked_rc:
+                    bd["recaptchaToken"] = _locked_rc
+                    log(f"[route-force] recaptchaToken 替换 orig={len(_orig_t)}chars→locked={len(_locked_rc)}chars")
+                await route.continue_(post_data=_jft.dumps(bd))
+            except Exception as _re:
+                log(f"[route-force] err: {_re}")
+                await route.continue_()
+        try:
+            await page.route("**/api/v1/auth/sign-up**", _signup_force_token)
+            log(f"[route-force] 已挂载 sign-up POST 拦截器，将强制 token={len(_locked_rc)}chars")
+        except Exception as _ro:
+            log(f"[route-force] 挂载失败: {_ro}")
+
     # 先注册 response+request 拦截器（在 click 前）避免漏掉快速响应
     _api_resp: dict = {}
     _api_req: dict = {}
