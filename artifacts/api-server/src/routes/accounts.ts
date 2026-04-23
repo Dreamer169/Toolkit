@@ -944,23 +944,54 @@ router.post("/replit/register", (req, res) => {
           if (!regOk) continue; // 换下一个 Outlook 账号
 
           // ── Step 3: 等待 Replit 发验证邮件 → 通过 Graph API 点击 ─────
-          log("  Step3: Waiting for Replit verification email...");
-          await new Promise(r => setTimeout(r, 12000));
-
+          // Fast-path: python 已经从 Graph API 拿到 verify_url 并返回 → 直接 HTTP 点击,
+          // 跳过容易扑空的收件箱轮询 (live-verify poller 也可能抢先点完导致永远找不到邮件)
+          const pyVerifyUrl = typeof parsed.verify_url === "string" ? parsed.verify_url.trim() : "";
           let verified = false;
-          for (let t = 0; t < 30; t++) {
-            log(`    Poll ${t + 1}/30 (accountId=${outlook.id})...`);
+
+          if (pyVerifyUrl) {
+            log(`  Step3: 直接点 python 已取的验证链接 (跳过收件箱轮询)`);
             const vr = await localPost("/api/tools/outlook/click-verify-link", {
               accountId: outlook.id,
+              verifyUrl: pyVerifyUrl,
             }) as { success?: boolean; final_url?: string; error?: string };
-
             if (vr.success) {
               log(`    ✅ Verified! => ${vr.final_url?.slice(0, 70)}`);
               verified = true;
-              break;
+            } else {
+              const errStr = String(vr.error ?? "").toLowerCase();
+              // "invalid or has been used" = 链接已被消费 (python goto / live-verify) → 实际已激活
+              if (errStr.includes("invalid") || errStr.includes("has been used") || errStr.includes("已使用")) {
+                log(`    ✅ 链接已被消费 (视为已验证): ${String(vr.error).slice(0, 80)}`);
+                verified = true;
+              } else {
+                log(`    ✗ 直接点击失败: ${String(vr.error).slice(0, 80)} → 退回收件箱轮询`);
+              }
             }
-            log(`    Waiting... (${String(vr.error ?? "no link yet").slice(0, 60)})`);
-            await new Promise(r => setTimeout(r, 15000));
+          }
+
+          if (!verified) {
+            log("  Step3: Waiting for Replit verification email...");
+            await new Promise(r => setTimeout(r, 12000));
+            for (let t = 0; t < 30; t++) {
+              log(`    Poll ${t + 1}/30 (accountId=${outlook.id})...`);
+              const vr = await localPost("/api/tools/outlook/click-verify-link", {
+                accountId: outlook.id,
+              }) as { success?: boolean; final_url?: string; error?: string };
+              if (vr.success) {
+                log(`    ✅ Verified! => ${vr.final_url?.slice(0, 70)}`);
+                verified = true;
+                break;
+              }
+              const errStr = String(vr.error ?? "no link yet").toLowerCase();
+              if (errStr.includes("invalid") || errStr.includes("has been used") || errStr.includes("已使用")) {
+                log(`    ✅ 链接已被消费 (视为已验证): ${String(vr.error).slice(0, 80)}`);
+                verified = true;
+                break;
+              }
+              log(`    Waiting... (${String(vr.error ?? "no link yet").slice(0, 60)})`);
+              await new Promise(r => setTimeout(r, 15000));
+            }
           }
           if (!verified) log("  Verification timed out (account may still be usable)");
 
