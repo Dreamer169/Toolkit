@@ -1663,6 +1663,14 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 if _domain_cleared:
                     log(f"[CDP] ⚠ 已过期 broker 残留 replit auth cookies: {_domain_cleared}")
                 log(f"[CDP] cf_clearance={_wd.get('cfClearance')} cookies_injected={len(_inj)} warmup_ms={_wd.get('ms')} attrs=full")
+                # v7.47 dump .google cookies for score diagnostics
+                try:
+                    _all_cks = await ctx.cookies()
+                    _g_cks = [c for c in _all_cks if "google" in (c.get("domain","").lower()) or "gstatic" in (c.get("domain","").lower()) or "recaptcha" in (c.get("domain","").lower())]
+                    _g_names = sorted({c.get("name","") for c in _g_cks})
+                    log(f"[CDP] google/gstatic/recaptcha cookies count={len(_g_cks)} names={_g_names}")
+                except Exception as _gce:
+                    log(f"[CDP] google cookie dump err: {_gce}")
                 # Per-host route: divert *.google.com / *.gstatic.com / *.recaptcha.net /
                 # *.youtube.com requests through clean non-GCP SOCKS5 exits so
                 # reCAPTCHA Enterprise sees a fresh IP instead of WARP-via-GCP.
@@ -1689,6 +1697,14 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 await page.wait_for_timeout(_random.randint(2000, 3500))
             except Exception as e:
                 log(f"[pre-nav] 异常(忽略): {e}")
+
+        # v7.47 CDP path 也做 google.com 预热 — 让 patchright context 与 google.com 建立 IP 一致性
+        try:
+            log("[pre-nav] (CDP) 访问 google.com 建立 IP/cookie 一致性…")
+            await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(_random.randint(1800, 3000))
+        except Exception as _pne:
+            log(f"[pre-nav] (CDP) google.com 失败(忽略): {_pne}")
 
         log("打开 replit.com/signup ...")
         await page.goto("https://replit.com/signup", wait_until="domcontentloaded", timeout=75000)
