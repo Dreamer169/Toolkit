@@ -56,3 +56,6 @@ data/
 artifacts/data/
 tmp_gateway_update_files/
 .env.local
+
+# Replit session storage_state (contains connect.sid + cf_clearance — sensitive)
+.state/
