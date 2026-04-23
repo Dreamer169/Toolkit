@@ -274,7 +274,7 @@ function sortedByReputation(ports: number[]): number[] {
 }
 function shuffled(arr: number[]): number[] { return [...arr].sort(() => Math.random() - 0.5); }
 
-const MIN_REPLIT_POOL = 5; // 账号池最低水位，低于此值自动触发补充
+const MIN_REPLIT_POOL = 1; // 账号池最低水位，低于此值自动触发补充
 
 let autoRefillRunning = false;
 
