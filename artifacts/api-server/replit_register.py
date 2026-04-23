@@ -695,45 +695,20 @@ async def fill_step1(page) -> str | None:
             log(f"[captcha] ⚠ 只有 v2 token({rc_token[:20]}), 非 Enterprise → 重置等待")
             rc_token = ""
 
+    # v7.41 (2026-04-23 hotfix): 直接走 checkbox+音频挑战，跳过 execute()
+    # 根因：grecaptcha.enterprise.execute() 在 datacenter/VPS IP 上 score 极低，
+    #      生成的 token 服务端 100% 以 code:2 "captcha token invalid" 拒绝。
+    # 修复：始终先用 solve_recaptcha_audio (checkbox → challenge token)，
+    #      challenge token 绑定真实浏览器 IP，服务端可接受。
     if any_rc and not rc_token:
-        log("[captcha] Enterprise: 等待 execute() score token (max 25s)…")
-        # 先尝试触发 enterprise.execute() 获取 score token
-        try:
-            ent_tok = await page.evaluate("""() => {
-                return new Promise((res) => {
-                    if (typeof grecaptcha === 'undefined' || !grecaptcha.enterprise) { res(''); return; }
-                    try {
-                        grecaptcha.enterprise.ready(() => {
-                            grecaptcha.enterprise.execute('6LfyLYUsAAAAAP0Xmu-hJvZOYJLSL7E410qvKyII', {action:'SIGNUP'})
-                                .then(t => {
-                                    var el = document.querySelector('[name="recaptchaToken"]');
-                                    if (el) { el.value = t; el.dispatchEvent(new Event('input',{bubbles:true})); }
-                                    res(t);
-                                }).catch(() => res(''));
-                        });
-                    } catch(e) { res(''); }
-                    setTimeout(() => res(''), 20000);
-                });
-            }""")
-            if ent_tok and len(ent_tok) > 50:
-                log(f"[captcha] ✅ execute() score token={len(ent_tok)}chars prefix={ent_tok[:20]}")
-                rc_token = ent_tok
-        except Exception as _ee:
-            log(f"[captcha] execute() 异常: {_ee}")
-
-    if any_rc and not rc_token:
-        rc_token, cf_token = await _wait_for_token(page, max_s=15)
-
-    if any_rc and not rc_token:
-        # Fallback: 音频挑战（checkbox Enterprise challenge token）
-        log("[captcha] 无 Enterprise score token → 音频挑战 fallback")
+        log("[captcha] datacenter IP → 直接 checkbox+音频挑战 (跳过 execute())")
         audio_token = await solve_recaptcha_audio(page) or ""
         if audio_token:
-            log(f"[captcha] ✅ 音频 Enterprise 挑战通过 token={len(audio_token)}chars")
+            log(f"[captcha] ✅ challenge token={len(audio_token)}chars prefix={audio_token[:20]}")
             rc_token = audio_token
         else:
-            log("[captcha] 音频失败，空提交尝试")
-            rc_token, cf_token = await _wait_for_token(page, max_s=8)
+            log("[captcha] checkbox/音频未拿到 token → 等自动 token (max 15s)")
+            rc_token, cf_token = await _wait_for_token(page, max_s=15)
     elif not rc_token and not cf_token:
         log("[captcha] 等待 Enterprise 自动 token (max 20s)...")
         rc_token, cf_token = await _wait_for_token(page, max_s=20)
