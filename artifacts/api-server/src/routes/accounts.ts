@@ -711,7 +711,7 @@ router.post("/replit/register", (req, res) => {
               capsolver_key: process.env.CAPSOLVER_KEY ?? "",
               outlook_refresh_token: outlook.refresh_token ?? "",
               use_cdp: useCdp,
-            });
+            }, 420_000);  // 7min: CDP warmup ~50s + warmup behaviors ~50s + Step1+captcha ~60s + Step2+verify ~120s
 
             // 记录代理使用（成功/失败均记录）
             await recordXrayProxyUsage(tryPort, dbE as unknown as (sql: string, params?: unknown[]) => Promise<unknown>);
