@@ -731,6 +731,13 @@ async def fill_step1(page) -> str | None:
                                         el.dispatchEvent(new Event('input',{bubbles:true}));
                                         el.dispatchEvent(new Event('change',{bubbles:true}));
                                     }
+                                    // v7.45 monkey-patch execute: 后续重复调用都立即 resolve OUR token
+                                    // 防止 _pre_wait 期间页面 auto-execute 拿到低分 token 经 data-callback 写入 React state
+                                    try {
+                                        window.__lockedRcToken = t;
+                                        grecaptcha.enterprise.execute = function() { return Promise.resolve(window.__lockedRcToken); };
+                                        if (grecaptcha.execute) grecaptcha.execute = grecaptcha.enterprise.execute;
+                                    } catch(_pe) {}
                                     res({ok:true, token:t, len:t?t.length:0});
                                 })
                                 .catch(e => res({ok:false, err:'execute_rejected:'+(e&&e.message?e.message:String(e))}));
