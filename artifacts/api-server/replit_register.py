@@ -743,6 +743,8 @@ async def fill_step1(page) -> str | None:
                 if ent_result.get("ok") and ent_result.get("token") and ent_result.get("len", 0) > 50:
                     rc_token = ent_result["token"]
                     log(f"[captcha] ✅ execute() Enterprise score token len={ent_result['len']} prefix={rc_token[:20]}")
+                    # v7.44 锁死字段 - 防 grecaptcha 后续 auto-execute 覆盖低分 token
+                    await _inject_and_trigger(rc_token)
                 else:
                     log(f"[captcha] ⚠ execute() 失败: {ent_result.get('err','unknown')[:200]}")
             else:
@@ -776,6 +778,14 @@ async def fill_step1(page) -> str | None:
     _pre_wait = _random.randint(5000, 8000)
     log(f"[submit] 等待 {_pre_wait}ms → Enterprise 最终评分")
     await page.wait_for_timeout(_pre_wait)
+    # v7.44 提交前 re-lock - _pre_wait 期间 grecaptcha 可能重新 execute 写入低分 token
+    if rc_token and len(rc_token) > 50:
+        await _inject_and_trigger(rc_token)
+        try:
+            cur = await page.evaluate("() => { var e=document.querySelector('[name=\"recaptchaToken\"]'); return e?e.value.length:0; }")
+            log(f"[submit] re-lock 后 DOM recaptchaToken value len={cur}")
+        except Exception:
+            pass
     # 顺便检查按钮状态
     try:
         btn_check = page.locator('[data-cy="signup-create-account"]')
