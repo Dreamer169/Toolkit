@@ -814,13 +814,12 @@ async def fill_step1(page) -> str | None:
 
     # v7.58 恢复 v7.46 route-force 拦截器：日志证明 page auto-re-execute 在 pre-wait 期间
     # 将 React state 中的 recaptchaToken 覆盖为不同 token，导致 POST body 与我们
-    # execute() 拿到的高分 token 不一致，Replit 返回 code:1。WARP 模式下我们的
-    # execute() token 才是高分来源，route-force 确保 POST 使用它。
-    # v7.71: DIRECT 模式 (BROWSER_PROXY 空) 时禁用 route-force — 此时 google_proxy_route 也已禁用，
-    # page 自身的 execute() 通过 chromium DIRECT 出口完成, 跟 POST 走同一 IP, 强制 lock 旧 token 反而
-    # 把已经过时的 token (可能 IP context 不同) 替换上去 → code:2.
-    _brox_rf = os.environ.get("BROWSER_PROXY", "").strip()
-    if rc_token and len(rc_token) > 50 and _brox_rf:
+    # execute() 拿到的高分 token 不一致，Replit 返回 code:1。
+    # v7.72: 默认禁用 route-force — 跟 google_proxy_route 配套, chromium 原生执行
+    # execute() + auto-re-execute, 同一 IP context 下生成的 token 都是高分一致的, 强制
+    # 锁定 旧 token 反而把过时 token 替换上去 → code:2. 仅当 FORCE_ROUTE_FORCE=1 时启用旧路径.
+    _force_rf = os.environ.get("FORCE_ROUTE_FORCE", "").strip() in ("1","true","yes")
+    if rc_token and len(rc_token) > 50 and _force_rf:
         _locked_rc = rc_token
         async def _signup_force_token(route, request):
             try:
@@ -1878,14 +1877,13 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 # Per-host route: divert *.google.com / *.gstatic.com / *.recaptcha.net /
                 # *.youtube.com requests through clean non-GCP SOCKS5 exits so
                 # reCAPTCHA Enterprise sees a fresh IP instead of WARP-via-GCP.
-                # v7.71: 当 broker chromium 走 DIRECT (BROWSER_PROXY=空) 时,
-                # 必须禁用 google_proxy_route 避免 IP 不一致 (token 来自 SOCKS exit,
-                # POST 来自 chromium DIRECT 出口) → Replit 返回 code:2 (token invalid).
-                # 同时也支持显式 DISABLE_GOOGLE_ROUTE=1 强制关闭.
+                # v7.72: 默认始终禁用 google_proxy_route — 让 chromium 原生出口同时处理
+                # execute() 和 signup POST, 保证 IP 一致 → 不再 code:2 (mismatch).
+                # 仅当 FORCE_GOOGLE_ROUTE=1 (例如手动调试 broker 走 WARP 时), 才启用旧路径.
                 _brox = os.environ.get("BROWSER_PROXY", "").strip()
-                _disable_groute = os.environ.get("DISABLE_GOOGLE_ROUTE", "").strip() in ("1","true","yes")
-                if not _brox or _disable_groute:
-                    log(f"[CDP] google-route SKIPPED (BROWSER_PROXY={_brox!r} disable={_disable_groute}) — chromium native exit handles *.google for IP一致性")
+                _force_groute = os.environ.get("FORCE_GOOGLE_ROUTE", "").strip() in ("1","true","yes")
+                if not _force_groute:
+                    log(f"[CDP] google-route SKIPPED (BROWSER_PROXY={_brox!r}) — chromium native exit 接管 *.google → IP一致避免 code:2")
                 else:
                     try:
                         import sys as _sys, os as _os
@@ -1894,7 +1892,7 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                             _sys.path.insert(0, _here)
                         from google_proxy_route import attach_google_proxy_routing as _agr
                         await _agr(ctx, log)
-                        log("[CDP] google-route attached (non-GCP exits for *.google/*.gstatic/*.recaptcha)")
+                        log("[CDP] google-route attached (FORCE_GOOGLE_ROUTE=1, *.google → SOCKS clean exits)")
                     except Exception as _ge:
                         log(f"[CDP] google-route attach failed: {_ge}")
             except Exception as _we:
