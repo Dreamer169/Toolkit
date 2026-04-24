@@ -4,7 +4,7 @@
     "gptmail_api_key": "gpt-test",
     "npcmail_api_key": "",
     "npcmail_domain": "git-hub.email",
-    "proxy": "socks5://PvN1fHeJtl-country-US-sessid-177592349810000:Zn4w03WLbI2P8aX@pool-us.quarkip.io:7777",
+    "proxy": "",
     "enable_oauth": true,
     "oauth_issuer": "https://auth.openai.com",
     "oauth_client_id": "app_EMoamEEZ73f0CkXaXp7hrann",

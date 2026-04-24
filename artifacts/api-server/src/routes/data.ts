@@ -599,7 +599,6 @@ router.get("/data/proxies/pick", async (req, res) => {
       ORDER BY
         CASE
           WHEN ${SUBNODE_BRIDGE_SQL} THEN 0
-          WHEN formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%' THEN 1
           WHEN host <> '127.0.0.1' THEN 2
           ELSE 3
         END,
@@ -827,7 +826,7 @@ async function runProxyMaintenance() {
       banned += usedRows.length;
     }
 
-    // 4. 连通性检测：随机抽 30 个 idle SOCKS5 代理（含 pool-us），验证真实出网
+    // 4. 连通性检测：随机抽 30 个 idle SOCKS5 代理，验证真实出网
     const toCheck = await query<{ id: number; formatted: string }>(
       `SELECT id, formatted FROM proxies
        WHERE status='idle' AND formatted ILIKE 'socks5://%'

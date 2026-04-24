@@ -1760,7 +1760,7 @@ router.post("/tools/cursor/register", async (req, res) => {
       await syncLocalSubnodeBridgeProxies();
       const { query: dbQuery } = await import("../db.js");
       const rows = await dbQuery<{ id: number; formatted: string }>(
-        `SELECT id, formatted FROM proxies WHERE ${ELIGIBLE_SHARED_PROXY_SQL} ORDER BY CASE WHEN ${SUBNODE_BRIDGE_SQL} THEN 0 WHEN formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%' THEN 1 WHEN host <> '127.0.0.1' THEN 2 ELSE 3 END, used_count ASC, RANDOM() LIMIT 1`
+        `SELECT id, formatted FROM proxies WHERE ${ELIGIBLE_SHARED_PROXY_SQL} ORDER BY CASE WHEN ${SUBNODE_BRIDGE_SQL} THEN 0 WHEN host <> '127.0.0.1' THEN 1 ELSE 2 END, used_count ASC, RANDOM() LIMIT 1`
       );
       if (rows[0]) {
         proxy = rows[0].formatted;
@@ -1911,7 +1911,7 @@ router.post("/tools/cursor/register-http", async (req, res) => {
       await syncLocalSubnodeBridgeProxies();
       const { query: dbQuery } = await import("../db.js");
       const rows = await dbQuery<{ formatted: string }>(
-        `SELECT formatted FROM proxies WHERE ${ELIGIBLE_SHARED_PROXY_SQL} ORDER BY CASE WHEN ${SUBNODE_BRIDGE_SQL} THEN 0 WHEN formatted ILIKE '%quarkip%' OR formatted ILIKE '%pool-us%' THEN 1 WHEN host <> '127.0.0.1' THEN 2 ELSE 3 END, used_count ASC, RANDOM() LIMIT 1`
+        `SELECT formatted FROM proxies WHERE ${ELIGIBLE_SHARED_PROXY_SQL} ORDER BY CASE WHEN ${SUBNODE_BRIDGE_SQL} THEN 0 WHEN host <> '127.0.0.1' THEN 1 ELSE 2 END, used_count ASC, RANDOM() LIMIT 1`
       );
       if (rows[0]) proxy = rows[0].formatted;
     } catch {}

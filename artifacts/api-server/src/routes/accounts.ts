@@ -11,13 +11,12 @@ const PYTHON = process.env.PYTHON_BIN || "/usr/bin/python3";
 const LOCAL_API_BASE = (process.env.LOCAL_API_BASE_URL || "http://127.0.0.1:" + (process.env.PORT || "8080")).replace(/\/$/, "");
 const VPS_GATEWAY = process.env.VPS_GATEWAY_URL || "http://45.205.27.69:8080/api/gateway";
 // Dead ports detected via connectivity scan (10827-10829, 10834-10841 offline)
-// All quarkip 10820-10845 confirmed datacenter IPs → CF JS challenge all → removed
 // Only port 1090 (WS-proxy bridge: VPS → http_ws_bridge.py → Replit repl WS → internet, exit: Replit cloud IP) remains
 // v7.51 — POOL SWAP (root cause of code:2 score-too-low):
 //   旧 1090-1095 走 WARP/Cloudflare 出口至 34.96.x.x = GOOGLE-CLOUD-PLATFORM ASN,
 //   reCAPTCHA Enterprise 给 GCP 的 datacenter IP 自动 ~0.1 score → server code:2 拒绝
 //   (commit a21d345 已经诊断过这点)。新 10820-10845 是干净 residential/colo (DigitalOcean/
-//   ColoCrossing/HostHatch 等), 实测大多 score >0.5 可过。注释 "all quarkip dead" 是过时的,
+//   ColoCrossing/HostHatch 等), 实测大多 score >0.5 可过。旧注释已过时,
 //   xray.json 已经把这 26 个端口配成 in-socks-N 入口, 实测探针 12/13 alive 且无 GCP IP.
 const XRAY_PORTS_DEAD = new Set<number>([1090, 1091, 1092, 1094, 1095]);  // 友节点全死/或剩 GCP 出口
 const XRAY_PORTS  = [10822, 10824, 10826, 10828, 10830, 10832, 10834, 10836, 10838, 10840, 10842, 10845];  // clean non-GCP pool

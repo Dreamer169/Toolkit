@@ -116,7 +116,7 @@ Critical implementation details:
 - Outlook registration skips proxy use fast when the CF pool is empty and triggers background refill instead of blocking account workers.
 
 ### Proxy pool
-- Outlook registration no longer uses the old DB/quarkip proxy pool by default.
+- Outlook registration uses CF / subnode_bridge proxies; quarkip references fully purged.
 - Default automatic proxy mode is CF IP pool + per-account xray relay.
 - Manual proxy input is still supported for known-good proxies.
 - `socks5_relay.py` creates a local unauthenticated SOCKS5 relay only when a manual authenticated SOCKS5 proxy is provided.

@@ -2,10 +2,10 @@
 本地 SOCKS5 无认证中转代理
 Chromium 不支持带认证的 SOCKS5，但支持无认证本地代理。
 此模块在 127.0.0.1 上启动一个无认证 SOCKS5 服务器，
-所有连接经过认证后转发到上游 SOCKS5（如 quarkip）。
+所有连接经过认证后转发到上游 SOCKS5。
 
 用法：
-    relay = Socks5Relay("pool-us.quarkip.io", 7777, "user", "pass")
+    relay = Socks5Relay("upstream.example.com", 7777, "user", "pass")
     local_port = relay.start()
     # Chromium 使用 socks5://127.0.0.1:local_port（无需认证）
     relay.stop()

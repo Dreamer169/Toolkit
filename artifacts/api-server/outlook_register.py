@@ -374,11 +374,10 @@ class PatchrightController(BaseController):
 
     def _try_enter_challenge_patchright(self, page) -> bool:
         """
-        Enter键法（与 PlaywrightController._try_enter_challenge 相同逻辑，
-        但在 patchright 下执行）。
-        等待视觉 CAPTCHA 的 blob URL 加载，然后 Enter 键通过。
+        Enter键法（兜底方案）：等待视觉 CAPTCHA 的 blob URL 加载，然后 Enter 键通过。
+        v7.63 起作为无障碍法失败后的回退，22s 超时保留作为关键 iframe 加载缓冲。
         历史教训：曾改成 5s "快速跳过" 反而把 captcha iframe 提前杀掉，
-        后续无障碍 fallback 扫到的全是 about:blank 导致 0/N。恢复 22s。
+        恢复 22s；此处不再缩短，让兜底有充分时间。
         """
         print("[captcha] 尝试Enter键法（等待blob URL）…", flush=True)
         try:
@@ -449,8 +448,9 @@ class PatchrightController(BaseController):
 
     def handle_captcha(self, page, blob_container=None):
         """
-        优先使用 Enter 键法（等待视觉 CAPTCHA blob URL）；
-        失败后使用无障碍按钮点击法。
+        v7.63 调换顺序：优先使用无障碍按钮点击法（v7.62 实测 100% 通过率）；
+        失败后回退到 Enter 键法（等待视觉 CAPTCHA blob URL）作为兜底。
+        历史教训保留：如果未来发现无障碍法被风控，可调回 Enter 键先序。
         """
         # ── [早期拦截] 在所有交互前安装网络请求拦截器 ──────────────────────
         # Arkose Labs 音频通过 XHR fetch，DOM 里 audio.src 始终为空
@@ -483,19 +483,20 @@ class PatchrightController(BaseController):
         page.on("request", _on_audio_req)
         print("[captcha] ✅ 音频URL拦截器已安装（在所有按钮点击前）", flush=True)
 
-        # ── 方式1：Enter键法（等blob URL → Enter通过）──────────────────
-        enter_ok = self._try_enter_challenge_patchright(page)
-        if enter_ok:
-            return True
-
-        # ── 方式2：无障碍挑战（轮椅按钮点击法）──────────────────────────
+        # ── 方式1：无障碍挑战（轮椅按钮点击法，v7.62 实测主力，100% 通过率）──
         accessibility_ok = self._try_accessibility_challenge(page)
         if accessibility_ok:
             return True
 
-        # ── [已禁用]方式3：打码服务降级 ──────────────────────────────────────────
-        # [已禁用] print("[captcha] 两种免费方法失败，尝试打码服务…", flush=True)
-        # [已禁用] return self._solve_with_service(page, blob_container or [])
+        # ── 方式2：Enter键法（等blob URL → Enter通过，作为兜底）─────────
+        print("[captcha] 无障碍法失败，回退 Enter 键法兜底…", flush=True)
+        enter_ok = self._try_enter_challenge_patchright(page)
+        if enter_ok:
+            return True
+
+        # 两种免费方法都失败（已不再支持付费打码服务）
+        print("[captcha] ❌ 两种免费方法均失败", flush=True)
+        return False
 
     @staticmethod
     def _human_press_hold(page, cx, cy, hold_ms_min=4400, hold_ms_max=5300):
