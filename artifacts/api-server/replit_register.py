@@ -2447,12 +2447,20 @@ async def run() -> dict:
         log(f"[CDP] use_cdp=True → attaching to broker chromium @ {CDP_WS}")
         from playwright.async_api import async_playwright as _apw_cdp
         try:
-            _ip_cdp = subprocess.check_output(
-                ["curl", "-s", "--max-time", "5", "https://api.ipify.org"],
-                text=True,
-            ).strip()
+            try:
+                _ip_cdp = subprocess.check_output(
+                    ["curl", "-s", "--max-time", "8", "--interface", "CloudflareWARP",
+                     "https://api.ipify.org"],
+                    text=True,
+                ).strip()
+                log(f"[CDP] WARP exit_ip={_ip_cdp}")
+            except Exception:
+                _ip_cdp = subprocess.check_output(
+                    ["curl", "-s", "--max-time", "5", "https://api.ipify.org"],
+                    text=True,
+                ).strip()
+                log(f"[CDP] fallback direct exit_ip={_ip_cdp}")
             final["exit_ip"] = _ip_cdp
-            log(f"[CDP] direct exit_ip={_ip_cdp}")
         except Exception as _e:
             log(f"[CDP] exit_ip probe err: {_e}")
         INTEGRITY_ERRORS_CDP = {
