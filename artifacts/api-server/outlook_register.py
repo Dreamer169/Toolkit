@@ -1217,6 +1217,36 @@ class PatchrightController(BaseController):
                                 _early_solved_reason = f"所有 hsprotect frame 已清空 (max bodyLen={max(_hsp_lens)}, n={len(_hsp_lens)})"
                         except Exception:
                             pass
+                # v7.64 修复：PerimeterX press-hold 通过后，外层 px-captcha 容器仍在 DOM
+                #         （bodyLen 还有 4000+），但内部 challenge iframe 会被设为 display:none
+                #         或外层 div 内容清空。补上这两条强信号，避免无谓的 20s+5s 音频等待
+                #         以及随后徒劳的 Enter键法兜底（blob URL 已消费）造成整轮 CF IP 重试。
+                if not _early_solved_reason:
+                    try:
+                        for _pf_chk_px in page.frames:
+                            _u_px = getattr(_pf_chk_px, "url", "") or ""
+                            if "hsprotect.net" not in _u_px:
+                                continue
+                            _px_state = _pf_chk_px.evaluate("""() => {
+                                const root = document.getElementById(px-captcha);
+                                if (!root) return null;
+                                if (root.children.length === 0) return empty;
+                                const inner = root.querySelector(iframe);
+                                if (inner) {
+                                    const cs = window.getComputedStyle(inner);
+                                    if (cs.display === none || cs.visibility === hidden) return iframe_hidden;
+                                }
+                                return null;
+                            }""")
+                            if _px_state == "empty":
+                                _early_solved_reason = "PerimeterX 外层 px-captcha 已清空"
+                                break
+                            if _px_state == "iframe_hidden":
+                                _early_solved_reason = "PerimeterX 内部挑战 iframe 已隐藏 (display:none)"
+                                break
+                    except Exception:
+                        pass
+
                 if _early_solved_reason:
                     print(f"[captcha] ✅ press-hold 后早期检测：CAPTCHA 已通过（{_early_solved_reason}）→ 跳过音频流程", flush=True)
                     return True
