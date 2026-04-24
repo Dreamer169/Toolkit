@@ -28,18 +28,9 @@ except Exception:
     _HAS_H2 = False
 
 DEFAULT_POOL = [
-    "socks5://127.0.0.1:10820",
-    "socks5://127.0.0.1:10822",
-    "socks5://127.0.0.1:10823",
-    "socks5://127.0.0.1:10824",
-    "socks5://127.0.0.1:10825",
-    "socks5://127.0.0.1:10826",
-    "socks5://127.0.0.1:10828",
-    "socks5://127.0.0.1:10830",
-    "socks5://127.0.0.1:10831",
-    "socks5://127.0.0.1:10836",
-    "socks5://127.0.0.1:10837",
-    "socks5://127.0.0.1:10845",
+    # v7.78b: WARP-only — chromium 主代理走 datacenter SOCKS (POST signup 通) 同时 *.google
+    # 流量全走 WARP (104.28.x = CF backbone, reCAPTCHA Enterprise 评分高). 不对称代理.
+    "socks5://127.0.0.1:40000",
 ]
 GOOGLE_HOST_RE = re.compile(
     r"(^|\.)("
@@ -58,6 +49,9 @@ def _load_pool() -> list[str]:
 
 
 _POOL = _load_pool()
+import sys as _gpr_sys
+_gpr_sys.stderr.write(f"[gpr-DIAG] _POOL_len={len(_POOL)} first={_POOL[0] if _POOL else None} env_GPP={os.environ.get('GOOGLE_PROXY_POOL','UNSET')[:120]}\n")
+_gpr_sys.stderr.flush()
 _client_cache: dict[str, httpx.AsyncClient] = {}
 
 

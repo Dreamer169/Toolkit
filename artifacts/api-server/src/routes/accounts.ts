@@ -19,7 +19,12 @@ const VPS_GATEWAY = process.env.VPS_GATEWAY_URL || "http://45.205.27.69:8080/api
 //   ColoCrossing/HostHatch 等), 实测大多 score >0.5 可过。旧注释已过时,
 //   xray.json 已经把这 26 个端口配成 in-socks-N 入口, 实测探针 12/13 alive 且无 GCP IP.
 const XRAY_PORTS_DEAD = new Set<number>([1090, 1091, 1092, 1094, 1095]);  // 友节点全死/或剩 GCP 出口
-const XRAY_PORTS  = [10822, 10824, 10826, 10828, 10830, 10832, 10834, 10836, 10838, 10840, 10842, 10845];  // clean non-GCP pool
+// v7.78b: WARP_PORT (40000) 不进 attempt-pool — chromium 主代理走 WARP 时 Replit
+// 的 sign-up POST 会因 CF 拒绝自家 IP 直连 origin 而 36s 超时。改为只在
+// google_proxy_route 端把 *.google 流量钉死走 WARP 提升 reCAPTCHA score, 而
+// chromium 主代理保持 datacenter SOCKS 让 sign-up POST 走得通 (不对称代理).
+const WARP_PORT   = 40000;  // 仅 google_proxy_route 用, 不进 attempt-pool
+const XRAY_PORTS  = [10822, 10824, 10826, 10828, 10830, 10832, 10834, 10836, 10838, 10840, 10842, 10845];  // clean non-GCP datacenter pool
 const DEAD_PORTS  = XRAY_PORTS_DEAD;
 const TOR_SOCKS_PORT = 9050;  // Tor SOCKS5 (already running on VPS), exit = non-CF/non-GCP
 const DIRECT_PORT    = 0;     // Direct VPS IP (AS8796 FASTNET DATA), exit = 45.205.27.69

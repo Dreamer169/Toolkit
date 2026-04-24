@@ -873,6 +873,27 @@ async def fill_step1(page) -> str | None:
             pass
     page.on("response", _on_response)
     page.on("request",  _on_request)
+    # v7.77 DIAG: 记录 36s 内 ALL replit.com 流量 (任何方法/状态), 用于定位 submit 后
+    # 为什么 _on_response 不触发: (a) POST 根本没发, (b) cf 把 POST 改写成 GET html
+    # challenge, (c) net error / requestfailed, (d) 走了 sub-domain (sp./api.) 被过滤
+    _diag_resp: list = []
+    _diag_failed: list = []
+    async def _diag_on_response(resp):
+        try:
+            url = resp.url
+            if "replit.com" in url:
+                _diag_resp.append(f"{resp.request.method} {resp.status} {url[:100]}")
+        except Exception:
+            pass
+    def _diag_on_requestfailed(req):
+        try:
+            url = req.url
+            if "replit.com" in url:
+                _diag_failed.append(f"{req.method} {url[:100]} fail={req.failure}")
+        except Exception:
+            pass
+    page.on("response", _diag_on_response)
+    page.on("requestfailed", _diag_on_requestfailed)
 
     # 提交 Step1：先尝试正常 click（5s），若 disabled 则 force=True 强制点击
     submitted = False
@@ -968,8 +989,22 @@ async def fill_step1(page) -> str | None:
             log(f"[step1-wait] 等待 {(_w+1)*2}s...")
     else:
         log("[step1-wait] 36s 超时，仍在 signup")
+        # v7.77 DIAG dump
+        log(f"[diag] 36s 内 replit.com response 总数={len(_diag_resp)}")
+        for _l in _diag_resp[-15:]:
+            log(f"[diag-resp] {_l}")
+        log(f"[diag] 36s 内 replit.com requestfailed 总数={len(_diag_failed)}")
+        for _l in _diag_failed[-10:]:
+            log(f"[diag-fail] {_l}")
+        try: cur_url2 = page.url
+        except Exception: cur_url2 = "(unknown)"
+        log(f"[diag] 当前 page.url={cur_url2[:120]}")
 
     page.remove_listener("response", _on_response)
+    try: page.remove_listener("response", _diag_on_response)
+    except: pass
+    try: page.remove_listener("requestfailed", _diag_on_requestfailed)
+    except: pass
 
     await page.screenshot(path=f"/tmp/replit_after_step1_{USERNAME}.png")
 
