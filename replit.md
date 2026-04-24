@@ -187,3 +187,24 @@ Critical implementation details:
 - Subnode bridge discovery now validates a real SOCKS5 CONNECT to `login.live.com:443` and marks failed bridge ports as banned.
 - Eligible proxy SQL now always excludes `banned` rows; subnode bridges are no longer force-selected after failure.
 - Outlook full workflow prioritizes residential proxies first, with subnode bridges behind residential sources, to reduce `ERR_SOCKS_CONNECTION_FAILED` registration failures.
+
+## Server Disk Layout (45.205.27.69)
+
+Root disk `/dev/vda1` is only 29G — keep large caches on the data disk `/dev/vdb1` (mounted at `/data`, 59G).
+
+### Symlinks / config (do NOT delete or recreate without reading this section)
+
+| Path | Actually lives at | Purpose |
+|---|---|---|
+| `/root/.cache/ms-playwright` | symlink → `/data/cache/ms-playwright` | patchright/playwright Chromium binaries (~900M) |
+| `pnpm config get store-dir` | `/data/cache/pnpm-store` | pnpm content-addressed store; rebuilt on next `pnpm install` |
+| `/data/cache/`, `/data/npm/`, `/data/go/`, `/data/sub2api/`, `/data/usr-local-go/` | (native) | pre-existing data-disk content, do not touch |
+
+### Rules for future agents
+
+- Never `rm -rf /root/.cache/ms-playwright` — it is a symlink; use `rm` (no `-r`) if you must remove it, then re-create the symlink to `/data/cache/ms-playwright`.
+- Never run `pnpm config set store-dir` to a root-disk path — keep it on `/data` to prevent root-disk fill.
+- If reinstalling playwright via `npx playwright install` or similar, ensure the symlink target `/data/cache/ms-playwright` exists first; otherwise the install will create a real directory on root and exhaust disk.
+- PostgreSQL data still lives at `/var/lib/postgresql/14/main` (root disk, ~106M today). Migration to `/data` is **not** done — only do it if PG data exceeds 1G.
+- `/tmp` is purged of debug screenshots and old install packages periodically; do not store anything you need to keep there.
+
