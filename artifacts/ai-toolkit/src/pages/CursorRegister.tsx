@@ -19,8 +19,6 @@ export default function CursorRegister() {
   const [password, setPassword] = useState("");
   const [useXray, setUseXray] = useState(true);
   const [skipStep1, setSkipStep1] = useState(true);
-  const [captchaService, setCaptchaService] = useState("yescaptcha");
-  const [captchaKey, setCaptchaKey] = useState("");
   const [imapHost, setImapHost] = useState("");
   const [imapUser, setImapUser] = useState("");
   const [imapPass, setImapPass] = useState("");
@@ -60,7 +58,7 @@ export default function CursorRegister() {
     stopPoll(); setLogs([]); setAccounts([]); setStatus("running"); setSinceIdx(0);
     const endpoint = mode === "http" ? "register-http" : "register";
     const body = mode === "http"
-      ? { email, password, proxy: autoProxy ? "" : proxy, useXray, skipStep1, autoProxy, captchaService, captchaKey, imapHost, imapUser, imapPass }
+      ? { email, password, proxy: autoProxy ? "" : proxy, useXray, skipStep1, autoProxy, imapHost, imapUser, imapPass }
       : { count, proxy: autoProxy ? "" : proxy, headless, autoProxy };
     try {
       const r = await fetch(`/api/tools/cursor/${endpoint}`, {
@@ -176,22 +174,6 @@ export default function CursorRegister() {
                 <input value={imapPass} onChange={(e) => setImapPass(e.target.value)}
                   placeholder="邮箱密码" type="password" disabled={isRunning}
                   className="px-3 py-2 rounded-lg bg-[#161b22] border border-[#30363d] text-gray-200 text-sm focus:outline-none focus:border-blue-500" />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">打码服务（Outlook 快速通道完全跳过 Turnstile，可不填）</label>
-              <div className="flex gap-2">
-                <select value={captchaService} onChange={(e) => setCaptchaService(e.target.value)}
-                  disabled={isRunning}
-                  className="px-3 py-2 rounded-lg bg-[#161b22] border border-[#30363d] text-gray-200 text-sm focus:outline-none">
-                  <option value="yescaptcha">YesCaptcha</option>
-                  <option value="capsolver">CapSolver</option>
-                  <option value="2captcha">2Captcha</option>
-                </select>
-                <input value={captchaKey} onChange={(e) => setCaptchaKey(e.target.value)}
-                  placeholder="API Key（快速通道可留空）" disabled={isRunning}
-                  className="flex-1 px-3 py-2 rounded-lg bg-[#161b22] border border-[#30363d] text-gray-200 text-sm focus:outline-none focus:border-blue-500" />
               </div>
             </div>
           </>

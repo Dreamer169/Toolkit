@@ -715,7 +715,6 @@ router.post("/replit/register", (req, res) => {
               proxy: portToProxy(tryPort),
               headless,
               max_wait: 90,
-              capsolver_key: process.env.CAPSOLVER_KEY ?? "",
               outlook_refresh_token: outlook.refresh_token ?? "",
               use_cdp: useCdp,
             }));

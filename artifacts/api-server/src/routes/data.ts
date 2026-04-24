@@ -713,38 +713,6 @@ router.get("/data/stats", async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
 });
 
-// ─── 打码服务配置 ────────────────────────────────────────────────────────────
-router.get("/data/captcha-config", async (_req, res) => {
-  try {
-    const row = await queryOne<{ value: string }>(
-      "SELECT value FROM configs WHERE key = 'captcha_config'"
-    );
-    const cfg = row ? JSON.parse(row.value) : { service: "", apiKey: "" };
-    const masked = cfg.apiKey ? cfg.apiKey.slice(0, 6) + "****" + cfg.apiKey.slice(-4) : "";
-    res.json({ success: true, service: cfg.service || "", apiKeyMasked: masked, hasKey: !!cfg.apiKey });
-  } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
-});
-
-router.post("/data/captcha-config", async (req, res) => {
-  const { service = "", apiKey = "" } = req.body as { service?: string; apiKey?: string };
-  try {
-    let finalKey = apiKey;
-    if (apiKey.includes("****")) {
-      const existing = await queryOne<{ value: string }>(
-        "SELECT value FROM configs WHERE key = 'captcha_config'"
-      );
-      if (existing) finalKey = (JSON.parse(existing.value) as { apiKey?: string }).apiKey || "";
-    }
-    const cfg = JSON.stringify({ service, apiKey: finalKey });
-    await execute(
-      `INSERT INTO configs(key, value) VALUES('captcha_config', $1)
-       ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value`,
-      [cfg]
-    );
-    res.json({ success: true });
-  } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
-});
-
 // ── 代理池后台维护 ─────────────────────────────────────────────────────────────
 const PROXY_MAINTAIN_INTERVAL_MS = 2 * 60 * 1000;   // 2 分钟跑一次
 const STUCK_ACTIVE_TIMEOUT_MS    = 8 * 60 * 1000;   // active 超 8 分钟算卡死

@@ -11,7 +11,7 @@ import argparse, asyncio, sys, os, time, subprocess, glob
 # ── 参数 ──────────────────────────────────────────────────────────────────────
 ap = argparse.ArgumentParser()
 ap.add_argument("--method", default="accessibility",
-                choices=["accessibility", "token", "audio-stt", "enter", "all"])
+                choices=["accessibility", "audio-stt", "enter", "all"])
 ap.add_argument("--proxy",    default="")
 ap.add_argument("--headless", default="true")
 ap.add_argument("--wait",     type=int, default=11)
@@ -263,41 +263,6 @@ def test_audio_stt(page):
         print("[lab] ✅ CAPTCHA 已消失，音频法通过！", flush=True)
         return True, "passed"
 
-# ── 测试方法3：Token 注入（CrisRain/OctoManager 方法）──────────────────────────
-def test_token_injection(page, blob_token=None):
-    print("[lab] ── 方法3: FunCaptcha Token 注入 ──", flush=True)
-    if not blob_token:
-        print("[lab] 需要 2captcha/CapMonster token，此方法跳过（未配置）", flush=True)
-        return False, "no_token"
-
-    for method_name, js in [
-        ("ArkoseEnforcement callback", f"window.ArkoseEnforcement && window.ArkoseEnforcement.setAnswerToken({repr(blob_token)})"),
-        ("hidden input fc-token",     f"""
-            const inp = document.querySelector('input[name*="fc-token"],input[name*="arkose"],input[name*="FunCaptcha-Token"]');
-            if (inp) {{ inp.value={repr(blob_token)}; inp.dispatchEvent(new Event('change',{{bubbles:true}})); return true; }}
-            return false;
-        """),
-        ("postMessage challenge-complete", f"""
-            Array.from(document.querySelectorAll('iframe')).forEach(f => {{
-                try {{ f.contentWindow.postMessage({{command:'challenge-complete',token:{repr(blob_token)}}}, '*'); }} catch(e) {{}}
-            }});
-            return true;
-        """),
-    ]:
-        try:
-            result = page.evaluate(js)
-            print(f"[lab] Token 注入 [{method_name}]: {result}", flush=True)
-        except Exception as e:
-            print(f"[lab]   [{method_name}] 异常: {e}", flush=True)
-
-    page.wait_for_timeout(3000)
-    try:
-        page.wait_for_selector('iframe[title="验证质询"]', timeout=3000)
-        return False, "token_injection_failed"
-    except Exception:
-        print("[lab] ✅ Token 注入通过！", flush=True)
-        return True, "passed"
-
 # ── 主流程 ──────────────────────────────────────────────────────────────────
 def run():
     from patchright.sync_api import sync_playwright
@@ -335,11 +300,6 @@ def run():
             result, reason = test_audio_stt(page)
             REPORT["audio-stt"] = (result, reason)
             print(f"[lab] 音频STT方法: {'✅ 通过' if result else '❌ 失败'} ({reason})", flush=True)
-
-        if args.method in ("token", "all") and not result:
-            result, reason = test_token_injection(page, blob_token=None)
-            REPORT["token"] = (result, reason)
-            print(f"[lab] Token注入方法: {'✅ 通过' if result else '❌ 失败'} ({reason})", flush=True)
 
         page.screenshot(path="/tmp/captcha_lab_end.png")
         print("[lab] 最终截图: /tmp/captcha_lab_end.png", flush=True)

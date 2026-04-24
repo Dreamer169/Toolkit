@@ -2,7 +2,7 @@
 """
 replit_signup.py — Replit 账号全自动注册 + 子节点接入
 ======================================================
-整合: playwright + fakemail_bridge + captcha_solver + DB 持久化
+整合: playwright + fakemail_bridge + DB 持久化
 
 流程:
   1. 生成随机身份 (用户名/密码/邮箱)
@@ -16,7 +16,7 @@ replit_signup.py — Replit 账号全自动注册 + 子节点接入
 
 用法:
   # 单个 (有打码key):
-  python3 replit_signup.py --count 1 --captcha-key YOUR_KEY
+  python3 replit_signup.py --count 1
 
   # 批量 (无打码key，半自动):
   python3 replit_signup.py --count 3 --no-headless
@@ -183,8 +183,7 @@ def _sql_q(v: str) -> str:
     return "'" + str(v).replace("'", "''") + "'"
 
 # ── 主注册流程 ─────────────────────────────────────────────────────────────────
-async def signup_one(identity: dict, headless: bool, captcha_key: str,
-                     captcha_provider: str) -> dict:
+async def signup_one(identity: dict, headless: bool) -> dict:
     """单个账号完整注册流程"""
     from playwright.async_api import async_playwright
 
@@ -288,42 +287,13 @@ async def signup_one(identity: dict, headless: bool, captcha_key: str,
             if has_captcha:
                 result["phase"] = "captcha"
                 warn("检测到 hCaptcha")
-                if captcha_key:
-                    inf(f"  调用 {captcha_provider} 打码 …")
-                    try:
-                        sys.path.insert(0, "/root/Toolkit/artifacts/api-server")
-                        from captcha_solver import solve_with_fallback
-                        token = solve_with_fallback(
-                            [(captcha_provider, captcha_key)],
-                            "hcaptcha",
-                            page_url=REPLIT_SIGNUP_URL,
-                            site_key="a5f74b19-9e45-40e0-b45d-47ff91b7a6c2"  # Replit hCaptcha key
-                        )
-                        # 注入 hcaptcha token
-                        await page.evaluate(f"""
-                            document.querySelector('textarea[name="h-captcha-response"]').value = '{token}';
-                            document.querySelector('textarea[name="g-recaptcha-response"]') &&
-                              (document.querySelector('textarea[name="g-recaptcha-response"]').value = '{token}');
-                        """)
-                        await submit_btn.first.click()
-                        await page.wait_for_timeout(4000)
-                        ok("  打码完成，已重新提交")
-                    except Exception as ce:
-                        warn(f"  打码失败: {ce}")
-                        if not headless:
-                            warn("  请手动完成 CAPTCHA，脚本将等待 60s …")
-                            await page.wait_for_timeout(60000)
-                        else:
-                            result["error"] = f"captcha 失败: {ce}"
-                            return result
+                if not headless:
+                    warn("  请手动完成 CAPTCHA (60s)（本工具已移除付费打码服务）…")
+                    await page.wait_for_timeout(60000)
                 else:
-                    if not headless:
-                        warn("  未提供打码 key，请手动完成 CAPTCHA (60s) …")
-                        await page.wait_for_timeout(60000)
-                    else:
-                        warn("  无头模式下无法手动完成 CAPTCHA，跳过")
-                        result["error"] = "需要 --captcha-key 或 --no-headless"
-                        return result
+                    warn("  无头模式下无法手动完成 CAPTCHA，跳过")
+                    result["error"] = "需要 --no-headless（已不支持付费打码）"
+                    return result
 
             # 6. 等待跳转到 /home 或验证邮件提示
             await page.wait_for_timeout(3000)
@@ -501,17 +471,16 @@ def probe_existing_nodes():
 
 
 # ── 批量注册 ──────────────────────────────────────────────────────────────────
-async def batch_signup(count: int, headless: bool, captcha_key: str,
-                       captcha_provider: str, delay_between: int):
+async def batch_signup(count: int, headless: bool, delay_between: int):
     hdr(f"Replit 子节点自动注册 — {count} 个账号")
-    print(f"  模式: {'无头' if headless else '有界面'}  打码: {captcha_provider if captcha_key else '手动/无'}")
+    print(f"  模式: {'无头' if headless else '有界面'}（已移除付费打码服务）")
     print()
 
     results = []
     for i in range(count):
         identity = gen_identity()
         print(f"\n{B}[{i+1}/{count}]{X} 开始注册 {identity['username']}")
-        r = await signup_one(identity, headless, captcha_key, captcha_provider)
+        r = await signup_one(identity, headless)
         results.append(r)
 
         # 输出结果
@@ -547,10 +516,6 @@ async def main():
     ap.add_argument("--count",            type=int, default=1,          help="注册账号数量 (默认 1)")
     ap.add_argument("--headless",         action="store_true",          help="无头模式 (默认)")
     ap.add_argument("--no-headless",      dest="headless", action="store_false", help="显示浏览器窗口")
-    ap.add_argument("--captcha-key",      default="",                   help="打码服务 API Key")
-    ap.add_argument("--captcha-provider", default="capsolver",
-                    choices=["2captcha","capmonster","yescaptcha","capsolver"],
-                    help="打码服务 (默认: capsolver)")
     ap.add_argument("--delay",            type=int, default=30,         help="批量注册间隔秒 (默认 30)")
     ap.add_argument("--probe-only",       action="store_true",          help="只探测现有节点，不注册")
     ap.add_argument("--gateway",          default="",                   help="覆盖本地 gateway API URL")
@@ -569,8 +534,6 @@ async def main():
     await batch_signup(
         count=a.count,
         headless=a.headless,
-        captcha_key=a.captcha_key,
-        captcha_provider=a.captcha_provider,
         delay_between=a.delay,
     )
 

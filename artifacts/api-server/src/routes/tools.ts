@@ -1407,20 +1407,6 @@ router.post("/tools/outlook/register", async (req, res) => {
     effectiveProxyMode = "cf";
   }
 
-  // 读取打码服务配置（可选）
-  let captchaService = "";
-  let captchaKey     = "";
-  try {
-    const { query: cfgQ } = await import("../db.js");
-    const rows = await cfgQ<{ value: string }>(
-      "SELECT value FROM configs WHERE key = 'captcha_config' LIMIT 1"
-    );
-    if (rows[0]) {
-      const cfg = JSON.parse(rows[0].value) as { service?: string; apiKey?: string };
-      if (cfg.service && cfg.apiKey) { captchaService = cfg.service; captchaKey = cfg.apiKey; }
-    }
-  } catch {}
-
   const proxyDisplay = proxy ? proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@") : "无代理";
   const job = await jobQueue.create(jobId);
   // 将代理池阶段收集的日志合并
@@ -1449,10 +1435,6 @@ router.post("/tools/outlook/register", async (req, res) => {
     job.logs.push({ type: "log", message: `🌐 代理轮换池: ${proxyList.length} 个节点` });
   } else if (proxy) {
     args.push("--proxy", proxy);
-  }
-  if (captchaService && captchaKey) {
-    args.push("--captcha-service", captchaService, "--captcha-key", captchaKey);
-    job.logs.push({ type: "log", message: `🔑 打码服务: ${captchaService}` });
   }
   if (effectiveProxyMode === "cf") {
     args.push("--proxy-mode", "cf", "--cf-port", String(cfPort));
@@ -1910,8 +1892,6 @@ router.post("/tools/cursor/register-http", async (req, res) => {
     useXray = false,
     skipStep1 = false,
     autoProxy = false,
-    captchaService = "yescaptcha",
-    captchaKey = "",
     imapHost = "",
     imapUser = "",
     imapPass = "",
@@ -1919,7 +1899,6 @@ router.post("/tools/cursor/register-http", async (req, res) => {
   } = req.body as {
     email?: string; password?: string; proxy?: string;
     useXray?: boolean; skipStep1?: boolean; autoProxy?: boolean;
-    captchaService?: string; captchaKey?: string;
     imapHost?: string; imapUser?: string; imapPass?: string;
     outlookAccountId?: number;
   };
@@ -1973,8 +1952,6 @@ router.post("/tools/cursor/register-http", async (req, res) => {
   if (proxy)           args.push("--proxy", proxy);
   if (useXray)         args.push("--use-xray");
   if (skipStep1)       args.push("--skip-step1");
-  if (captchaService)  args.push("--captcha-service", captchaService);
-  if (captchaKey)      args.push("--captcha-key", captchaKey);
   if (imapHost || resolvedImapUser) {
     args.push("--imap-host",  imapHost || "outlook.office365.com");
     args.push("--imap-user",  resolvedImapUser);

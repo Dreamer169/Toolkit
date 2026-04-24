@@ -2244,8 +2244,6 @@ def main():
     parser.add_argument("--retries",         type=int,   default=MAX_CAPTCHA_RETRIES)
     parser.add_argument("--delay",           type=int,   default=5,            help="每次注册间隔秒数")
     parser.add_argument("--output",          type=str,   default="",           help="输出文件")
-    # [已禁用] parser.add_argument("--captcha-service", type=str,   default="",           help="打码服务: 2captcha | capmonster")
-    # [已禁用] parser.add_argument("--captcha-key",     type=str,   default="",           help="打码服务 API Key")
     parser.add_argument("--proxy-mode",      type=str,   default="",           help="cf = 从 CF IP 池自动分配代理")
     parser.add_argument("--cf-port",         type=int,   default=443,          help="CF 代理端口（默认443）")
     parser.add_argument("--username",        type=str,   default="",           help="指定首个 Outlook 用户名（可带 @outlook.com）")

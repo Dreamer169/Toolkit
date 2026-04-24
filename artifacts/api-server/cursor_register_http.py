@@ -13,7 +13,6 @@ Turnstile 绕过策略（免费优先）:
   1. Outlook/Hotmail/Live 域名  → email-verification 快速通道，Step3 完全跳过 ✅
   2. MailTM 域名注册            → Step2 后检测服务器是否也触发快速通道
   3. Step3 空 token 探测        → 部分场景后端不校验，直接过 ✅
-  4. CapSolver/YesCaptcha/2captcha API → 需要 key（--captcha-key）
 
 OTP 获取策略（按优先级）:
   1. MailTM API 轮询（当用临时邮箱时）
@@ -28,7 +27,6 @@ OTP 获取策略（按优先级）:
   python cursor_register_http.py --use-xray --email user@outlook.com
 
   # 带打码服务:
-  python cursor_register_http.py --use-xray --captcha-service capsolver --captcha-key YOUR_KEY
 
   # IMAP 接 OTP:
   python cursor_register_http.py --email user@example.com \
@@ -64,7 +62,6 @@ ACTION_SUBMIT_EMAIL    = "d0b05a2a36fbe69091c2f49016138171d5c1e4cd"  # RSC $h25 
 ACTION_SUBMIT_PASSWORD = "fef846a39073c935bea71b63308b177b113269b7"
 ACTION_MAGIC_CODE      = "f9e8ae3d58a7cd11cccbcdbf210e6f2a6a2550dd"
 
-TURNSTILE_SITE_KEY = "0x4AAAAAAAMNIvC45A4Wjjln"
 MAILTM_BASE        = "https://api.mail.tm"
 
 # Microsoft / Outlook domains that trigger email-verification fast path
@@ -260,75 +257,6 @@ def wait_for_otp_imap(host: str, user: str, password: str,
             print(f"[IMAP] 连接错误: {e}", flush=True)
         time.sleep(interval)
     raise TimeoutError("等待 OTP 超时")
-
-
-# ─── Turnstile 解码（付费服务，有 key 才调用）────────────────────────────────
-
-def solve_turnstile(service: str, api_key: str, page_url: str, site_key: str) -> str:
-    if not api_key:
-        raise ValueError("未配置打码 API key，无法调用打码服务")
-    s = service.lower().replace('-', '').replace('_', '')
-
-    if s == "yescaptcha":
-        r = httpx.post("https://api.yescaptcha.com/createTask", json={
-            "clientKey": api_key,
-            "task": {
-                "type": "TurnstileTaskProxylessM1",
-                "websiteURL": page_url,
-                "websiteKey": site_key,
-            }
-        }, timeout=30).json()
-        if r.get("errorId", 1) != 0:
-            raise RuntimeError(f"YesCaptcha 提交失败: {r}")
-        task_id = r["taskId"]
-        for _ in range(60):
-            time.sleep(5)
-            res = httpx.post("https://api.yescaptcha.com/getTaskResult",
-                             json={"clientKey": api_key, "taskId": task_id},
-                             timeout=15).json()
-            if res.get("status") == "ready":
-                return res["solution"]["token"]
-        raise TimeoutError("YesCaptcha Turnstile 超时")
-
-    if s in ("capsolver", "cap_solver"):
-        r = httpx.post("https://api.capsolver.com/createTask", json={
-            "clientKey": api_key,
-            "task": {
-                "type": "AntiTurnstileTaskProxyLess",
-                "websiteURL": page_url,
-                "websiteKey": site_key,
-            }
-        }, timeout=30).json()
-        if r.get("errorId", 0) != 0:
-            raise RuntimeError(f"CapSolver 提交失败: {r}")
-        task_id = r["taskId"]
-        for _ in range(60):
-            time.sleep(5)
-            res = httpx.post("https://api.capsolver.com/getTaskResult",
-                             json={"clientKey": api_key, "taskId": task_id},
-                             timeout=15).json()
-            if res.get("status") == "ready":
-                return res["solution"]["token"]
-        raise TimeoutError("CapSolver Turnstile 超时")
-
-    if s == "2captcha":
-        resp = httpx.post("https://2captcha.com/in.php", data={
-            "key": api_key, "method": "turnstile",
-            "sitekey": site_key, "pageurl": page_url, "json": 1,
-        }, timeout=30).json()
-        task_id = resp.get("request")
-        for _ in range(72):
-            time.sleep(5)
-            res = httpx.get("https://2captcha.com/res.php",
-                            params={"key": api_key, "action": "get",
-                                    "id": task_id, "json": 1},
-                            timeout=15).json()
-            if res.get("status") == 1:
-                return res["request"]
-        raise TimeoutError("2captcha Turnstile 超时")
-
-    raise ValueError(f"未知打码服务: {service}，支持 yescaptcha / capsolver / 2captcha")
-
 
 
 def build_server_action(bound_hash: str) -> tuple[bytes, str]:
@@ -706,8 +634,6 @@ def register(
     email: str = "",
     password: str = "",
     proxy=None,
-    captcha_service: str = "capsolver",
-    captcha_key: str = "",
     imap_host: str = "",
     imap_user: str = "",
     imap_pass: str = "",
@@ -717,7 +643,7 @@ def register(
     """
     完整注册流程。
     - email 为空时：优先 DB Outlook 账号，其次创建 MailTM 临时邮箱
-    - Turnstile 绕过顺序：快速通道 > 空 token 探测 > 打码 API（需 key）
+    - Turnstile 绕过顺序：快速通道 > 空 token 探测（不再支持付费打码 API）
     """
     # ── 决定邮箱 ──────────────────────────────────────────────────────────────
     mailtm_token: str = ""
@@ -815,30 +741,11 @@ def register(
             if step3_ok:
                 print("[Cursor] ✅ Step3 空 token 通过！Turnstile 绕过成功（后端未校验）", flush=True)
             else:
-                # 策略 2: 打码 API（需 key）
-                if captcha_key:
-                    print(f"[Cursor] 调用 {captcha_service} 解 Turnstile...", flush=True)
-                    try:
-                        captcha_token = solve_turnstile(
-                            captcha_service, captcha_key,
-                            f"{CURSOR_AUTH_BASE}/sign-up", TURNSTILE_SITE_KEY
-                        )
-                        print(f"[Cursor] Turnstile token 获取成功（{len(captcha_token)} chars）", flush=True)
-                        step3_ok = reg.step3_submit_password(
-                            email, password, state_encoded, captcha_token
-                        )
-                        if not step3_ok:
-                            raise RuntimeError("Step3 打码后仍失败")
-                    except Exception as e:
-                        raise RuntimeError(f"Turnstile 解码失败: {e}")
-                else:
-                    raise RuntimeError(
-                        "Step3 需要 Turnstile token，空 token 被拒，且未配置打码 API key。\n"
-                        "解决方案：\n"
-                        "  1) 使用 Outlook/Hotmail 邮箱（自动触发快速通道）\n"
-                        "  2) 添加 --captcha-key <key> 和 --captcha-service capsolver\n"
-                        "  3) 在 DB configs 表设置 captcha_key"
-                    )
+                raise RuntimeError(
+                    "Step3 需要 Turnstile token，空 token 被拒。\n"
+                    "解决方案：使用 Outlook/Hotmail 邮箱（自动触发快速通道）。\n"
+                    "本工具已移除付费打码服务支持（坚持免费开源原则）。"
+                )
 
         # ── Step 4: 获取 OTP ──────────────────────────────────────────────────
         print("[Cursor] ⏳ 等待 OTP...", flush=True)
@@ -899,10 +806,6 @@ if __name__ == "__main__":
     p.add_argument("--use-xray",       action="store_true", help="使用本机 xray socks5://127.0.0.1:10808")
     p.add_argument("--use-mailtm",     action="store_true", help="强制使用 MailTM 临时邮箱（而非 DB 账号）")
     p.add_argument("--skip-step1",     action="store_true", help="跳过 Step1（CF 已知拦截时）")
-    p.add_argument("--captcha-service", default=os.environ.get("CAPTCHA_SERVICE", "capsolver"),
-                   help="打码服务: capsolver / yescaptcha / 2captcha")
-    p.add_argument("--captcha-key",    default=os.environ.get("CAPTCHA_KEY", ""),
-                   help="打码 API key")
     p.add_argument("--imap-host",      default="",  help="IMAP 服务器（可选）")
     p.add_argument("--imap-user",      default="",  help="IMAP 用户名（可选）")
     p.add_argument("--imap-pass",      default="",  help="IMAP 密码（可选）")
@@ -913,29 +816,10 @@ if __name__ == "__main__":
         proxy = "socks5://127.0.0.1:10808"
         print(f"[Cursor] 使用 xray 代理: {proxy}", flush=True)
 
-    # 从 DB configs 读取打码 key（如果命令行未指定）
-    if not args.captcha_key:
-        try:
-            import subprocess as _sp2
-            _res2 = _sp2.run(
-                ["psql", "postgresql://postgres:postgres@localhost/toolkit",
-                 "-t", "-A", "-c",
-                 "SELECT value FROM configs WHERE key='captcha_key' LIMIT 1;"],
-                capture_output=True, text=True, timeout=5
-            )
-            _val = _res2.stdout.strip()
-            if _val and len(_val) > 10:
-                args.captcha_key = _val
-                print(f"[Cursor] 从 DB 读取打码 key: {_val[:8]}...", flush=True)
-        except Exception:
-            pass
-
     result = register(
         email           = args.email,
         password        = args.password,
         proxy           = proxy or None,
-        captcha_service = args.captcha_service,
-        captcha_key     = args.captcha_key,
         imap_host       = args.imap_host,
         imap_user       = args.imap_user,
         imap_pass       = args.imap_pass,
