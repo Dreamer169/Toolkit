@@ -110,12 +110,20 @@ async def attach_google_proxy_routing(target, log=None) -> None:
         if log:
             log("[google-route-py] empty pool; skipping")
         return
-    cursor = {"i": random.randrange(len(pool))}
+    # v7.76 sticky-per-context: 一次 attach (= 一个 BrowserContext 生命周期 = 一次
+    # signup attempt) 内, 所有 *.google / gstatic / recaptcha.net 子请求共用同一个
+    # SOCKS5 出口 IP。旧逻辑用纯轮询 cursor +1, 导致一次提交内 page-load 走 IP-A、
+    # _GRECAPTCHA cookie 写入走 IP-B、grecaptcha.execute() POST 走 IP-C ... Google
+    # reCAPTCHA Enterprise 看到同一 client 的 NID/_GRECAPTCHA cookie 从 N 个不同 IP
+    # 发出 → 评分降到 ~0 → token invalid → Replit 返回 code:1。
+    # 修复后整个 ctx 内 IP 只一个, 评分能上来。不同 ctx 之间通过 random 起点
+    # 分散, 避免所有 ctx 都撞到 pool[0]。
+    _pinned_proxy = pool[random.randrange(len(pool))]
+    if log:
+        log(f"[google-route-py] ctx pinned to {_pinned_proxy} (sticky, pool={len(pool)})")
 
     def _pick() -> str:
-        p = pool[cursor["i"] % len(pool)]
-        cursor["i"] = (cursor["i"] + 1) % len(pool)
-        return p
+        return _pinned_proxy
 
     async def handler(route, request):
         try:
