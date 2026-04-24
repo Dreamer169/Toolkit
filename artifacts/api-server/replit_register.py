@@ -1971,6 +1971,30 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
         err1 = await fill_step1(page)
         # captcha_token_invalid → 在当前页面直接触发音频挑战（bypass auto-token）
         if err1 == "captcha_token_invalid":
+            # v7.69: 早判 reCAPTCHA Enterprise v3 score-only —
+            # 无 bframe 即无视觉/音频挑战 UI（v3 纯打分模式），
+            # 当前 IP 出口分被判 0 (code:2)；retry/reload 不会改善分数，
+            # 直接返回结构化错误，避免 280s 内 outer-reload-retry 无谓循环耗尽 timeout。
+            _v3_score_only = True
+            try:
+                for _f_chk in page.frames:
+                    _u_chk = (_f_chk.url or "")
+                    if "recaptcha" in _u_chk and "bframe" in _u_chk:
+                        _v3_score_only = False; break
+            except Exception:
+                _v3_score_only = False
+            if _v3_score_only:
+                log("[retry] reCAPTCHA Enterprise v3 score-only (no bframe iframe) → captcha_low_score 立即返回")
+                log("[retry] 根因: 出口 IP 被 Google 评 0 分；retry 无改善余地。需切换到 residential proxy。")
+                result["error"] = "captcha_low_score"
+                result["detail"] = (
+                    "reCAPTCHA Enterprise v3 rejected token (code:2). "
+                    "Current exit IP scored insufficient by Google risk engine. "
+                    "Datacenter/WARP IPs cannot pass; needs residential proxy."
+                )
+                try: await browser.close()
+                except Exception: pass
+                return result
             log("[retry] captcha_token_invalid → 尝试音频挑战 (Layer 2)...")
             try:
                 # 当前页面仍在 signup，直接触发音频解算
