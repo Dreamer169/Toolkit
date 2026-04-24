@@ -1026,6 +1026,8 @@ export class CdpSession {
                 .catch(() => false);
               if (!hasDoc) {
                 this.send({ type: "navError", url: target, error: String((err as Error)?.message ?? err) });
+                // 即便 nav 失败也补一条 httpStatus, 否则前端地址栏状态格永远空
+                this.send({ type: "httpStatus", status: this.lastStatus });
                 break;
               }
             }
