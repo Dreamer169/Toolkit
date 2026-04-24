@@ -105,9 +105,20 @@ module.exports = {
       "autorestart": true
     },
     {
+      "name": "xvfb",
+      "script": "/root/Toolkit/start-xvfb.sh",
+      "interpreter": "bash",
+      "cwd": "/root/Toolkit",
+      "restart_delay": 3000,
+      "max_restarts": 50,
+      "watch": false,
+      "autorestart": true,
+      "kill_timeout": 3000
+    },
+    {
       "name": "ngrok",
       "script": "/usr/local/bin/ngrok",
-      "args": "http 8081 --domain=recycling-tragedy-projector.ngrok-free.dev --request-header-add ngrok-skip-browser-warning:true --log=stdout",
+      "args": "http 3000 --domain=recycling-tragedy-projector.ngrok-free.dev --request-header-add ngrok-skip-browser-warning:true --log=stdout",
       "interpreter": "none",
       "cwd": "/root/Toolkit",
       "restart_delay": 5000,
