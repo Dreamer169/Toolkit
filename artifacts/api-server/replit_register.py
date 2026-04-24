@@ -1922,10 +1922,15 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 # v7.72: 默认始终禁用 google_proxy_route — 让 chromium 原生出口同时处理
                 # execute() 和 signup POST, 保证 IP 一致 → 不再 code:2 (mismatch).
                 # v7.71 restored: enable google_proxy_route when BROWSER_PROXY non-empty (VLESS).
-                _brox = os.environ.get("BROWSER_PROXY","").strip()  # v7.78f: revert v7.74 regression — gate must read broker chromium env, not legacy patchright PROXY param
+                # v7.78g — RESTORE 0391f15 working behavior: google_proxy_route ALWAYS attached.
+                # 0391f15 (e2e verified: tylerreyes307@outlook.com -> userId=58078470) had NO gate
+                # here — *.google traffic was unconditionally routed via clean non-GCP SOCKS pool.
+                # The v7.71-v7.78f BROWSER_PROXY/Tor gate was a misdiagnosis of code:2 (which is
+                # actually a LIVE/LOCKED token-action mismatch, not an IP mismatch — see route-force
+                # at line ~825 which already handles that). DISABLE_GOOGLE_ROUTE=1 kept as escape hatch.
                 _disable_groute = os.environ.get("DISABLE_GOOGLE_ROUTE","").strip() in ("1","true","yes")
-                if not _brox or _disable_groute or ":9050" in _brox:
-                    log(f"[CDP] google-route SKIPPED (BROWSER_PROXY={_brox!r}) — chromium native exit 接管 *.google → IP一致避免 code:2")
+                if _disable_groute:
+                    log("[CDP] google-route SKIPPED (DISABLE_GOOGLE_ROUTE=1 explicit opt-out)")
                 else:
                     try:
                         import sys as _sys, os as _os
@@ -1934,7 +1939,7 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                             _sys.path.insert(0, _here)
                         from google_proxy_route import attach_google_proxy_routing as _agr
                         await _agr(ctx, log)
-                        log("[CDP] google-route attached (FORCE_GOOGLE_ROUTE=1, *.google → SOCKS clean exits)")
+                        log("[CDP] google-route attached (v7.78g restore — *.google ALWAYS via clean non-GCP SOCKS pool)")
                     except Exception as _ge:
                         log(f"[CDP] google-route attach failed: {_ge}")
             except Exception as _we:
