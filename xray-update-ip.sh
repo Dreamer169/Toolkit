@@ -1,7 +1,7 @@
 #!/bin/bash
 # 从域名解析最新 CF IP 并更新 xray.json（使用 Node.js DNS，兼容无 dig/nslookup 环境）
 DOMAIN=iam.jimhacker.qzz.io
-CFG=/workspaces/Toolkit/xray.json
+CFG=/root/Toolkit/xray.json
 
 FRESH_IPS=$(node -e "
 require('dns').resolve4('$DOMAIN', (err, addrs) => {
