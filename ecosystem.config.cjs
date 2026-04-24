@@ -18,7 +18,8 @@ module.exports = {
         "SUB2API_API_KEY": "sk-06cf1c8b2ff7a09a1f11d7909a6d7cb7dee97e38793d630f25a3bddf2bf0ec16",
         "LOCAL_GATEWAY_BASE_URL": "https://strive-phoney-vocalize.ngrok-free.dev/api/gateway",
         "REPLIT_SUBNODES": "https://gh-cli-direct--elizabetha96.replit.app/api/gateway",
-        "CONNECT_PROXY_TOKEN": "vps_direct_proxy_2024"
+        "CONNECT_PROXY_TOKEN": "vps_direct_proxy_2024",
+        "FORCE_REGISTER_PORTS": ""
       },
       "restart_delay": 3000,
       "max_restarts": 20,
@@ -293,6 +294,7 @@ module.exports = {
       "env": {
         "CONNECT_PROXY_PORT": "8091",
         "CONNECT_PROXY_TOKEN": "vps_direct_proxy_2024",
+        "FORCE_REGISTER_PORTS": "",
         "PYTHONUNBUFFERED": "1"
       },
       "restart_delay": 3000,

@@ -28,14 +28,14 @@ _pick_browser_proxy() {
   for cand in 10826:DigitalOcean 10824:Kirino 10830:MULTACOM 10828:Misaka 10822:Vultr 10832:Linode 10820:Static 10825:Static 10831:Static 10836:Static 10837:Static 10845:Static; do
     port="${cand%%:*}"; name="${cand##*:}"
     ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:${port}\b" || continue
-    if curl -s --max-time 10 --socks5 "127.0.0.1:${port}" https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep -q '^h=1\.1\.1\.1'; then
+    if curl -s --max-time 10 --socks5 "127.0.0.1:${port}" https://ifconfig.me/ip 2>/dev/null | grep -qE "^[0-9]"; then
       echo "socks5://127.0.0.1:${port}|${name}"
       return 0
     fi
   done
   # Tor as residential-style fallback
   if ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:9050\b" && \
-     curl -s --max-time 12 --socks5 127.0.0.1:9050 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep -q '^h=1\.1\.1\.1'; then
+     curl -s --max-time 12 --socks5 127.0.0.1:9050 https://ifconfig.me/ip 2>/dev/null | grep -qE "^[0-9]"; then
     echo "socks5://127.0.0.1:9050|Tor"
     return 0
   fi

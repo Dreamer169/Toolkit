@@ -817,9 +817,9 @@ async def fill_step1(page) -> str | None:
     # execute() 拿到的高分 token 不一致，Replit 返回 code:1。
     # v7.72: 默认禁用 route-force — 跟 google_proxy_route 配套, chromium 原生执行
     # execute() + auto-re-execute, 同一 IP context 下生成的 token 都是高分一致的, 强制
-    # 锁定 旧 token 反而把过时 token 替换上去 → code:2. 仅当 FORCE_ROUTE_FORCE=1 时启用旧路径.
-    _force_rf = os.environ.get("FORCE_ROUTE_FORCE", "").strip() in ("1","true","yes")
-    if rc_token and len(rc_token) > 50 and _force_rf:
+    # v7.71 restored: enable route-force when BROWSER_PROXY non-empty (google_proxy_route path).
+    _brox_rf = PROXY.strip()
+    if rc_token and len(rc_token) > 50 and bool(_brox_rf) and ":9050" not in _brox_rf:
         _locked_rc = rc_token
         async def _signup_force_token(route, request):
             try:
@@ -1879,10 +1879,10 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 # reCAPTCHA Enterprise sees a fresh IP instead of WARP-via-GCP.
                 # v7.72: 默认始终禁用 google_proxy_route — 让 chromium 原生出口同时处理
                 # execute() 和 signup POST, 保证 IP 一致 → 不再 code:2 (mismatch).
-                # 仅当 FORCE_GOOGLE_ROUTE=1 (例如手动调试 broker 走 WARP 时), 才启用旧路径.
-                _brox = os.environ.get("BROWSER_PROXY", "").strip()
-                _force_groute = os.environ.get("FORCE_GOOGLE_ROUTE", "").strip() in ("1","true","yes")
-                if not _force_groute:
+                # v7.71 restored: enable google_proxy_route when BROWSER_PROXY non-empty (VLESS).
+                _brox = PROXY.strip()
+                _disable_groute = os.environ.get("DISABLE_GOOGLE_ROUTE","").strip() in ("1","true","yes")
+                if not _brox or _disable_groute or ":9050" in _brox:
                     log(f"[CDP] google-route SKIPPED (BROWSER_PROXY={_brox!r}) — chromium native exit 接管 *.google → IP一致避免 code:2")
                 else:
                     try:
