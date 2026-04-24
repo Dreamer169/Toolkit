@@ -84,4 +84,23 @@ export class PersistenceManager {
     await this.init();
     await execute('DELETE FROM job_snapshots WHERE job_id = $1', [jobId]);
   }
+
+  /**
+   * reapOrphans — 启动时调用：所有遗留 status='running' 的行其实没有进程在跑
+   * （子进程是 api-server 的 child；node 一重启就 SIGTERM 掉了；DB 行没人收尾）。
+   * 把它们标记成 'crashed' + exitCode=-99 + 追加一条说明日志，前端不再撒谎。
+   */
+  static async reapOrphans(): Promise<number> {
+    await this.init();
+    const rows = await query<{ job_id: string }>(
+      `UPDATE job_snapshots
+         SET status = 'crashed',
+             exit_code = -99,
+             logs = logs || '[{"type":"error","message":"⚠ api-server 重启时此任务仍在 running，子进程已丢失，自动标记为 crashed"}]'::jsonb,
+             updated_at = NOW()
+       WHERE status = 'running'
+       RETURNING job_id`
+    );
+    return rows.length;
+  }
 }

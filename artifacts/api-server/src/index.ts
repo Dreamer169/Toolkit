@@ -6,6 +6,7 @@ import { startAccountHealthcheck } from "./lib/account-healthcheck.js";
 import { startCfPoolMaintainer } from "./lib/cf-pool-maintainer.js";
 import { startProxyMaintenance } from "./routes/data.js";
 import { attachCdpRelayWebSocket } from "./lib/cdp_relay_ws.js";
+import { PersistenceManager } from "./lib/persistence-manager.js";
 
 const rawPort = process.env["PORT"];
 if (!rawPort) throw new Error("PORT environment variable is required but was not provided.");
@@ -25,6 +26,10 @@ const server = app.listen(port, (err) => {
   startCfPoolMaintainer();
   startProxyMaintenance();
   attachCdpRelayWebSocket(server);
+  // v1: 启动时回收上次 api-server 退出后留下的 'running' 僵尸 job
+  PersistenceManager.reapOrphans()
+    .then((n) => { if (n > 0) logger.warn({ reaped: n }, "reaped orphan running jobs"); })
+    .catch((err) => logger.error({ err }, "reapOrphans failed"));
 });
 
 server.on("error", (err) => { logger.error({ err }, "Server error"); });
