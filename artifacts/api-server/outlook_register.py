@@ -1429,6 +1429,34 @@ class PatchrightController(BaseController):
                                 return True
                 except Exception:
                     pass
+                # v7.64 终极兜底：press-hold 通过后 PerimeterX 可能保留 px-captcha 外壳但
+                # （a）外层 div 内容清空，或（b）内部 challenge iframe 设为 display:none。
+                # 这两种状态 bodyLen 仍 >1500（因为 <script> 体），v7.61 检测捕捉不到，
+                # 但视觉上 captcha 已通过——这是 g4ljon 类型 job 浪费 CF IP 的根因。
+                try:
+                    for _pf_px in page.frames:
+                        _u_px = getattr(_pf_px, "url", "") or ""
+                        if "hsprotect.net" not in _u_px:
+                            continue
+                        _px_state = _pf_px.evaluate("""() => {
+                            const root = document.getElementById(px-captcha);
+                            if (!root) return null;
+                            if (root.children.length === 0) return empty;
+                            const inner = root.querySelector(iframe);
+                            if (inner) {
+                                const cs = window.getComputedStyle(inner);
+                                if (cs.display === none || cs.visibility === hidden) return iframe_hidden;
+                            }
+                            return null;
+                        }""")
+                        if _px_state == "empty":
+                            print("[captcha] ✅ v7.64 终极兜底：PerimeterX 外层 px-captcha 已清空 → CAPTCHA 通过", flush=True)
+                            return True
+                        if _px_state == "iframe_hidden":
+                            print("[captcha] ✅ v7.64 终极兜底：PerimeterX 内部挑战 iframe 已隐藏 (display:none) → CAPTCHA 通过", flush=True)
+                            return True
+                except Exception:
+                    pass
                 print("[captcha] ❌ CAPTCHA 仍然存在", flush=True)
                 return False
             except Exception:
