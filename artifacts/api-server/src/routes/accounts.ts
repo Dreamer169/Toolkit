@@ -685,6 +685,14 @@ router.post("/replit/register", (req, res) => {
 
           // 每个Outlook账号：信誉好的端口优先，避免重复
           let portQueue = sortedByReputation(availablePorts());
+          // v7.71: env override FORCE_REGISTER_PORTS="0" → only use DIRECT (VPS IP).
+          //   When all xray subnodes are dead (iam.jimhacker.qzz.io down), regular SOCKS5
+          //   ports hang on data probe → registration stuck. DIRECT bypasses xray entirely.
+          const _forceRaw = process.env.FORCE_REGISTER_PORTS;
+          if (_forceRaw && _forceRaw.trim()) {
+            portQueue = _forceRaw.split(",").map((x) => parseInt(x.trim(), 10)).filter((n) => Number.isFinite(n));
+            log(`    [force-ports] FORCE_REGISTER_PORTS=${_forceRaw} → portQueue=[${portQueue.join(",")}]`);
+          }
           if (portQueue.length === 0) {
             log(`  [skip] No available ports for this Outlook, skipping`);
             continue; // skip to next Outlook

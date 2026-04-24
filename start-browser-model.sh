@@ -22,17 +22,17 @@ export FRONTEND_DIR=/root/browser-model/artifacts/api-server/public
 
 # v7.67 — 选 BROWSER_PROXY (优先 WARP，fallback Kirino → DigitalOcean)
 _pick_browser_proxy() {
-  for cand in 40000:WARP 10824:Kirino 10826:DigitalOcean; do
+  # v7.71: 优先 clean SOCKS exit (Kirino/DO/Multacom). 全死时 fallback DIRECT (VPS IP),
+  # 不再用 WARP — WARP exit 是 Cloudflare datacenter IP, reCAPTCHA Enterprise 直接判低分 → code:2 reject.
+  for cand in 10826:DigitalOcean 10824:Kirino 10830:MULTACOM 10828:Misaka 10822:Vultr 10832:Linode; do
     port="${cand%%:*}"; name="${cand##*:}"
-    if ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:${port}\b"; then
-      # 探活: socks5 出口能解析+连出
-      if curl -s --max-time 4 --socks5 "127.0.0.1:${port}" https://1.1.1.1/cdn-cgi/trace >/dev/null 2>&1; then
-        echo "socks5://127.0.0.1:${port}|${name}"
-        return 0
-      fi
+    ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:${port}\b" || continue
+    if curl -s --max-time 10 --socks5 "127.0.0.1:${port}" https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep -q '^h=1\.1\.1\.1'; then
+      echo "socks5://127.0.0.1:${port}|${name}"
+      return 0
     fi
   done
-  echo "socks5://127.0.0.1:40000|WARP-fallback"
+  echo "|DIRECT-VPS-fallback"
 }
 _picked="$(_pick_browser_proxy)"
 export BROWSER_PROXY="${_picked%%|*}"

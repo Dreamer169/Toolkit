@@ -816,7 +816,11 @@ async def fill_step1(page) -> str | None:
     # 将 React state 中的 recaptchaToken 覆盖为不同 token，导致 POST body 与我们
     # execute() 拿到的高分 token 不一致，Replit 返回 code:1。WARP 模式下我们的
     # execute() token 才是高分来源，route-force 确保 POST 使用它。
-    if rc_token and len(rc_token) > 50:
+    # v7.71: DIRECT 模式 (BROWSER_PROXY 空) 时禁用 route-force — 此时 google_proxy_route 也已禁用，
+    # page 自身的 execute() 通过 chromium DIRECT 出口完成, 跟 POST 走同一 IP, 强制 lock 旧 token 反而
+    # 把已经过时的 token (可能 IP context 不同) 替换上去 → code:2.
+    _brox_rf = os.environ.get("BROWSER_PROXY", "").strip()
+    if rc_token and len(rc_token) > 50 and _brox_rf:
         _locked_rc = rc_token
         async def _signup_force_token(route, request):
             try:
@@ -967,9 +971,14 @@ async def fill_step1(page) -> str | None:
     _api_status = _api_resp.get("status", 0)
     _api_body_r = _api_resp.get("body", "")
     log(f"[cf-check] status={_api_status} body_has_moment={'just a moment' in _api_body_r.lower()} body50={repr(_api_body_r[:50])}")
+    _api_url_r = _api_resp.get("url", "")
+    _is_signup_post = "sign-up" in _api_url_r or "/signup" in _api_url_r
     if _api_status in (403, 429, 503) and ("just a moment" in _api_body_r.lower() or "challenge" in _api_body_r.lower() or "cloudflare" in _api_body_r.lower()):
-        log(f"[step1] CF API 拦截 ({_api_status}) → cf_api_blocked")
-        return "cf_api_blocked"
+        if not _is_signup_post:
+            log(f"[cf-check] {_api_status} on non-signup ({_api_url_r[:80]}) → 忽略, 等待 sign-up POST 真结果")
+        else:
+            log(f"[step1] CF API 拦截 ({_api_status}) on sign-up → cf_api_blocked")
+            return "cf_api_blocked"
     if _api_status == 400 and "captcha" in _api_body_r.lower():
         log(f"[step1] API captcha 400 → v7.54 fast-retry (同 ctx 内 port-rotate + 重做 execute)")
         # re-attach response listener (was removed above) so we can read new responses
@@ -1869,16 +1878,25 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 # Per-host route: divert *.google.com / *.gstatic.com / *.recaptcha.net /
                 # *.youtube.com requests through clean non-GCP SOCKS5 exits so
                 # reCAPTCHA Enterprise sees a fresh IP instead of WARP-via-GCP.
-                try:
-                    import sys as _sys, os as _os
-                    _here = _os.path.dirname(_os.path.abspath(__file__))
-                    if _here not in _sys.path:
-                        _sys.path.insert(0, _here)
-                    from google_proxy_route import attach_google_proxy_routing as _agr
-                    await _agr(ctx, log)
-                    log("[CDP] google-route attached (non-GCP exits for *.google/*.gstatic/*.recaptcha)")
-                except Exception as _ge:
-                    log(f"[CDP] google-route attach failed: {_ge}")
+                # v7.71: 当 broker chromium 走 DIRECT (BROWSER_PROXY=空) 时,
+                # 必须禁用 google_proxy_route 避免 IP 不一致 (token 来自 SOCKS exit,
+                # POST 来自 chromium DIRECT 出口) → Replit 返回 code:2 (token invalid).
+                # 同时也支持显式 DISABLE_GOOGLE_ROUTE=1 强制关闭.
+                _brox = os.environ.get("BROWSER_PROXY", "").strip()
+                _disable_groute = os.environ.get("DISABLE_GOOGLE_ROUTE", "").strip() in ("1","true","yes")
+                if not _brox or _disable_groute:
+                    log(f"[CDP] google-route SKIPPED (BROWSER_PROXY={_brox!r} disable={_disable_groute}) — chromium native exit handles *.google for IP一致性")
+                else:
+                    try:
+                        import sys as _sys, os as _os
+                        _here = _os.path.dirname(_os.path.abspath(__file__))
+                        if _here not in _sys.path:
+                            _sys.path.insert(0, _here)
+                        from google_proxy_route import attach_google_proxy_routing as _agr
+                        await _agr(ctx, log)
+                        log("[CDP] google-route attached (non-GCP exits for *.google/*.gstatic/*.recaptcha)")
+                    except Exception as _ge:
+                        log(f"[CDP] google-route attach failed: {_ge}")
             except Exception as _we:
                 log(f"[CDP] cf-warmup err (continuing): {_we}")
         else:
