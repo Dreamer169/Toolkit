@@ -7,8 +7,8 @@
  *                                                               ↕ (VPS 内部会话)
  *   cursor_register.py ← --cdp-url http://localhost:8080/api/cdp-relay/<sessionId>
  */
-import type { IncomingMessage } from "http";
-import type { WebSocket as WSType } from "ws";
+import type { IncomingMessage, Server as HttpServer } from "http";
+import { WebSocketServer, type WebSocket as WSType } from "ws";
 
 export interface CdpSession {
   sessionId: string;
@@ -29,8 +29,11 @@ export function handleClientConnection(ws: WSType, _req: IncomingMessage): void 
   let sessionId: string | null = null;
 
   const keepAlive = setInterval(() => {
-    if (ws.readyState === 1) ws.send(JSON.stringify({ type: "ping" }));
+    if (ws.readyState === 1) {
+      try { ws.send(JSON.stringify({ type: "ping" })); } catch {}
+    }
   }, 20_000);
+  keepAlive.unref();
 
   ws.on("message", (raw) => {
     try {
@@ -38,6 +41,12 @@ export function handleClientConnection(ws: WSType, _req: IncomingMessage): void 
 
       if (msg["type"] === "register") {
         // 客户端注册，携带 Chrome /json/version 数据
+        // 防泄漏：同一 ws 重复 register 时先清理旧 session
+        if (sessionId && sessions.has(sessionId)) {
+          const old = sessions.get(sessionId);
+          old?.playwrightWs?.close();
+          sessions.delete(sessionId);
+        }
         sessionId = genId();
         const jsonVersion = (msg["jsonVersion"] as Record<string, unknown>) ?? {};
         const session: CdpSession = {
@@ -54,7 +63,7 @@ export function handleClientConnection(ws: WSType, _req: IncomingMessage): void 
           sessionId,
           relayUrl: `http://localhost:${process.env["PORT"] ?? 8080}/api/cdp-relay/${sessionId}`,
           // 对外 URL 供用户复制到注册请求里
-          publicRelayUrl: `http://45.205.27.69:${process.env["PORT"] ?? 8080}/api/cdp-relay/${sessionId}`,
+          publicRelayUrl: `http://${process.env["PUBLIC_HOST"] ?? "45.205.27.69"}:${process.env["PORT"] ?? 8080}/api/cdp-relay/${sessionId}`,
         }));
         console.log(`[cdp-relay] 新会话 ${sessionId} 已注册`);
 
@@ -139,4 +148,40 @@ setInterval(() => {
       sessions.delete(id);
     }
   }
-}, 5 * 60 * 1000);
+}, 5 * 60 * 1000).unref();
+
+/** 把 WebSocket 升级 hook 装到 Node http.Server 上。
+ *  路径:
+ *    /api/cdp-relay/client                       → 本地桥接客户端
+ *    /api/cdp-relay/:sessionId/playwright        → Playwright/cursor_register
+ *  其他路径放行（不调用 socket.destroy()，避免影响其他 WS 服务）
+ */
+export function attachCdpRelayWebSocket(server: HttpServer): void {
+  const clientWss = new WebSocketServer({ noServer: true });
+  const playwrightWss = new WebSocketServer({ noServer: true });
+  const PLAYWRIGHT_RE = /^\/api\/cdp-relay\/([^/]+)\/playwright$/;
+
+  server.on("upgrade", (req, socket, head) => {
+    if (!req.url) return;
+    const url = new URL(req.url, "http://x");
+
+    if (url.pathname === "/api/cdp-relay/client") {
+      clientWss.handleUpgrade(req, socket, head, (ws) => {
+        handleClientConnection(ws as unknown as WSType, req);
+      });
+      return;
+    }
+
+    const m = PLAYWRIGHT_RE.exec(url.pathname);
+    if (m && m[1]) {
+      const sessionId = m[1];
+      playwrightWss.handleUpgrade(req, socket, head, (ws) => {
+        handlePlaywrightConnection(ws as unknown as WSType, sessionId);
+      });
+      return;
+    }
+    // 不属于本路由：放行（不 destroy，让其他 upgrade 处理器接管）
+  });
+
+  console.log("[cdp-relay] WebSocket endpoints attached: /api/cdp-relay/client + /api/cdp-relay/:sessionId/playwright");
+}
