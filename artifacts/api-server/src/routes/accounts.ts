@@ -1155,36 +1155,6 @@ router.get("/replit-accounts", async (_req, res) => {
   } catch (e) { res.json({ accounts: [], total: 0, error: String(e) }); }
 });
 
-// ── POST /api/signup (旧接口) ─────────────────────────────────────────────────
-router.post("/signup", (req, res) => {
-  const parsedCount = Number.parseInt(String(req.body?.count ?? "1"), 10);
-  const count = Math.min(Math.max(Number.isFinite(parsedCount) ? parsedCount : 1, 1), 5);
-  const jobId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  const job: Job = { id: jobId, status: "running", started: Date.now(), logs: [], result: null };
-  jobs.set(jobId, job);
-  const proc = spawn(PYTHON, [
-    path.join(SCRIPTS_DIR, "replit_signup_v2.py"),
-    "--count", String(count),
-  ], {
-    cwd: SCRIPTS_DIR,
-    env: { ...process.env, GATEWAY_API: LOCAL_API_BASE + "/api/gateway", VPS_GATEWAY_URL: VPS_GATEWAY },
-  });
-  proc.stdout.on("data", (d: Buffer) => { job.logs.push(...d.toString().split("\n").filter(Boolean)); });
-  proc.stderr.on("data", (d: Buffer) => { job.logs.push("ERR: " + d.toString().trim()); });
-  proc.on("close", (code) => { job.status = code === 0 ? "done" : "error"; });
-  res.json({ jobId, count, status: "running" });
-});
-
-router.get("/signup/status/:jobId", (req, res) => {
-  const job = jobs.get(req.params.jobId);
-  if (!job) { res.status(404).json({ error: "job not found" }); return; }
-  res.json({
-    jobId: job.id, status: job.status,
-    elapsed: Math.round((Date.now() - job.started) / 1000),
-    lastLines: job.logs.slice(-30),
-    result: job.result,
-  });
-});
 
 // ── POST /api/replit/retry-verify ─────────────────────────────────────────────
 // 对所有 unverified 的 Reseek 账号重试邮箱验证（用对应 Outlook 账号的 token）
