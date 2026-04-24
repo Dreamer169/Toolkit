@@ -65,10 +65,42 @@ function createProxyAgent(preferred?: string | null): ProxyAgent | undefined {
   return new ProxyAgent({ uri, token } as ConstructorParameters<typeof ProxyAgent>[0]);
 }
 
+// 本地 8091 CONNECT 代理偶尔挂掉（pm2 未起 / 端口被占 / 子进程崩溃）。
+// 之前实现是"代理失败 → 全部 fetch failed"，导致 live-verify 轮询每 10 秒
+// 给所有账号刷一遍 ECONNREFUSED 错误，污染日志。改为：
+//   1) 默认走代理；
+//   2) 一旦遇到连接级错误（ECONNREFUSED / fetch failed 等），打开 60 秒熔断，
+//      期间所有 microsoftFetch 直连 fetch（不带 dispatcher）；
+//   3) 熔断到期后再尝试代理，恢复正常即继续走代理。
+let circuitOpenUntil = 0;
+function isProxyConnectError(err: unknown): boolean {
+  const msg = String((err as { message?: string })?.message ?? err ?? "").toLowerCase();
+  const cause = String(((err as { cause?: { code?: string; message?: string } })?.cause?.code) ?? ((err as { cause?: { code?: string; message?: string } })?.cause?.message) ?? "").toLowerCase();
+  return (
+    msg.includes("fetch failed") ||
+    cause.includes("econnrefused") ||
+    cause.includes("econnreset") ||
+    cause.includes("socket hang up") ||
+    cause.includes("other side closed")
+  );
+}
+
 export async function microsoftFetch(input: RequestInfo | URL, init: RequestInit = {}, preferredProxy?: string | null): Promise<Response> {
+  const now = Date.now();
+  // 熔断打开期间：直连，跳过代理
+  if (now < circuitOpenUntil) return fetch(input, init);
   const dispatcher = createProxyAgent(preferredProxy);
   if (!dispatcher) return fetch(input, init);
-  return fetch(input, { ...init, dispatcher } as RequestInitWithDispatcher);
+  try {
+    return await fetch(input, { ...init, dispatcher } as RequestInitWithDispatcher);
+  } catch (err) {
+    if (isProxyConnectError(err)) {
+      circuitOpenUntil = Date.now() + 60_000;
+      // 直连兜底，让 live-verify / refreshToken 等不再连环失败
+      return fetch(input, init);
+    }
+    throw err;
+  }
 }
 
 export function getMicrosoftBrowserProxy(preferred?: string | null): string {

@@ -286,6 +286,21 @@ module.exports = {
       }
     },
     {
+      "name": "http-connect-proxy",
+      "script": "/root/Toolkit/artifacts/api-server/http_connect_proxy.py",
+      "interpreter": "python3",
+      "cwd": "/root/Toolkit",
+      "env": {
+        "CONNECT_PROXY_PORT": "8091",
+        "CONNECT_PROXY_TOKEN": "vps_direct_proxy_2024",
+        "PYTHONUNBUFFERED": "1"
+      },
+      "restart_delay": 3000,
+      "max_restarts": 50,
+      "watch": false,
+      "autorestart": true
+    },
+    {
       "name": "browser-model",
       "script": "/root/Toolkit/start-browser-model.sh",
       "interpreter": "bash",
