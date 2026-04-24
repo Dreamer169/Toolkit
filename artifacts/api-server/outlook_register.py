@@ -1147,11 +1147,13 @@ class PatchrightController(BaseController):
 
             # v7.60 早期通过检测：press-hold 完成后若 CAPTCHA 已消失，跳过音频流程
             # 修复：PerimeterX (px-captcha) 路径下 press-hold 已通过但代码继续等音频导致超时失败
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(3500)
             try:
                 _early_solved_reason = None
                 if page.get_by_text("取消").count() > 0:
                     _early_solved_reason = "出现取消按钮"
+                elif page.get_by_text("Cancel").count() > 0:
+                    _early_solved_reason = "出现 Cancel 按钮"
                 elif page.locator("iframe[title=\"验证质询\"]").count() == 0:
                     _early_solved_reason = "验证质询 iframe 已消失"
                 else:
@@ -1161,6 +1163,25 @@ class PatchrightController(BaseController):
                             if "interrupt" in _u_chk or "passkey" in _u_chk:
                                 _early_solved_reason = f"页面已跳到 {_u_chk[:60]}"
                                 break
+                            # v7.61: 关键检测——所有 hsprotect.net frame 都已清空 = captcha 通过
+                            # 注意：success state 是 ALL hsprotect frames bodyLen<1500，因为部分 frame 有外壳<1500 但活跃 frame 仍 >3000
+                        except Exception:
+                            pass
+                    # v7.61: 全量 hsprotect frame 清空检测
+                    if not _early_solved_reason:
+                        try:
+                            _hsp_lens = []
+                            for _pf_chk2 in page.frames:
+                                _u2 = getattr(_pf_chk2, "url", "") or ""
+                                if "hsprotect.net" in _u2:
+                                    try:
+                                        _bl = _pf_chk2.evaluate("() => document.body ? document.body.innerHTML.length : -1")
+                                        if _bl is not None and _bl >= 0:
+                                            _hsp_lens.append(_bl)
+                                    except Exception:
+                                        pass
+                            if _hsp_lens and max(_hsp_lens) < 1500:
+                                _early_solved_reason = f"所有 hsprotect frame 已清空 (max bodyLen={max(_hsp_lens)}, n={len(_hsp_lens)})"
                         except Exception:
                             pass
                 if _early_solved_reason:
@@ -1207,8 +1228,27 @@ class PatchrightController(BaseController):
                 _late_solved_reason = None
                 if page.get_by_text("取消").count() > 0:
                     _late_solved_reason = "出现取消按钮"
+                elif page.get_by_text("Cancel").count() > 0:
+                    _late_solved_reason = "出现 Cancel 按钮"
                 elif page.locator("iframe[title=\"验证质询\"]").count() == 0:
                     _late_solved_reason = "验证质询 iframe 已消失"
+                else:
+                    # v7.61: 全量 hsprotect frame 清空检测
+                    _hsp_lens_l = []
+                    for _pf_late in page.frames:
+                        try:
+                            _u_late = getattr(_pf_late, "url", "") or ""
+                            if "hsprotect.net" in _u_late:
+                                _bl_l = _pf_late.evaluate("() => document.body ? document.body.innerHTML.length : -1")
+                                if _bl_l is not None and _bl_l >= 0:
+                                    _hsp_lens_l.append(_bl_l)
+                            elif "interrupt" in _u_late or "passkey" in _u_late:
+                                _late_solved_reason = f"页面已跳到 {_u_late[:60]}"
+                                break
+                        except Exception:
+                            pass
+                    if not _late_solved_reason and _hsp_lens_l and max(_hsp_lens_l) < 1500:
+                        _late_solved_reason = f"所有 hsprotect frame 已清空 (max bodyLen={max(_hsp_lens_l)})"
                 if _late_solved_reason:
                     print(f"[captcha] ✅ 20s 后二次检测：CAPTCHA 已通过（{_late_solved_reason}）→ 跳过深度扫描", flush=True)
                     return True
