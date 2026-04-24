@@ -12,7 +12,7 @@ let _enabled    = true;
 let _running    = false;
 let _intervalId: ReturnType<typeof setInterval> | null = null;
 let _lastRun: string | null = null;
-let _lastStats: { total: number; clicked: number; skipped: number; failed: number } = { total: 0, clicked: 0, skipped: 0, failed: 0 };
+let _lastStats: { total: number; clicked: number; skipped: number; failed: number; ok: number } = { total: 0, clicked: 0, skipped: 0, failed: 0, ok: 0 };
 
 /** msgId → 失败次数；永久失败3次/瞬态失败5次才放弃（标记已读） */
 const failCounts = new Map<string, number>();
@@ -110,7 +110,7 @@ async function refreshToken(rt: string, proxy?: string | null): Promise<{ token:
 async function runOnce() {
   if (_running) { logger.info("[live-verify] 上次轮询尚未结束，跳过"); return; }
   _running = true;
-  const stats = { total: 0, clicked: 0, skipped: 0, failed: 0 };
+  const stats = { total: 0, clicked: 0, skipped: 0, failed: 0, ok: 0 };
   try {
     const { query } = await import("../db.js");
     // 排除已被标记为 suspended 或 abuse_mode 的账号
@@ -173,13 +173,13 @@ async function runOnce() {
           if (!gr2.ok) { stats.skipped++; continue; }
           const gd2 = await gr2.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
           const msgs2 = (gd2.value ?? []).filter(m => !m.isRead && m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase())).filter(m => !isRecentlyHandled(m.id));
-          if (!msgs2.length) continue;
+          if (!msgs2.length) { stats.ok++; continue; }
           for (const msg of msgs2) { if (!_enabled) break; await processMessage(acc, msg, accessToken, stats); }
           continue;
         }
         const gd = await gr.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
         const msgs = (gd.value ?? []).filter(m => m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase())).filter(m => !isRecentlyHandled(m.id));
-        if (!msgs.length) continue;
+        if (!msgs.length) { stats.ok++; continue; }
         logger.info({ email: acc.email, count: msgs.length }, "[live-verify] 发现未读验证邮件");
         for (const msg of msgs) { if (!_enabled) break; await processMessage(acc, msg, accessToken, stats); }
       } catch (e) {

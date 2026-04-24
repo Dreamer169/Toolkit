@@ -85,7 +85,7 @@ function isProxyConnectError(err: unknown): boolean {
   );
 }
 
-export async function microsoftFetch(input: RequestInfo | URL, init: RequestInit = {}, preferredProxy?: string | null): Promise<Response> {
+export async function microsoftFetch(input: Parameters<typeof fetch>[0], init: RequestInit = {}, preferredProxy?: string | null): Promise<Response> {
   const now = Date.now();
   // 熔断打开期间：直连，跳过代理
   if (now < circuitOpenUntil) return fetch(input, init);
