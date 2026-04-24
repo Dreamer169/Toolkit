@@ -273,6 +273,16 @@ module.exports = {
         "REFRESH_SECS": "30",
         "PYTHONUNBUFFERED": "1"
       }
+    },
+    {
+      "name": "browser-model",
+      "script": "/root/Toolkit/start-browser-model.sh",
+      "interpreter": "bash",
+      "cwd": "/root/Toolkit",
+      "restart_delay": 5000,
+      "max_restarts": 30,
+      "watch": false,
+      "autorestart": true
     }
   ]
 };

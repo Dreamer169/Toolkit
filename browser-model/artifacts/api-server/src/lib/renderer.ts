@@ -1,7 +1,55 @@
 import { chromium, Browser, BrowserContext } from "playwright";
 import { attachGoogleProxyRouting, googleProxyPoolInfo } from "./google-route.js";
+import { spawn, type ChildProcess } from "node:child_process";
+import * as net from "node:net";
+import * as fs from "node:fs";
 
 let browserPromise: Promise<Browser> | null = null;
+let chromiumProc: ChildProcess | null = null;
+
+async function waitForCdpHttp(port: number, host: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastErr: unknown = null;
+  while (Date.now() < deadline) {
+    const sockOk = await new Promise<boolean>((resolve) => {
+      const s = net.connect(port, host);
+      let done = false;
+      const finish = (v: boolean, e?: unknown) => {
+        if (done) return;
+        done = true;
+        if (e) lastErr = e;
+        try { s.destroy(); } catch { /* ignore */ }
+        resolve(v);
+      };
+      s.once("connect", () => finish(true));
+      s.once("error", (e) => finish(false, e));
+      setTimeout(() => finish(false, new Error("connect timeout")), 1500);
+    });
+    if (sockOk) {
+      // chromium with --remote-debugging-pipe will LISTEN on the port but
+      // /json/version returns ECONNREFUSED at the HTTP layer. Probe HTTP.
+      try {
+        const ctl = new AbortController();
+        const t = setTimeout(() => ctl.abort(), 2500);
+        const r = await fetch(`http://${host}:${port}/json/version`, { signal: ctl.signal });
+        clearTimeout(t);
+        if (r.ok) return;
+      } catch (e) { lastErr = e; }
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  throw new Error(`CDP HTTP at ${host}:${port} not ready in ${timeoutMs}ms (last=${String(lastErr)})`);
+}
+
+function killChromiumProc(): void {
+  if (chromiumProc && chromiumProc.exitCode === null) {
+    try { chromiumProc.kill("SIGTERM"); } catch { /* ignore */ }
+  }
+  chromiumProc = null;
+}
+process.once("exit",   () => { killChromiumProc(); });
+process.once("SIGTERM", () => { killChromiumProc(); process.exit(0); });
+process.once("SIGINT",  () => { killChromiumProc(); process.exit(0); });
 
 export const STEALTH_INIT = `
 // === Anti-fingerprint init script (runs before any page JS) ===
@@ -243,48 +291,69 @@ async function getBrowser(): Promise<Browser> {
     }
   }
   if (!browserPromise) {
-    const executablePath = process.env.REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined;
+    const executablePath = process.env.REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE
+      || "/data/cache/ms-playwright/chromium-1208/chrome-linux64/chrome";
     const proxyServer = process.env.BROWSER_PROXY || undefined;
-    browserPromise = chromium
-      .launch({
-        // Headed mode over Xvfb :99 (1920x1080x24). DISPLAY env is set by
-        // start-browser-model.sh. This gives a real GPU stack, real fonts,
-        // real window manager surface — anti-bot / WebGL / fingerprint gets
-        // a vastly more realistic profile than headless.
-        headless: false,
-        executablePath,
-        proxy: proxyServer ? { server: proxyServer } : undefined,
-        args: [
-          "--no-sandbox",
-          "--disable-blink-features=AutomationControlled",
-          "--disable-features=IsolateOrigins,site-per-process,AutomationControlled,Translate",
-          "--disable-dev-shm-usage",
-          "--disable-extensions-except",
-          "--disable-component-extensions-with-background-pages",
-          "--no-default-browser-check",
-          "--no-first-run",
-          "--password-store=basic",
-          "--use-mock-keychain",
-          "--remote-debugging-port=9222",
-          "--remote-debugging-address=127.0.0.1",
-          // Window/screen
-          "--window-size=1920,1080",
-          "--window-position=0,0",
-          "--start-maximized",
-          // GPU on Xvfb — software GL via SwiftShader/ANGLE works headed too
-          "--use-gl=angle",
-          "--use-angle=swiftshader",
-          "--enable-webgl",
-          // DNS via DoH directly inside chromium (bypasses GFW UDP poisoning)
-          "--proxy-resolves-dns-locally",
-          "--enable-features=AsyncDns,DnsOverHttpsUpgrade,NetworkServiceInProcess",
-          "--dns-over-https-templates=https://1.1.1.1/dns-query,https://dns.google/dns-query",
-        ],
-        ignoreDefaultArgs: ["--enable-automation", "--disable-component-extensions-with-background-pages"],
-      })
+    const userDataDir = "/tmp/broker-chromium-profile";
+    try { fs.mkdirSync(userDataDir, { recursive: true }); } catch { /* ignore */ }
+    // We must spawn chromium directly (not chromium.launch) because Playwright
+    // forces --remote-debugging-pipe transport, which suppresses the HTTP
+    // DevTools server on :9222 — making external CDP attach (replit_register.py
+    // connect_over_cdp) impossible. By spawning ourselves with TCP CDP only
+    // and then calling connectOverCDP from this process, we share the same
+    // chromium instance + user-data-dir + CF cookies between broker & external
+    // attach clients.
+    const args: string[] = [
+      "--no-sandbox",
+      "--disable-blink-features=AutomationControlled",
+      "--disable-features=IsolateOrigins,site-per-process,AutomationControlled,Translate",
+      "--disable-dev-shm-usage",
+      "--no-default-browser-check",
+      "--no-first-run",
+      "--password-store=basic",
+      "--use-mock-keychain",
+      "--remote-debugging-port=9222",
+      "--remote-debugging-address=127.0.0.1",
+      `--user-data-dir=${userDataDir}`,
+      "--window-size=1920,1080",
+      "--window-position=0,0",
+      "--start-maximized",
+      "--use-gl=angle",
+      "--use-angle=swiftshader",
+      "--enable-webgl",
+      "--proxy-resolves-dns-locally",
+      "--enable-features=AsyncDns,DnsOverHttpsUpgrade,NetworkServiceInProcess",
+      "--dns-over-https-templates=https://1.1.1.1/dns-query,https://dns.google/dns-query",
+      ...(proxyServer ? [`--proxy-server=${proxyServer}`, "--disable-quic"] : []),
+      "about:blank",
+    ];
+    killChromiumProc();
+    chromiumProc = spawn(executablePath, args, {
+      env: {
+        ...process.env,
+        LANG: "en_US.UTF-8",
+        LC_ALL: "en_US.UTF-8",
+        LANGUAGE: "en_US:en",
+        DISPLAY: process.env.DISPLAY ?? ":99",
+      } as NodeJS.ProcessEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: false,
+    });
+    chromiumProc.on("exit", (code, signal) => {
+      console.error(`[renderer] chromium exited code=${code} signal=${signal}`);
+      browserPromise = null;
+      chromiumProc = null;
+    });
+    chromiumProc.stderr?.on("data", (d: Buffer) => {
+      const line = d.toString();
+      if (/error|fatal|fail/i.test(line)) process.stderr.write(`[chromium] ${line}`);
+    });
+    browserPromise = waitForCdpHttp(9222, "127.0.0.1", 30000)
+      .then(() => chromium.connectOverCDP("http://127.0.0.1:9222"))
       .catch((err) => {
         browserPromise = null;
-        console.error("[renderer] chromium.launch failed:", err);
+        killChromiumProc();
+        console.error("[renderer] spawn chromium / connectOverCDP failed:", err);
         throw err;
       });
   }
