@@ -812,12 +812,16 @@ async def fill_step1(page) -> str | None:
     except Exception:
         pass
 
-    # v7.58 恢复 v7.46 route-force 拦截器：日志证明 page auto-re-execute 在 pre-wait 期间
-    # 将 React state 中的 recaptchaToken 覆盖为不同 token，导致 POST body 与我们
-    # execute() 拿到的高分 token 不一致，Replit 返回 code:1。
-    # v7.72: 默认禁用 route-force — 跟 google_proxy_route 配套, chromium 原生执行
-    # execute() + auto-re-execute, 同一 IP context 下生成的 token 都是高分一致的, 强制
-    # v7.71 restored: enable route-force when BROWSER_PROXY non-empty (google_proxy_route path).
+    # v7.75 — route-force 智能化（拓扑修正后）
+    # 拓扑修正：broker chromium 走 WARP (CF backbone) 拿 cf_clearance；
+    # google_proxy_route 把 *.google/recaptcha.net 转走非 GCP SOCKS5 池。
+    # 在这套同 IP 一致 context 下，page auto-re-execute 在 submit click 时
+    # 调 grecaptcha.enterprise.execute() 拿到的 LIVE token 跟我们手动 execute()
+    # 拿到的 LOCKED token 评分一致（同 sitekey/同 action/同出口/同 NID cookie），
+    # 但 LIVE token 更新鲜（sub-second），LOCKED token 已老 5-15s 且 action 可能
+    # 跟 Replit 后端 expected_action 不匹配 → Google verify 返 code:2。
+    #
+    # 因此：只在 LIVE token 缺失/异常时才回填 locked，正常情况完全放行。
     _brox_rf = PROXY.strip()
     if rc_token and len(rc_token) > 50 and bool(_brox_rf) and ":9050" not in _brox_rf:
         _locked_rc = rc_token
@@ -825,19 +829,22 @@ async def fill_step1(page) -> str | None:
             try:
                 import json as _jft
                 bd = _jft.loads(request.post_data or "{}")
-                _orig_t = bd.get("recaptchaToken", "")
-                if _orig_t != _locked_rc:
-                    bd["recaptchaToken"] = _locked_rc
-                    log(f"[route-force] recaptchaToken 替换 orig={len(_orig_t)}chars→locked={len(_locked_rc)}chars")
-                else:
-                    log(f"[route-force] token 一致 ({len(_orig_t)}chars), 不替换")
+                _orig_t = bd.get("recaptchaToken", "") or ""
+                # v7.75: 放行 LIVE token (>=1000 chars 且 0c 开头 = grecaptcha enterprise 正确格式)
+                # 只在 LIVE 异常时才回填 LOCKED — 这是真正的 fallback 而非强制覆盖。
+                if len(_orig_t) >= 1000 and _orig_t.startswith("0c"):
+                    log(f"[route-force] LIVE token OK ({len(_orig_t)}chars, 0c... prefix) → 放行不覆盖")
+                    await route.continue_()
+                    return
+                bd["recaptchaToken"] = _locked_rc
+                log(f"[route-force] LIVE token 异常 (len={len(_orig_t)}, prefix={_orig_t[:4]!r}) → 回填 locked={len(_locked_rc)}chars")
                 await route.continue_(post_data=_jft.dumps(bd))
             except Exception as _re:
                 log(f"[route-force] err: {_re}")
                 await route.continue_()
         try:
             await page.route("**/api/v1/auth/sign-up**", _signup_force_token)
-            log(f"[route-force] v7.58 已挂载 sign-up POST 拦截器，将强制 token={len(rc_token)}chars")
+            log(f"[route-force] v7.75 sign-up POST 拦截器已挂载（LIVE-token 优先, LOCKED 回填）")
         except Exception as _ro:
             log(f"[route-force] 挂载失败: {_ro}")
 
