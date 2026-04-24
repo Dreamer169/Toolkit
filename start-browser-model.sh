@@ -34,16 +34,20 @@ export DISPLAY=:99
 export REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE=/root/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome
 export FRONTEND_DIR=/root/browser-model/artifacts/api-server/public
 
-# v7.75 — WARP-first picker (拓扑修正)
+# v7.78d — datacenter-SOCKS-first picker (拓扑修正 v7.75 的错误判断)
+#
+# 实证（v7.78c CDP 测试 2026-04-23）：WARP 出口 (104.28.x) 通过 replit.com/signup
+# 触发 CF Just-a-moment 反爬，broker chromium 33s 内解不开 → bail。
+# Datacenter SOCKS (Kirino/DO/MULTACOM/Vultr) 出口直接拿 Sign Up - Replit title，
+# 无 CF challenge，signup POST 立通。所以 broker chromium 主代理必须是 datacenter SOCKS。
+#
+# *.google 子请求由 google_proxy_route.py 接管 → 钉到 WARP (40000)，
+# 走 CF backbone 让 reCAPTCHA Enterprise 评分高。两层职责清晰分离：
+#   broker chromium 主代理 → datacenter SOCKS (CF 友好)
+#   *.google / *.gstatic / *.recaptcha.net → WARP (Google 信任)
 _pick_browser_proxy() {
-  # 1) WARP (40000) — CF backbone，replit.com 信任路径
-  if ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b" && \
-     curl -s --max-time 10 --socks5 127.0.0.1:40000 https://ifconfig.me/ip 2>/dev/null | grep -qE "^[0-9]"; then
-    echo "socks5://127.0.0.1:40000|WARP"
-    return 0
-  fi
-  # 2) xray clean SOCKS — 排除 10827/10829 (GCP, audit 0391f15 已剔出)
-  for cand in 10824:Kirino 10826:DigitalOcean 10830:MULTACOM 10828:Misaka 10822:Vultr 10832:Linode 10820:Static 10825:Static 10831:Static 10836:Static 10837:Static 10845:Static; do
+  # 1) datacenter SOCKS clean 池 (优先 Kirino/DO/MULTACOM 等已审计非 GCP 节点)
+  for cand in 10824:Kirino 10826:DigitalOcean 10830:MULTACOM 10828:Misaka 10822:Vultr 10832:Linode 10838:Static 10820:Static 10825:Static 10831:Static 10836:Static 10837:Static 10845:Static; do
     port="${cand%%:*}"; name="${cand##*:}"
     ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:${port}\b" || continue
     if curl -s --max-time 10 --socks5 "127.0.0.1:${port}" https://ifconfig.me/ip 2>/dev/null | grep -qE "^[0-9]"; then
@@ -51,10 +55,16 @@ _pick_browser_proxy() {
       return 0
     fi
   done
-  # 3) Tor residential-style fallback
+  # 2) Tor residential-style fallback
   if ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:9050\b" && \
      curl -s --max-time 12 --socks5 127.0.0.1:9050 https://ifconfig.me/ip 2>/dev/null | grep -qE "^[0-9]"; then
     echo "socks5://127.0.0.1:9050|Tor"
+    return 0
+  fi
+  # 3) WARP (40000) 仅作 LAST resort — replit.com 在 WARP 出口会 CF challenge timeout
+  if ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b" && \
+     curl -s --max-time 10 --socks5 127.0.0.1:40000 https://ifconfig.me/ip 2>/dev/null | grep -qE "^[0-9]"; then
+    echo "socks5://127.0.0.1:40000|WARP-degraded"
     return 0
   fi
   # 4) DIRECT (will get CF-challenged on replit.com — last resort)
