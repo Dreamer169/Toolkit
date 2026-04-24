@@ -2235,6 +2235,19 @@ def make_pool_skip_result(i: int, args, engine_name: str, error: str) -> dict:
 
 # ─── 入口 ─────────────────────────────────────────────────────────────────────
 def main():
+    # —— 磁盘健康校验（exit 2 阻止启动；warn 仅打印不阻塞）——
+    try:
+        _hc = subprocess.run(
+            ["bash", "/root/Toolkit/scripts/disk_health_check.sh"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if _hc.stdout:
+            print(_hc.stdout, end="", flush=True)
+        if _hc.returncode == 2:
+            print("[DISK-CHECK] ❌ 磁盘致命异常，拒绝启动注册任务。请运维介入。", flush=True)
+            sys.exit(2)
+    except Exception as _e:
+        print(f"[DISK-CHECK] ⚠ 健康校验执行失败（{_e!r}），继续启动。", flush=True)
     parser = argparse.ArgumentParser(description="Outlook 批量注册 (参考 outlook-batch-manager)")
     parser.add_argument("--count",           type=int,   default=1,            help="注册数量")
     parser.add_argument("--proxy",           type=str,   default="",           help="代理, 如 socks5://127.0.0.1:1080")
