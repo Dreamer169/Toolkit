@@ -34,41 +34,54 @@ export DISPLAY=:99
 export REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE=/root/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome
 export FRONTEND_DIR=/root/browser-model/artifacts/api-server/public
 
-# v7.78d — datacenter-SOCKS-first picker (拓扑修正 v7.75 的错误判断)
+# v7.78e — datacenter-SOCKS-first picker + CF-段出口过滤 (拓扑修正 v7.75 / v7.78d)
 #
-# 实证（v7.78c CDP 测试 2026-04-23）：WARP 出口 (104.28.x) 通过 replit.com/signup
-# 触发 CF Just-a-moment 反爬，broker chromium 33s 内解不开 → bail。
-# Datacenter SOCKS (Kirino/DO/MULTACOM/Vultr) 出口直接拿 Sign Up - Replit title，
-# 无 CF challenge，signup POST 立通。所以 broker chromium 主代理必须是 datacenter SOCKS。
+# 实证 (v7.78d CDP 测试 2026-04-23 23:00):
+# - 所有 26 个 xray VLESS outbound 上游都指向 CF edge IP (104.21.21.136 / 172.67.199.22),
+#   后端 VLESS server 自身跑在 CF Workers / CF backbone, 出口 IP 全在 104.28.x 段。
+# - CF 不发自家 IP 段的 cf_clearance → cf-warmup 永远 cf_clearance=False
+#   → Replit integrity_check_failed_after_step1。
+# - VPS 公网 45.205.27.69 = AS8796 FASTNET DATA (真 datacenter, CF 友好)。
 #
-# *.google 子请求由 google_proxy_route.py 接管 → 钉到 WARP (40000)，
-# 走 CF backbone 让 reCAPTCHA Enterprise 评分高。两层职责清晰分离：
-#   broker chromium 主代理 → datacenter SOCKS (CF 友好)
-#   *.google / *.gstatic / *.recaptcha.net → WARP (Google 信任)
+# 修复策略: picker 测每个候选 SOCKS 实际出口 IP, 落在 CF 段就跳过；
+# 所有 SOCKS 都 CF 时 fallback DIRECT (空 BROWSER_PROXY → chromium 直走 VPS 公网)。
+# *.google 子请求由 google_proxy_route.py 单独走 WARP (40000)。
+#
+# CF IP 段 (AS-13335 主要):
+#   104.16.0.0/12 (含 104.16/17/18/19/20/21/22/23/24/25/26/27/28/29/30/31)
+#   172.64.0.0/13 (含 172.64/65/66/67/68/69/70/71)
+#   141.101.64.0/18, 162.158.0.0/15, 173.245.48.0/20, 188.114.96.0/20 等
+_is_cf_ip() {
+  local ip="$1"
+  [[ -z "$ip" ]] && return 1
+  case "$ip" in
+    104.1[6-9].*|104.2[0-9].*|104.3[01].*) return 0 ;;
+    172.6[4-9].*|172.7[01].*) return 0 ;;
+    141.101.6[4-9].*|141.101.[7-9][0-9].*|141.101.1[0-2][0-9].*) return 0 ;;
+    162.158.*|173.245.4[8-9].*|173.245.5[0-9].*|173.245.6[0-3].*) return 0 ;;
+    188.114.9[6-9].*|188.114.1[01][0-9].*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 _pick_browser_proxy() {
-  # 1) datacenter SOCKS clean 池 (优先 Kirino/DO/MULTACOM 等已审计非 GCP 节点)
+  # 1) datacenter SOCKS clean 池 — 必须出口非 CF 段
   for cand in 10824:Kirino 10826:DigitalOcean 10830:MULTACOM 10828:Misaka 10822:Vultr 10832:Linode 10838:Static 10820:Static 10825:Static 10831:Static 10836:Static 10837:Static 10845:Static; do
     port="${cand%%:*}"; name="${cand##*:}"
     ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:${port}\b" || continue
-    if curl -s --max-time 10 --socks5 "127.0.0.1:${port}" https://ifconfig.me/ip 2>/dev/null | grep -qE "^[0-9]"; then
-      echo "socks5://127.0.0.1:${port}|${name}"
-      return 0
+    EXIT=$(curl -s --max-time 8 --socks5 "127.0.0.1:${port}" https://ifconfig.me/ip 2>/dev/null | tr -d "[:space:]")
+    [[ -z "$EXIT" ]] && continue
+    if _is_cf_ip "$EXIT"; then
+      echo "[picker] skip ${name}(${port}) — exit ${EXIT} 在 CF 段 (cf_clearance 拿不到)" >&2
+      continue
     fi
+    echo "socks5://127.0.0.1:${port}|${name}@${EXIT}"
+    return 0
   done
-  # 2) Tor residential-style fallback
-  if ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:9050\b" && \
-     curl -s --max-time 12 --socks5 127.0.0.1:9050 https://ifconfig.me/ip 2>/dev/null | grep -qE "^[0-9]"; then
-    echo "socks5://127.0.0.1:9050|Tor"
-    return 0
-  fi
-  # 3) WARP (40000) 仅作 LAST resort — replit.com 在 WARP 出口会 CF challenge timeout
-  if ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b" && \
-     curl -s --max-time 10 --socks5 127.0.0.1:40000 https://ifconfig.me/ip 2>/dev/null | grep -qE "^[0-9]"; then
-    echo "socks5://127.0.0.1:40000|WARP-degraded"
-    return 0
-  fi
-  # 4) DIRECT (will get CF-challenged on replit.com — last resort)
-  echo "|DIRECT-VPS-fallback"
+  # 2) DIRECT — VPS 公网 IP (45.205.27.69 AS8796 FASTNET datacenter, CF 友好)
+  #    空 BROWSER_PROXY → browser-model 不加 --proxy-server, chromium 直走 OS 路由
+  #    跳过 Tor: Replit/CF 几乎全部 ban 已知 Tor exit IPs
+  echo "|DIRECT-VPS@45.205.27.69(AS8796-FASTNET)"
 }
 _picked="$(_pick_browser_proxy)"
 export BROWSER_PROXY="${_picked%%|*}"

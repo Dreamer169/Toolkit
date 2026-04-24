@@ -1922,7 +1922,7 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 # v7.72: 默认始终禁用 google_proxy_route — 让 chromium 原生出口同时处理
                 # execute() 和 signup POST, 保证 IP 一致 → 不再 code:2 (mismatch).
                 # v7.71 restored: enable google_proxy_route when BROWSER_PROXY non-empty (VLESS).
-                _brox = PROXY.strip()
+                _brox = os.environ.get("BROWSER_PROXY","").strip()  # v7.78f: revert v7.74 regression — gate must read broker chromium env, not legacy patchright PROXY param
                 _disable_groute = os.environ.get("DISABLE_GOOGLE_ROUTE","").strip() in ("1","true","yes")
                 if not _brox or _disable_groute or ":9050" in _brox:
                     log(f"[CDP] google-route SKIPPED (BROWSER_PROXY={_brox!r}) — chromium native exit 接管 *.google → IP一致避免 code:2")
