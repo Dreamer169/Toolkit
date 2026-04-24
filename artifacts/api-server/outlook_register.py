@@ -497,6 +497,44 @@ class PatchrightController(BaseController):
         # [已禁用] print("[captcha] 两种免费方法失败，尝试打码服务…", flush=True)
         # [已禁用] return self._solve_with_service(page, blob_container or [])
 
+    @staticmethod
+    def _human_press_hold(page, cx, cy, hold_ms_min=4400, hold_ms_max=5300):
+        """v7.62 人类化 press-and-hold：平滑接近 + 按下期间随机 jitter + 随机时长。
+        修复 Microsoft 升级 PerimeterX 行为打分后机械 mouse.move/down/up 被识别为 bot 的问题。"""
+        import random as _r
+        # 平滑接近：从 60-120px 外开始，分 8-14 步移动到目标
+        _sx = cx + _r.uniform(-130, -60) * _r.choice([-1, 1])
+        _sy = cy + _r.uniform(-90, -40) * _r.choice([-1, 1])
+        page.mouse.move(_sx, _sy)
+        _steps = _r.randint(8, 14)
+        for _i in range(1, _steps + 1):
+            _t = _i / _steps
+            _ix = _sx + (cx - _sx) * _t + _r.uniform(-1.8, 1.8)
+            _iy = _sy + (cy - _sy) * _t + _r.uniform(-1.8, 1.8)
+            try:
+                page.mouse.move(_ix, _iy)
+            except Exception:
+                pass
+            page.wait_for_timeout(_r.randint(8, 24))
+        # 抵达后短暂停顿（人类反应时间）
+        page.wait_for_timeout(_r.randint(80, 220))
+        page.mouse.down()
+        # 按住期间小幅 jitter（每 180-360ms 一次微动）
+        _hold_total = _r.randint(hold_ms_min, hold_ms_max)
+        _elapsed = 0
+        while _elapsed < _hold_total:
+            _wait = _r.randint(180, 360)
+            page.wait_for_timeout(_wait)
+            _elapsed += _wait
+            _jx = cx + _r.uniform(-2.2, 2.2)
+            _jy = cy + _r.uniform(-2.2, 2.2)
+            try:
+                page.mouse.move(_jx, _jy)
+            except Exception:
+                pass
+        page.mouse.up()
+        return _hold_total
+
     def _try_accessibility_challenge(self, page) -> bool:
         """
         点击无障碍挑战按钮（轮椅图标）绕过视觉 CAPTCHA。
@@ -911,11 +949,8 @@ class PatchrightController(BaseController):
                         _cx2 = _box2['x'] + _box2['width'] / 2 + _rnd.randint(-10, 10)
                         _cy2 = _box2['y'] + _box2['height'] / 2 + _rnd.randint(-5, 5)
                         print(f"[captcha] 🖱 按住 再次按下: PAGE=({_cx2:.0f},{_cy2:.0f})", flush=True)
-                        page.mouse.move(_cx2, _cy2)
-                        page.mouse.down()
-                        page.wait_for_timeout(4500)  # 按住4.5秒，等待音频加载
-                        page.mouse.up()
-                        print("[captcha] ✅ 再次按下已按住4.5s！（Arkose press-and-hold）", flush=True)
+                        _held = PatchrightController._human_press_hold(page, _cx2, _cy2, 4400, 5200)
+                        print(f"[captcha] ✅ 再次按下已按住{_held/1000:.1f}s！（v7.62 人类化 Arkose press-and-hold）", flush=True)
                         _press_clicked = True
                     else:
                         print(f"[captcha]   再次按下 bounding_box 无效: {_box2}", flush=True)
@@ -975,11 +1010,8 @@ class PatchrightController(BaseController):
                                             if _px_box and _px_box.get('width', 0) > 0:
                                                 _rx = _px_box['x'] + _px_box['width'] / 2
                                                 _ry = _px_box['y'] + _px_box['height'] / 2
-                                                page.mouse.move(_rx, _ry)
-                                                page.mouse.down()
-                                                page.wait_for_timeout(5500)
-                                                page.mouse.up()
-                                                print(f"[captcha] ✅ 真实鼠标 px-captcha 按住5.5s ({_rx:.0f},{_ry:.0f})", flush=True)
+                                                _held_px = PatchrightController._human_press_hold(page, _rx, _ry, 5200, 6300)
+                                                print(f"[captcha] ✅ 真实鼠标 px-captcha 按住{_held_px/1000:.1f}s ({_rx:.0f},{_ry:.0f}) [v7.62 人类化]", flush=True)
                                                 _real_hold_done = True
                                                 break
                                         except Exception:
