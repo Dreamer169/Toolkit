@@ -1228,13 +1228,13 @@ class PatchrightController(BaseController):
                             if "hsprotect.net" not in _u_px:
                                 continue
                             _px_state = _pf_chk_px.evaluate("""() => {
-                                const root = document.getElementById(px-captcha);
+                                const root = document.getElementById("px-captcha");
                                 if (!root) return null;
-                                if (root.children.length === 0) return empty;
-                                const inner = root.querySelector(iframe);
+                                if (root.children.length === 0) return "empty";
+                                const inner = root.querySelector("iframe");
                                 if (inner) {
                                     const cs = window.getComputedStyle(inner);
-                                    if (cs.display === none || cs.visibility === hidden) return iframe_hidden;
+                                    if (cs.display === "none" || cs.visibility === "hidden") return "iframe_hidden";
                                 }
                                 return null;
                             }""")
@@ -1439,13 +1439,13 @@ class PatchrightController(BaseController):
                         if "hsprotect.net" not in _u_px:
                             continue
                         _px_state = _pf_px.evaluate("""() => {
-                            const root = document.getElementById(px-captcha);
+                            const root = document.getElementById("px-captcha");
                             if (!root) return null;
-                            if (root.children.length === 0) return empty;
-                            const inner = root.querySelector(iframe);
+                            if (root.children.length === 0) return "empty";
+                            const inner = root.querySelector("iframe");
                             if (inner) {
                                 const cs = window.getComputedStyle(inner);
-                                if (cs.display === none || cs.visibility === hidden) return iframe_hidden;
+                                if (cs.display === "none" || cs.visibility === "hidden") return "iframe_hidden";
                             }
                             return null;
                         }""")
