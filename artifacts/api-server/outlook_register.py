@@ -1144,6 +1144,31 @@ class PatchrightController(BaseController):
 
             if not _second_click_done:
                 print("[captcha] ⚠ 可访问性挑战按钮未找到，跳过", flush=True)
+
+            # v7.60 早期通过检测：press-hold 完成后若 CAPTCHA 已消失，跳过音频流程
+            # 修复：PerimeterX (px-captcha) 路径下 press-hold 已通过但代码继续等音频导致超时失败
+            page.wait_for_timeout(2000)
+            try:
+                _early_solved_reason = None
+                if page.get_by_text("取消").count() > 0:
+                    _early_solved_reason = "出现取消按钮"
+                elif page.locator("iframe[title=\"验证质询\"]").count() == 0:
+                    _early_solved_reason = "验证质询 iframe 已消失"
+                else:
+                    for _pf_chk in page.frames:
+                        try:
+                            _u_chk = getattr(_pf_chk, "url", "") or ""
+                            if "interrupt" in _u_chk or "passkey" in _u_chk:
+                                _early_solved_reason = f"页面已跳到 {_u_chk[:60]}"
+                                break
+                        except Exception:
+                            pass
+                if _early_solved_reason:
+                    print(f"[captcha] ✅ press-hold 后早期检测：CAPTCHA 已通过（{_early_solved_reason}）→ 跳过音频流程", flush=True)
+                    return True
+            except Exception as _early_e:
+                print(f"[captcha]   早期检测异常: {_early_e}", flush=True)
+
             # ── 按住后轮询等待音频加载（最多20s，每2s检查一次网络拦截URL）──
             print("[captcha] 轮询等待音频加载（最多20s）…", flush=True)
             _poll_audio_start = time.time()
@@ -1176,6 +1201,19 @@ class PatchrightController(BaseController):
                 page.wait_for_timeout(1000)
             else:
                 print("[captcha] ⚠ 20s内音频未加载完成（代理延迟或挑战仍在fetching）", flush=True)
+
+            # v7.60 二次早期检测：20s 后若 CAPTCHA 已消失，跳过深度扫描+音频解析
+            try:
+                _late_solved_reason = None
+                if page.get_by_text("取消").count() > 0:
+                    _late_solved_reason = "出现取消按钮"
+                elif page.locator("iframe[title=\"验证质询\"]").count() == 0:
+                    _late_solved_reason = "验证质询 iframe 已消失"
+                if _late_solved_reason:
+                    print(f"[captcha] ✅ 20s 后二次检测：CAPTCHA 已通过（{_late_solved_reason}）→ 跳过深度扫描", flush=True)
+                    return True
+            except Exception:
+                pass
 
             # 额外缓冲：若 fetching-volume 仍在则再等 5s
             _fv_still = False
