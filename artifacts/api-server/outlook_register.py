@@ -1315,6 +1315,17 @@ class PatchrightController(BaseController):
                 raise
             try:
                 page.wait_for_selector('iframe[title="验证质询"]', timeout=2000)
+                # v7.61 终极兜底：iframe 在 DOM 中但 hsprotect 内容已清空 → 视为通过
+                try:
+                    for _pf_final in page.frames:
+                        _u_final = getattr(_pf_final, "url", "") or ""
+                        if "hsprotect.net" in _u_final:
+                            _blen_final = _pf_final.evaluate("() => document.body ? document.body.innerHTML.length : 0")
+                            if _blen_final is not None and 0 < _blen_final < 1500:
+                                print(f"[captcha] ✅ 终极兜底：hsprotect frame 已清空 (bodyLen={_blen_final}) → CAPTCHA 通过", flush=True)
+                                return True
+                except Exception:
+                    pass
                 print("[captcha] ❌ CAPTCHA 仍然存在", flush=True)
                 return False
             except Exception:
