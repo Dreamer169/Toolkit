@@ -2,7 +2,7 @@
 // 自动从 DNS 解析最新 CF IP 并更新 xray.json
 const dns = require('dns');
 const fs = require('fs');
-const CFG = '/workspaces/Toolkit/xray.json';
+const CFG = '/root/Toolkit/xray.json';
 const DOMAIN = 'iam.jimhacker.qzz.io';
 
 dns.resolve4(DOMAIN, (err, ipv4) => {
