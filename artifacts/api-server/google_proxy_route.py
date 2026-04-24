@@ -28,9 +28,18 @@ except Exception:
     _HAS_H2 = False
 
 DEFAULT_POOL = [
-    # v7.78b: WARP-only — chromium 主代理走 datacenter SOCKS (POST signup 通) 同时 *.google
-    # 流量全走 WARP (104.28.x = CF backbone, reCAPTCHA Enterprise 评分高). 不对称代理.
-    "socks5://127.0.0.1:40000",
+    "socks5://127.0.0.1:10820",
+    "socks5://127.0.0.1:10822",
+    "socks5://127.0.0.1:10823",
+    "socks5://127.0.0.1:10824",
+    "socks5://127.0.0.1:10825",
+    "socks5://127.0.0.1:10826",
+    "socks5://127.0.0.1:10828",
+    "socks5://127.0.0.1:10830",
+    "socks5://127.0.0.1:10831",
+    "socks5://127.0.0.1:10836",
+    "socks5://127.0.0.1:10837",
+    "socks5://127.0.0.1:10845",
 ]
 GOOGLE_HOST_RE = re.compile(
     r"(^|\.)("
@@ -49,9 +58,6 @@ def _load_pool() -> list[str]:
 
 
 _POOL = _load_pool()
-import sys as _gpr_sys
-_gpr_sys.stderr.write(f"[gpr-DIAG] _POOL_len={len(_POOL)} first={_POOL[0] if _POOL else None} env_GPP={os.environ.get('GOOGLE_PROXY_POOL','UNSET')[:120]}\n")
-_gpr_sys.stderr.flush()
 _client_cache: dict[str, httpx.AsyncClient] = {}
 
 
@@ -175,7 +181,29 @@ async def attach_google_proxy_routing(target, log=None) -> None:
         except Exception:
             pass
 
-    await target.route("**/*", handler)
+    # v7.78c: 在 broker reused-ctx (cf-warmup 已加载 /signup + reCAPTCHA cross-origin
+    # iframes) 上裸调 ctx.route("**/*",h) 会让 playwright 把 handler back-fill 到所有
+    # iframe targets, 与 reCAPTCHA enterprise 的 anchor/bframe 跨 origin frame 死锁,
+    # 导致 await 永远不返回 → 上层 240s Node 超时杀进程。先 unroute_all 清空残留,
+    # 再用 8s wait_for 包裹 ctx.route, 超时则 swallow 继续后续流程, 不让单步 hang。
+    try:
+        if hasattr(target, "unroute_all"):
+            await asyncio.wait_for(target.unroute_all(behavior="ignoreErrors"), timeout=3.0)
+    except Exception as _ue:
+        if log:
+            log(f"[google-route-py] unroute_all 跳过: {_ue}")
+    try:
+        await asyncio.wait_for(target.route("**/*", handler), timeout=8.0)
+        if log:
+            log(f"[google-route-py] route handler 安装完成 (target={type(target).__name__})")
+    except asyncio.TimeoutError:
+        if log:
+            log("[google-route-py] ⚠ route 安装超时 >8s（broker reused-ctx 已有 cross-origin iframe），跳过 *.google 截流，chromium 主代理直出")
+        return
+    except Exception as _re:
+        if log:
+            log(f"[google-route-py] ⚠ route 安装异常: {_re}; 跳过 *.google 截流")
+        return
 
 
 async def aclose_all() -> None:
