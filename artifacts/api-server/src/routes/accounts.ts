@@ -1529,12 +1529,23 @@ router.post("/admin/replay-audit", async (req, res) => {
   const { query: dbQ, execute: dbE } = await import("../db.js");
 
   let rows: Array<{ id: number; username: string; status: string }>;
+  const t0 = Date.now();
+  const details: Array<Record<string, unknown>> = [];
+  let activeCnt = 0, staleCnt = 0, errCnt = 0;
   try {
     if (Array.isArray(body.ids) && body.ids.length) {
       rows = await dbQ<{ id: number; username: string; status: string }>(
         "SELECT id, username, status FROM accounts WHERE platform='replit' AND id = ANY($1::int[]) AND username IS NOT NULL ORDER BY id",
         [body.ids]
       );
+      // v7.78q Bug L: 报告 ids 里查不到 / 无 username 的, 别静默吞
+      const found = new Set(rows.map((r) => r.id));
+      for (const id of body.ids) {
+        if (!found.has(id)) {
+          details.push({ id, ok: false, error: "id not in DB or username is NULL", action: "not-found" });
+          errCnt++;
+        }
+      }
     } else if (scope === "all") {
       rows = await dbQ<{ id: number; username: string; status: string }>(
         "SELECT id, username, status FROM accounts WHERE platform='replit' AND username IS NOT NULL ORDER BY id"
@@ -1548,10 +1559,6 @@ router.post("/admin/replay-audit", async (req, res) => {
     res.status(500).json({ ok: false, error: `query failed: ${String(e).slice(0,200)}` });
     return;
   }
-
-  const t0 = Date.now();
-  const details: Array<Record<string, unknown>> = [];
-  let activeCnt = 0, staleCnt = 0, errCnt = 0;
 
   for (let i = 0; i < rows.length; i += concurrency) {
     const batch = rows.slice(i, i + concurrency);
@@ -1603,7 +1610,8 @@ router.post("/admin/replay-audit", async (req, res) => {
 
   res.json({
     ok: true, scope, dryRun, concurrency, timeoutMs,
-    total: rows.length, active: activeCnt, stale: staleCnt, errors: errCnt,
+    total: details.length, scanned: rows.length,
+    active: activeCnt, stale: staleCnt, errors: errCnt,
     duration_ms: Date.now() - t0,
     details,
   });
