@@ -27,19 +27,49 @@ try:
 except Exception:
     _HAS_H2 = False
 
+# v7.87 — POOL CURATION (audited 2026-04-25)
+# 原则继承自 0391f15 (e2e: tylerreyes307@outlook.com -> userId=58078470 score-token
+# 2425chars one-shot pass): "google_proxy_route 池子已剔除 GCP 端口，纯非 GCP 出口"。
+# 0391f15 当时移除 10827 (34.132.50.119 GOOGLE-CLOUD-PLATFORM) + 10829 (34.53.117.84
+# Google LLC), 加入 10824 (Cogent/Kirino) + 10826 (DigitalOcean) + 10830
+# (Cogent/MULTACOM)。
+#
+# 2026-04-25 重新探测 (curl --socks5 + ipinfo.io ASN), 发现 xray 上游订阅轮换后:
+#   10820 → 159.89.91.17    AS14061 DigitalOcean       ✓ 通用 DC, 历史可用
+#   10822 → 107.174.42.185  AS36352 HostPapa           ✓ 小型 colo
+#   10823 → 128.14.66.101   AS21859 Zenlayer           ✓ CDN 性质, 边缘
+#   10824 → 38.244.31.27    AS174   Cogent             ✓ 0391f15 原班 (telecom)
+# ★ 10825 → 77.110.126.244  AS210644 AEZA GROUP        ★ 唯一近期实测真新签成功的端口
+#                                                        (e2e: userId=58169318
+#                                                         SignupNewUserResponse)
+#   10826 → 165.232.148.158 AS14061 DigitalOcean       ✓ 0391f15 原班
+#   10828 → 147.182.229.237 AS14061 DigitalOcean       ✓ 通用 DC
+#   10830 → 38.146.28.146   AS174   Cogent             ✓ 0391f15 原班
+# ✗ 10831 → 20.106.211.232  AS8075  Microsoft Azure    ✗ 超大规模云 (跟 GCP 同性质,
+#                                                        reCAPTCHA Enterprise 评 0 分,
+#                                                        违反 0391f15 "non-GCP exits" 原则)
+#   10836 → 137.184.228.85  AS14061 DigitalOcean       ✓ 通用 DC
+#   10837 → 23.95.88.103    AS36352 HostPapa           ✓ 小型 colo
+#   10845 → 107.173.15.46   AS36352 HostPapa           ✓ 小型 colo
+#
+# 排序: ★10825 已知好 → 0391f15 原班 (10824/10826/10830) → 其余通用 DC。
+# sticky-per-context (random.randrange) 选中后整 ctx 共用, 故池子干净度比顺序更重要。
+# CLOUD_ASN_BLOCKLIST: 任何 hyperscale 云 ASN 都按 0391f15 原则剔除。后续 xray 节点
+# 轮换重新打分时, 用 "curl --socks5 :PORT https://ipinfo.io/json" 复检 ASN, 命中
+# Google/Microsoft/Amazon/Oracle/Tencent/Alibaba/Huawei 云 ASN 即从池中剔除。
 DEFAULT_POOL = [
-    "socks5://127.0.0.1:10820",
-    "socks5://127.0.0.1:10822",
-    "socks5://127.0.0.1:10823",
-    "socks5://127.0.0.1:10824",
-    "socks5://127.0.0.1:10825",
-    "socks5://127.0.0.1:10826",
-    "socks5://127.0.0.1:10828",
-    "socks5://127.0.0.1:10830",
-    "socks5://127.0.0.1:10831",
-    "socks5://127.0.0.1:10836",
-    "socks5://127.0.0.1:10837",
-    "socks5://127.0.0.1:10845",
+    "socks5://127.0.0.1:10825",  # ★ AEZA — 实测成功 (userId=58169318)
+    "socks5://127.0.0.1:10824",  # 0391f15 原班 — Cogent
+    "socks5://127.0.0.1:10826",  # 0391f15 原班 — DigitalOcean
+    "socks5://127.0.0.1:10830",  # 0391f15 原班 — Cogent
+    "socks5://127.0.0.1:10820",  # DigitalOcean
+    "socks5://127.0.0.1:10822",  # HostPapa
+    "socks5://127.0.0.1:10823",  # Zenlayer
+    "socks5://127.0.0.1:10828",  # DigitalOcean
+    # "socks5://127.0.0.1:10831",  # ✗ DROPPED — Microsoft Azure (AS8075) hyperscale cloud
+    "socks5://127.0.0.1:10836",  # DigitalOcean
+    "socks5://127.0.0.1:10837",  # HostPapa
+    "socks5://127.0.0.1:10845",  # HostPapa
 ]
 GOOGLE_HOST_RE = re.compile(
     r"(^|\.)("

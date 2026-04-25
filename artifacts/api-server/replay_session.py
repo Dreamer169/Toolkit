@@ -264,10 +264,30 @@ async def replay(acc: dict) -> dict:
         canvas_noise_js = ""
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-        )
+        # v7.87 — 把 proxy 从 ctx 层提到 launch 层 + 加 --disable-quic.
+        # cb0872b/v7.83 的 WARP-aware resolver 只解决 "选哪个 socks5 端口",
+        # 但实际 launch 时只在 new_context 挂 proxy 有两个漏:
+        #   (a) chromium 自身发起的 OCSP / safebrowsing / favicon / DNS-over-HTTPS
+        #       等系统级请求绕 ctx proxy, 从 VPS 公网 (45.205.27.69) 直出 →
+        #       Replit 反爬看到 "cf_clearance 绑 104.28.x.x 但同时有 45.205.27.69
+        #       打过来" 直接判 fake. v7.85 replit_login.py 已经改成 launch 层 proxy
+        #       就是这个原因, replay_session 漏了同步.
+        #   (b) replit.com 启用 HTTP/3, chromium 默认尝试 QUIC over UDP, socks5
+        #       只代理 TCP, UDP 包仍从 VPS 公网直出. v7.85 click_verify_link.py
+        #       加 --disable-quic 注释明写这点, replay_session 同样漏了.
+        # 这两个漏导致 18+ 老账号 replay 时 IP 泄漏给 Replit, cf_clearance 失效.
+        _launch_args = ["--no-sandbox", "--disable-blink-features=AutomationControlled",
+                        "--disable-quic"]
+        _launch_kw = {"headless": True, "args": _launch_args}
+        if proxy_cfg:
+            _launch_kw["proxy"] = proxy_cfg
+            _srv = proxy_cfg.get("server")
+            _mode = resolved.get("mode")
+            print("[replay] launch proxy=" + str(_srv) + " mode=" + str(_mode) + " (v7.87 launch-level WARP)", flush=True)
+        else:
+            _mode = resolved.get("mode")
+            print("[replay] launch direct (no proxy) mode=" + str(_mode), flush=True)
+        browser = await pw.chromium.launch(**_launch_kw)
         ctx_kw = dict(
             storage_state=state_path,
             user_agent=ua,
@@ -284,8 +304,8 @@ async def replay(acc: dict) -> dict:
                 "Accept-Language": "en-US,en;q=0.9",
             },
         )
-        if proxy_cfg:
-            ctx_kw["proxy"] = proxy_cfg
+        # v7.87 — proxy 已在 launch 层设置 (覆盖 chromium 全局), ctx 层不再重复.
+        # 重复挂会被 patchright 警告 "proxy already configured at browser level".
         ctx = await browser.new_context(**ctx_kw)
         page = await ctx.new_page()
         if stealth_fn:
