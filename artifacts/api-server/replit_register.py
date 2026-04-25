@@ -2175,25 +2175,47 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 # topology broker chromium ALSO exits via clean datacenter SOCKS (matching
                 # google_proxy_route's pool family), so token-gen IP segment == submit IP
                 # segment. DISABLE_GOOGLE_ROUTE=1 kept as escape hatch.
-                # v7.95 — broker-exit-aware google-route (修复 v7.79+ IP 串台 → recaptcha code:1)
-                # 实证根因 (rpl_modyengc_1kgm 2026-04-25): broker chromium 出口为 WARP
-                # (104.28.195.185), google_proxy_route 把 *.google 转走 SOCKS 10828
-                # (DigitalOcean datacenter 段). reCAPTCHA Enterprise 颁发 token 给客户端
-                # IP=10828, Replit siteverify 时 user IP=104.28.x → Google 比对 MISMATCH
-                # → token invalid → code:1.
+                # v7.99 — broker-family-aware google-route, 适配当前退化基础设施.
                 #
-                # v7.78q-era 工作拓扑 (e2e: tylerreyes307 → userId=58078470): broker 出口
-                # 也是清洁 SOCKS pool, google-route 同 pool → 同段 IP → 一致 → 通过.
-                # 当前基础设施退化 (xray 上游全搬到 CF Workers, picker 13 个 SOCKS 全
-                # 探测到 CF 段被 _is_cf_ip 过滤) 导致 broker 退到 WARP. 此时硬上 google-route
-                # 就 IP 串台.
+                # ★ 关键事实 (2026-04-25 实测, 必须读懂否则永远绕不出来):
+                #   xray 上游订阅已全部迁移到 CF Workers, 13 个 SOCKS 子节点
+                #   (10820/22/23/24/25/26/28/30/36/37/45) 出口 IP 全部在 AS13335
+                #   Cloudflare 104.28.x 段. WARP (40000) 也在 AS13335 104.28.x.
+                #   唯一非 CF 出口: DIRECT VPS 45.205.27.69 (AS8796 FASTNET DATA).
                 #
-                # 修法: 跟随 broker 出口家族 (BROKER_EXIT_FAMILY 由 start-browser-model.sh 导出)
-                #   socks  -> google-route 强制 pin 到 broker 同 port (同 IP 一致)
-                #   warp   -> 跳过 google-route, 让 *.google 走 broker WARP 出口 (一致)
-                #            用户实证: WARP 端到端走完整链路是能注册的, 关键是别串
-                #   direct -> 跳过 google-route, 让 *.google 走 VPS 公网 (同 broker 一致)
-                # DISABLE_GOOGLE_ROUTE=1 / FORCE_GOOGLE_ROUTE=1 保留为强制 escape hatch.
+                #   → v7.78q/r 时代仰仗的"清洁非 GCP datacenter SOCKS 池" (10824 Kirino,
+                #     10826 DO, 10830 MULTACOM 等真小型 ISP datacenter) 整个不复存在.
+                #     google_proxy_route.DEFAULT_POOL 现在 = 同样 13 个 CF 端口.
+                #
+                # ★ 历史误诊回顾 (避免下次再绕进去):
+                #   v7.78q 时 "always attach DEFAULT_POOL" 是对的 (池子真清洁).
+                #   v7.95 引入 broker-family-aware SKIP/PIN, 当时被骂"误诊 code:1",
+                #     其实是误打误撞做对了 — 因为基础设施在 v7.79-v7.95 期间逐步退化,
+                #     SKIP-on-warp/direct 反而保证了 broker 与 *.google 同家族.
+                #   v7.97 commit message 错把 code:2 解释为 "IP consistency" — 而 v7.78r
+                #     原始注释 (line ~2050) 明说 "code:2 is LIVE/LOCKED token-action
+                #     mismatch, NOT IP mismatch — see route-force at line ~825". 但 v7.95
+                #     的 family-aware SKIP/PIN 行为本身仍是适配当前退化设施的最优解.
+                #   v7.98 又把 SKIP 撤掉, 强行 always-attach DEFAULT_POOL, 在当前 CF-only
+                #     SOCKS 基础设施下变成: broker=DIRECT(AS8796) vs *.google=CF(AS13335)
+                #     跨家族, reCAPTCHA Enterprise 看到 token-IP 与 submit-IP 完全不同
+                #     ASN → 评低 / token invalid / code:1.
+                #
+                # ★ v7.99 决策矩阵 (适配当前退化基础设施, 双轨保护):
+                #   broker=direct (45.205.27.69 AS8796) → SKIP google-route
+                #     → *.google 也走 VPS 公网 → 与 broker 同 IP, 完全一致, 评分 OK.
+                #   broker=warp (104.28.x AS13335) → SKIP google-route
+                #     → *.google 也走 WARP → 与 broker 同段 (CF), 一致 (评分受 CF 段影响
+                #     但不会 mismatch, code:1 概率显著低于跨段).
+                #   broker=socks (理论上的非 CF SOCKS, 当前不会发生) → PIN GOOGLE_PROXY_POOL
+                #     到 broker 同 port → 同 IP 一致. 留这个分支为日后 xray 恢复清洁 SOCKS
+                #     上游时自动启用.
+                #   xray 上游恢复清洁 datacenter SOCKS 池后, 把 google_proxy_route.DEFAULT_POOL
+                #     更新为新清洁端口, 然后这里改回 always-attach 即可 (v7.78q 模型).
+                #
+                # FORCE_GOOGLE_ROUTE=1 保留为 escape hatch (强制走 DEFAULT_POOL,
+                # 用于人工调试 / DEFAULT_POOL 恢复后的快速验证).
+                # DISABLE_GOOGLE_ROUTE=1 保留为完全禁用 escape hatch.
                 _disable_groute = os.environ.get("DISABLE_GOOGLE_ROUTE","").strip() in ("1","true","yes")
                 _force_groute = os.environ.get("FORCE_GOOGLE_ROUTE","").strip() in ("1","true","yes")
                 # v7.95b — broker 与 api-server 是不同 pm2 进程, env 不互通.
@@ -2213,22 +2235,27 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                     _broker_fam = (os.environ.get("BROKER_EXIT_FAMILY","") or "").strip().lower()
                     _broker_port = (os.environ.get("BROKER_EXIT_SOCKS_PORT","") or "").strip()
                 if _disable_groute and not _force_groute:
-                    log("[CDP] google-route SKIPPED (DISABLE_GOOGLE_ROUTE=1)")
+                    log("[CDP] google-route SKIPPED (DISABLE_GOOGLE_ROUTE=1 explicit opt-out)")
                 elif _broker_fam in ("warp","direct") and not _force_groute:
-                    log(f"[CDP] google-route SKIPPED (v7.95 broker={_broker_fam} → IP 一致策略, *.google 走 broker 原生出口)")
+                    log(f"[CDP] google-route SKIPPED (v7.99 broker={_broker_fam} → 同家族一致策略, *.google 走 broker 原生出口避免跨 ASN)")
                 else:
                     try:
                         import sys as _sys, os as _os
                         _here = _os.path.dirname(_os.path.abspath(__file__))
                         if _here not in _sys.path:
                             _sys.path.insert(0, _here)
-                        # v7.95: socks 模式下强制 google-route 用同 port, 保证 IP 段一致
+                        # broker=socks 模式下 (当前 xray 退化到全 CF 段, 此分支当前不会
+                        # 触发, 留作 xray 恢复清洁 SOCKS 上游后的自动正确路径) — 强制
+                        # google-route 用同 port, 保证 token-IP == submit-IP 一致.
                         if _broker_fam == "socks" and _broker_port:
                             _os.environ["GOOGLE_PROXY_POOL"] = f"socks5://127.0.0.1:{_broker_port}"
-                            log(f"[CDP] v7.95 google-route pool override → socks5://127.0.0.1:{_broker_port} (sync broker exit)")
+                            log(f"[CDP] v7.99 google-route pool override → socks5://127.0.0.1:{_broker_port} (sync broker exit, IP 一致)")
+                        elif _force_groute:
+                            log("[CDP] v7.99 FORCE_GOOGLE_ROUTE=1 — 强行用 DEFAULT_POOL (调试)")
+                            _os.environ.pop("GOOGLE_PROXY_POOL", None)
                         from google_proxy_route import attach_google_proxy_routing as _agr
                         await _agr(ctx, log)
-                        log(f"[CDP] google-route attached (v7.95 — broker={_broker_fam or 'unknown'} family-aligned)")
+                        log(f"[CDP] google-route attached (v7.99 — broker={_broker_fam or 'unknown'} family-aligned)")
                     except Exception as _ge:
                         log(f"[CDP] google-route attach failed: {_ge}")
             except Exception as _we:

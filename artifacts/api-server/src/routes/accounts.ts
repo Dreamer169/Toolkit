@@ -517,12 +517,37 @@ function normalizeUrls(input: unknown): string[] {
   return [];
 }
 
+function _readBrokerExitEnv(): Record<string, string> {
+  // v7.98 — read /tmp/replit-broker/exit.json (written by start-browser-model.sh)
+  // and inject BROWSER_PROXY / BROKER_EXIT_FAMILY / BROKER_EXIT_SOCKS_PORT into
+  // python child process env. api-server pm2 process does not export these
+  // (broker is a separate pm2 process), so without this injection python sees
+  // empty env and v7.71-era fallback paths trigger SKIP wrongly.
+  try {
+    const fs = require("fs") as typeof import("fs");
+    const raw = fs.readFileSync("/tmp/replit-broker/exit.json", "utf8");
+    const j = JSON.parse(raw) as { family?: string; port?: string | number };
+    const fam = String(j.family || "").trim().toLowerCase();
+    const port = String(j.port || "").trim();
+    const env: Record<string, string> = {};
+    if (fam) env.BROKER_EXIT_FAMILY = fam;
+    if (port) env.BROKER_EXIT_SOCKS_PORT = port;
+    if (fam === "socks" && port) env.BROWSER_PROXY = `socks5://127.0.0.1:${port}`;
+    else if (fam === "warp") env.BROWSER_PROXY = "socks5://127.0.0.1:40000";
+    else env.BROWSER_PROXY = ""; // direct
+    return env;
+  } catch {
+    return {};
+  }
+}
+
 function runPython(script: string, arg: unknown, timeoutMs = 240_000, onLine?: (line: string) => void): Promise<{
   ok: boolean; raw: string; parsed: Record<string, unknown>;
 }> {
   return new Promise((resolve) => {
+    const _brokerEnv = _readBrokerExitEnv();
     const child = spawn(PYTHON, [script, JSON.stringify(arg)], {
-      env: { ...process.env, PYTHONUNBUFFERED: "1" },
+      env: { ...process.env, PYTHONUNBUFFERED: "1", ..._brokerEnv },
       detached: true,
     });
     let out = "";
