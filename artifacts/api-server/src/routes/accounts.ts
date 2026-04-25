@@ -1787,6 +1787,7 @@ const _CF_BLOCK_PATTERNS = [
   "captcha token is invalid",
   "(code:1)",
   "captcha_token_invalid",
+  "captcha_low_score",
   "cf_warmup_failed",
   "signup_username_field_missing",
 ];
