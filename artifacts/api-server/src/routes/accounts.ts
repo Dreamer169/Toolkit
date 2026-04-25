@@ -763,11 +763,14 @@ router.post("/replit/register", (req, res) => {
             if (lastErr.toLowerCase().includes("already") && lastErr.toLowerCase().includes("use")) {
               portLastGood.set(tryPort, Date.now()); // port got form response → mark good
               log(`    Email already on Replit → 写 placeholder + marking replit_used`);
+              // v7.84: actual_proxy_port (broker WARP path) takes priority over xray hint
+              const actualPortPh = Number(parsed.actual_proxy_port ?? 0);
+              const portPh = actualPortPh > 0 ? actualPortPh : tryPort;
               await dbE(
                 `INSERT INTO accounts (platform, email, password, username, status, notes, tags, exit_ip, proxy_port)
                  VALUES ('replit', $1, NULL, NULL, 'exists_no_password', 'email already on Replit, password not captured', 'replit,exists_no_password', $2, $3)
                  ON CONFLICT (platform, email) DO NOTHING`,
-                [outlook.email, exitIp, tryPort]
+                [outlook.email, exitIp, portPh]
               ).catch(e => log(`    placeholder insert warn: ${e}`));
               await dbE(
                 "UPDATE accounts SET tags = CASE WHEN string_to_array(COALESCE(tags,''), ',') @> ARRAY['replit_used'] THEN tags ELSE NULLIF(TRIM(BOTH ',' FROM COALESCE(tags,'') || ',replit_used'), ',') END, updated_at = NOW() WHERE id = $1",
@@ -1044,7 +1047,14 @@ router.post("/replit/register", (req, res) => {
                      updated_at = NOW()`,
               [outlook.email, password, username,
                verified ? "registered" : "unverified",
-               outlook.email, exitIp, lastUsedPort >= 0 ? lastUsedPort : pick(XRAY_PORTS),
+               outlook.email, exitIp,
+               // v7.84: actual_proxy_port (broker WARP=40000) overrides xray hint port
+               // (lastUsedPort 是 xray pool 中尝试的端口, broker 实际可能切到 WARP)
+               (() => {
+                 const actualPort = Number(parsed.actual_proxy_port ?? 0);
+                 if (actualPort > 0) return actualPort;
+                 return lastUsedPort >= 0 ? lastUsedPort : pick(XRAY_PORTS);
+               })(),
                String(parsed.user_agent ?? (parsed.fingerprint as Record<string, unknown> | undefined)?.user_agent ?? "") || null,
                parsed.fingerprint ? JSON.stringify(parsed.fingerprint) : null]
             );

@@ -93,6 +93,20 @@ def resolve_proxy_for_target(target_ip: str, hint_port: int) -> dict:
     out = {"target_ip": target_ip, "candidates_tried": []}
     vps = vps_public_ip()
 
+    # 0) v7.84: hint_port 已经是 WARP_PORT (新的 v7.84 注册路径正确写入了
+    #    actual_proxy_port=40000) → 直接探 WARP, 落 WARP CIDR 即接受.
+    #    比 CIDR(target_ip) 启发式更可靠 — 即使 target_ip 不在我们已知 prefix
+    #    列表里 (CF 可能新增段), proxy_port 字段是权威信号.
+    if hint_port == WARP_PORT:
+        ip = probe_socks_exit_ip(WARP_PORT, timeout=8)
+        out["candidates_tried"].append({"port": WARP_PORT, "ip": ip, "kind": "warp_authoritative"})
+        if is_warp_ip(ip) or (target_ip and ip == target_ip):
+            out["mode"] = "warp_authoritative"; out["port"] = WARP_PORT
+            out["server"] = "socks5://127.0.0.1:" + str(WARP_PORT)
+            out["probed_ip"] = ip; return out
+        # WARP 端口拿不到 WARP IP → warp-cli 故障, 直接回落 direct, 别瞎试 xray
+        out["mode"] = "warp_down_fallback_direct"; out["probed_ip"] = vps; return out
+
     # 1) WARP-class target → fuzzy CIDR match via WARP_PORT
     if is_warp_ip(target_ip):
         ip = probe_socks_exit_ip(WARP_PORT, timeout=8)
@@ -206,9 +220,10 @@ async def replay(acc: dict) -> dict:
     resolved = resolve_proxy_for_target(target_ip, int(hint_port) if hint_port else 0)
     out["resolved_proxy"] = {k: v for k, v in resolved.items() if k != "candidates_tried"}
     proxy_cfg = None
-    # v7.83: 新增 warp_fuzzy / warp_legacy_fuzzy → 走 WARP socks5;
-    # warp_down_fallback_direct → 走直连 (跟 direct 等价).
-    if resolved["mode"] in ("socks", "socks_alt", "warp_fuzzy", "warp_legacy_fuzzy"):
+    # v7.83 + v7.84: warp_authoritative (proxy_port=40000 权威) /
+    # warp_fuzzy (target_ip CIDR 推断) / warp_legacy_fuzzy (VPS-IP 老 bug 兜底)
+    # → 一律走 WARP socks5; warp_down_fallback_direct → 走直连 (跟 direct 等价).
+    if resolved["mode"] in ("socks", "socks_alt", "warp_authoritative", "warp_fuzzy", "warp_legacy_fuzzy"):
         proxy_cfg = {"server": resolved["server"]}
     elif resolved["mode"] in ("direct", "warp_down_fallback_direct"):
         proxy_cfg = None

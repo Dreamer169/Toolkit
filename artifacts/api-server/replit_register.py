@@ -1777,11 +1777,24 @@ async def _probe_inpage_fingerprint(page) -> dict:
     return {}
 
 
+_WARP_CIDR_PREFIXES = (
+    "104.28.", "162.158.", "172.69.", "172.70.", "108.162.",
+    "131.0.72.", "188.114.", "190.93.", "197.234.24",
+    "199.27.128.", "104.16.", "104.17.",
+)
+_WARP_PROXY_PORT = 40000  # broker 用 socks5://127.0.0.1:40000 = warp-cli proxy
+
+def _ip_is_warp(ip: str) -> bool:
+    return bool(ip) and isinstance(ip, str) and any(ip.startswith(p) for p in _WARP_CIDR_PREFIXES)
+
 async def _finalize_exit_ip(result: dict, page) -> None:
     """v7.78m+v7.78o: signup 成功后一次到位:
     1. in-page fetch ipify → ground truth exit_ip (覆写 preflight 值)
     2. in-page navigator/screen 探针 → ground truth fingerprint
     3. 写 result.user_agent / result.fingerprint, accounts.ts INSERT 拿得到
+    4. v7.84: in-page IP 落 CF WARP CIDR 时, 写 result.actual_proxy_port=40000
+       让 accounts.ts INSERT 拿真实 proxy_port (broker WARP 路径) 而不是 xray
+       hint port. 这是 v7.82 修了 exit_ip 字段后, 对 proxy_port 字段的对称修复.
     全部用 try/except 包住, 避免 page 异常影响 signup-成功 状态."""
     try:
         real = await _probe_inpage_exit_ip(page)
@@ -1791,6 +1804,11 @@ async def _finalize_exit_ip(result: dict, page) -> None:
             result["exit_ip_real"] = real
             result["exit_ip_source"] = "inpage_post_signup"
             log(f"[inpage-ip] ground truth = {real} (覆盖 preflight {result.get('exit_ip_original','')})")
+            # v7.84: 推断真实 proxy_port — WARP CIDR 出口 ↔ broker 走的是 WARP socks
+            if _ip_is_warp(real):
+                result["actual_proxy_port"] = _WARP_PROXY_PORT
+                result["actual_proxy_kind"] = "warp"
+                log(f"[inpage-ip] real exit ∈ WARP CIDR → actual_proxy_port={_WARP_PROXY_PORT}")
         else:
             result["exit_ip_source"] = "preflight_only"
             log(f"[inpage-ip] probe 失败, 保留 preflight 值 {result.get('exit_ip','')}")
