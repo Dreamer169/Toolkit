@@ -94,23 +94,24 @@ _pick_browser_proxy() {
       *) echo "replit-unreachable($rc)"; return 1 ;;
     esac
   }
-  # ── v8.05 — WARP-FIRST ordering (cf_clearance 修复) ─────────────────────────
-  # 实证 2026-04-25 12:30:
-  #   v7.78g 成功 job (rpl_modt0h8f_uw86): cf_clearance=True → signup POST 200 ✓
-  #   v8.03 失败 job (rpl_moebikhg_m6co): cf_clearance=False → code:1 captcha invalid
-  #   两者唯一已知差异 = broker exit family: v7.78g 用非-DIRECT (socks 或 warp);
-  #   v8.04 强制 DIRECT 把 broker 钉在 VPS IP (45.205.27.69 AS8796), 该 IP 当前
-  #   被 CF 标记, 跑 cf-warmup 不发 cf_clearance cookie → reCAPTCHA Enterprise
-  #   token 拿不到 cf_clearance 信号 → 评分极低 → code:1.
-  # 1) WARP — socks5://127.0.0.1:40000 (104.28.x AS13335 = CF backbone, 自家 IP
-  #    最可能拿到 cf_clearance; 实测可达 google/recaptcha 200; raw replit.com
-  #    撞 CF challenge 由 chromium JS 解).
+  # ── v8.07 — WARP-FIRST + python v8.07 broker=warp PIN → 同源 IP-match ────
+  # 实证 2026-04-25 12:51 (job rpl_moec7ywp_5w00):
+  #   broker=socks Kirino(75.127.12.19) cf-warmup → 卡 Just-a-moment timeout
+  #   → SOCKS broker 今天解不了 CF JS challenge.
+  # 实证 2026-04-25 12:48 (job rpl_moec16kj_debv, fresh profile):
+  #   broker=warp 104.28.195.185 cf-warmup → cf_clearance=True ✓
+  #   但 google-route DEFAULT_POOL → IP-mismatch → code:1.
+  # 修复方案 (v8.07 联动):
+  #   1) picker 选 WARP broker (能解 CF JS challenge)
+  #   2) python v8.07 broker=warp 分支 PIN GOOGLE_PROXY_POOL=socks5://:40000
+  #      → token-mint 和 signup-POST 都走 WARP → mint-IP == submit-IP ✓
+  # 1) WARP — socks5://127.0.0.1:40000 (CF backbone, 能解 CF, IP 一致由 v8.07 保障)
   if ss -uln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b" || ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b"; then
     WARP_EXIT=$(curl -s --max-time 8 --socks5 "127.0.0.1:40000" https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
     if [[ -n "$WARP_EXIT" ]]; then
       _probe_status=$(_probe_replit_reachable "127.0.0.1:40000")
       _probe_rc=$?
-      echo "[picker] v8.05 WARP probe: replit.com → ${_probe_status} (exit=${WARP_EXIT})" >&2
+      echo "[picker] v8.07 WARP probe: replit.com → ${_probe_status} (exit=${WARP_EXIT})" >&2
       if [[ $_probe_rc -eq 0 ]]; then
         echo "socks5://127.0.0.1:40000|WARP@${WARP_EXIT}"
         return 0
@@ -120,7 +121,7 @@ _pick_browser_proxy() {
       echo "[picker] WARP port 40000 listen 但 ipify 失败, 跳过" >&2
     fi
   fi
-  # 2) datacenter SOCKS clean 池 — 必须出口非 CF 段
+  # 2) SOCKS clean 池 — fallback (今天 broker=socks 解 CF 失败, 留作未来恢复)
   for cand in 10824:Kirino 10826:DigitalOcean 10830:MULTACOM 10828:Misaka 10822:Vultr 10832:Linode 10838:Static 10820:Static 10825:Static 10831:Static 10836:Static 10837:Static 10845:Static; do
     port="${cand%%:*}"; name="${cand##*:}"
     ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:${port}\b" || continue

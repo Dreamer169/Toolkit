@@ -2264,6 +2264,15 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                         if _broker_fam == "socks" and _broker_port:
                             _os.environ["GOOGLE_PROXY_POOL"] = f"socks5://127.0.0.1:{_broker_port}"
                             log(f"[CDP] v7.99 google-route pool override → socks5://127.0.0.1:{_broker_port} (sync broker exit, IP 一致)")
+                        elif _broker_fam == "warp":
+                            # v8.07 — broker=warp 时 chromium 经 WARP socks5://:40000 出口.
+                            # 必须把 *.google 也 PIN 到同一 WARP 端口, 否则 reCAPTCHA Enterprise
+                            # 检测到 token-mint IP (DEFAULT_POOL clean SOCKS) ≠ submit IP (WARP)
+                            # 跨段信号 → 评分极低 → code:1 reject.
+                            # 实证 2026-04-25 12:48 (job rpl_moec16kj_debv): broker=warp + 清洁 profile
+                            # 拿到 cf_clearance=True, 但 google-route 走 DEFAULT_POOL 仍 code:1.
+                            _os.environ["GOOGLE_PROXY_POOL"] = "socks5://127.0.0.1:40000"
+                            log("[CDP] v8.07 google-route pool override → socks5://127.0.0.1:40000 (broker=warp, IP 一致 via WARP backbone)")
                         elif _force_groute:
                             log("[CDP] v7.99 FORCE_GOOGLE_ROUTE=1 — 强行用 DEFAULT_POOL (调试)")
                             _os.environ.pop("GOOGLE_PROXY_POOL", None)
