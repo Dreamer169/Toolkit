@@ -946,7 +946,18 @@ async def fill_step1(page) -> str | None:
             if ("replit.com" in url and "sign-up" in url and req.method == "POST"):
                 pb = req.post_data or ""
                 _api_req["url"]  = url
-                _api_req["body"] = pb[:800]
+                _api_req["body"] = pb[:8000]
+                # v7.92 DIAG: log all top-level field names + turnstile-related field presence
+                try:
+                    import json as _jdiag
+                    _bd = _jdiag.loads(pb) if pb else {}
+                    _keys = list(_bd.keys()) if isinstance(_bd, dict) else []
+                    _ts_fields = {k: (len(str(_bd[k])) if _bd.get(k) is not None else 0)
+                                  for k in _keys if any(t in k.lower() for t in ("turnstile","cf-","captcha","token","challenge"))}
+                    log(f"[step1-wait] DIAG POST keys={_keys}")
+                    log(f"[step1-wait] DIAG captcha-like fields lens={_ts_fields}")
+                except Exception as _de:
+                    log(f"[step1-wait] DIAG parse fail: {_de}")
         except Exception:
             pass
     page.on("response", _on_response)
@@ -1141,34 +1152,36 @@ async def fill_step1(page) -> str | None:
                         log(f"[fast-retry {_fr+1}/3] execute 失败: {(_new or {}).get('err','?')[:120]}")
                         break
                     log(f"[fast-retry {_fr+1}/3] 新 token len={_new.get('len')} prefix={_new.get('token','')[:20]}")
-                    _clicked = False
-                    for _sel in ('[data-cy="signup-create-account"]', 'button[type="submit"]'):
-                        _b = page.locator(_sel)
-                        if await _b.count():
-                            try:
-                                await page.evaluate(
-                                    "(s) => { var b=document.querySelector(s); if (b) { b.removeAttribute('disabled'); b.removeAttribute('aria-disabled'); } }",
-                                    _sel
-                                )
-                                await _b.first.click(timeout=4000)
-                                _clicked = True
-                                break
-                            except Exception:
-                                try:
-                                    await _b.first.click(force=True, timeout=2000)
-                                    _clicked = True
-                                    break
-                                except Exception:
-                                    pass
-                    if not _clicked:
-                        log(f"[fast-retry {_fr+1}/3] submit click 失败")
+                    # v7.92 ROOT-CAUSE FIX: 不走 click submit (Replit click handler 会重新 execute() 覆盖 token).
+                    # 直接 page.evaluate fetch POST sign-up API, body 严格用 fast-retry 拿的 fresh token.
+                    # 这样跳过 Replit JS 层, POST 真正发送的就是我们手里 valid token, 不会被 (code:1).
+                    try:
+                        _ftc = await page.evaluate("""
+                            async (args) => {
+                                try {
+                                    const r = await fetch('/api/v1/auth/sign-up', {
+                                        method: 'POST',
+                                        headers: {'content-type':'application/json','accept':'application/json, text/plain, */*'},
+                                        credentials: 'include',
+                                        body: JSON.stringify({
+                                            email: args.email,
+                                            rawPassword: args.password,
+                                            clientType: 'web',
+                                            recaptchaToken: args.token,
+                                            source: 'signup'
+                                        })
+                                    });
+                                    const tx = await r.text();
+                                    return {status: r.status, body: tx.slice(0, 600)};
+                                } catch(e) { return {status: 0, body: 'fetch_err:' + (e && e.message || e)}; }
+                            }
+                        """, {"email": EMAIL, "password": PASSWORD, "token": _new.get("token", "")})
+                    except Exception as _fce:
+                        log(f"[fast-retry {_fr+1}/3] fetch evaluate 异常: {_fce}")
                         break
-                    for _ww in range(8):
-                        await page.wait_for_timeout(2000)
-                        if _api_resp.get("status"): break
-                    _s2 = _api_resp.get("status", 0)
-                    _b2 = _api_resp.get("body", "")
-                    log(f"[fast-retry {_fr+1}/3] API={_s2} body={_b2[:140]}")
+                    _s2 = (_ftc or {}).get("status", 0)
+                    _b2 = (_ftc or {}).get("body", "")
+                    log(f"[fast-retry {_fr+1}/3] FETCH-API={_s2} body={_b2[:140]}")
                     if _s2 in (200, 201, 204):
                         log(f"[fast-retry {_fr+1}/3] ✅ 成功")
                         return None
