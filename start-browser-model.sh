@@ -78,13 +78,19 @@ _pick_browser_proxy() {
     echo "socks5://127.0.0.1:${port}|${name}@${EXIT}"
     return 0
   done
-  # v7.97 — REVERT v7.95c 顺序错乱. 恢复 v7.78d/e 已验证模型:
-  #   clean SOCKS (非 CF 段) → WARP → DIRECT (硬兜底).
-  # 关键: WARP 也能正常注册 (v7.78q 实证), 前提是 broker chromium / google_proxy_route /
-  # signup POST 全程 IP 一致 (家族对齐由 BROKER_EXIT_FAMILY 控制).
-  # code:1 是 stealth 指纹问题 (不是 IP 评分), code:2 是 IP 一致性问题 (不是出口 IP score).
+  # v8.01 — DIRECT BEFORE WARP:
+  #   实证 2026-04-25 03:00: 3次成功注册全走 DIRECT(45.205.27.69 AS8796 FASTNET DATA).
+  #   WARP(104.28.x CF backbone) 被 replit.com/signup CF-challenge 且 reCAPTCHA 评分极低.
+  #   DIRECT VPS IP 不被 CF 拦截, broker=direct 时 google-route SKIPPED(IP一致), 成功率最高.
+  #   原注释 v7.75/v7.78 说 DIRECT "会被 CF challenge" 是错的 — 实证推翻.
   #
-  # 2) WARP — socks5://127.0.0.1:40000 (warp-cli proxy mode)
+  # 2) DIRECT — VPS 公网 IP 45.205.27.69 AS8796 FASTNET DATA
+  DIRECT_EXIT=$(curl -s --max-time 6 https://ifconfig.me/ip 2>/dev/null | tr -d "[:space:]")
+  if [[ -n "$DIRECT_EXIT" ]]; then
+    echo "|DIRECT-VPS@${DIRECT_EXIT}(AS8796-FASTNET)"
+    return 0
+  fi
+  # 3) WARP — socks5://127.0.0.1:40000 (最后兜底; CF IP, reCAPTCHA 评分低, CF challenge on signup)
   if ss -uln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b" || ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b"; then
     WARP_EXIT=$(curl -s --max-time 8 --socks5 "127.0.0.1:40000" https://ifconfig.me/ip 2>/dev/null | tr -d "[:space:]")
     if [[ -n "$WARP_EXIT" ]]; then
@@ -93,8 +99,8 @@ _pick_browser_proxy() {
     fi
     echo "[picker] WARP port 40000 listen 但 curl 失败, 跳过" >&2
   fi
-  # 3) DIRECT — VPS 公网 IP (45.205.27.69) 真 datacenter, 全部上游失活时硬兜底
-  echo "|DIRECT-VPS@45.205.27.69(AS8796-FASTNET)"
+  # 4) 完全失活硬兜底
+  echo "|DIRECT-VPS@45.205.27.69(AS8796-FASTNET-fallback)"
   return 0
 }
 _picked="$(_pick_browser_proxy)"

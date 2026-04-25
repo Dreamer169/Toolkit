@@ -38,8 +38,8 @@ const STEALTH_INIT = `
   // 我们之前又 defineProperty 一次 -> getOwnPropertyDescriptor 不为 undefined -> FAIL.
   try { delete Navigator.prototype.webdriver; } catch (_) {}
   try { delete navigator.__proto__.webdriver; } catch (_) {}
-  // 在 navigator 自身上保留 false 取值, 让 navigator.webdriver 仍然返回 false
-  try { Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true }); } catch (_) {}
+  // v8.01 — undefined is real Chrome behavior (property absent). false is the strongest "tried to hide" tell.
+  try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true }); } catch (_) {}
   // 删 CDP 注入的全局变量（Selenium/Playwright 检测套路）
   try { delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array; } catch(_) {}
   try { delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise; } catch(_) {}
