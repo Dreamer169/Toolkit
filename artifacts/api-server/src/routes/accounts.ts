@@ -332,6 +332,66 @@ interface Job {
 }
 const jobs = new Map<string, Job>();
 
+// v7.93c — jobs persistence (file-backed, hydrate on boot, throttled writes)
+const _jobsDir = '/root/Toolkit/.local/replit_jobs';
+const _writeTimers = new Map<string, NodeJS.Timeout>();
+async function _ensureJobsDir() {
+  try {
+    const fs = await import('fs/promises');
+    await fs.mkdir(_jobsDir, { recursive: true });
+  } catch {}
+}
+async function _flushJob(id: string) {
+  const job = jobs.get(id);
+  if (!job) return;
+  try {
+    const fs = await import('fs/promises');
+    await _ensureJobsDir();
+    await fs.writeFile(`${_jobsDir}/${id}.json`, JSON.stringify({
+      id: job.id, status: job.status, started: job.started,
+      logs: job.logs.slice(-2000), result: job.result, updated: Date.now(),
+    }));
+  } catch (e) { console.warn('[jobs-persist] flush fail', id, e); }
+}
+function persistJob(id: string, immediate = false) {
+  if (immediate) {
+    const t = _writeTimers.get(id);
+    if (t) { clearTimeout(t); _writeTimers.delete(id); }
+    _flushJob(id);
+    return;
+  }
+  if (_writeTimers.has(id)) return;
+  _writeTimers.set(id, setTimeout(() => {
+    _writeTimers.delete(id);
+    _flushJob(id);
+  }, 5000));
+}
+(async () => {
+  try {
+    const fs = await import('fs/promises');
+    await _ensureJobsDir();
+    const files = await fs.readdir(_jobsDir);
+    let n = 0;
+    for (const f of files) {
+      if (!f.endsWith('.json')) continue;
+      try {
+        const txt = await fs.readFile(`${_jobsDir}/${f}`, 'utf8');
+        const obj = JSON.parse(txt) as Job & { updated?: number };
+        if (!obj?.id) continue;
+        // mark any 'running' as 'error' (process was killed mid-flight)
+        if (obj.status === 'running') {
+          obj.status = 'error';
+          obj.logs = [...(obj.logs ?? []), `[${new Date().toISOString().slice(11,19)}] ⚠ pm2 重启截断 — 状态由 running 标记为 error`];
+        }
+        jobs.set(obj.id, { id: obj.id, status: obj.status, started: obj.started, logs: obj.logs ?? [], result: obj.result ?? null });
+        n++;
+      } catch (e) { console.warn('[jobs-persist] hydrate fail', f, e); }
+    }
+    console.log(`[jobs-persist] hydrated ${n} replit jobs from disk`);
+  } catch (e) { console.warn('[jobs-persist] hydrate dir fail', e); }
+})();
+
+
 function makeJobId() { return `rpl_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`; }
 function pick<T>(arr: T[]): T { return arr[Math.floor(Math.random() * arr.length)]; }
 
@@ -627,11 +687,13 @@ router.post("/replit/register", (req, res) => {
   const jobId    = makeJobId();
   const job: Job = { id: jobId, status: "running", started: Date.now(), logs: [], result: null };
   jobs.set(jobId, job);
+  persistJob(jobId, true);
 
   function log(msg: string) {
     const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
     job.logs.push(line);
     console.log(`[replit-reg][${jobId}] ${msg}`);
+    persistJob(jobId);
   }
 
   (async () => {
@@ -1117,6 +1179,7 @@ router.post("/replit/register", (req, res) => {
     const okCount = results.filter((r: unknown) => (r as Record<string, unknown>).ok).length;
     job.status = okCount > 0 ? "done" : "error";
     job.result = { results, summary: `${okCount}/${count} succeeded` };
+    persistJob(jobId, true);
     log(`\nAll done: ${okCount}/${count} succeeded`);
     if (!requestedEmail) await checkAndRefillReplitPool(dbQ, log);
   })().catch(err => {
@@ -1290,6 +1353,7 @@ router.post("/pipeline/full", async (req, res) => {
   const jobId = `pipe_${Date.now().toString(36)}`;
   const job: Job = { id: jobId, status: "running", started: Date.now(), logs: [], result: null };
   jobs.set(jobId, job);
+  persistJob(jobId, true);
   function log(msg: string) {
     const line = `[${new Date().toISOString().slice(11,19)}] ${msg}`;
     job.logs.push(line);
@@ -1435,6 +1499,7 @@ router.post("/replit/deploy-subnode", async (req, res) => {
   const jobId = makeJobId();
   const job: Job = { id: jobId, status: "running", started: Date.now(), logs: [], result: null };
   jobs.set(jobId, job);
+  persistJob(jobId, true);
   function log(msg: string) {
     const line = `[${new Date().toISOString().slice(11,19)}] ${msg}`;
     job.logs.push(line);
