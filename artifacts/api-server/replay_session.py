@@ -26,6 +26,27 @@ STATE_DIR = "/root/Toolkit/.state/replit"
 XRAY_POOL = list(range(10820, 10846))
 VPS_IP_CACHE: dict = {}
 
+# v7.83 — WARP-class detection + WARP socks port.
+# 注册时 broker chromium 走 socks5://127.0.0.1:40000 (warp-cli proxy mode),
+# 出口落到 Cloudflare WARP consumer pool (104.28.x.x / 162.158.x.x / 等).
+# WARP 出口 IP 会按客户端 ID 漂移, 不可能严格 IP 相等匹配, 但同一 /16 CIDR
+# (Cloudflare 给的 CF-Connecting-IP) 仍属同一 WARP "client", cf_clearance
+# 不会被立刻撤销. 所以 WARP-class 目标改成 CIDR fuzzy match.
+WARP_PORT = 40000
+# CF WARP consumer 出口 IPv4 段 (从 cloudflare-radar / WARP traceroute 实测).
+# 不求穷尽, 覆盖近 6 个月观测到的所有 WARP egress 段即可.
+WARP_CIDR_PREFIXES = (
+    "104.28.", "162.158.", "172.69.", "172.70.", "108.162.",
+    "131.0.72.", "188.114.", "190.93.", "197.234.24",
+    "199.27.128.", "203.0.113.", "104.16.", "104.17.",
+)
+
+
+def is_warp_ip(ip: str) -> bool:
+    if not ip or not isinstance(ip, str):
+        return False
+    return any(ip.startswith(p) for p in WARP_CIDR_PREFIXES)
+
 
 def vps_public_ip() -> str:
     if "ip" in VPS_IP_CACHE:
@@ -57,14 +78,47 @@ def probe_socks_exit_ip(port: int, timeout: int = 6) -> str:
 
 
 def resolve_proxy_for_target(target_ip: str, hint_port: int) -> dict:
-    """按 register 时落库 exit_ip 找当前能落到同一 IP 的 SOCKS 端口；
-    若 target == VPS 自身 IP, 直接 bypass SOCKS 走直连 (最稳)。"""
+    """按 register 时落库 exit_ip 找当前能落到同一 IP 的 SOCKS 端口。
+
+    优先级 (v7.83):
+      1. target ∈ WARP CIDR → 探 WARP_PORT (40000), CIDR fuzzy 匹配即接受
+         (WARP IP 漂移不可避免, 同 /16 仍属同一 WARP client → cf_clearance 兼容)
+      2. target == VPS 公网 IP → 这是 v7.82 之前的 broken DB 标记 (preflight curl
+         走 OS 默认路由误标 VPS IP, 实际 chromium 走 broker WARP). 优先试 WARP
+         (绝大多数老账号其实是 WARP 注册的), WARP 不可用再回落 direct.
+      3. hint_port (DB 落的 saved proxy_port) → exact IP 匹配
+      4. 遍历 XRAY_POOL → exact IP 匹配
+      5. 全部 unmatched → 返回 error 让上层决定 (一般标 stale)
+    """
     out = {"target_ip": target_ip, "candidates_tried": []}
     vps = vps_public_ip()
 
+    # 1) WARP-class target → fuzzy CIDR match via WARP_PORT
+    if is_warp_ip(target_ip):
+        ip = probe_socks_exit_ip(WARP_PORT, timeout=8)
+        out["candidates_tried"].append({"port": WARP_PORT, "ip": ip, "kind": "warp"})
+        if is_warp_ip(ip):
+            out["mode"] = "warp_fuzzy"; out["port"] = WARP_PORT
+            out["server"] = "socks5://127.0.0.1:" + str(WARP_PORT)
+            out["probed_ip"] = ip; return out
+        # WARP 端口拿不到 WARP IP (warp-cli down?) → 回落 direct, 让 cf_clearance
+        # 自然失效后上层标 stale, 不要瞎试 xray pool (IP 类别都不对).
+        out["mode"] = "warp_down_fallback_direct"; out["probed_ip"] = vps; return out
+
+    # 2) target == VPS IP (legacy v7.82-pre broken row) → 试 WARP, 失败再 direct
     if target_ip and vps and target_ip == vps:
+        ip = probe_socks_exit_ip(WARP_PORT, timeout=8)
+        out["candidates_tried"].append({"port": WARP_PORT, "ip": ip, "kind": "warp_legacy_guess"})
+        if is_warp_ip(ip):
+            # 极大概率这个老账号其实是 broker WARP 注册的 (cookies 绑 104.28.x.x,
+            # DB 因 v7.82-pre bug 落了 VPS IP). 用 WARP 重放.
+            out["mode"] = "warp_legacy_fuzzy"; out["port"] = WARP_PORT
+            out["server"] = "socks5://127.0.0.1:" + str(WARP_PORT)
+            out["probed_ip"] = ip; return out
+        # WARP 不可用 → 回落 direct (如果是真正 VPS 直连注册的老账号, 这就对了)
         out["mode"] = "direct"; out["probed_ip"] = vps; return out
 
+    # 3) hint_port exact match
     if hint_port:
         ip = probe_socks_exit_ip(hint_port)
         out["candidates_tried"].append({"port": hint_port, "ip": ip})
@@ -73,6 +127,7 @@ def resolve_proxy_for_target(target_ip: str, hint_port: int) -> dict:
             out["server"] = "socks5://127.0.0.1:" + str(hint_port)
             out["probed_ip"] = ip; return out
 
+    # 4) iterate xray pool
     for pp in XRAY_POOL:
         if pp == hint_port: continue
         ip = probe_socks_exit_ip(pp, timeout=4)
@@ -151,9 +206,11 @@ async def replay(acc: dict) -> dict:
     resolved = resolve_proxy_for_target(target_ip, int(hint_port) if hint_port else 0)
     out["resolved_proxy"] = {k: v for k, v in resolved.items() if k != "candidates_tried"}
     proxy_cfg = None
-    if resolved["mode"] in ("socks", "socks_alt"):
+    # v7.83: 新增 warp_fuzzy / warp_legacy_fuzzy → 走 WARP socks5;
+    # warp_down_fallback_direct → 走直连 (跟 direct 等价).
+    if resolved["mode"] in ("socks", "socks_alt", "warp_fuzzy", "warp_legacy_fuzzy"):
         proxy_cfg = {"server": resolved["server"]}
-    elif resolved["mode"] == "direct":
+    elif resolved["mode"] in ("direct", "warp_down_fallback_direct"):
         proxy_cfg = None
     else:
         out["error"] = ("exit_ip 漂移: register 时=" + target_ip + ", 当前所有 xray "
