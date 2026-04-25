@@ -354,7 +354,14 @@ router.get("/replit/jobs", (_req, res) => {
     logCount: job.logs.length,
     accountCount: Array.isArray(job.result?.results) ? job.result.results.length : 0,
     exitCode: null,
-    lastLog: job.logs.length ? { type: job.status === "error" ? "error" : job.status === "done" ? "done" : "log", message: job.logs.at(-1) ?? "" } : null,
+    lastLog: job.logs.length ? ((): { type: string; message: string } => {
+      // v7.88: derive type from log content (same regex as GET /:jobId handler) instead
+      // of job.status — fixes monitor showing successful tail line as red "error"
+      // pill just because the job overall ended in error state.
+      const line = job.logs.at(-1) ?? "";
+      const t = /fatal|error|失败|✗|❌/i.test(line) ? "error" : /✓|✅|成功|done/i.test(line) ? "success" : "log";
+      return { type: t, message: line };
+    })() : null,
   })).sort((a, b) => b.startedAt - a.startedAt);
   res.json({ success: true, jobs: list });
 });
@@ -450,7 +457,7 @@ function normalizeUrls(input: unknown): string[] {
   return [];
 }
 
-function runPython(script: string, arg: unknown, timeoutMs = 240_000): Promise<{
+function runPython(script: string, arg: unknown, timeoutMs = 240_000, onLine?: (line: string) => void): Promise<{
   ok: boolean; raw: string; parsed: Record<string, unknown>;
 }> {
   return new Promise((resolve) => {
@@ -459,8 +466,22 @@ function runPython(script: string, arg: unknown, timeoutMs = 240_000): Promise<{
       detached: true,
     });
     let out = "";
-    child.stdout.on("data", (d: Buffer) => { out += d.toString(); process.stdout.write(d); });
-    child.stderr.on("data", (d: Buffer) => { process.stderr.write(d); });
+    // v7.88: line-buffered stdout/stderr forwarder so caller (e.g. /replit/register
+    // handler) can pump python progress into job.logs → 实时监控中心 finally sees
+    // [CDP] WARP exit_ip / [step2-miss] body_check / Canvas inject ✓ etc. previously
+    // only visible in pm2 raw log. Without onLine: behavior is identical to before.
+    let _outBuf = "";
+    let _errBuf = "";
+    const _emitLines = (which: "out" | "err", chunk: string) => {
+      if (!onLine) return;
+      const ref = which === "out" ? _outBuf + chunk : _errBuf + chunk;
+      const lines = ref.split(/\r?\n/);
+      const tail = lines.pop() ?? "";
+      if (which === "out") _outBuf = tail; else _errBuf = tail;
+      for (const ln of lines) { if (ln.trim()) onLine(ln); }
+    };
+    child.stdout.on("data", (d: Buffer) => { const t = d.toString(); out += t; process.stdout.write(d); _emitLines("out", t); });
+    child.stderr.on("data", (d: Buffer) => { const t = d.toString(); process.stderr.write(d); _emitLines("err", t); });
     let settled = false;
     const finish = (result: { ok: boolean; raw: string; parsed: Record<string, unknown> }) => {
       if (settled) return;
@@ -736,7 +757,7 @@ router.post("/replit/register", (req, res) => {
               max_wait: 90,
               outlook_refresh_token: outlook.refresh_token ?? "",
               use_cdp: useCdp,
-            }));
+            }, 240_000, (line) => log(`      [py] ${line}`)));
 
             // 记录代理使用（成功/失败均记录）
             await recordXrayProxyUsage(tryPort, dbE as unknown as (sql: string, params?: unknown[]) => Promise<unknown>);
