@@ -1779,6 +1779,16 @@ const _CF_BLOCK_PATTERNS = [
   "cf_mitigated",
   "cf-mitigated",
   "cloudflare challenge",
+  // v7.90 - broker WARP exit IP CF-banned symptom: renderWithBrowser loops
+  // captcha-detect retry then returns cookies=[] cfClearance=false. python
+  // forced grecaptcha.enterprise.execute() on a partial /signup page (no
+  // Enterprise widget) -> token page-state mismatch -> Replit returns
+  // 400 captcha token is invalid (code:1).
+  "captcha token is invalid",
+  "(code:1)",
+  "captcha_token_invalid",
+  "cf_warmup_failed",
+  "signup_username_field_missing",
 ];
 const _CF_WINDOW_MS    = 5 * 60_000;  // 5min sliding window
 const _CF_THRESHOLD    = 3;            // N events within window → rotate
