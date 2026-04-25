@@ -15,7 +15,10 @@ token      = data.get("token", "")
 message_id = data.get("message_id", "")
 verify_url = data.get("verify_url", "")
 verify_url = html_lib.unescape(verify_url) if verify_url else verify_url
-proxy_url = data.get("proxy") or os.environ.get("MICROSOFT_BROWSER_PROXY") or os.environ.get("OUTLOOK_BROWSER_PROXY") or os.environ.get("MICROSOFT_HTTP_PROXY") or os.environ.get("OUTLOOK_HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or "http://127.0.0.1:8091"
+# v7.78j — 去掉 "http://127.0.0.1:8091" 默认 fallback。该端口长期无 listener,
+# 而 Graph API 从 VPS 直连 graph.microsoft.com 完全可达 (无需 IP-anchoring)。
+# 仅当上层显式传入或 env 设置时才用代理。
+proxy_url = data.get("proxy") or os.environ.get("MICROSOFT_BROWSER_PROXY") or os.environ.get("OUTLOOK_BROWSER_PROXY") or os.environ.get("MICROSOFT_HTTP_PROXY") or os.environ.get("OUTLOOK_HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or ""
 
 VERIFY_KWS   = ("verify", "confirm", "activate", "validation", "email-action",
                 "verificationToken", "emailVerification", "signup_success",
@@ -166,6 +169,27 @@ def extract_verify_url(html_content):
 
 
 def search_verify_email(token):
+    # v7.78i — fast path: list recent inbox by receivedDateTime desc, match
+    # sender=verify@replit.com or noreply@replit.com or subject contains replit/verify.
+    # KQL $search excludes brand-new emails (~1-5 min indexing delay) so we MUST
+    # use $orderby+top + Python-side filter for verify emails sent <5min ago.
+    for folder in ("Inbox", "JunkEmail"):
+        try:
+            url = (f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder}/messages"
+                   f"?$top=20&$orderby=receivedDateTime+desc"
+                   f"&$select=id,subject,isRead,receivedDateTime,from")
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+            with open_url(req, timeout=12) as r:
+                d = json.loads(r.read())
+            for m in d.get("value", []):
+                s   = (m.get("subject", "") or "").lower()
+                snd = (m.get("from", {}).get("emailAddress", {}).get("address", "") or "").lower()
+                if ("replit.com" in snd) or ("verify" in s) or ("confirm" in s) or ("replit" in s):
+                    print(f"[click_verify] 找到验证邮件 (recent-list/{folder}): {m.get('subject','')} from={snd}", flush=True)
+                    return m["id"]
+        except Exception as e:
+            print(f"[click_verify] recent-list {folder} 失败: {e}", flush=True)
+    # 回退：旧 $search 路径 (索引化邮件 >5min)
     for subj_kw in ("verify", "confirm", "replit", "reseek", "activate"):
         try:
             url = (f"https://graph.microsoft.com/v1.0/me/messages"
@@ -177,7 +201,7 @@ def search_verify_email(token):
             for m in d.get("value", []):
                 s = m.get("subject", "").lower()
                 if any(k in s for k in ("verify", "confirm", "activat", "replit", "reseek")):
-                    print(f"[click_verify] 找到验证邮件: {m['subject']}", flush=True)
+                    print(f"[click_verify] 找到验证邮件 ($search): {m['subject']}", flush=True)
                     return m["id"]
         except Exception as e:
             print(f"[click_verify] 搜索 {subj_kw} 失败: {e}", flush=True)
@@ -289,10 +313,15 @@ try:
         body_text = ""
         verified_marker = None
         # 收紧 success 关键词：避免与 "verifying..."、"please verify your email" 等加载/请求页冲突
+        # v7.78j — 加 Replit action-code 成功页实际短语:
+        # "Verifying email Success!" / "this window will close automatically" /
+        # "return to replit here". 这些只在 Firebase oobCode 验证通过后才出现。
         SUCCESS_KWS = (
             "email verified", "email has been verified", "successfully verified",
             "verification successful", "email confirmed", "已验证邮箱", "邮箱已验证",
             "your email is now verified", "you have verified",
+            "verifying email success", "this window will close automatically",
+            "return to replit here",
         )
         # 收紧 failure 关键词：去掉过于通用的 "error"，加上明确的 oobCode 已用/过期措辞
         FAILURE_KWS = (

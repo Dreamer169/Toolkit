@@ -115,5 +115,9 @@ export function getMicrosoftProxyEnv(preferred?: string | null): Record<string, 
     if (token) url.password = token;
   }
   const value = url.toString();
+  // v7.78j — 8091 默认 CONNECT proxy 长期不存在 (无 listener)，注入会让 spawned
+  // python script 把 Microsoft Graph API 请求都打到死端口 → Errno 111。直接
+  // 跳过 → script 走 VPS 直连 graph.microsoft.com (实测可达, AS8796 FASTNET).
+  if (value.includes(":8091")) return {};
   return { HTTP_PROXY: value, HTTPS_PROXY: value, http_proxy: value, https_proxy: value };
 }
