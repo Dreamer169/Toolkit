@@ -69,7 +69,7 @@ _pick_browser_proxy() {
   for cand in 10824:Kirino 10826:DigitalOcean 10830:MULTACOM 10828:Misaka 10822:Vultr 10832:Linode 10838:Static 10820:Static 10825:Static 10831:Static 10836:Static 10837:Static 10845:Static; do
     port="${cand%%:*}"; name="${cand##*:}"
     ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:${port}\b" || continue
-    EXIT=$(curl -s --max-time 8 --socks5 "127.0.0.1:${port}" https://ifconfig.me/ip 2>/dev/null | tr -d "[:space:]")
+    EXIT=$(curl -s --max-time 8 --socks5 "127.0.0.1:${port}" https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
     [[ -z "$EXIT" ]] && continue
     if _is_cf_ip "$EXIT"; then
       echo "[picker] skip ${name}(${port}) — exit ${EXIT} 在 CF 段 (cf_clearance 拿不到)" >&2
@@ -85,14 +85,14 @@ _pick_browser_proxy() {
   #   原注释 v7.75/v7.78 说 DIRECT "会被 CF challenge" 是错的 — 实证推翻.
   #
   # 2) DIRECT — VPS 公网 IP 45.205.27.69 AS8796 FASTNET DATA
-  DIRECT_EXIT=$(curl -s --max-time 6 https://ifconfig.me/ip 2>/dev/null | tr -d "[:space:]")
+  DIRECT_EXIT=$(curl -s --max-time 6 https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
   if [[ -n "$DIRECT_EXIT" ]]; then
     echo "|DIRECT-VPS@${DIRECT_EXIT}(AS8796-FASTNET)"
     return 0
   fi
   # 3) WARP — socks5://127.0.0.1:40000 (最后兜底; CF IP, reCAPTCHA 评分低, CF challenge on signup)
   if ss -uln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b" || ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b"; then
-    WARP_EXIT=$(curl -s --max-time 8 --socks5 "127.0.0.1:40000" https://ifconfig.me/ip 2>/dev/null | tr -d "[:space:]")
+    WARP_EXIT=$(curl -s --max-time 8 --socks5 "127.0.0.1:40000" https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
     if [[ -n "$WARP_EXIT" ]]; then
       echo "socks5://127.0.0.1:40000|WARP@${WARP_EXIT}"
       return 0
