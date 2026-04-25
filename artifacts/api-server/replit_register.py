@@ -25,6 +25,16 @@ HEADLESS = params.get("headless", True)
 USE_CDP  = params.get("use_cdp", False)
 CDP_WS   = params.get("cdp_ws", "http://127.0.0.1:9222")
 
+# v7.80: precheck-only mode. When True, fill_step1 will navigate + fill email +
+# run the inline availability probe, then short-circuit BEFORE password fill /
+# captcha solve / verification. Used by /api/admin/email-prescan to batch-mark
+# the outlook pool as replit_used / replit_avail / replit_unknown so the actual
+# registration picker hits known-good emails on the first try.
+# Returns: {"ok": True, "phase": "precheck", "decision": "available|taken|unknown"}
+PRECHECK_ONLY    = bool(params.get("precheck_only", False))
+PRECHECK_MAX_S   = float(params.get("precheck_max_s", 6.0))
+_PRECHECK_RESULT = None  # set inside fill_step1 by the probe block
+
 # ── CDP shim ────────────────────────────────────────────────────────────────
 # Lets attempt_register() reuse the headed-Chromium owned by browser-model
 # (port 9222) instead of launching its own. Bypasses CF + Camoufox detection
@@ -645,9 +655,11 @@ async def fill_step1(page) -> str | None:
     _POS_KW = ("available", "looks good", "valid email")
     _precheck_decision = None
     try:
-        # 5s 内轮询: 任一明确判断成立就 break, 优先识别 negative
+        # PRECHECK_MAX_S 内轮询: 任一明确判断成立就 break, 优先识别 negative
+        # v7.80: 改为可配 (default 6s for actual register, 12s for precheck-only)
+        _probe_budget = PRECHECK_MAX_S if PRECHECK_ONLY else 5.0
         _t_start = asyncio.get_event_loop().time()
-        while asyncio.get_event_loop().time() - _t_start < 5.0:
+        while asyncio.get_event_loop().time() - _t_start < _probe_budget:
             try:
                 _alerts = await page.locator(
                     '[role="alert"], [class*="error" i], [class*="invalid" i], '
@@ -672,10 +684,21 @@ async def fill_step1(page) -> str | None:
     except Exception as _ev:
         log(f"[email-precheck] 异常 (忽略, fallback 走完整 flow): {_ev}")
 
+    # v7.80: 把决策回写 module-global, 让 attempt_register 在 PRECHECK_ONLY 模式
+    # 下能拿到 "available" vs "unknown(timeout)" 的区分 (fill_step1 单纯 return None
+    # 不够区分这两个).
+    global _PRECHECK_RESULT
+    _PRECHECK_RESULT = _precheck_decision
+
     if _precheck_decision == "taken":
         # 短路: 直接告诉上游 "Email already in use", 让它标 replit_used 换下一个
         # outlook. 避免后续 captcha solve + submit 浪费 ~2.5 分钟.
         return "Email already in use on Replit"
+
+    # v7.80: precheck-only 模式 → 跳过后续 password/captcha/submit, 直接告诉
+    # attempt_register 用 _PRECHECK_RESULT 短路返回。
+    if PRECHECK_ONLY:
+        return "_precheck_done"
 
     # 填 password
     await _fast_fill(
@@ -2212,6 +2235,15 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
 
         result["phase"] = "fill_step1"
         err1 = await fill_step1(page)
+        # v7.80: precheck-only 短路 — 用 _PRECHECK_RESULT 拼装最终结果, 跳过 captcha/submit
+        if PRECHECK_ONLY:
+            _dec = _PRECHECK_RESULT or ("taken" if err1 == "Email already in use on Replit" else "unknown")
+            result.update({
+                "ok": True, "phase": "precheck", "decision": _dec,
+                "precheck_raw_err": err1 or "",
+            })
+            log(f"[precheck-only] decision={_dec} raw_err={err1!r}")
+            await browser.close(); return result
         # captcha_token_invalid → 在当前页面直接触发音频挑战（bypass auto-token）
         if err1 == "captcha_token_invalid":
             # v7.69: 早判 reCAPTCHA Enterprise v3 score-only —
@@ -2557,6 +2589,15 @@ async def attempt_register_camoufox(proxy_cfg, exit_ip: str) -> dict:
                 return result
             result["phase"] = "fill_step1"
             err1 = await fill_step1(page)
+            # v7.80: precheck-only 短路 (camoufox path 同样要支持)
+            if PRECHECK_ONLY:
+                _dec = _PRECHECK_RESULT or ("taken" if err1 == "Email already in use on Replit" else "unknown")
+                result.update({
+                    "ok": True, "phase": "precheck", "decision": _dec,
+                    "precheck_raw_err": err1 or "",
+                })
+                log(f"[precheck-only][camoufox] decision={_dec} raw_err={err1!r}")
+                return result
             if err1 == "captcha_token_invalid":
                 log("[retry] captcha_token_invalid -> audio challenge...")
                 try:

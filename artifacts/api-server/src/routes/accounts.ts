@@ -644,6 +644,12 @@ router.post("/replit/register", (req, res) => {
                  AND r.email = accounts.email
              )
            ORDER BY
+             -- v7.80: prefer pre-scanned available emails (replit_avail), then unknown,
+             -- defer pre-scanned taken/error emails to the very end so picker hits
+             -- known-good candidates on the first try.
+             CASE WHEN COALESCE(tags,'') LIKE '%replit_avail%' THEN 0
+                  WHEN COALESCE(tags,'') LIKE '%replit_unknown%' THEN 2
+                  ELSE 1 END,
              CASE WHEN COALESCE(tags,'') LIKE '%inbox_verified%' THEN 0 ELSE 1 END,
              RANDOM()
            LIMIT 10`,
@@ -1717,6 +1723,246 @@ router.get("/admin/audit-history", async (req, res) => {
   } catch (e: unknown) {
     res.status(500).json({ ok: false, error: String(e).slice(0, 200) });
   }
+});
+
+
+// ── v7.80 — Batch email pre-scan ─────────────────────────────────────────────
+// Run replit_register.py with precheck_only=true on every eligible outlook in DB,
+// tag each one as replit_avail / replit_used / replit_unknown so the registration
+// picker hits known-good candidates on the first try.  Reuses replit_audit_history
+// table (source='prescan').  Mutex-locked to one run at a time.
+let _prescanRunning = false;
+let _lastPrescanStartedAt = 0;
+let _lastPrescanFinishedAt = 0;
+
+export function isEmailPrescanRunning(): boolean { return _prescanRunning; }
+export function getEmailPrescanState(): { running: boolean; lastStartedAt: number; lastFinishedAt: number } {
+  return { running: _prescanRunning, lastStartedAt: _lastPrescanStartedAt, lastFinishedAt: _lastPrescanFinishedAt };
+}
+
+export type EmailPrescanOpts = {
+  ids?: number[];
+  rescan?: boolean;        // if true, ignore existing replit_avail/used/unknown tags
+  limit?: number;          // cap how many emails this run touches (default 50)
+  perEmailTimeoutMs?: number; // per-email python timeout (default 90s)
+  precheckMaxS?: number;   // python-side probe budget seconds (default 8)
+};
+export type EmailPrescanResult = {
+  ok: boolean;
+  source: string;
+  total: number;
+  scanned: number;
+  available: number;
+  taken: number;
+  unknown: number;
+  errors: number;
+  duration_ms: number;
+  details: Array<Record<string, unknown>>;
+  history_id?: number;
+  skipped?: string;
+};
+
+export async function executeEmailPrescan(opts: EmailPrescanOpts, source = "manual"): Promise<EmailPrescanResult> {
+  const limit = Math.max(1, Math.min(500, opts.limit ?? 50));
+  const perEmailTimeoutMs = Math.max(30_000, Math.min(180_000, opts.perEmailTimeoutMs ?? 90_000));
+  const precheckMaxS = Math.max(3, Math.min(20, opts.precheckMaxS ?? 8));
+  const rescan = opts.rescan === true;
+
+  if (_prescanRunning) {
+    return {
+      ok: false, source, total: 0, scanned: 0, available: 0, taken: 0,
+      unknown: 0, errors: 0, duration_ms: 0, details: [], skipped: "prescan_already_running",
+    };
+  }
+  _prescanRunning = true;
+  _lastPrescanStartedAt = Date.now();
+
+  const { query: dbQ, execute: dbE } = await import("../db.js");
+  const t0 = Date.now();
+  const startedAt = new Date(t0).toISOString();
+  const details: Array<Record<string, unknown>> = [];
+  let availCnt = 0, takenCnt = 0, unkCnt = 0, errCnt = 0;
+  let rows: Array<{ id: number; email: string; tags: string | null }> = [];
+
+  try {
+    // Eligible outlook pool — same filters as registration picker.
+    // When rescan=false, also skip emails already tagged with a prescan verdict.
+    const tagFilter = rescan ? "" : `
+        AND COALESCE(tags,'') NOT LIKE '%replit_avail%'
+        AND COALESCE(tags,'') NOT LIKE '%replit_unknown%'`;
+    if (Array.isArray(opts.ids) && opts.ids.length) {
+      rows = await dbQ<{ id: number; email: string; tags: string | null }>(
+        `SELECT id, email, tags FROM accounts
+         WHERE platform='outlook' AND id = ANY($1::int[]) ORDER BY id LIMIT $2`,
+        [opts.ids, limit]
+      );
+    } else {
+      rows = await dbQ<{ id: number; email: string; tags: string | null }>(
+        `SELECT id, email, tags FROM accounts
+         WHERE platform='outlook'
+           AND status='active'
+           AND (token IS NOT NULL OR refresh_token IS NOT NULL)
+           AND COALESCE(tags,'') NOT LIKE '%replit_used%'
+           AND COALESCE(tags,'') NOT LIKE '%token_invalid%'
+           AND COALESCE(tags,'') NOT LIKE '%inbox_error%'
+           AND COALESCE(tags,'') NOT LIKE '%abuse_mode%'
+           AND NOT EXISTS (
+             SELECT 1 FROM accounts r
+             WHERE r.platform='replit' AND r.email = accounts.email
+           )
+           ${tagFilter}
+         ORDER BY
+           CASE WHEN COALESCE(tags,'') LIKE '%inbox_verified%' THEN 0 ELSE 1 END,
+           id
+         LIMIT $1`,
+        [limit]
+      );
+    }
+
+    if (rows.length === 0) {
+      _prescanRunning = false;
+      _lastPrescanFinishedAt = Date.now();
+      return {
+        ok: true, source, total: 0, scanned: 0, available: 0, taken: 0,
+        unknown: 0, errors: 0, duration_ms: Date.now() - t0, details: [],
+        skipped: "no_eligible_outlooks",
+      };
+    }
+
+    const regScript = path.join(API_DIR, "replit_register.py");
+
+    // Sequential — precheck holds a CDP browser instance and we don't want to
+    // multiplex it.  ~10s per email × 50 = ~8min worst case, well within sane.
+    for (const acc of rows) {
+      const portList = sortedByReputation(availablePorts());
+      const tryPort = portList[0];
+      if (tryPort === undefined) {
+        details.push({ id: acc.id, email: acc.email, decision: "error", error: "no_proxy_ports" });
+        errCnt++;
+        continue;
+      }
+
+      const { ok: pyOk, parsed } = await runPython(
+        regScript,
+        {
+          email: acc.email,
+          username: "_precheck_user_dummy",  // never submitted in precheck mode
+          password: "_precheck_pwd_dummy",
+          proxy: portToProxy(tryPort),
+          headless: true,
+          use_cdp: true,
+          precheck_only: true,
+          precheck_max_s: precheckMaxS,
+        },
+        perEmailTimeoutMs
+      );
+
+      const decisionRaw = String(
+        (parsed && (parsed as { decision?: unknown }).decision) ?? ""
+      ).toLowerCase();
+      const decision: "available" | "taken" | "unknown" | "error" =
+        decisionRaw === "available" ? "available" :
+        decisionRaw === "taken" ? "taken" :
+        decisionRaw === "unknown" ? "unknown" :
+        (pyOk && parsed && (parsed as { ok?: unknown }).ok === true) ? "unknown" :
+        "error";
+
+      // Map decision → tag delta. tag added (idempotent), competing tags removed.
+      const addTag =
+        decision === "available" ? "replit_avail" :
+        decision === "taken" ? "replit_used" :
+        decision === "unknown" ? "replit_unknown" :
+        null; // error → don't tag, retry later
+      const removeTags =
+        decision === "available" ? ["replit_used", "replit_unknown"] :
+        decision === "taken" ? ["replit_avail", "replit_unknown"] :
+        decision === "unknown" ? ["replit_avail", "replit_used"] :
+        [];
+
+      if (addTag) {
+        try {
+          // remove competing prescan tags first, then append the verdict tag (dedup via set logic)
+          await dbE(
+            `UPDATE accounts
+                SET tags = (
+                  SELECT NULLIF(
+                    array_to_string(
+                      ARRAY(
+                        SELECT DISTINCT t FROM unnest(string_to_array(COALESCE(tags,''), ',')) AS t
+                        WHERE t <> '' AND t <> ALL($2::text[])
+                      ) || ARRAY[$3::text],
+                    ','),
+                  '')
+                ),
+                updated_at = NOW()
+              WHERE id = $1`,
+            [acc.id, removeTags, addTag]
+          );
+        } catch (e: unknown) {
+          details.push({ id: acc.id, email: acc.email, dbError: String(e).slice(0, 200) });
+        }
+      }
+
+      if (decision === "available") availCnt++;
+      else if (decision === "taken") takenCnt++;
+      else if (decision === "unknown") unkCnt++;
+      else errCnt++;
+
+      details.push({
+        id: acc.id,
+        email: acc.email,
+        decision,
+        port: tryPort,
+        phase: parsed && (parsed as { phase?: unknown }).phase,
+        raw_err: parsed && (parsed as { precheck_raw_err?: unknown }).precheck_raw_err,
+        py_error: parsed && (parsed as { error?: unknown }).error,
+      });
+    }
+  } finally {
+    _prescanRunning = false;
+    _lastPrescanFinishedAt = Date.now();
+  }
+
+  const duration_ms = Date.now() - t0;
+  const total = details.length;
+  const scanned = rows.length;
+
+  // Slim details for jsonb storage (drop large fields if any)
+  const slimDetails = details.map((d) => ({
+    id: d.id, email: d.email, decision: d.decision,
+    port: d.port, raw_err: d.raw_err, py_error: d.py_error,
+  }));
+  let history_id: number | undefined;
+  try {
+    const ins = await dbQ<{ id: number }>(
+      `INSERT INTO replit_audit_history(source, scope, dry_run, total, scanned, active, stale, errors, duration_ms, details, started_at, finished_at)
+       VALUES ($1,'email_prescan',false,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,NOW()) RETURNING id`,
+      ["prescan:" + source, total, scanned, availCnt, takenCnt, errCnt + unkCnt,
+       duration_ms, JSON.stringify(slimDetails), startedAt]
+    );
+    history_id = ins[0]?.id;
+  } catch (e: unknown) {
+    details.push({ history_write_failed: String(e).slice(0, 200) });
+  }
+
+  return {
+    ok: true, source,
+    total, scanned,
+    available: availCnt, taken: takenCnt, unknown: unkCnt, errors: errCnt,
+    duration_ms, details, history_id,
+  };
+}
+
+router.post("/admin/email-prescan", async (req, res) => {
+  const body = (req.body ?? {}) as EmailPrescanOpts & { source?: string };
+  const source = (body && typeof body.source === "string") ? body.source : "manual";
+  const result = await executeEmailPrescan(body, source);
+  if (result.skipped === "prescan_already_running") { res.status(409).json(result); return; }
+  res.json(result);
+});
+
+router.get("/admin/email-prescan/state", (_req, res) => {
+  res.json({ ok: true, state: getEmailPrescanState() });
 });
 
 
