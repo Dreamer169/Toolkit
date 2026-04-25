@@ -58,6 +58,14 @@ except Exception:
 # 轮换重新打分时, 用 "curl --socks5 :PORT https://ipinfo.io/json" 复检 ASN, 命中
 # Google/Microsoft/Amazon/Oracle/Tencent/Alibaba/Huawei 云 ASN 即从池中剔除。
 DEFAULT_POOL = [
+    # v7.94 — REVERT v7.93d. WARP-only DEFAULT_POOL was wrong: in v7.78q-era working
+    # topology broker chromium itself exits via clean datacenter SOCKS (Kirino/DO/MULTACOM,
+    # see start-browser-model.sh v7.78e picker), and google_proxy_route routes *.google
+    # via the SAME family of clean non-GCP/non-Azure datacenter exits. IP-segment of
+    # Google sub-requests therefore matches IP-segment of Replit sign-up POST (both are
+    # non-CF, non-cloud datacenter), and reCAPTCHA Enterprise scores them as a
+    # consistent residential-class small-DC client. WARP exit (104.28.x) is CF backbone,
+    # which Google scores aggressively against. Restore v7.87 verified pool below.
     "socks5://127.0.0.1:10825",  # ★ AEZA — 实测成功 (userId=58169318)
     "socks5://127.0.0.1:10824",  # 0391f15 原班 — Cogent
     "socks5://127.0.0.1:10826",  # 0391f15 原班 — DigitalOcean

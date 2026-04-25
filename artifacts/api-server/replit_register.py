@@ -900,6 +900,12 @@ async def fill_step1(page) -> str | None:
     # 跟 Replit 后端 expected_action 不匹配 → Google verify 返 code:2。
     #
     # 因此：只在 LIVE token 缺失/异常时才回填 locked，正常情况完全放行。
+    # v7.94 — REVERT v7.93f. Restore v7.75 always-on route-force (LIVE-token-first,
+    # LOCKED-fallback) when proxy is non-empty + non-Tor. The v7.93f reasoning that
+    # page.route leaves runtime instrumentation was unfounded — v7.75 logic is purely
+    # a body-rewriter and only fires when LIVE token is missing/malformed (<1000 chars
+    # or wrong prefix). LIVE token short-circuits before any rewrite, so no overhead
+    # under the happy path. Keeping FORCE_ROUTE_FORCE=0 as opt-out.
     _brox_rf = PROXY.strip()
     if rc_token and len(rc_token) > 50 and bool(_brox_rf) and ":9050" not in _brox_rf:
         _locked_rc = rc_token
@@ -1152,30 +1158,35 @@ async def fill_step1(page) -> str | None:
                         log(f"[fast-retry {_fr+1}/3] execute 失败: {(_new or {}).get('err','?')[:120]}")
                         break
                     log(f"[fast-retry {_fr+1}/3] 新 token len={_new.get('len')} prefix={_new.get('token','')[:20]}")
-                    # v7.92 ROOT-CAUSE FIX: 不走 click submit (Replit click handler 会重新 execute() 覆盖 token).
+                    # v7.93 ROOT-CAUSE FIX (refines v7.92): 不走 click submit (Replit click handler 会重新 execute() 覆盖 token).
                     # 直接 page.evaluate fetch POST sign-up API, body 严格用 fast-retry 拿的 fresh token.
                     # 这样跳过 Replit JS 层, POST 真正发送的就是我们手里 valid token, 不会被 (code:1).
+                    # v7.93b: 复用 click submit 真实 captured body, 仅替换 recaptchaToken,
+                    # 避免缺字段 (Replit 后端可能要 csrfToken / captchaProvider / extra fields)
+                    import json as _jrbf
+                    try:
+                        _orig_body = _api_req.get("body") or ""
+                        _bd_tpl = _jrbf.loads(_orig_body) if _orig_body else {"email": EMAIL, "rawPassword": PASSWORD, "clientType":"web", "source":"signup"}
+                    except Exception:
+                        _bd_tpl = {"email": EMAIL, "rawPassword": PASSWORD, "clientType":"web", "source":"signup"}
+                    _bd_tpl["recaptchaToken"] = _new.get("token", "")
+                    _retry_body_str = _jrbf.dumps(_bd_tpl)
+                    log(f"[fast-retry {_fr+1}/3] reuse body keys={list(_bd_tpl.keys())} len={len(_retry_body_str)}")
                     try:
                         _ftc = await page.evaluate("""
                             async (args) => {
                                 try {
                                     const r = await fetch('/api/v1/auth/sign-up', {
                                         method: 'POST',
-                                        headers: {'content-type':'application/json','accept':'application/json, text/plain, */*'},
+                                        headers: {'content-type':'application/json','accept':'application/json, text/plain, */*','x-requested-with':'XMLHttpRequest','origin':'https://replit.com','referer':'https://replit.com/signup'},
                                         credentials: 'include',
-                                        body: JSON.stringify({
-                                            email: args.email,
-                                            rawPassword: args.password,
-                                            clientType: 'web',
-                                            recaptchaToken: args.token,
-                                            source: 'signup'
-                                        })
+                                        body: args.body
                                     });
                                     const tx = await r.text();
                                     return {status: r.status, body: tx.slice(0, 600)};
                                 } catch(e) { return {status: 0, body: 'fetch_err:' + (e && e.message || e)}; }
                             }
-                        """, {"email": EMAIL, "password": PASSWORD, "token": _new.get("token", "")})
+                        """, {"body": _retry_body_str})
                     except Exception as _fce:
                         log(f"[fast-retry {_fr+1}/3] fetch evaluate 异常: {_fce}")
                         break
@@ -1199,7 +1210,11 @@ async def fill_step1(page) -> str | None:
                     if _s2 == 429:
                         log(f"[fast-retry {_fr+1}/3] 429 速率限制 → 继续等待下轮")
                         continue
-                    log(f"[fast-retry {_fr+1}/3] 非 captcha 错误 → 退出循环")
+                    # v7.93: 403 CSRF / 'expected x-requested-with' = 网络层噪声, 不是 captcha 终态, 继续重试
+                    if _s2 == 403 and ('x-requested-with' in _b2l or 'csrf' in _b2l or 'expected' in _b2l):
+                        log(f"[fast-retry {_fr+1}/3] 403 CSRF/header 噪声 → 继续下一轮")
+                        continue
+                    log(f"[fast-retry {_fr+1}/3] 非 captcha 错误 ({_s2}) → 退出循环 body={_b2[:80]}")
                     break
                 except Exception as _fre:
                     log(f"[fast-retry {_fr+1}/3] 异常: {_fre}")
@@ -2162,6 +2177,12 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 # The v7.71-v7.78f BROWSER_PROXY/Tor gate was a misdiagnosis of code:2 (which is
                 # actually a LIVE/LOCKED token-action mismatch, not an IP mismatch — see route-force
                 # at line ~825 which already handles that). DISABLE_GOOGLE_ROUTE=1 kept as escape hatch.
+                # v7.94 — REVERT v7.93e back to v7.78g always-on. v7.78q-era e2e-verified
+                # behavior (tylerreyes307@outlook.com → userId=58078470) had google_proxy_route
+                # unconditionally attached. The httpx-TLS-mismatch concern was wrong: in v7.78q
+                # topology broker chromium ALSO exits via clean datacenter SOCKS (matching
+                # google_proxy_route's pool family), so token-gen IP segment == submit IP
+                # segment. DISABLE_GOOGLE_ROUTE=1 kept as escape hatch.
                 _disable_groute = os.environ.get("DISABLE_GOOGLE_ROUTE","").strip() in ("1","true","yes")
                 if _disable_groute:
                     log("[CDP] google-route SKIPPED (DISABLE_GOOGLE_ROUTE=1 explicit opt-out)")
@@ -2173,7 +2194,7 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                             _sys.path.insert(0, _here)
                         from google_proxy_route import attach_google_proxy_routing as _agr
                         await _agr(ctx, log)
-                        log("[CDP] google-route attached (v7.78g restore — *.google ALWAYS via clean non-GCP SOCKS pool)")
+                        log("[CDP] google-route attached (v7.94 restore — *.google ALWAYS via clean non-GCP SOCKS pool)")
                     except Exception as _ge:
                         log(f"[CDP] google-route attach failed: {_ge}")
             except Exception as _we:
