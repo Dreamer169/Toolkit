@@ -2303,9 +2303,11 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 try { Reflect.defineProperty(Navigator.prototype, 'language', {get:()=>'en-US', configurable:true}); } catch(_){}
                 try { Reflect.defineProperty(Navigator.prototype, 'languages', {get:()=>['en-US','en'], configurable:true}); } catch(_){}
                 try { Reflect.defineProperty(Navigator.prototype, 'maxTouchPoints', {get:()=>0, configurable:true}); } catch(_){}
-                // v8.00 — DO NOT override webdriver here. Broker's STEALTH_INIT
-                // already sets `()=>undefined` (real Chrome value). Overriding to
-                // `false` is reCAPTCHA Enterprise's strongest "tried to hide" tell.
+                // v8.01 FIX: addInitScript via connect_over_cdp = ISOLATED world only.
+                // Main world webdriver must be fixed HERE in this script tag.
+                try { delete Navigator.prototype.webdriver; } catch(_){}
+                try { delete navigator.__proto__.webdriver; } catch(_){}
+                try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true, enumerable: false }); } catch(_){}
                 try {
                     const orig = Intl.DateTimeFormat.prototype.resolvedOptions;
                     Intl.DateTimeFormat.prototype.resolvedOptions = function(){
