@@ -44,6 +44,21 @@ function pickProxy(): URL {
   return p;
 }
 
+// v7.76 — sticky-per-context: 同一 BrowserContext 整个生命周期内, 所有 *.google /
+// gstatic / recaptcha.net 子请求共用同一个 SOCKS 出口 IP, 避免 reCAPTCHA Enterprise
+// 看到一个 client 的 NID/_GRECAPTCHA cookie 从 N 个 IP 发出来 → 评分接近 0 → token
+// invalid (code:1)。第一次进 attachGoogleProxyRouting 时挑一个 (cursor 轮换), 之后
+// 该 ctx 内 pickProxy() 永远返回同一个; 不同 ctx 之间继续轮换 (避免所有 ctx 撞同 IP)。
+const stickyByCtx: WeakMap<BrowserContext, URL> = new WeakMap();
+function pickProxyForCtx(ctx: BrowserContext): URL {
+  let pinned = stickyByCtx.get(ctx);
+  if (!pinned) {
+    pinned = pickProxy();
+    stickyByCtx.set(ctx, pinned);
+  }
+  return pinned;
+}
+
 const GOOGLE_HOST_RE =
   /(^|\.)(google\.com|gstatic\.com|recaptcha\.net|youtube\.com|googleapis\.com|googleusercontent\.com|googletagmanager\.com|googleadservices\.com|google-analytics\.com|doubleclick\.net|ytimg\.com)$/i;
 
@@ -102,6 +117,9 @@ export async function attachGoogleProxyRouting(
   ctx: BrowserContext,
   stats?: GoogleRouteStats,
 ): Promise<void> {
+  // v7.76: pre-pin 一个出口给这个 ctx, 同时打日志方便审计
+  const pinned = pickProxyForCtx(ctx);
+  console.log("[google-route] ctx pinned to", pinned.toString());
   await ctx.route("**/*", async (route, request) => {
     let u: URL;
     try { u = new URL(request.url()); } catch { return route.fallback(); }
@@ -109,7 +127,7 @@ export async function attachGoogleProxyRouting(
       if (stats) stats.bypassed++;
       return route.fallback();
     }
-    const proxy = pickProxy();
+    const proxy = pickProxyForCtx(ctx);
     try {
       const agent = getAgent(proxy);
       const headers: Record<string, string> = {};
