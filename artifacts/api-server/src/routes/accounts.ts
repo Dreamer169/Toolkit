@@ -744,6 +744,11 @@ router.post("/replit/register", (req, res) => {
             exitIp  = String(parsed.exit_ip ?? "");
             lastErr = String(parsed.error ?? "");
 
+            // v7.81: broker-watchdog hook — feed every register attempt result so
+            // N consecutive CF blocks within a window auto-rotate the broker (which
+            // re-runs _pick_browser_proxy, picking a fresh WARP/SOCKS exit).
+            recordBrokerSignal(parsed.ok === true, lastErr, log);
+
             if (parsed.ok) {
               portLastGood.set(tryPort, Date.now()); // successful registration
               lastUsedPort = tryPort; // v7.78p: 让 Step4 INSERT 能拿到真实端口
@@ -1723,6 +1728,117 @@ router.get("/admin/audit-history", async (req, res) => {
   } catch (e: unknown) {
     res.status(500).json({ ok: false, error: String(e).slice(0, 200) });
   }
+});
+
+
+// ── v7.81 — Broker watchdog ──────────────────────────────────────────────────
+// Tally CF block / 403 cf-mitigated / signup_cf_ip_banned / cf_js_challenge_timeout
+// signals coming back from replit_register.py.  When N events accumulate inside
+// a sliding window AND we're past the cooldown, spawn `pm2 restart browser-model`
+// which re-runs start-browser-model.sh's _pick_browser_proxy → fresh WARP/SOCKS
+// exit IP.  Picker will skip the now-bad CF-segment ports automatically.
+//
+// Why per-process counter (not python-side): the python register process is
+// short-lived and per-attempt; only api-server has the cross-attempt view to
+// know when "every recent attempt failed for the same CF reason".
+const _CF_BLOCK_PATTERNS = [
+  "cf_api_blocked",
+  "cf_js_challenge_timeout",
+  "signup_cf_ip_banned",
+  "cf_mitigated",
+  "cf-mitigated",
+  "cloudflare challenge",
+];
+const _CF_WINDOW_MS    = 5 * 60_000;  // 5min sliding window
+const _CF_THRESHOLD    = 3;            // N events within window → rotate
+const _CF_COOLDOWN_MS  = 90_000;       // don't rotate again within 90s
+let   _cfEvents: number[] = [];        // timestamps of recent CF block events
+let   _lastBrokerRotateAt = 0;
+let   _brokerRotatesTotal = 0;
+let   _lastBrokerRotateReason = "";
+
+function _isCfBlockErr(err: string): boolean {
+  if (!err) return false;
+  const e = err.toLowerCase();
+  return _CF_BLOCK_PATTERNS.some((p) => e.includes(p));
+}
+
+function _spawnBrokerRotate(reason: string, log: (m: string) => void): void {
+  _lastBrokerRotateAt = Date.now();
+  _brokerRotatesTotal += 1;
+  _lastBrokerRotateReason = reason;
+  log(`[broker-watchdog] 🔄 rotating broker — reason=${reason} (rotate #${_brokerRotatesTotal})`);
+  try {
+    const child = spawn("pm2", ["restart", "browser-model", "--update-env"], {
+      detached: true, stdio: "ignore",
+    });
+    child.unref();
+  } catch (e: unknown) {
+    log(`[broker-watchdog] spawn pm2 failed: ${String(e).slice(0, 200)}`);
+  }
+}
+
+export function recordBrokerSignal(ok: boolean, err: string, log: (m: string) => void): void {
+  if (ok) {
+    // success clears the sliding window — broker is healthy, drop noise
+    if (_cfEvents.length > 0) {
+      log(`[broker-watchdog] ✓ success → clearing ${_cfEvents.length} pending CF events`);
+      _cfEvents = [];
+    }
+    return;
+  }
+  if (!_isCfBlockErr(err)) return;
+  const now = Date.now();
+  _cfEvents.push(now);
+  // prune out-of-window events
+  _cfEvents = _cfEvents.filter((t) => now - t <= _CF_WINDOW_MS);
+  log(`[broker-watchdog] CF signal #${_cfEvents.length}/${_CF_THRESHOLD} window — err=${err.slice(0, 80)}`);
+  if (_cfEvents.length < _CF_THRESHOLD) return;
+  if (now - _lastBrokerRotateAt < _CF_COOLDOWN_MS) {
+    log(`[broker-watchdog] threshold hit but cooldown active (${Math.round((now - _lastBrokerRotateAt)/1000)}s/${_CF_COOLDOWN_MS/1000}s) — skip`);
+    return;
+  }
+  _spawnBrokerRotate(`${_cfEvents.length} CF blocks in ${_CF_WINDOW_MS/60000}min: ${err.slice(0,60)}`, log);
+  _cfEvents = []; // reset so we don't immediately re-trigger
+}
+
+export function getBrokerWatchdogState(): {
+  cfEventsInWindow: number; threshold: number; windowMs: number; cooldownMs: number;
+  lastRotateAt: number; lastRotateReason: string; rotatesTotal: number;
+} {
+  // prune before report
+  const now = Date.now();
+  _cfEvents = _cfEvents.filter((t) => now - t <= _CF_WINDOW_MS);
+  return {
+    cfEventsInWindow: _cfEvents.length,
+    threshold: _CF_THRESHOLD,
+    windowMs: _CF_WINDOW_MS,
+    cooldownMs: _CF_COOLDOWN_MS,
+    lastRotateAt: _lastBrokerRotateAt,
+    lastRotateReason: _lastBrokerRotateReason,
+    rotatesTotal: _brokerRotatesTotal,
+  };
+}
+
+router.post("/admin/broker-rotate", (req, res) => {
+  const reason = (req.body && typeof req.body.reason === "string")
+    ? `manual: ${req.body.reason}` : "manual";
+  const force = req.body && req.body.force === true;
+  const now = Date.now();
+  if (!force && now - _lastBrokerRotateAt < _CF_COOLDOWN_MS) {
+    res.status(409).json({
+      ok: false, skipped: "cooldown_active",
+      cooldown_remaining_s: Math.round((_CF_COOLDOWN_MS - (now - _lastBrokerRotateAt)) / 1000),
+      state: getBrokerWatchdogState(),
+    });
+    return;
+  }
+  _spawnBrokerRotate(reason, (m: string) => console.log(`[broker-watchdog] ${m}`));
+  res.json({ ok: true, reason, state: getBrokerWatchdogState() });
+});
+
+router.get("/admin/broker-rotate/state", (_req, res) => {
+  res.json({ ok: true, state: getBrokerWatchdogState() });
 });
 
 
