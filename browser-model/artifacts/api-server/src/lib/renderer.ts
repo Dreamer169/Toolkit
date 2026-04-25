@@ -113,19 +113,19 @@ export const STEALTH_INIT = `
     }
   } catch (_) {}
 
-  // WebGL vendor / renderer (Mesa Intel — typical Linux Chrome)
+  // WebGL vendor / renderer (Linux ANGLE/Mesa — v8.00 fixed Mac-string regression)
   try {
     const getParam = WebGLRenderingContext.prototype.getParameter;
     WebGLRenderingContext.prototype.getParameter = function (p) {
-      if (p === 37445) return 'Intel Inc.';            // UNMASKED_VENDOR_WEBGL
-      if (p === 37446) return 'Intel Iris OpenGL Engine'; // UNMASKED_RENDERER_WEBGL
+      if (p === 37445) return 'Google Inc. (Intel)';            // UNMASKED_VENDOR_WEBGL
+      if (p === 37446) return 'ANGLE (Intel, Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2), OpenGL 4.6)'; // UNMASKED_RENDERER_WEBGL
       return getParam.apply(this, arguments);
     };
     if (typeof WebGL2RenderingContext !== 'undefined') {
       const getParam2 = WebGL2RenderingContext.prototype.getParameter;
       WebGL2RenderingContext.prototype.getParameter = function (p) {
-        if (p === 37445) return 'Intel Inc.';
-        if (p === 37446) return 'Intel Iris OpenGL Engine';
+        if (p === 37445) return 'Google Inc. (Intel)';
+        if (p === 37446) return 'ANGLE (Intel, Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2), OpenGL 4.6)';
         return getParam2.apply(this, arguments);
       };
     }

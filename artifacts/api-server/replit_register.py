@@ -1392,8 +1392,8 @@ _CANVAS_WEBGL_NOISE_JS = """
         if (!ctx) return;
         const _getParam = ctx.getParameter.bind(ctx);
         ctx.getParameter = function(p) {
-            if (p === 37445) return 'Intel Inc.';
-            if (p === 37446) return 'Intel Iris OpenGL Engine';
+            if (p === 37445) return 'Google Inc. (Intel)';
+            if (p === 37446) return 'ANGLE (Intel, Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2), OpenGL 4.6)';
             if (p === 7936)  return 'WebKit';
             if (p === 7937)  return 'WebKit WebGL';
             if (p === 7938)  return 'WebGL 1.0 (OpenGL ES 2.0 Chromium)';
@@ -1946,12 +1946,18 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
         ctx  = await browser.new_context(viewport={"width": 1280, "height": 800}, locale="en-US", user_agent=UA)
     page = await ctx.new_page()
 
-    # playwright_stealth 注入（chrome_runtime=True + webgl_vendor=True）
-    if stealth_fn:
+    # v8.00 — playwright_stealth DISABLED on CDP path:
+    # it forcibly sets navigator.webdriver=false (real Chrome=undefined),
+    # overriding broker's correct STEALTH_INIT and producing the strongest
+    # reCAPTCHA Enterprise bot tell. Broker STEALTH_INIT + v8.00 main-world
+    # inject cover all the same surface anyway.
+    if stealth_fn and not USE_CDP:
         try:
             await stealth_fn(page)
         except Exception as e:
             log(f"stealth 注入失败: {e}")
+    elif stealth_fn and USE_CDP:
+        log('[stealth-v8.00] playwright_stealth SKIPPED on CDP (broker STEALTH_INIT owns webdriver)')
 
     # Canvas 2D 噪声（独立注入，stealth 不覆盖）
     try:
@@ -2277,7 +2283,7 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
         # broker cf-warmup 内部已对 google reCAPTCHA 资源做过预热并把 cookie 同步过来。
 
         log("打开 replit.com/signup ...")
-        log("=== v7.96-MARKER REACHED line 2251 ===")
+        log("=== v8.00-MARKER REACHED (stealth aligned) ===")
         await page.goto("https://replit.com/signup", wait_until="domcontentloaded", timeout=75000)
 
         # === v7.96 STEALTH FORCE INJECTION (main-world via <script> tag) ===
@@ -2297,8 +2303,9 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 try { Reflect.defineProperty(Navigator.prototype, 'language', {get:()=>'en-US', configurable:true}); } catch(_){}
                 try { Reflect.defineProperty(Navigator.prototype, 'languages', {get:()=>['en-US','en'], configurable:true}); } catch(_){}
                 try { Reflect.defineProperty(Navigator.prototype, 'maxTouchPoints', {get:()=>0, configurable:true}); } catch(_){}
-                try { delete Navigator.prototype.webdriver; } catch(_){}
-                try { Reflect.defineProperty(Navigator.prototype, 'webdriver', {get:()=>false, configurable:true}); } catch(_){}
+                // v8.00 — DO NOT override webdriver here. Broker's STEALTH_INIT
+                // already sets `()=>undefined` (real Chrome value). Overriding to
+                // `false` is reCAPTCHA Enterprise's strongest "tried to hide" tell.
                 try {
                     const orig = Intl.DateTimeFormat.prototype.resolvedOptions;
                     Intl.DateTimeFormat.prototype.resolvedOptions = function(){
@@ -2330,20 +2337,20 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 try {
                     const wgl = WebGLRenderingContext.prototype.getParameter;
                     WebGLRenderingContext.prototype.getParameter = function(p){
-                        if (p === 37445) return 'Intel Inc.';
-                        if (p === 37446) return 'Intel Iris OpenGL Engine';
+                        if (p === 37445) return 'Google Inc. (Intel)';
+                        if (p === 37446) return 'ANGLE (Intel, Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2), OpenGL 4.6)';
                         return wgl.apply(this, arguments);
                     };
                     if (typeof WebGL2RenderingContext !== 'undefined') {
                         const wgl2 = WebGL2RenderingContext.prototype.getParameter;
                         WebGL2RenderingContext.prototype.getParameter = function(p){
-                            if (p === 37445) return 'Intel Inc.';
-                            if (p === 37446) return 'Intel Iris OpenGL Engine';
+                            if (p === 37445) return 'Google Inc. (Intel)';
+                            if (p === 37446) return 'ANGLE (Intel, Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2), OpenGL 4.6)';
                             return wgl2.apply(this, arguments);
                         };
                     }
                 } catch(_){}
-                try { Reflect.defineProperty(Navigator.prototype, 'gpu', {get:()=>null, configurable:true}); } catch(_){}
+                // v8.00 — REMOVED: Chrome 145 has WebGPU; forcing null is feature-mismatch tell.
                 try {
                     Reflect.defineProperty(screen, 'availWidth',  {get:()=>1920, configurable:true});
                     Reflect.defineProperty(screen, 'availHeight', {get:()=>1040, configurable:true});
