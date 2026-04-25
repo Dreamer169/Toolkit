@@ -703,6 +703,7 @@ router.post("/replit/register", (req, res) => {
             continue; // skip to next Outlook
           }
 
+          let lastUsedPort = -1; // v7.78p: 记录 success break 时实际用的端口, 供 Step4 INSERT
           for (let attempt = 1; attempt <= 3; attempt++) {
             const livePorts = availablePorts();
             if (livePorts.length === 0) {
@@ -739,6 +740,7 @@ router.post("/replit/register", (req, res) => {
 
             if (parsed.ok) {
               portLastGood.set(tryPort, Date.now()); // successful registration
+              lastUsedPort = tryPort; // v7.78p: 让 Step4 INSERT 能拿到真实端口
               log(`    ✅ Registered! phase=${parsed.phase} exit_ip=${exitIp}`);
               regOk = true;
               break;
@@ -1031,7 +1033,7 @@ router.post("/replit/register", (req, res) => {
                      updated_at = NOW()`,
               [outlook.email, password, username,
                verified ? "registered" : "unverified",
-               outlook.email, exitIp, tryPort,
+               outlook.email, exitIp, lastUsedPort >= 0 ? lastUsedPort : pick(XRAY_PORTS),
                String(parsed.user_agent ?? (parsed.fingerprint as Record<string, unknown> | undefined)?.user_agent ?? "") || null,
                parsed.fingerprint ? JSON.stringify(parsed.fingerprint) : null]
             );
@@ -1468,6 +1470,143 @@ router.get("/replit/deploy-subnode/:jobId", (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) { res.status(404).json({ success: false, error: "job not found" }); return; }
   res.json({ jobId: job.id, status: job.status, elapsed: Math.round((Date.now() - job.started) / 1000), logs: job.logs, result: job.result });
+});
+
+
+// ── POST /api/admin/replay-audit ──────────────────────────────────────────────
+// v7.78p — 跑 replay_session.py 校验所有 active 账号真实登录态:
+//   logged_in=true  → status='active', notes append "[audit ...] ok"
+//   logged_in=false → status='stale',  notes append "[audit ...] stale: reason"
+//   script error    → 不改 status, 仅在 summary 里报错
+// body: { scope?: "active"|"all", ids?: number[], dryRun?: boolean,
+//         concurrency?: 1..3 (default 1), timeoutMs?: 30000..300000 (default 180000) }
+const REPLAY_SCRIPT = "/root/Toolkit/artifacts/api-server/replay_session.py";
+
+function runReplay(idOrUser: string | number, timeoutMs = 180_000): Promise<{
+  ok: boolean; raw: string; parsed: Record<string, unknown>;
+}> {
+  return new Promise((resolve) => {
+    const child = spawn(PYTHON, [REPLAY_SCRIPT, String(idOrUser)], {
+      env: { ...process.env, PYTHONUNBUFFERED: "1" },
+      detached: true,
+    });
+    let out = "";
+    child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
+    child.stderr.on("data", () => { /* swallow stderr (verbose patchright) */ });
+    let settled = false;
+    const finish = (r: { ok: boolean; raw: string; parsed: Record<string, unknown> }) => {
+      if (settled) return; settled = true; resolve(r);
+    };
+    const timer = setTimeout(() => {
+      try { process.kill(-child.pid!, "SIGTERM"); } catch { try { child.kill("SIGTERM"); } catch {} }
+      setTimeout(() => { try { process.kill(-child.pid!, "SIGKILL"); } catch {} }, 3000).unref();
+      finish({ ok: false, raw: out, parsed: { error: "replay_timeout" } });
+    }, timeoutMs);
+    child.on("close", () => {
+      clearTimeout(timer);
+      const last = out.trim().split("\n").at(-1) ?? "{}";
+      try { finish({ ok: true, raw: out, parsed: JSON.parse(last) }); }
+      catch { finish({ ok: false, raw: out, parsed: { error: "parse_failed", raw_tail: last.slice(-300) } }); }
+    });
+    child.on("error", (e) => { clearTimeout(timer); finish({ ok: false, raw: "", parsed: { error: e.message } }); });
+  });
+}
+
+router.post("/admin/replay-audit", async (req, res) => {
+  const body = (req.body ?? {}) as {
+    scope?: "active" | "all";
+    ids?: number[];
+    dryRun?: boolean;
+    concurrency?: number;
+    timeoutMs?: number;
+  };
+  const scope = body.scope ?? "active";
+  const dryRun = body.dryRun === true;
+  const concurrency = Math.max(1, Math.min(3, body.concurrency ?? 1));
+  const timeoutMs = Math.max(30_000, Math.min(300_000, body.timeoutMs ?? 180_000));
+
+  // v7.78p: dbQ/dbE 与 register handler 同款 lazy import (db.js 没在 module top-level export)
+  const { query: dbQ, execute: dbE } = await import("../db.js");
+
+  let rows: Array<{ id: number; username: string; status: string }>;
+  try {
+    if (Array.isArray(body.ids) && body.ids.length) {
+      rows = await dbQ<{ id: number; username: string; status: string }>(
+        "SELECT id, username, status FROM accounts WHERE platform='replit' AND id = ANY($1::int[]) AND username IS NOT NULL ORDER BY id",
+        [body.ids]
+      );
+    } else if (scope === "all") {
+      rows = await dbQ<{ id: number; username: string; status: string }>(
+        "SELECT id, username, status FROM accounts WHERE platform='replit' AND username IS NOT NULL ORDER BY id"
+      );
+    } else {
+      rows = await dbQ<{ id: number; username: string; status: string }>(
+        "SELECT id, username, status FROM accounts WHERE platform='replit' AND status IN ('active','registered','unverified') AND username IS NOT NULL ORDER BY id"
+      );
+    }
+  } catch (e: unknown) {
+    res.status(500).json({ ok: false, error: `query failed: ${String(e).slice(0,200)}` });
+    return;
+  }
+
+  const t0 = Date.now();
+  const details: Array<Record<string, unknown>> = [];
+  let activeCnt = 0, staleCnt = 0, errCnt = 0;
+
+  for (let i = 0; i < rows.length; i += concurrency) {
+    const batch = rows.slice(i, i + concurrency);
+    const results = await Promise.all(batch.map((acc) => runReplay(acc.id, timeoutMs)));
+    for (let j = 0; j < batch.length; j++) {
+      const acc = batch[j];
+      const r = results[j];
+      const p = r.parsed as { logged_in?: boolean; http_status?: number; final_url?: string; error?: string };
+      const loggedIn = p.logged_in === true;
+      const ts = new Date().toISOString();
+      let action = "no-change";
+
+      if (!r.ok || (p.error && !loggedIn)) {
+        errCnt++;
+        action = "script-error";
+      } else if (loggedIn) {
+        activeCnt++;
+        action = dryRun ? "would-keep-active" : "kept-active";
+        if (!dryRun) {
+          const note = `[audit ${ts}] ok status=${p.http_status ?? ""} url=${(p.final_url ?? "").slice(0,80)}`;
+          await dbE(
+            "UPDATE accounts SET status='active', updated_at=NOW(), notes=NULLIF(TRIM(BOTH E'\n' FROM COALESCE(notes,'') || E'\n' || $2),'') WHERE id=$1",
+            [acc.id, note]
+          ).catch((e: unknown) => { details.push({ id: acc.id, dbError: String(e).slice(0,200) }); });
+        }
+      } else {
+        staleCnt++;
+        action = dryRun ? "would-mark-stale" : "marked-stale";
+        if (!dryRun) {
+          const reason = p.error
+            ? p.error
+            : `not-logged-in status=${p.http_status ?? ""} url=${(p.final_url ?? "").slice(0,80)}`;
+          const note = `[audit ${ts}] stale: ${String(reason).slice(0,200)}`;
+          await dbE(
+            "UPDATE accounts SET status='stale', updated_at=NOW(), notes=NULLIF(TRIM(BOTH E'\n' FROM COALESCE(notes,'') || E'\n' || $2),'') WHERE id=$1",
+            [acc.id, note]
+          ).catch((e: unknown) => { details.push({ id: acc.id, dbError: String(e).slice(0,200) }); });
+        }
+      }
+
+      details.push({
+        id: acc.id, username: acc.username, prev_status: acc.status,
+        ok: r.ok, logged_in: loggedIn,
+        http_status: p.http_status, final_url: p.final_url,
+        error: p.error, action,
+      });
+    }
+  }
+
+  res.json({
+    ok: true, scope, dryRun, concurrency, timeoutMs,
+    total: rows.length, active: activeCnt, stale: staleCnt, errors: errCnt,
+    duration_ms: Date.now() - t0,
+    details,
+  });
 });
 
 
