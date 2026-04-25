@@ -111,6 +111,35 @@ if command -v warp-cli >/dev/null 2>&1; then
   esac
 fi
 
+# v7.89 — preflight: kill any orphan chromium owning the broker debug port (9222)
+# before spawning new broker. Without this, pm2 restart of browser-model leaks
+# orphan chromium that holds 9222 (its parent broker died but chromium kept
+# running with --user-data-dir=/tmp/broker-chromium-profile + --remote-debugging
+# -port=9222). Next broker spawns fresh chromium that fails to bind 9222 (port
+# taken) → all CDP traffic still goes to the dead-broker-orphan → playwright
+# connect_over_cdp times out 180s after WebSocket connects (the orphan replies
+# to /devtools/browser/<uuid> handshake but never to subsequent CDP commands
+# because its parent renderer process tree is half-dead and spamming SSL
+# net_error -178). Downstream visible failure is signup_username_field_missing
+# but real cause is broker-chromium attach hang.
+_kill_orphan_broker_chromium() {
+  local pid
+  # 1) anything whose cmdline mentions remote-debugging-port=9222 (the broker chromium tree)
+  for pid in $(pgrep -f "remote-debugging-port=9222" 2>/dev/null); do
+    kill -9 "$pid" 2>/dev/null && echo "[start-browser-model] killed orphan chromium pid=$pid (--remote-debugging-port=9222)"
+  done
+  # 2) anything still bound to :9222 (extra safety)
+  pid=$(ss -lntp 2>/dev/null | grep -oP "127\.0\.0\.1:9222[^,]*pid=\K[0-9]+" | head -1)
+  if [[ -n "$pid" ]]; then
+    kill -9 "$pid" 2>/dev/null && echo "[start-browser-model] killed leftover pid=$pid still bound to :9222"
+  fi
+  # 3) wipe singleton locks in shared user-data-dir so new chromium does not refuse to start
+  rm -f /tmp/broker-chromium-profile/Singleton* 2>/dev/null
+  # 4) brief delay for kernel to release port + FDs
+  sleep 0.5
+}
+_kill_orphan_broker_chromium
+
 # v7.66 — ensure dbus system socket exists (chromium D-Bus FATAL fix)
 if [ ! -S /var/run/dbus/system_bus_socket ] || ! pgrep -f "dbus-daemon --system --fork" >/dev/null 2>&1; then
   mkdir -p /var/run/dbus
