@@ -1641,6 +1641,7 @@ async def _complete_via_verify_url(page, verify_url: str, close_fn=None) -> dict
 # 注册/登录成功时把 cookies+localStorage 落到 .state/replit/<username>.json,
 # 下次 replit_login.py 直接 load_state 进 context, 0 captcha 0 cf_challenge,
 # 复用直到 connect.sid 过期 (Replit cookieExpiresAt ≈ 7 天).
+_CTX_FINGERPRINT: dict = {}
 STATE_DIR = "/root/Toolkit/.state/replit"
 
 async def _save_replit_state(ctx, username: str, email: str = "", extra: dict | None = None):
@@ -1656,6 +1657,7 @@ async def _save_replit_state(ctx, username: str, email: str = "", extra: dict | 
             "username": username,
             "email": email,
             "saved_at": int(__import__("time").time()),
+            "fingerprint": _CTX_FINGERPRINT,
             **(extra or {}),
         }
         import json as _j
@@ -1683,23 +1685,41 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
         # v7.57 revert v7.52: 不再强行 proxy=proxy_cfg。CDP 路径继承 broker WARP 出口，
         # 与 cf_clearance 来源 IP / Google NID trust cookies 起源 IP 保持一致，
         # 恢复 7d89395 时段 reCAPTCHA Enterprise 高分拓扑。
-        ctx = await browser.new_context(
-            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
-            viewport={"width": 1920, "height": 1040},
-            screen={"width": 1920, "height": 1080},
-            device_scale_factor=1,
-            is_mobile=False,
-            has_touch=False,
-            locale="en-US",
-            timezone_id="America/Los_Angeles",
-            color_scheme="light",
-            ignore_https_errors=True,
-            extra_http_headers={
+        # v7.78k — 把 context 指纹快照写到 _CTX_FINGERPRINT，便于 register 完成时
+        # 一并回写 DB (accounts.user_agent + accounts.fingerprint_json)，replay 时
+        # 重建一致上下文，避免 Cloudflare/Replit 风控因 UA/viewport/timezone 漂移
+        # 把 cf_clearance + connect.sid 拉黑。
+        global _CTX_FINGERPRINT
+        _CTX_FINGERPRINT = {
+            "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+            "viewport": {"width": 1920, "height": 1040},
+            "screen": {"width": 1920, "height": 1080},
+            "device_scale_factor": 1,
+            "is_mobile": False,
+            "has_touch": False,
+            "locale": "en-US",
+            "timezone_id": "America/Los_Angeles",
+            "color_scheme": "light",
+            "extra_http_headers": {
                 "Accept-Language": "en-US,en;q=0.9",
                 "sec-ch-ua": "\"Chromium\";v=\"145\", \"Not:A-Brand\";v=\"99\", \"Google Chrome\";v=\"145\"",
                 "sec-ch-ua-mobile": "?0",
                 "sec-ch-ua-platform": "\"Linux\"",
             },
+            "platform": "Linux x86_64",
+        }
+        ctx = await browser.new_context(
+            user_agent=_CTX_FINGERPRINT["user_agent"],
+            viewport=_CTX_FINGERPRINT["viewport"],
+            screen=_CTX_FINGERPRINT["screen"],
+            device_scale_factor=_CTX_FINGERPRINT["device_scale_factor"],
+            is_mobile=_CTX_FINGERPRINT["is_mobile"],
+            has_touch=_CTX_FINGERPRINT["has_touch"],
+            locale=_CTX_FINGERPRINT["locale"],
+            timezone_id=_CTX_FINGERPRINT["timezone_id"],
+            color_scheme=_CTX_FINGERPRINT["color_scheme"],
+            ignore_https_errors=True,
+            extra_http_headers=_CTX_FINGERPRINT["extra_http_headers"],
         )
     else:
         ctx  = await browser.new_context(viewport={"width": 1280, "height": 800}, locale="en-US", user_agent=UA)

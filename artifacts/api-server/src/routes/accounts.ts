@@ -1018,18 +1018,22 @@ router.post("/replit/register", (req, res) => {
           let dbInsertOk = false;
           try {
             await dbE(
-              `INSERT INTO accounts (platform, email, password, username, status, notes, tags, exit_ip, proxy_port)
-               VALUES ('replit', $1, $2, $3, $4, $5, 'replit,subnode', $6, $7)
+              `INSERT INTO accounts (platform, email, password, username, status, notes, tags, exit_ip, proxy_port, user_agent, fingerprint_json)
+               VALUES ('replit', $1, $2, $3, $4, $5, 'replit,subnode', $6, $7, $8, $9::jsonb)
                ON CONFLICT (platform, email) DO UPDATE
                  SET status = EXCLUDED.status,
                      username = EXCLUDED.username,
                      password = EXCLUDED.password,
                      exit_ip = EXCLUDED.exit_ip,
                      proxy_port = EXCLUDED.proxy_port,
+                     user_agent = COALESCE(EXCLUDED.user_agent, accounts.user_agent),
+                     fingerprint_json = COALESCE(EXCLUDED.fingerprint_json, accounts.fingerprint_json),
                      updated_at = NOW()`,
               [outlook.email, password, username,
                verified ? "registered" : "unverified",
-               outlook.email, exitIp, pick(XRAY_PORTS)]
+               outlook.email, exitIp, pick(XRAY_PORTS),
+               String(parsed.user_agent ?? "") || null,
+               parsed.fingerprint ? JSON.stringify(parsed.fingerprint) : null]
             );
             dbInsertOk = true;
             log(`  Step4 ✅ replit account saved (email=${outlook.email}, user=${username}, status=${verified ? 'registered' : 'unverified'})`);
