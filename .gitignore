@@ -59,3 +59,10 @@ tmp_gateway_update_files/
 
 # Replit session storage_state (contains connect.sid + cf_clearance — sensitive)
 .state/
+
+# auto backups & local db
+*.bak
+*.bak.*
+**/*.bak.*
+**/*.bak
+artifacts/api-server/data.db
