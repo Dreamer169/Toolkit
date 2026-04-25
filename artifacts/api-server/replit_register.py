@@ -2867,8 +2867,14 @@ async def run() -> dict:
         else:
             async with pw_ctx_fn() as pw:
                 res = await attempt_register(pw, proxy_cfg, stealth_fn, final["exit_ip"])
-        res["exit_ip"] = final["exit_ip"]
-        res["exit_ip"] = final["exit_ip"]
+        # v7.82: 不再用 preflight final["exit_ip"] 覆盖 attempt_register 已经
+        # 用 _finalize_exit_ip 写入的 in-page ground truth IP. preflight 来自
+        # python 进程 curl ipify 走 OS 默认路由 (45.205.x.x VPS 公网), 不是
+        # chromium 实际走的 socks5/WARP 出口. 仅在 attempt_register 没填
+        # exit_ip 时才回退到 preflight.
+        res["exit_ip_preflight"] = final["exit_ip"]
+        if not res.get("exit_ip"):
+            res["exit_ip"] = final["exit_ip"]
         final = res
         if res["ok"]:
             break
