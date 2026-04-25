@@ -19,10 +19,71 @@ fingerprint_json) + 持久化的 storage_state 文件 (.state/replit/<username>.
 
 输出: 单行 JSON {ok, logged_in, username, email, user_id, final_url, error?}
 """
-import asyncio, json, os, sys, traceback
+import asyncio, json, os, subprocess, sys, traceback
 import psycopg2
 
 STATE_DIR = "/root/Toolkit/.state/replit"
+XRAY_POOL = list(range(10820, 10846))
+VPS_IP_CACHE: dict = {}
+
+
+def vps_public_ip() -> str:
+    if "ip" in VPS_IP_CACHE:
+        return VPS_IP_CACHE["ip"]
+    for url in ("https://ifconfig.me", "https://api.ipify.org", "https://icanhazip.com"):
+        try:
+            r = subprocess.run(["curl", "-s", "-4", "--max-time", "5", url],
+                               capture_output=True, text=True, timeout=8)
+            ip = r.stdout.strip()
+            if ip and ip.count(".") == 3:
+                VPS_IP_CACHE["ip"] = ip; return ip
+        except Exception:
+            pass
+    return ""
+
+
+def probe_socks_exit_ip(port: int, timeout: int = 6) -> str:
+    """通过本地 SOCKS port 请求 ifconfig.me 拿当前出口公网 IP"""
+    try:
+        r = subprocess.run(
+            ["curl", "-s", "-4", "--max-time", str(timeout),
+             "--socks5-hostname", "127.0.0.1:" + str(port), "https://ifconfig.me"],
+            capture_output=True, text=True, timeout=timeout + 2,
+        )
+        ip = (r.stdout or "").strip()
+        return ip if ip.count(".") == 3 else ""
+    except Exception:
+        return ""
+
+
+def resolve_proxy_for_target(target_ip: str, hint_port: int) -> dict:
+    """按 register 时落库 exit_ip 找当前能落到同一 IP 的 SOCKS 端口；
+    若 target == VPS 自身 IP, 直接 bypass SOCKS 走直连 (最稳)。"""
+    out = {"target_ip": target_ip, "candidates_tried": []}
+    vps = vps_public_ip()
+
+    if target_ip and vps and target_ip == vps:
+        out["mode"] = "direct"; out["probed_ip"] = vps; return out
+
+    if hint_port:
+        ip = probe_socks_exit_ip(hint_port)
+        out["candidates_tried"].append({"port": hint_port, "ip": ip})
+        if ip and ip == target_ip:
+            out["mode"] = "socks"; out["port"] = hint_port
+            out["server"] = "socks5://127.0.0.1:" + str(hint_port)
+            out["probed_ip"] = ip; return out
+
+    for pp in XRAY_POOL:
+        if pp == hint_port: continue
+        ip = probe_socks_exit_ip(pp, timeout=4)
+        out["candidates_tried"].append({"port": pp, "ip": ip})
+        if ip and ip == target_ip:
+            out["mode"] = "socks_alt"; out["port"] = pp
+            out["server"] = "socks5://127.0.0.1:" + str(pp)
+            out["probed_ip"] = ip; return out
+
+    out["mode"] = "unmatched"; out["probed_ip"] = ""
+    return out
 DB_DSN = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@localhost/toolkit")
 
 
@@ -59,12 +120,26 @@ async def replay(acc: dict) -> dict:
         out["error"] = "no user_agent in DB or fingerprint"
         return out
 
-    # SOCKS 出口: register 时落库的 proxy_port → 复用同一条出口 (xray 池里同
-    # 一个 outbound,多数情况映射回 VPS 自己 IP — 与 register 时 exit_ip 一致)
+    # v7.78l: IP 一致性校验 — exit_ip 是 register 实测出口 IP, 但同一个
+    # SOCKS 端口在不同时间可能走不同上游 outbound (xray pool / WARP 漂移),
+    # 不一定每次都落同 IP. Replit + Cloudflare 的 cf_clearance / connect.sid
+    # 都做 IP 校验, IP 漂移会立刻被拒. 先 probe 当前出口 IP, 不一致就遍历
+    # xray 池或 bypass 走 VPS 直连.
+    target_ip = (acc.get("exit_ip") or "").strip()
+    hint_port = acc.get("proxy_port") or 0
+    resolved = resolve_proxy_for_target(target_ip, int(hint_port) if hint_port else 0)
+    out["resolved_proxy"] = {k: v for k, v in resolved.items() if k != "candidates_tried"}
     proxy_cfg = None
-    pp = acc.get("proxy_port")
-    if pp:
-        proxy_cfg = {"server": f"socks5://127.0.0.1:{pp}"}
+    if resolved["mode"] in ("socks", "socks_alt"):
+        proxy_cfg = {"server": resolved["server"]}
+    elif resolved["mode"] == "direct":
+        proxy_cfg = None
+    else:
+        out["error"] = ("exit_ip 漂移: register 时=" + target_ip + ", 当前所有 xray "
+                        "端口都不落到该 IP. 上游池子 outbound 配置可能已变, "
+                        "建议把账号标 needs_relink 重新登录刷新 cf_clearance.")
+        out["candidates_tried"] = resolved["candidates_tried"]
+        return out
 
     try:
         from patchright.async_api import async_playwright
@@ -147,7 +222,7 @@ async def replay(acc: dict) -> dict:
             out["final_url"] = final_url
             out["title"] = title
             out["body_snippet"] = body[:200].replace("\n", " ")
-            out["proxy_used"] = proxy_cfg["server"] if proxy_cfg else "direct"
+            out["proxy_used"] = ((proxy_cfg["server"] if proxy_cfg else "direct") + " (mode=" + resolved["mode"] + ")")
             out["ok"] = out["logged_in"]
         except Exception as e:
             out["error"] = f"navigate failed: {e}"
