@@ -65,15 +65,62 @@ _is_cf_ip() {
 }
 
 _pick_browser_proxy() {
-  # v8.01c — ALL datacenter SOCKS get CF-challenged on replit.com/signup.
-  # Only DIRECT (VPS IP 45.205.27.69) passes CF without challenge.
-  # Temporarily skip SOCKS, force DIRECT.
-  DIRECT_EXIT=$(curl -s --max-time 6 https://api.ipify.org 2>/dev/null | tr -d "[[:space:]]")
-  if [[ -n "$DIRECT_EXIT" ]]; then
-    echo "|DIRECT-VPS@${DIRECT_EXIT}(AS8796-FASTNET)"
-    return 0
+  # v8.04 — DIRECT-first picker, with TRUTHFUL probe semantics:
+  # Both DIRECT and WARP get CF-challenge (HTTP 403 Just-a-moment) on raw curl;
+  # cf_clearance is solved by headed chromium JS, NOT by the exit IP itself.
+  # DIRECT is preferred because VPS AS8796 had v7.78g+h empirical reCAPTCHA pass.
+  # Add a real reachability probe before commit so the picker fails loud if the
+  # exit is fully dead (vs CF-challenged-but-recoverable-by-chromium).
+  _probe_replit_reachable() {
+    # exit code 0 if either: (a) HTTP 200/30x OR (b) HTTP 403 + body contains
+    # "Just a moment" (CF JS challenge — chromium can solve). Non-zero if
+    # connection refused / timeout / unrelated 5xx (true exit failure).
+    local proxy_arg="$1" url="https://replit.com/signup"
+    local out rc body
+    if [[ -n "$proxy_arg" ]]; then
+      out=$(curl -s -w "\n%{http_code}" --max-time 10 --socks5 "$proxy_arg" "$url" 2>/dev/null)
+    else
+      out=$(curl -s -w "\n%{http_code}" --max-time 10 "$url" 2>/dev/null)
+    fi
+    rc=$(echo "$out" | tail -1)
+    body=$(echo "$out" | head -c 600)
+    case "$rc" in
+      2*|3*) echo "replit-200/30x"; return 0 ;;
+      403)
+        if echo "$body" | grep -q "Just a moment"; then
+          echo "cf-js-challenge-acceptable"; return 0
+        fi
+        echo "replit-403-banned"; return 1 ;;
+      *) echo "replit-unreachable($rc)"; return 1 ;;
+    esac
+  }
+  # ── v8.05 — WARP-FIRST ordering (cf_clearance 修复) ─────────────────────────
+  # 实证 2026-04-25 12:30:
+  #   v7.78g 成功 job (rpl_modt0h8f_uw86): cf_clearance=True → signup POST 200 ✓
+  #   v8.03 失败 job (rpl_moebikhg_m6co): cf_clearance=False → code:1 captcha invalid
+  #   两者唯一已知差异 = broker exit family: v7.78g 用非-DIRECT (socks 或 warp);
+  #   v8.04 强制 DIRECT 把 broker 钉在 VPS IP (45.205.27.69 AS8796), 该 IP 当前
+  #   被 CF 标记, 跑 cf-warmup 不发 cf_clearance cookie → reCAPTCHA Enterprise
+  #   token 拿不到 cf_clearance 信号 → 评分极低 → code:1.
+  # 1) WARP — socks5://127.0.0.1:40000 (104.28.x AS13335 = CF backbone, 自家 IP
+  #    最可能拿到 cf_clearance; 实测可达 google/recaptcha 200; raw replit.com
+  #    撞 CF challenge 由 chromium JS 解).
+  if ss -uln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b" || ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b"; then
+    WARP_EXIT=$(curl -s --max-time 8 --socks5 "127.0.0.1:40000" https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
+    if [[ -n "$WARP_EXIT" ]]; then
+      _probe_status=$(_probe_replit_reachable "127.0.0.1:40000")
+      _probe_rc=$?
+      echo "[picker] v8.05 WARP probe: replit.com → ${_probe_status} (exit=${WARP_EXIT})" >&2
+      if [[ $_probe_rc -eq 0 ]]; then
+        echo "socks5://127.0.0.1:40000|WARP@${WARP_EXIT}"
+        return 0
+      fi
+      echo "[picker] WARP probe failed (${_probe_status}) — fall through" >&2
+    else
+      echo "[picker] WARP port 40000 listen 但 ipify 失败, 跳过" >&2
+    fi
   fi
-  # 1) datacenter SOCKS clean 池 — 必须出口非 CF 段
+  # 2) datacenter SOCKS clean 池 — 必须出口非 CF 段
   for cand in 10824:Kirino 10826:DigitalOcean 10830:MULTACOM 10828:Misaka 10822:Vultr 10832:Linode 10838:Static 10820:Static 10825:Static 10831:Static 10836:Static 10837:Static 10845:Static; do
     port="${cand%%:*}"; name="${cand##*:}"
     ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:${port}\b" || continue
@@ -86,26 +133,12 @@ _pick_browser_proxy() {
     echo "socks5://127.0.0.1:${port}|${name}@${EXIT}"
     return 0
   done
-  # v8.01 — DIRECT BEFORE WARP:
-  #   实证 2026-04-25 03:00: 3次成功注册全走 DIRECT(45.205.27.69 AS8796 FASTNET DATA).
-  #   WARP(104.28.x CF backbone) 被 replit.com/signup CF-challenge 且 reCAPTCHA 评分极低.
-  #   DIRECT VPS IP 不被 CF 拦截, broker=direct 时 google-route SKIPPED(IP一致), 成功率最高.
-  #   原注释 v7.75/v7.78 说 DIRECT "会被 CF challenge" 是错的 — 实证推翻.
-  #
-  # 2) DIRECT — VPS 公网 IP 45.205.27.69 AS8796 FASTNET DATA
+  # 3) DIRECT — VPS 公网 IP 45.205.27.69 AS8796 FASTNET DATA (兜底, cf_clearance
+  #    在该 IP 上当前不稳定; reCAPTCHA Enterprise 评分曾 OK 但需 WARP cf_clearance 配合)
   DIRECT_EXIT=$(curl -s --max-time 6 https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
   if [[ -n "$DIRECT_EXIT" ]]; then
     echo "|DIRECT-VPS@${DIRECT_EXIT}(AS8796-FASTNET)"
     return 0
-  fi
-  # 3) WARP — socks5://127.0.0.1:40000 (最后兜底; CF IP, reCAPTCHA 评分低, CF challenge on signup)
-  if ss -uln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b" || ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b"; then
-    WARP_EXIT=$(curl -s --max-time 8 --socks5 "127.0.0.1:40000" https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
-    if [[ -n "$WARP_EXIT" ]]; then
-      echo "socks5://127.0.0.1:40000|WARP@${WARP_EXIT}"
-      return 0
-    fi
-    echo "[picker] WARP port 40000 listen 但 curl 失败, 跳过" >&2
   fi
   # 4) 完全失活硬兜底
   echo "|DIRECT-VPS@45.205.27.69(AS8796-FASTNET-fallback)"
