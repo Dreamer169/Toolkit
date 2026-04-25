@@ -1158,41 +1158,33 @@ async def fill_step1(page) -> str | None:
                         log(f"[fast-retry {_fr+1}/3] execute 失败: {(_new or {}).get('err','?')[:120]}")
                         break
                     log(f"[fast-retry {_fr+1}/3] 新 token len={_new.get('len')} prefix={_new.get('token','')[:20]}")
-                    # v7.93 ROOT-CAUSE FIX (refines v7.92): 不走 click submit (Replit click handler 会重新 execute() 覆盖 token).
-                    # 直接 page.evaluate fetch POST sign-up API, body 严格用 fast-retry 拿的 fresh token.
-                    # 这样跳过 Replit JS 层, POST 真正发送的就是我们手里 valid token, 不会被 (code:1).
-                    # v7.93b: 复用 click submit 真实 captured body, 仅替换 recaptchaToken,
-                    # 避免缺字段 (Replit 后端可能要 csrfToken / captchaProvider / extra fields)
-                    import json as _jrbf
-                    try:
-                        _orig_body = _api_req.get("body") or ""
-                        _bd_tpl = _jrbf.loads(_orig_body) if _orig_body else {"email": EMAIL, "rawPassword": PASSWORD, "clientType":"web", "source":"signup"}
-                    except Exception:
-                        _bd_tpl = {"email": EMAIL, "rawPassword": PASSWORD, "clientType":"web", "source":"signup"}
-                    _bd_tpl["recaptchaToken"] = _new.get("token", "")
-                    _retry_body_str = _jrbf.dumps(_bd_tpl)
-                    log(f"[fast-retry {_fr+1}/3] reuse body keys={list(_bd_tpl.keys())} len={len(_retry_body_str)}")
-                    try:
-                        _ftc = await page.evaluate("""
-                            async (args) => {
-                                try {
-                                    const r = await fetch('/api/v1/auth/sign-up', {
-                                        method: 'POST',
-                                        headers: {'content-type':'application/json','accept':'application/json, text/plain, */*','x-requested-with':'XMLHttpRequest','origin':'https://replit.com','referer':'https://replit.com/signup'},
-                                        credentials: 'include',
-                                        body: args.body
-                                    });
-                                    const tx = await r.text();
-                                    return {status: r.status, body: tx.slice(0, 600)};
-                                } catch(e) { return {status: 0, body: 'fetch_err:' + (e && e.message || e)}; }
-                            }
-                        """, {"body": _retry_body_str})
-                    except Exception as _fce:
-                        log(f"[fast-retry {_fr+1}/3] fetch evaluate 异常: {_fce}")
-                        break
-                    _s2 = (_ftc or {}).get("status", 0)
-                    _b2 = (_ftc or {}).get("body", "")
-                    log(f"[fast-retry {_fr+1}/3] FETCH-API={_s2} body={_b2[:140]}")
+                    # v7.95 — REVERT v7.92/v7.93 直 fetch. 直 fetch 缺 Replit 真实 XHR 的
+                    # CSRF / origin / 完整 header 链, 必然 403 "Expected X-Requested-With".
+                    # 回到 v7.78r click-submit: Replit JS 调用 execute() 拿 fresh LIVE token,
+                    # 经 route-force LIVE-OK 放行不覆盖, IP 一致前提下 (v7.95 broker-aware
+                    # google-route 已修复 IP 串台) 直接通过.
+                    _api_resp.clear()
+                    _clicked = False
+                    for _sel in ('[data-cy="signup-create-account"]', 'button[type="submit"]'):
+                        try:
+                            _btn = page.locator(_sel)
+                            if await _btn.count():
+                                await _btn.first.click(force=True)
+                                _clicked = True
+                                break
+                        except Exception:
+                            continue
+                    if not _clicked:
+                        log(f"[fast-retry {_fr+1}/3] submit click 失败")
+                        continue
+                    # 等 Replit POST 响应进入 _on_response (max 30s)
+                    for _w in range(15):
+                        await page.wait_for_timeout(2000)
+                        if _api_resp.get("status"):
+                            break
+                    _s2 = _api_resp.get("status", 0)
+                    _b2 = _api_resp.get("body", "")
+                    log(f"[fast-retry {_fr+1}/3] CLICK-API={_s2} body={_b2[:140]}")
                     if _s2 in (200, 201, 204):
                         log(f"[fast-retry {_fr+1}/3] ✅ 成功")
                         return None
@@ -2183,18 +2175,60 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 # topology broker chromium ALSO exits via clean datacenter SOCKS (matching
                 # google_proxy_route's pool family), so token-gen IP segment == submit IP
                 # segment. DISABLE_GOOGLE_ROUTE=1 kept as escape hatch.
+                # v7.95 — broker-exit-aware google-route (修复 v7.79+ IP 串台 → recaptcha code:1)
+                # 实证根因 (rpl_modyengc_1kgm 2026-04-25): broker chromium 出口为 WARP
+                # (104.28.195.185), google_proxy_route 把 *.google 转走 SOCKS 10828
+                # (DigitalOcean datacenter 段). reCAPTCHA Enterprise 颁发 token 给客户端
+                # IP=10828, Replit siteverify 时 user IP=104.28.x → Google 比对 MISMATCH
+                # → token invalid → code:1.
+                #
+                # v7.78q-era 工作拓扑 (e2e: tylerreyes307 → userId=58078470): broker 出口
+                # 也是清洁 SOCKS pool, google-route 同 pool → 同段 IP → 一致 → 通过.
+                # 当前基础设施退化 (xray 上游全搬到 CF Workers, picker 13 个 SOCKS 全
+                # 探测到 CF 段被 _is_cf_ip 过滤) 导致 broker 退到 WARP. 此时硬上 google-route
+                # 就 IP 串台.
+                #
+                # 修法: 跟随 broker 出口家族 (BROKER_EXIT_FAMILY 由 start-browser-model.sh 导出)
+                #   socks  -> google-route 强制 pin 到 broker 同 port (同 IP 一致)
+                #   warp   -> 跳过 google-route, 让 *.google 走 broker WARP 出口 (一致)
+                #            用户实证: WARP 端到端走完整链路是能注册的, 关键是别串
+                #   direct -> 跳过 google-route, 让 *.google 走 VPS 公网 (同 broker 一致)
+                # DISABLE_GOOGLE_ROUTE=1 / FORCE_GOOGLE_ROUTE=1 保留为强制 escape hatch.
                 _disable_groute = os.environ.get("DISABLE_GOOGLE_ROUTE","").strip() in ("1","true","yes")
-                if _disable_groute:
-                    log("[CDP] google-route SKIPPED (DISABLE_GOOGLE_ROUTE=1 explicit opt-out)")
+                _force_groute = os.environ.get("FORCE_GOOGLE_ROUTE","").strip() in ("1","true","yes")
+                # v7.95b — broker 与 api-server 是不同 pm2 进程, env 不互通.
+                # broker 启动时把 BROKER_EXIT_FAMILY 写到 /tmp/replit-broker/exit.json,
+                # 这里读文件优先, env 兜底.
+                _broker_fam = ""
+                _broker_port = ""
+                try:
+                    import json as _jbf
+                    with open("/tmp/replit-broker/exit.json","r") as _bf:
+                        _bj = _jbf.load(_bf)
+                    _broker_fam = (_bj.get("family") or "").strip().lower()
+                    _broker_port = str(_bj.get("port") or "").strip()
+                    log(f"[CDP] broker exit hint from /tmp/replit-broker/exit.json → family={_broker_fam} port={_broker_port or 'N/A'}")
+                except Exception as _bfe:
+                    log(f"[CDP] /tmp/replit-broker/exit.json 读取失败 → fall back env: {_bfe}")
+                    _broker_fam = (os.environ.get("BROKER_EXIT_FAMILY","") or "").strip().lower()
+                    _broker_port = (os.environ.get("BROKER_EXIT_SOCKS_PORT","") or "").strip()
+                if _disable_groute and not _force_groute:
+                    log("[CDP] google-route SKIPPED (DISABLE_GOOGLE_ROUTE=1)")
+                elif _broker_fam in ("warp","direct") and not _force_groute:
+                    log(f"[CDP] google-route SKIPPED (v7.95 broker={_broker_fam} → IP 一致策略, *.google 走 broker 原生出口)")
                 else:
                     try:
                         import sys as _sys, os as _os
                         _here = _os.path.dirname(_os.path.abspath(__file__))
                         if _here not in _sys.path:
                             _sys.path.insert(0, _here)
+                        # v7.95: socks 模式下强制 google-route 用同 port, 保证 IP 段一致
+                        if _broker_fam == "socks" and _broker_port:
+                            _os.environ["GOOGLE_PROXY_POOL"] = f"socks5://127.0.0.1:{_broker_port}"
+                            log(f"[CDP] v7.95 google-route pool override → socks5://127.0.0.1:{_broker_port} (sync broker exit)")
                         from google_proxy_route import attach_google_proxy_routing as _agr
                         await _agr(ctx, log)
-                        log("[CDP] google-route attached (v7.94 restore — *.google ALWAYS via clean non-GCP SOCKS pool)")
+                        log(f"[CDP] google-route attached (v7.95 — broker={_broker_fam or 'unknown'} family-aligned)")
                     except Exception as _ge:
                         log(f"[CDP] google-route attach failed: {_ge}")
             except Exception as _we:
@@ -2216,7 +2250,110 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
         # broker cf-warmup 内部已对 google reCAPTCHA 资源做过预热并把 cookie 同步过来。
 
         log("打开 replit.com/signup ...")
+        log("=== v7.96-MARKER REACHED line 2251 ===")
         await page.goto("https://replit.com/signup", wait_until="domcontentloaded", timeout=75000)
+
+        # === v7.96 STEALTH FORCE INJECTION (main-world via <script> tag) ===
+        # ROOT CAUSE: 04-24 broker rewrite changed chromium.launch -> child_process.spawn.
+        # Result: playwright addInitScript via connectOverCDP runs in ISOLATED world,
+        # so all Object.defineProperty(Navigator.prototype, ...) silently DON'T propagate
+        # to the page main world that reCAPTCHA Enterprise reads from. Probe v6 confirmed
+        # that <script>-tag injection successfully writes prototype mutations into main
+        # world AND they propagate back to playwright page.evaluate (proving same realm).
+        # reCAPTCHA execute() runs at submit time -> stealth must be in place by then.
+        try:
+            _STEALTH_FORCE_v796 = """
+            (() => {
+                try { Reflect.defineProperty(Navigator.prototype, 'hardwareConcurrency', {get:()=>8, configurable:true}); } catch(_){}
+                try { Reflect.defineProperty(Navigator.prototype, 'deviceMemory', {get:()=>8, configurable:true}); } catch(_){}
+                try { Reflect.defineProperty(Navigator.prototype, 'platform', {get:()=>'Linux x86_64', configurable:true}); } catch(_){}
+                try { Reflect.defineProperty(Navigator.prototype, 'language', {get:()=>'en-US', configurable:true}); } catch(_){}
+                try { Reflect.defineProperty(Navigator.prototype, 'languages', {get:()=>['en-US','en'], configurable:true}); } catch(_){}
+                try { Reflect.defineProperty(Navigator.prototype, 'maxTouchPoints', {get:()=>0, configurable:true}); } catch(_){}
+                try { delete Navigator.prototype.webdriver; } catch(_){}
+                try { Reflect.defineProperty(Navigator.prototype, 'webdriver', {get:()=>false, configurable:true}); } catch(_){}
+                try {
+                    const orig = Intl.DateTimeFormat.prototype.resolvedOptions;
+                    Intl.DateTimeFormat.prototype.resolvedOptions = function(){
+                        const r = orig.apply(this, arguments);
+                        if (!r.timeZone || r.timeZone === 'UTC') r.timeZone = 'America/Los_Angeles';
+                        if (!r.locale || /^(zh|en-GB|de|fr|ja|ru|ko)/.test(r.locale)) r.locale = 'en-US';
+                        return r;
+                    };
+                } catch(_){}
+                try {
+                    Date.prototype.getTimezoneOffset = function(){
+                        const m = this.getUTCMonth();
+                        return (m >= 2 && m <= 10) ? 420 : 480;
+                    };
+                } catch(_){}
+                try {
+                    if (!window.chrome) window.chrome = {};
+                    window.chrome.runtime = window.chrome.runtime || {
+                        OnInstalledReason:{}, OnRestartRequiredReason:{},
+                        PlatformArch:{}, PlatformOs:{}, RequestUpdateCheckStatus:{}
+                    };
+                    window.chrome.app = window.chrome.app || { isInstalled:false,
+                        InstallState:{DISABLED:'disabled',INSTALLED:'installed',NOT_INSTALLED:'not_installed'},
+                        RunningState:{CANNOT_RUN:'cannot_run',READY_TO_RUN:'ready_to_run',RUNNING:'running'}
+                    };
+                    window.chrome.csi = window.chrome.csi || function(){return{};};
+                    window.chrome.loadTimes = window.chrome.loadTimes || function(){return{requestTime:Date.now()/1000,startLoadTime:Date.now()/1000,commitLoadTime:Date.now()/1000,finishDocumentLoadTime:0,finishLoadTime:0,firstPaintTime:0,firstPaintAfterLoadTime:0,navigationType:'Other',wasFetchedViaSpdy:false,wasNpnNegotiated:true,npnNegotiatedProtocol:'h2',wasAlternateProtocolAvailable:false,connectionInfo:'h2'};};
+                } catch(_){}
+                try {
+                    const wgl = WebGLRenderingContext.prototype.getParameter;
+                    WebGLRenderingContext.prototype.getParameter = function(p){
+                        if (p === 37445) return 'Intel Inc.';
+                        if (p === 37446) return 'Intel Iris OpenGL Engine';
+                        return wgl.apply(this, arguments);
+                    };
+                    if (typeof WebGL2RenderingContext !== 'undefined') {
+                        const wgl2 = WebGL2RenderingContext.prototype.getParameter;
+                        WebGL2RenderingContext.prototype.getParameter = function(p){
+                            if (p === 37445) return 'Intel Inc.';
+                            if (p === 37446) return 'Intel Iris OpenGL Engine';
+                            return wgl2.apply(this, arguments);
+                        };
+                    }
+                } catch(_){}
+                try { Reflect.defineProperty(Navigator.prototype, 'gpu', {get:()=>null, configurable:true}); } catch(_){}
+                try {
+                    Reflect.defineProperty(screen, 'availWidth',  {get:()=>1920, configurable:true});
+                    Reflect.defineProperty(screen, 'availHeight', {get:()=>1040, configurable:true});
+                    Reflect.defineProperty(screen, 'width',  {get:()=>1920, configurable:true});
+                    Reflect.defineProperty(screen, 'height', {get:()=>1080, configurable:true});
+                    Reflect.defineProperty(screen, 'colorDepth', {get:()=>24, configurable:true});
+                    Reflect.defineProperty(screen, 'pixelDepth', {get:()=>24, configurable:true});
+                } catch(_){}
+                window.__STEALTH_v796_OK = {
+                    hwc: navigator.hardwareConcurrency,
+                    dm: navigator.deviceMemory,
+                    wd_in_proto: ('webdriver' in Navigator.prototype),
+                    wd_val: navigator.webdriver,
+                    tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                    tzoff: new Date().getTimezoneOffset(),
+                    cr: !!(window.chrome && window.chrome.runtime),
+                    plat: navigator.platform,
+                };
+                try {
+                    const c = document.createElement('canvas').getContext('webgl');
+                    window.__STEALTH_v796_OK.webgl_v = c ? c.getParameter(37445) : 'no-ctx';
+                    window.__STEALTH_v796_OK.webgl_r = c ? c.getParameter(37446) : 'no-ctx';
+                } catch(_){}
+            })();
+            """
+            _r796 = await page.evaluate("""(s) => {
+                const tag = document.createElement('script');
+                tag.textContent = s;
+                document.documentElement.appendChild(tag);
+                tag.remove();
+                return window.__STEALTH_v796_OK || null;
+            }""", _STEALTH_FORCE_v796)
+            log(f"[stealth-v7.96] main-world inject result: {_r796}")
+        except Exception as _se796:
+            log(f"[stealth-v7.96] inject failed (non-fatal): {_se796}")
+        # === END v7.96 STEALTH FORCE INJECTION ===
+
 
         # 页面加载后立即做 warmup（并发，让 reCAPTCHA 采集行为）
         warmup_task = asyncio.create_task(_human_warmup(page))
