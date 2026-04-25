@@ -112,13 +112,34 @@ async def replay(acc: dict) -> dict:
         out["error"] = f"state file missing: {state_path}"
         return out
 
-    fp = acc.get("fingerprint_json") or {}
-    if isinstance(fp, str):
-        fp = json.loads(fp)
-    ua = acc.get("user_agent") or fp.get("user_agent")
-    if not ua:
-        out["error"] = "no user_agent in DB or fingerprint"
-        return out
+    # v7.78n: 默认 fingerprint, 与 register v7.78k 的 _CTX_FINGERPRINT 一致.
+    # 老账号 (register 在 v7.78k 之前) DB 里没存 fp/UA, 用默认值兜底而不是直接 abort.
+    DEFAULT_FP = {
+        "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+        "viewport": {"width": 1920, "height": 1040},
+        "screen": {"width": 1920, "height": 1080},
+        "device_scale_factor": 1,
+        "is_mobile": False,
+        "has_touch": False,
+        "locale": "en-US",
+        "timezone_id": "America/Los_Angeles",
+        "color_scheme": "light",
+        "extra_http_headers": {
+            "Accept-Language": "en-US,en;q=0.9",
+            "sec-ch-ua": "\"Chromium\";v=\"145\", \"Not:A-Brand\";v=\"99\", \"Google Chrome\";v=\"145\"",
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": "\"Linux\"",
+        },
+        "platform": "Linux x86_64",
+    }
+    fp_raw = acc.get("fingerprint_json") or {}
+    if isinstance(fp_raw, str):
+        try: fp_raw = json.loads(fp_raw)
+        except Exception: fp_raw = {}
+    fp = {**DEFAULT_FP, **(fp_raw or {})}
+    ua = acc.get("user_agent") or fp.get("user_agent") or DEFAULT_FP["user_agent"]
+    if not (acc.get("user_agent") or fp_raw.get("user_agent")):
+        out["fingerprint_source"] = "default_fallback"
 
     # v7.78l: IP 一致性校验 — exit_ip 是 register 实测出口 IP, 但同一个
     # SOCKS 端口在不同时间可能走不同上游 outbound (xray pool / WARP 漂移),
