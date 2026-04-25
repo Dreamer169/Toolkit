@@ -879,7 +879,7 @@ async def fill_step1(page) -> str | None:
                     if (!grecaptcha.enterprise) { res({ok:false,err:'enterprise undefined'}); return; }
                     try {
                         grecaptcha.enterprise.ready(() => {
-                            grecaptcha.enterprise.execute(SK, {action:"SIGNUP"})
+                            grecaptcha.enterprise.execute(SK, {action:"signUpPassword"})
                                 .then(t => {
                                     var el = document.querySelector('[name="recaptchaToken"]');
                                     if (el) {
@@ -1218,7 +1218,7 @@ async def fill_step1(page) -> str | None:
                                     }
                                 }
                                 if (!fn) { res({ok:false, err:'no_execute'}); return; }
-                                fn(SK, {action:"SIGNUP"})
+                                fn(SK, {action:"signUpPassword"})
                                     .then(t => {
                                         window.__lockedRcToken = t;
                                         var el = document.querySelector('[name="recaptchaToken"]');
@@ -1989,9 +1989,16 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
         with open("/tmp/replit-broker/exit.json","r") as _bf08:
             _bj08 = _jbf08.load(_bf08)
         _fam08 = (_bj08.get("family") or "").strip().lower()
-        if _fam08 == "warp":
+        # v8.11 — opt-out switch to bypass WARP override (let chromium use orchestrator
+        # SOCKS5 proxy = real residential/DC IP for higher reCAPTCHA Enterprise score).
+        # Trade-off: cf_clearance from broker WARP IP may be invalidated → CF may issue
+        # fresh challenge on signup nav. Use NO_WARP_OVERRIDE=1 env to enable.
+        _no_warp = os.environ.get("NO_WARP_OVERRIDE","").strip() in ("1","true","yes")
+        if _fam08 == "warp" and not _no_warp:
             log(f"[attempt-register] v8.08 broker=warp → main ctx proxy override: {proxy_cfg} → socks5://127.0.0.1:40000 (IP-同源 with cf_clearance + recaptcha mint)")
             proxy_cfg = {"server": "socks5://127.0.0.1:40000"}
+        elif _fam08 == "warp" and _no_warp:
+            log(f"[attempt-register] v8.11 NO_WARP_OVERRIDE=1 → keep orchestrator proxy_cfg={proxy_cfg} (better reCAPTCHA score, may CF challenge)")
         elif _fam08 == "socks":
             _bport08 = str(_bj08.get("port") or "").strip()
             if _bport08:
@@ -2052,6 +2059,18 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
     else:
         ctx  = await browser.new_context(viewport={"width": 1280, "height": 800}, locale="en-US", user_agent=UA)
     page = await ctx.new_page()
+    try:
+        def _diag_console_handler(msg):
+            try:
+                t = msg.text or ""
+                if "[DIAG-RC]" in t:
+                    log(f"[DIAG-RC-CON] {t}")
+            except Exception:
+                pass
+        page.on("console", _diag_console_handler)
+        log("[DIAG-RC] console listener attached")
+    except Exception as _ce:
+        log(f"[DIAG-RC] console listener failed: {_ce}")
 
     # v8.00 — playwright_stealth DISABLED on CDP path:
     # it forcibly sets navigator.webdriver=false (real Chrome=undefined),
@@ -2072,6 +2091,40 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
         log("Canvas 2D + WebGL 完整注入 ✓")
     except Exception as e:
         log(f"Canvas 噪声注入失败: {e}")
+    try:
+        _DIAG_RECAPTCHA_PROBE = """
+        (() => {
+          try {
+            const tag = (msg) => {
+              try { console.log('[DIAG-RC]', msg); } catch(e){}
+              try { document.title = '[DIAG-RC] ' + String(msg).slice(0,180); } catch(e){}
+            };
+            const wrap = () => {
+              try {
+                const ge = window.grecaptcha;
+                if (!ge || !ge.enterprise || !ge.enterprise.execute || ge.__diag_wrapped) return false;
+                const orig = ge.enterprise.execute.bind(ge.enterprise);
+                ge.enterprise.execute = function(sk, opts){
+                  try { tag('execute sk=' + String(sk).slice(0,18) + ' action=' + JSON.stringify(opts||{})); } catch(e){}
+                  return orig(sk, opts);
+                };
+                ge.__diag_wrapped = true;
+                tag('wrapped grecaptcha.enterprise.execute');
+                return true;
+              } catch(e){ return false; }
+            };
+            if (!wrap()) {
+              const t0 = Date.now();
+              const iv = setInterval(() => { if (wrap() || Date.now()-t0>30000) clearInterval(iv); }, 200);
+            }
+          } catch(e){}
+        })();
+        """
+        await page.add_init_script(_DIAG_RECAPTCHA_PROBE)
+        log("[DIAG-RC] grecaptcha.execute action probe injected ✓")
+    except Exception as _de:
+        log(f"[DIAG-RC] inject failed: {_de}")
+
 
     try:
         result["phase"] = "navigate"
@@ -2372,14 +2425,19 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                             _os.environ["GOOGLE_PROXY_POOL"] = f"socks5://127.0.0.1:{_broker_port}"
                             log(f"[CDP] v7.99 google-route pool override → socks5://127.0.0.1:{_broker_port} (sync broker exit, IP 一致)")
                         elif _broker_fam == "warp":
-                            # v8.07 — broker=warp 时 chromium 经 WARP socks5://:40000 出口.
-                            # 必须把 *.google 也 PIN 到同一 WARP 端口, 否则 reCAPTCHA Enterprise
-                            # 检测到 token-mint IP (DEFAULT_POOL clean SOCKS) ≠ submit IP (WARP)
-                            # 跨段信号 → 评分极低 → code:1 reject.
-                            # 实证 2026-04-25 12:48 (job rpl_moec16kj_debv): broker=warp + 清洁 profile
-                            # 拿到 cf_clearance=True, 但 google-route 走 DEFAULT_POOL 仍 code:1.
-                            _os.environ["GOOGLE_PROXY_POOL"] = "socks5://127.0.0.1:40000"
-                            log("[CDP] v8.07 google-route pool override → socks5://127.0.0.1:40000 (broker=warp, IP 一致 via WARP backbone)")
+                            _no_warp_g = os.environ.get("NO_WARP_OVERRIDE","").strip() in ("1","true","yes")
+                            if _no_warp_g:
+                                # v8.11 — main ctx already escaped WARP; let *.google share that
+                                # SOCKS exit too so 三件 IP-同源 in clean DC IP (better reCAPTCHA score).
+                                _os.environ.pop("GOOGLE_PROXY_POOL", None)
+                                log("[CDP] v8.11 NO_WARP_OVERRIDE=1 → google-route SKIP WARP PIN, use chromium main proxy (SOCKS clean) for IP-同源")
+                            else:
+                                # v8.07 — broker=warp 时 chromium 经 WARP socks5://:40000 出口.
+                                # 必须把 *.google 也 PIN 到同一 WARP 端口, 否则 reCAPTCHA Enterprise
+                                # 检测到 token-mint IP (DEFAULT_POOL clean SOCKS) ≠ submit IP (WARP)
+                                # 跨段信号 → 评分极低 → code:1 reject.
+                                _os.environ["GOOGLE_PROXY_POOL"] = "socks5://127.0.0.1:40000"
+                                log("[CDP] v8.07 google-route pool override → socks5://127.0.0.1:40000 (broker=warp, IP 一致 via WARP backbone)")
                         elif _force_groute:
                             log("[CDP] v7.99 FORCE_GOOGLE_ROUTE=1 — 强行用 DEFAULT_POOL (调试)")
                             _os.environ.pop("GOOGLE_PROXY_POOL", None)
