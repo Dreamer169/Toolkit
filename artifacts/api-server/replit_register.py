@@ -1637,6 +1637,52 @@ async def _complete_via_verify_url(page, verify_url: str, close_fn=None) -> dict
     return None
 
 
+
+# v7.78m — in-page exit-IP probe.
+# register 流程之前用 curl/get_exit_ip(_camoufox) 测的 exit_ip 有 4 种来源歧义:
+# (a) [CDP] curl --interface CloudflareWARP ipify  (broker WARP iface)
+# (b) [CDP] fallback curl ipify                     (VPS 默认路由)
+# (c) get_exit_ip_camoufox(proxy_cfg)               (camoufox + proxy)
+# (d) get_exit_ip(pw, proxy_cfg)                    (playwright + proxy)
+# 这 4 种测出来的 IP 不一定等于 signup HTTP 实际 source IP, 也不一定等于
+# cf_clearance 发放时浏览器看到的 IP (因为 broker 出口 vs new_context 的
+# proxy 出口可能不同, 且 xray pool outbound 在实时漂移).
+#
+# 唯一 ground truth: signup 完成后, 在已通过 CF challenge 的 page 上下文里
+# fetch ipify - 此时的源 IP 一定等于 cf_clearance/connect.sid 绑定 IP, 也
+# 是 replay 时必须严格复刻的 IP.
+async def _probe_inpage_exit_ip(page) -> str:
+    """在 page 内 fetch ipify, 拿浏览器 chromium 链路实际出口 IP."""
+    try:
+        ip = await page.evaluate("""async () => {
+            try {
+                const r = await fetch("https://api.ipify.org/?format=json", {cache: "no-store"});
+                const j = await r.json();
+                return j.ip || "";
+            } catch(e) { return ""; }
+        }""")
+        if ip and isinstance(ip, str) and ip.count(".") == 3:
+            return ip.strip()
+    except Exception as e:
+        log(f"[inpage-ip] err: {e}")
+    return ""
+
+
+async def _finalize_exit_ip(result: dict, page) -> None:
+    """signup 成功后调用: 用 in-page probe 拿 ground truth 覆盖 result['exit_ip'],
+    并在 result 里同时保留原始测量值 + source 标签, 便于诊断字段歧义."""
+    real = await _probe_inpage_exit_ip(page)
+    if real:
+        result["exit_ip_original"] = result.get("exit_ip", "")
+        result["exit_ip"] = real
+        result["exit_ip_real"] = real
+        result["exit_ip_source"] = "inpage_post_signup"
+        log(f"[inpage-ip] ground truth = {real} (覆盖 register 前测的 {result.get('exit_ip_original','')})")
+    else:
+        result["exit_ip_source"] = "preflight_only"
+        log(f"[inpage-ip] probe 失败, 保留 preflight 值 {result.get('exit_ip','')}")
+
+
 # ── session 持久化 ─────────────────────────────────────────────────────────
 # 注册/登录成功时把 cookies+localStorage 落到 .state/replit/<username>.json,
 # 下次 replit_login.py 直接 load_state 进 context, 0 captcha 0 cf_challenge,
@@ -2226,10 +2272,12 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 log("[step2-miss] 验证邮件已发送 → 交还 TS orchestrator (Graph API + click-verify-link)")
                 result["ok"] = True
                 result["phase"] = "verify_email_sent"
+                # v7.78m: in-page ground-truth IP probe
+                await _finalize_exit_ip(result, page)
                 # 不再 in-python _fetch_replit_verify_url / _complete_via_verify_url
                 # TS Graph API (accounts.ts L900-940) 全权负责拉链接 + 点击, 避免 replit_register 污染
                 try:
-                    _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path":"verify_email_sent"})
+                    _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path":"verify_email_sent","exit_ip_real":result.get("exit_ip_real",""),"exit_ip_source":result.get("exit_ip_source","")})
                     if _sp: result["state_path"] = _sp
                 except Exception as _se:
                     log(f"[state] ⚠ {_se}")
@@ -2259,8 +2307,10 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
         result["ok"] = True
         result["phase"] = "done"
         log("✅ 注册完成（验证邮件发送阶段）")
+        # v7.78m: in-page ground-truth IP probe
+        await _finalize_exit_ip(result, page)
         try:
-            _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path": "step2_done"})
+            _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path": "step2_done","exit_ip_real":result.get("exit_ip_real",""),"exit_ip_source":result.get("exit_ip_source","")})
             if _sp: result["state_path"] = _sp
         except Exception as _se:
             log(f"[state] ⚠ step2-done save_state failed: {_se}")
@@ -2498,9 +2548,11 @@ async def attempt_register_camoufox(proxy_cfg, exit_ip: str) -> dict:
                 if any(h in bck.lower() for h in SUCCESS_HINTS):
                     log("[camoufox][step2-miss] 验证邮件已发送 → 交还 TS orchestrator (Graph API + click-verify-link)")
                     result["ok"] = True; result["phase"] = "verify_email_sent"
+                    # v7.78m: in-page ground-truth IP probe
+                    await _finalize_exit_ip(result, page)
                     # 不再 in-python _fetch / _complete, TS Graph API 全权负责
                     try:
-                        _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path":"verify_email_sent_camoufox"})
+                        _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path":"verify_email_sent_camoufox","exit_ip_real":result.get("exit_ip_real",""),"exit_ip_source":result.get("exit_ip_source","")})
                         if _sp: result["state_path"] = _sp
                     except Exception as _se:
                         log(f"[camoufox][state] ⚠ {_se}")
@@ -2515,8 +2567,10 @@ async def attempt_register_camoufox(proxy_cfg, exit_ip: str) -> dict:
                 result["error"] = "integrity_check_failed_at_step2"; return result
             result["ok"] = True; result["phase"] = "done"
             log("[camoufox] registration complete (verify email phase)")
+            # v7.78m: in-page ground-truth IP probe
+            await _finalize_exit_ip(result, page)
             try:
-                _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path": "step2_done_camoufox"})
+                _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path": "step2_done_camoufox","exit_ip_real":result.get("exit_ip_real",""),"exit_ip_source":result.get("exit_ip_source","")})
                 if _sp: result["state_path"] = _sp
             except Exception as _se:
                 log(f"[camoufox][state] ⚠ step2-done save_state failed: {_se}")
