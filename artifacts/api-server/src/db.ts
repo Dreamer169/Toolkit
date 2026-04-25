@@ -125,4 +125,19 @@ export async function initDatabase(): Promise<void> {
     status VARCHAR(32) NOT NULL DEFAULT 'active', notes TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
   await execute(`CREATE INDEX IF NOT EXISTS archives_platform_email_idx ON archives(platform, email)`);
+  await execute(`CREATE TABLE IF NOT EXISTS replit_audit_history (
+    id SERIAL PRIMARY KEY,
+    source VARCHAR(32) NOT NULL DEFAULT 'manual',
+    scope VARCHAR(32) NOT NULL DEFAULT 'active',
+    dry_run BOOLEAN NOT NULL DEFAULT false,
+    total INTEGER NOT NULL DEFAULT 0,
+    scanned INTEGER NOT NULL DEFAULT 0,
+    active INTEGER NOT NULL DEFAULT 0,
+    stale INTEGER NOT NULL DEFAULT 0,
+    errors INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    details JSONB NOT NULL DEFAULT '[]'::jsonb,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finished_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+  await execute(`CREATE INDEX IF NOT EXISTS replit_audit_history_finished_idx ON replit_audit_history(finished_at DESC)`);
 }

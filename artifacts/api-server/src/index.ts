@@ -1,8 +1,10 @@
 import app from "./app";
+import { initDatabase } from "./db.js";
 import { logger } from "./lib/logger";
 import { selfRegister } from "./routes/tunnel";
 import { startLiveVerifyPoller } from "./lib/live-verify-poller.js";
 import { startAccountHealthcheck } from "./lib/account-healthcheck.js";
+import { startReplitReplayAudit } from "./lib/replit-replay-audit.js";
 import { startCfPoolMaintainer } from "./lib/cf-pool-maintainer.js";
 import { startProxyMaintenance } from "./routes/data.js";
 import { attachCdpRelayWebSocket } from "./lib/cdp_relay_ws.js";
@@ -14,6 +16,9 @@ if (!rawPort) throw new Error("PORT environment variable is required but was not
 const port = Number(rawPort);
 if (Number.isNaN(port) || port <= 0) throw new Error(`Invalid PORT value: "${rawPort}"`);
 
+// v7.78r Bug O: 启动前确保所有 CREATE TABLE IF NOT EXISTS 跑过
+await initDatabase().catch((e) => { logger.error({ err: String(e) }, "initDatabase failed"); process.exit(1); });
+
 const server = app.listen(port, (err) => {
   if (err) { logger.error({ err }, "Error listening on port"); process.exit(1); }
   logger.info({ port }, "Server listening");
@@ -23,6 +28,8 @@ const server = app.listen(port, (err) => {
   startLiveVerifyPoller(10_000);
   // 账号健康检查：自动补 OAuth + 打标签（每5分钟）
   startAccountHealthcheck(5 * 60 * 1000);
+  // v7.78r — Replit 账号 replay-audit 周期校验 (默认 6h, env REPLAY_AUDIT_INTERVAL_HOURS)
+  startReplitReplayAudit();
   startCfPoolMaintainer();
   startProxyMaintenance();
   attachCdpRelayWebSocket(server);

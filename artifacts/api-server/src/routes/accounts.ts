@@ -1512,35 +1512,72 @@ function runReplay(idOrUser: string | number, timeoutMs = 180_000): Promise<{
   });
 }
 
-router.post("/admin/replay-audit", async (req, res) => {
-  const body = (req.body ?? {}) as {
-    scope?: "active" | "all";
-    ids?: number[];
-    dryRun?: boolean;
-    concurrency?: number;
-    timeoutMs?: number;
-  };
-  const scope = body.scope ?? "active";
-  const dryRun = body.dryRun === true;
-  const concurrency = Math.max(1, Math.min(3, body.concurrency ?? 1));
-  const timeoutMs = Math.max(30_000, Math.min(300_000, body.timeoutMs ?? 180_000));
+// v7.78r — 抽出 audit 核心 + lock + history 写入, cron 与 endpoint 共享
+let _auditRunning = false;
+let _lastAuditStartedAt = 0;
+let _lastAuditFinishedAt = 0;
 
-  // v7.78p: dbQ/dbE 与 register handler 同款 lazy import (db.js 没在 module top-level export)
+export type ReplayAuditOpts = {
+  scope?: "active" | "all";
+  ids?: number[];
+  dryRun?: boolean;
+  concurrency?: number;
+  timeoutMs?: number;
+};
+export type ReplayAuditResult = {
+  ok: boolean;
+  source: string;
+  scope: string;
+  dryRun: boolean;
+  concurrency: number;
+  timeoutMs: number;
+  total: number;
+  scanned: number;
+  active: number;
+  stale: number;
+  errors: number;
+  duration_ms: number;
+  details: Array<Record<string, unknown>>;
+  history_id?: number;
+  skipped?: string;
+};
+
+export function isReplayAuditRunning(): boolean { return _auditRunning; }
+export function getReplayAuditState(): { running: boolean; lastStartedAt: number; lastFinishedAt: number } {
+  return { running: _auditRunning, lastStartedAt: _lastAuditStartedAt, lastFinishedAt: _lastAuditFinishedAt };
+}
+
+export async function executeReplayAudit(opts: ReplayAuditOpts, source = "manual"): Promise<ReplayAuditResult> {
+  const scope = opts.scope ?? "active";
+  const dryRun = opts.dryRun === true;
+  const concurrency = Math.max(1, Math.min(3, opts.concurrency ?? 1));
+  const timeoutMs = Math.max(30_000, Math.min(300_000, opts.timeoutMs ?? 180_000));
+
+  if (_auditRunning) {
+    return {
+      ok: false, source, scope, dryRun, concurrency, timeoutMs,
+      total: 0, scanned: 0, active: 0, stale: 0, errors: 0, duration_ms: 0,
+      details: [], skipped: "audit_already_running",
+    };
+  }
+  _auditRunning = true;
+  _lastAuditStartedAt = Date.now();
+
   const { query: dbQ, execute: dbE } = await import("../db.js");
-
-  let rows: Array<{ id: number; username: string; status: string }>;
   const t0 = Date.now();
+  const startedAt = new Date(t0).toISOString();
   const details: Array<Record<string, unknown>> = [];
   let activeCnt = 0, staleCnt = 0, errCnt = 0;
+  let rows: Array<{ id: number; username: string; status: string }> = [];
+
   try {
-    if (Array.isArray(body.ids) && body.ids.length) {
+    if (Array.isArray(opts.ids) && opts.ids.length) {
       rows = await dbQ<{ id: number; username: string; status: string }>(
         "SELECT id, username, status FROM accounts WHERE platform='replit' AND id = ANY($1::int[]) AND username IS NOT NULL ORDER BY id",
-        [body.ids]
+        [opts.ids]
       );
-      // v7.78q Bug L: 报告 ids 里查不到 / 无 username 的, 别静默吞
       const found = new Set(rows.map((r) => r.id));
-      for (const id of body.ids) {
+      for (const id of opts.ids) {
         if (!found.has(id)) {
           details.push({ id, ok: false, error: "id not in DB or username is NULL", action: "not-found" });
           errCnt++;
@@ -1555,66 +1592,131 @@ router.post("/admin/replay-audit", async (req, res) => {
         "SELECT id, username, status FROM accounts WHERE platform='replit' AND status IN ('active','registered','unverified') AND username IS NOT NULL ORDER BY id"
       );
     }
-  } catch (e: unknown) {
-    res.status(500).json({ ok: false, error: `query failed: ${String(e).slice(0,200)}` });
-    return;
-  }
 
-  for (let i = 0; i < rows.length; i += concurrency) {
-    const batch = rows.slice(i, i + concurrency);
-    const results = await Promise.all(batch.map((acc) => runReplay(acc.id, timeoutMs)));
-    for (let j = 0; j < batch.length; j++) {
-      const acc = batch[j];
-      const r = results[j];
-      const p = r.parsed as { logged_in?: boolean; http_status?: number; final_url?: string; error?: string };
-      const loggedIn = p.logged_in === true;
-      const ts = new Date().toISOString();
-      let action = "no-change";
+    for (let i = 0; i < rows.length; i += concurrency) {
+      const batch = rows.slice(i, i + concurrency);
+      const results = await Promise.all(batch.map((acc) => runReplay(acc.id, timeoutMs)));
+      for (let j = 0; j < batch.length; j++) {
+        const acc = batch[j];
+        const r = results[j];
+        const pp = r.parsed as { logged_in?: boolean; http_status?: number; final_url?: string; error?: string };
+        const loggedIn = pp.logged_in === true;
+        const ts = new Date().toISOString();
+        let action = "no-change";
 
-      if (!r.ok || (p.error && !loggedIn)) {
-        errCnt++;
-        action = "script-error";
-      } else if (loggedIn) {
-        activeCnt++;
-        action = dryRun ? "would-keep-active" : "kept-active";
-        if (!dryRun) {
-          const note = `[audit ${ts}] ok status=${p.http_status ?? ""} url=${(p.final_url ?? "").slice(0,80)}`;
-          await dbE(
-            "UPDATE accounts SET status='active', updated_at=NOW(), notes=NULLIF(TRIM(BOTH E'\n' FROM COALESCE(notes,'') || E'\n' || $2),'') WHERE id=$1",
-            [acc.id, note]
-          ).catch((e: unknown) => { details.push({ id: acc.id, dbError: String(e).slice(0,200) }); });
+        if (!r.ok || (pp.error && !loggedIn)) {
+          errCnt++;
+          action = "script-error";
+        } else if (loggedIn) {
+          activeCnt++;
+          action = dryRun ? "would-keep-active" : "kept-active";
+          if (!dryRun) {
+            const note = `[audit ${ts}] ok status=${pp.http_status ?? ""} url=${(pp.final_url ?? "").slice(0,80)}`;
+            await dbE(
+              "UPDATE accounts SET status='active', updated_at=NOW(), notes=NULLIF(TRIM(BOTH E'\n' FROM COALESCE(notes,'') || E'\n' || $2),'') WHERE id=$1",
+              [acc.id, note]
+            ).catch((e: unknown) => { details.push({ id: acc.id, dbError: String(e).slice(0,200) }); });
+          }
+        } else {
+          staleCnt++;
+          action = dryRun ? "would-mark-stale" : "marked-stale";
+          if (!dryRun) {
+            const reason = pp.error
+              ? pp.error
+              : `not-logged-in status=${pp.http_status ?? ""} url=${(pp.final_url ?? "").slice(0,80)}`;
+            const note = `[audit ${ts}] stale: ${String(reason).slice(0,200)}`;
+            await dbE(
+              "UPDATE accounts SET status='stale', updated_at=NOW(), notes=NULLIF(TRIM(BOTH E'\n' FROM COALESCE(notes,'') || E'\n' || $2),'') WHERE id=$1",
+              [acc.id, note]
+            ).catch((e: unknown) => { details.push({ id: acc.id, dbError: String(e).slice(0,200) }); });
+          }
         }
-      } else {
-        staleCnt++;
-        action = dryRun ? "would-mark-stale" : "marked-stale";
-        if (!dryRun) {
-          const reason = p.error
-            ? p.error
-            : `not-logged-in status=${p.http_status ?? ""} url=${(p.final_url ?? "").slice(0,80)}`;
-          const note = `[audit ${ts}] stale: ${String(reason).slice(0,200)}`;
-          await dbE(
-            "UPDATE accounts SET status='stale', updated_at=NOW(), notes=NULLIF(TRIM(BOTH E'\n' FROM COALESCE(notes,'') || E'\n' || $2),'') WHERE id=$1",
-            [acc.id, note]
-          ).catch((e: unknown) => { details.push({ id: acc.id, dbError: String(e).slice(0,200) }); });
-        }
+
+        details.push({
+          id: acc.id, username: acc.username, prev_status: acc.status,
+          ok: r.ok, logged_in: loggedIn,
+          http_status: pp.http_status, final_url: pp.final_url,
+          error: pp.error, action,
+        });
       }
-
-      details.push({
-        id: acc.id, username: acc.username, prev_status: acc.status,
-        ok: r.ok, logged_in: loggedIn,
-        http_status: p.http_status, final_url: p.final_url,
-        error: p.error, action,
-      });
     }
+  } finally {
+    _auditRunning = false;
+    _lastAuditFinishedAt = Date.now();
   }
 
-  res.json({
-    ok: true, scope, dryRun, concurrency, timeoutMs,
-    total: details.length, scanned: rows.length,
-    active: activeCnt, stale: staleCnt, errors: errCnt,
-    duration_ms: Date.now() - t0,
-    details,
-  });
+  const duration_ms = Date.now() - t0;
+  const total = details.length;
+  const scanned = rows.length;
+
+  // v7.78r Bug N: 写 history 但 details 精简, 避免 jsonb 膨胀 (final_url 截断)
+  const slimDetails = details.map((d) => ({
+    id: d.id,
+    username: d.username,
+    action: d.action,
+    prev_status: d.prev_status,
+    logged_in: d.logged_in,
+    http_status: d.http_status,
+    error: d.error,
+  }));
+  let history_id: number | undefined;
+  try {
+    const ins = await dbQ<{ id: number }>(
+      `INSERT INTO replit_audit_history(source, scope, dry_run, total, scanned, active, stale, errors, duration_ms, details, started_at, finished_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,NOW()) RETURNING id`,
+      [source, scope, dryRun, total, scanned, activeCnt, staleCnt, errCnt, duration_ms, JSON.stringify(slimDetails), startedAt]
+    );
+    history_id = ins[0]?.id;
+  } catch (e: unknown) {
+    details.push({ history_write_failed: String(e).slice(0, 200) });
+  }
+
+  return {
+    ok: true, source, scope, dryRun, concurrency, timeoutMs,
+    total, scanned, active: activeCnt, stale: staleCnt, errors: errCnt,
+    duration_ms, details, history_id,
+  };
+}
+
+router.post("/admin/replay-audit", async (req, res) => {
+  const body = (req.body ?? {}) as ReplayAuditOpts;
+  const result = await executeReplayAudit(body, "manual");
+  if (result.skipped) { res.status(409).json(result); return; }
+  res.json(result);
+});
+
+// v7.78r — alias of replay-audit, semantic name + cron-friendly
+router.post("/admin/audit-trigger", async (req, res) => {
+  const body = (req.body ?? {}) as ReplayAuditOpts;
+  const source = (req.body && typeof req.body.source === "string") ? req.body.source : "manual";
+  const result = await executeReplayAudit(body, source);
+  if (result.skipped) { res.status(409).json(result); return; }
+  res.json(result);
+});
+
+// v7.78r — GET /admin/audit-history?limit=50 拿最近 N 次 run summary
+router.get("/admin/audit-history", async (req, res) => {
+  const limit = Math.max(1, Math.min(200, Number(req.query.limit ?? 50)));
+  const { query: dbQ } = await import("../db.js");
+  try {
+    const rows = await dbQ<{
+      id: number; source: string; scope: string; dry_run: boolean;
+      total: number; scanned: number; active: number; stale: number; errors: number;
+      duration_ms: number; started_at: string; finished_at: string;
+    }>(
+      `SELECT id, source, scope, dry_run, total, scanned, active, stale, errors,
+              duration_ms, started_at, finished_at
+         FROM replit_audit_history ORDER BY id DESC LIMIT $1`,
+      [limit]
+    );
+    res.json({
+      ok: true,
+      runs: rows,
+      state: getReplayAuditState(),
+    });
+  } catch (e: unknown) {
+    res.status(500).json({ ok: false, error: String(e).slice(0, 200) });
+  }
 });
 
 
