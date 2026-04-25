@@ -2781,19 +2781,25 @@ async def run() -> dict:
         log(f"[CDP] use_cdp=True → attaching to broker chromium @ {CDP_WS}")
         from playwright.async_api import async_playwright as _apw_cdp
         try:
+            # v7.86: WARP 在本 VPS 暴露为 socks5://127.0.0.1:40000 (warp-cli proxy mode),
+            # 不是 TUN 接口, 故 --interface CloudflareWARP 永远失败, 走 except 把 VPS 直连 IP
+            # 当作 exit_ip 写入 DB, 污染下游 replay/audit. 改用 broker chromium 同款 socks5.
+            _ip_cdp = ""
             try:
                 _ip_cdp = subprocess.check_output(
-                    ["curl", "-s", "--max-time", "8", "--interface", "CloudflareWARP",
+                    ["curl", "-s", "--max-time", "8",
+                     "--socks5", "127.0.0.1:40000",
                      "https://api.ipify.org"],
                     text=True,
                 ).strip()
-                log(f"[CDP] WARP exit_ip={_ip_cdp}")
-            except Exception:
-                _ip_cdp = subprocess.check_output(
-                    ["curl", "-s", "--max-time", "5", "https://api.ipify.org"],
-                    text=True,
-                ).strip()
-                log(f"[CDP] fallback direct exit_ip={_ip_cdp}")
+                if _ip_cdp:
+                    log(f"[CDP] WARP exit_ip={_ip_cdp}")
+                else:
+                    raise RuntimeError("empty WARP ipify response")
+            except Exception as _werr:
+                # WARP 探不到就放弃, 不写 VPS 直连 IP, 让 in-page fetch 兜底
+                log(f"[CDP] WARP exit_ip probe failed ({_werr}); leaving exit_ip empty until in-page fetch")
+                _ip_cdp = ""
             final["exit_ip"] = _ip_cdp
         except Exception as _e:
             log(f"[CDP] exit_ip probe err: {_e}")
