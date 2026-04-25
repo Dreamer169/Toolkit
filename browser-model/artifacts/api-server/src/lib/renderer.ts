@@ -518,6 +518,14 @@ async function getBrowser(): Promise<Browser> {
     });
     browserPromise = waitForCdpHttp(9222, "127.0.0.1", 30000)
       .then(() => chromium.connectOverCDP("http://127.0.0.1:9222"))
+      .then((b) => {
+        // v8.10 — fire-and-forget Google trust bootstrap (~40s deep visit, once
+        // per chromium lifetime). Lifts reCAPTCHA Enterprise score by seeding
+        // a real user-like browsing history (youtube + google + search) into
+        // the persistent broker-chromium-profile + shared google-cookies cache.
+        void _bootstrapGoogleTrust(b);
+        return b;
+      })
       .catch((err) => {
         browserPromise = null;
         killChromiumProc();
@@ -927,7 +935,7 @@ export function readCachedGoogleCookies(): CK[] | null {
     return raw.cookies;
   } catch { return null; }
 }
-function writeCachedGoogleCookies(cookies: CK[]): void {
+export function writeCachedGoogleCookies(cookies: CK[]): void {
   try {
     fs.mkdirSync(path.dirname(GOOGLE_COOKIE_CACHE), { recursive: true });
     fs.writeFileSync(GOOGLE_COOKIE_CACHE, JSON.stringify({ savedAt: Date.now(), cookies }));
@@ -1031,4 +1039,107 @@ export async function warmupGoogleSession(hostnameForKey: string): Promise<{
     cookieCount: cookies.length,
     source,
   };
+}
+
+
+// ── v8.10 — Google trust-cookie deep bootstrap ──────────────────────────────
+// Runs ONCE per chromium lifetime (after first connectOverCDP succeeds).
+// Visits youtube + google.com + google search over ~40s in a fresh context to
+// drop NID / AEC / SOCS / __Secure-1PSIDTS / VISITOR_INFO1_LIVE / SIDCC etc.
+// trust cookies into the persistent --user-data-dir profile + shared cache.
+let _googleTrustDone = false;
+let _googleTrustInFlight = false;
+async function _bootstrapGoogleTrust(browser: Browser): Promise<void> {
+  if (_googleTrustDone || _googleTrustInFlight) return;
+  _googleTrustInFlight = true;
+  const t0 = Date.now();
+  let ctx: BrowserContext | null = null;
+  try {
+    console.log("[v8.10] google-trust bootstrap START (~40s real-visit warmup)");
+    ctx = await browser.newContext({
+      userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      viewport: { width: 1920, height: 1040 },
+      screen: { width: 1920, height: 1080 },
+      locale: "en-US",
+      timezoneId: "America/Los_Angeles",
+      ignoreHTTPSErrors: true,
+      extraHTTPHeaders: {
+        "Accept-Language": "en-US,en;q=0.9",
+        "sec-ch-ua": '"Chromium";v="145", "Not:A-Brand";v="99", "Google Chrome";v="145"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Linux"',
+      },
+    });
+    try { await ctx.addInitScript(STEALTH_INIT); } catch (_) { /* */ }
+    const page = await ctx.newPage();
+    // Phase 1: youtube.com (~13s) — VISITOR_INFO1_LIVE / YSC / LOGIN_INFO / __Secure-3PSIDCC
+    try {
+      await page.goto("https://www.youtube.com/", { waitUntil: "domcontentloaded", timeout: 18000 });
+      await page.waitForTimeout(2500);
+      await page.evaluate("window.scrollBy(0, 450)");
+      await page.waitForTimeout(2500);
+      await page.evaluate("window.scrollBy(0, 700)");
+      await page.waitForTimeout(2500);
+      await page.evaluate("window.scrollBy(0, -400)");
+      await page.waitForTimeout(2500);
+      console.log(`[v8.10] phase-1 youtube.com OK (${Date.now() - t0}ms)`);
+    } catch (e) {
+      console.warn("[v8.10] phase-1 youtube.com failed:", (e as Error).message);
+    }
+    // Phase 2: google.com (~10s) — NID / AEC / SOCS / __Secure-1PSIDTS
+    try {
+      await page.goto("https://www.google.com/", { waitUntil: "domcontentloaded", timeout: 15000 });
+      await page.waitForTimeout(2000);
+      await page.mouse.move(700, 400);
+      await page.waitForTimeout(1500);
+      await page.evaluate("window.scrollBy(0, 200)");
+      await page.waitForTimeout(2000);
+      await page.mouse.move(900, 600);
+      await page.waitForTimeout(2000);
+      await page.evaluate("window.scrollBy(0, -150)");
+      await page.waitForTimeout(1500);
+      console.log(`[v8.10] phase-2 google.com OK (${Date.now() - t0}ms)`);
+    } catch (e) {
+      console.warn("[v8.10] phase-2 google.com failed:", (e as Error).message);
+    }
+    // Phase 3: google search (~13s) — registers SIDCC + recent search activity
+    try {
+      await page.goto("https://www.google.com/search?q=hello+world", { waitUntil: "domcontentloaded", timeout: 15000 });
+      await page.waitForTimeout(2000);
+      await page.evaluate("window.scrollBy(0, 500)");
+      await page.waitForTimeout(2500);
+      await page.evaluate("window.scrollBy(0, 800)");
+      await page.waitForTimeout(2500);
+      await page.mouse.move(800, 500);
+      await page.waitForTimeout(2000);
+      await page.evaluate("window.scrollBy(0, -400)");
+      await page.waitForTimeout(2000);
+      console.log(`[v8.10] phase-3 google search OK (${Date.now() - t0}ms)`);
+    } catch (e) {
+      console.warn("[v8.10] phase-3 google search failed:", (e as Error).message);
+    }
+    // Harvest google-family cookies into shared cache
+    try {
+      const allCks = await ctx.cookies();
+      const googleCks = allCks.filter((c) =>
+        /(^|\.)(google\.com|gstatic\.com|youtube\.com|recaptcha\.net|googleapis\.com|googleusercontent\.com|googletagmanager\.com)$/i.test(c.domain)
+      );
+      console.log(`[v8.10] google-trust cookies harvested: ${googleCks.length} (${Date.now() - t0}ms)`);
+      try {
+        writeCachedGoogleCookies(googleCks as Parameters<typeof writeCachedGoogleCookies>[0]);
+        console.log("[v8.10] google-trust cookies written to shared cache");
+      } catch (e) {
+        console.warn("[v8.10] writeCachedGoogleCookies failed:", (e as Error).message);
+      }
+    } catch (e) {
+      console.warn("[v8.10] cookie harvest failed:", (e as Error).message);
+    }
+    _googleTrustDone = true;
+    console.log(`[v8.10] google-trust bootstrap COMPLETE (${Date.now() - t0}ms)`);
+  } catch (e) {
+    console.error("[v8.10] google-trust bootstrap fatal:", (e as Error).message);
+  } finally {
+    _googleTrustInFlight = false;
+    if (ctx) try { await ctx.close(); } catch (_) { /* */ }
+  }
 }

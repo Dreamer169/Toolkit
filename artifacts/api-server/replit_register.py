@@ -578,10 +578,53 @@ async def _human_warmup(page):
         except Exception:
             pass
 
+        # ── v8.10 阶段 5.5：reCAPTCHA iframe 邻近行为（最高权重信号源）──────
+        # Enterprise 评分对 iframe 邻近的鼠标轨迹权重最高 (Google 公开论文 2019).
+        # 在 execute() 之前 0-2s 在 reCAPTCHA iframe 区域做 5-10 次贝塞尔移动 + hover,
+        # 让 score 模型把这些动作归到 "user just clicked the captcha" 高置信类别.
+        try:
+            _rc_iframes = await page.evaluate("""() => {
+                const out = [];
+                for (const f of document.querySelectorAll('iframe')) {
+                    const s = f.src || '';
+                    if (s.includes('recaptcha/enterprise') || s.includes('recaptcha/api') || s.includes('google.com/recaptcha')) {
+                        const r = f.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) {
+                            out.push({ x: r.x, y: r.y, w: r.width, h: r.height, src: s.slice(0, 80) });
+                        }
+                    }
+                }
+                return out;
+            }""")
+            if _rc_iframes and isinstance(_rc_iframes, list):
+                _rc = _rc_iframes[0]
+                _cx, _cy = _rc['x'] + _rc['w']/2, _rc['y'] + _rc['h']/2
+                log(f"[warmup] v8.10 iframe-near hover @ ({int(_cx)},{int(_cy)}) box={int(_rc['w'])}x{int(_rc['h'])}")
+                # First slow approach to iframe center
+                _ax, _ay = _random.randint(200, w - 200), _random.randint(150, h - 200)
+                await _bezier(_ax, _ay, _cx, _cy, steps=_random.randint(20, 30))
+                await page.wait_for_timeout(_random.randint(400, 800))
+                # 6-10 small bezier moves around the iframe rectangle
+                _hx, _hy = _cx, _cy
+                for _i in range(_random.randint(6, 10)):
+                    _nx = _rc['x'] + _random.uniform(-30, _rc['w'] + 30)
+                    _ny = _rc['y'] + _random.uniform(-30, _rc['h'] + 30)
+                    await _bezier(_hx, _hy, _nx, _ny, steps=_random.randint(10, 18))
+                    await page.wait_for_timeout(_random.randint(120, 350))
+                    _hx, _hy = _nx, _ny
+                # Final hover in iframe center (~1.5s) — strongest signal
+                await page.mouse.move(_cx, _cy)
+                await page.wait_for_timeout(_random.randint(1200, 1800))
+                log("[warmup] v8.10 iframe-near phase ✓")
+            else:
+                log("[warmup] v8.10 no recaptcha iframe yet (skip iframe-near phase)")
+        except Exception as _ife:
+            log(f"[warmup] v8.10 iframe-near phase err (忽略): {_ife}")
+
         # 阶段 6：最终停顿（用户"决定"开始填表）
         await page.wait_for_timeout(_random.randint(2000, 4000))
 
-        log("[warmup] ✓ 完成（约 40-55s 行为积累）")
+        log("[warmup] ✓ 完成（约 40-55s 行为积累 + v8.10 iframe-targeted）")
     except Exception as e:
         log(f"[warmup] 异常(忽略): {e}")
 
