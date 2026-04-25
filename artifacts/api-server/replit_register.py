@@ -181,6 +181,39 @@ _JS_FULL_PROBE = """() => {
 def is_rate_limited(t: str) -> bool:
     t = t.lower()
     return any(p in t for p in ("too quickly","doing this too quickly","please wait a bit","rate limit","too many requests","wait a bit"))
+# ── v8.09 — dynamic sitekey defense (auto-track LIVE drift) ─────────────────
+# Empirical: 2026-04-25 8 cleared sessions all returned 6LfyLYUsAAAAAP0Xmu-hJvZOYJLSL7E410qvKyII
+# (no drift today). But hardcoding the key in execute() means a future rotation
+# breaks signup silently. v8.09 caches the LIVE sitekey from each cleared
+# iframe scan and uses it (not the hardcoded constant) at every execute() call.
+_LIVE_SITEKEY: str = "6LfyLYUsAAAAAP0Xmu-hJvZOYJLSL7E410qvKyII"  # default fallback
+def _update_live_sitekey(k: str) -> None:
+    global _LIVE_SITEKEY
+    if not k or not k.startswith("6L") or len(k) < 30:
+        return
+    if k != _LIVE_SITEKEY:
+        log(f"[v8.09] LIVE sitekey CHANGED: {_LIVE_SITEKEY} → {k} (drift detected, cache updated)")
+        _LIVE_SITEKEY = k
+async def _live_sitekey_from_page(page) -> str:
+    # Pull k= from any visible recaptcha iframe in the LIVE DOM, fall back to cache.
+    try:
+        k = await page.evaluate("""() => {
+            const ifs = Array.from(document.querySelectorAll("iframe"));
+            for (const f of ifs) {
+                const s = f.src || "";
+                if (s.includes("google.com/recaptcha") || s.includes("recaptcha/api") || s.includes("recaptcha/enterprise")) {
+                    try { const u = new URL(s); const k = u.searchParams.get("k"); if (k) return k; } catch(e) {}
+                }
+            }
+            return null;
+        }""")
+        if k and isinstance(k, str) and k.startswith("6L"):
+            _update_live_sitekey(k)
+            return k
+    except Exception as e:
+        log(f"[v8.09] _live_sitekey_from_page failed: {e}")
+    return _LIVE_SITEKEY
+
 def extract_recaptcha_sitekey(iframes: list) -> str | None:
     import urllib.parse
     for fr in iframes:
@@ -191,6 +224,7 @@ def extract_recaptcha_sitekey(iframes: list) -> str | None:
             k = p.get("k") or p.get("sitekey")
             if k:
                 log(f"[reCAPTCHA] sitekey={k}")
+                _update_live_sitekey(k)
                 return k
     return None
 
@@ -794,13 +828,15 @@ async def fill_step1(page) -> str | None:
     if any_rc and not rc_token:
         log("[captcha] Enterprise: 触发 execute() 取 score token (max 25s)…")
         try:
-            ent_result = await page.evaluate("""() => {
+            _sk_live = await _live_sitekey_from_page(page)
+            log(f"[v8.09] mint sitekey={_sk_live} (LIVE)")
+            ent_result = await page.evaluate("""(SK) => {
                 return new Promise((res) => {
                     if (typeof grecaptcha === 'undefined') { res({ok:false,err:'grecaptcha undefined'}); return; }
                     if (!grecaptcha.enterprise) { res({ok:false,err:'enterprise undefined'}); return; }
                     try {
                         grecaptcha.enterprise.ready(() => {
-                            grecaptcha.enterprise.execute('6LfyLYUsAAAAAP0Xmu-hJvZOYJLSL7E410qvKyII', {action:'SIGNUP'})
+                            grecaptcha.enterprise.execute(SK, {action:"SIGNUP"})
                                 .then(t => {
                                     var el = document.querySelector('[name="recaptchaToken"]');
                                     if (el) {
@@ -819,7 +855,7 @@ async def fill_step1(page) -> str | None:
                     } catch(e) { res({ok:false, err:'try_catch:'+(e&&e.message?e.message:String(e))}); }
                     setTimeout(() => res({ok:false, err:'timeout_22s'}), 22000);
                 });
-            }""")
+            }""", _sk_live)
             if isinstance(ent_result, dict):
                 if ent_result.get("ok") and ent_result.get("token") and ent_result.get("len", 0) > 50:
                     rc_token = ent_result["token"]
@@ -1127,8 +1163,10 @@ async def fill_step1(page) -> str | None:
                     log(f"[fast-retry {_fr+1}/3] 等 {_bw}s 避开 replit 429 速率窗口…")
                     await page.wait_for_timeout(_bw * 1000)
                     _api_resp.clear()
+                    _sk_live2 = await _live_sitekey_from_page(page)
+                    log(f"[v8.09] fast-retry sitekey={_sk_live2} (LIVE)")
                     _new = await page.evaluate("""
-                        () => new Promise((res) => {
+                        (SK) => new Promise((res) => {
                             try {
                                 var fn = window.__origExecute;
                                 if (!fn) {
@@ -1137,7 +1175,7 @@ async def fill_step1(page) -> str | None:
                                     }
                                 }
                                 if (!fn) { res({ok:false, err:'no_execute'}); return; }
-                                fn('6LfyLYUsAAAAAP0Xmu-hJvZOYJLSL7E410qvKyII', {action:'SIGNUP'})
+                                fn(SK, {action:"SIGNUP"})
                                     .then(t => {
                                         window.__lockedRcToken = t;
                                         var el = document.querySelector('[name="recaptchaToken"]');
@@ -1153,7 +1191,7 @@ async def fill_step1(page) -> str | None:
                                 setTimeout(() => res({ok:false, err:'execute_timeout_20s'}), 20000);
                             } catch(e) { res({ok:false, err:String(e&&e.message||e)}); }
                         })
-                    """)
+                    """, _sk_live2)
                     if not (isinstance(_new, dict) and _new.get("ok")):
                         log(f"[fast-retry {_fr+1}/3] execute 失败: {(_new or {}).get('err','?')[:120]}")
                         break
