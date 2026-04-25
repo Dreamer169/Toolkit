@@ -2242,14 +2242,17 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                     _broker_port = (os.environ.get("BROKER_EXIT_SOCKS_PORT","") or "").strip()
                 if _disable_groute and not _force_groute:
                     log("[CDP] google-route SKIPPED (DISABLE_GOOGLE_ROUTE=1 explicit opt-out)")
-                elif _broker_fam == "warp" and not _force_groute:
-                    # v8.02 — only SKIP for WARP (broker on CF backbone, *.google via WARP = same CF segment).
-                    # broker=direct (45.205.27.69 AS8796 datacenter) MUST NOT skip: empirical evidence
-                    # (job rpl_modt0h8f_uw86 v7.78g SUCCESS vs job rpl_moeaeubb_mz0o v7.99 FAIL with code:1)
-                    # shows reCAPTCHA Enterprise rejects tokens minted on AS8796 datacenter IP.
-                    # Always pin *.google to clean DEFAULT_POOL (v7.78g/v7.94 restored, v7.99 reverted).
-                    log(f"[CDP] google-route SKIPPED (v8.02 broker=warp → *.google 同走 WARP, CF backbone 一致)")
                 else:
+                    # v8.03 — eliminate ambiguity: ALWAYS attach google-route to clean DEFAULT_POOL,
+                    # regardless of broker family. v7.78g empirical (v7.78g+h success log:
+                    # "google-route attached (v7.78g restore — *.google ALWAYS via clean non-GCP SOCKS pool)")
+                    # → reCAPTCHA Enterprise score OK + signup POST 200. The v7.99 SKIP-on-direct branch
+                    # was a regression (job rpl_moeaeubb_mz0o failed code:1). The v8.02 SKIP-on-warp
+                    # branch was speculative (no empirical backing). Both removed.
+                    # Live test 2026-04-25: WARP :40000 → google.com 200 / recaptcha.net 200 (reachable),
+                    # but clean SOCKS pool 10820-10845 is the only path with empirically-validated
+                    # high reCAPTCHA Enterprise score. broker=socks PIN branch retained as future-proof
+                    # for clean SOCKS broker recovery.
                     try:
                         import sys as _sys, os as _os
                         _here = _os.path.dirname(_os.path.abspath(__file__))
