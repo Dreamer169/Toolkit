@@ -99,10 +99,17 @@ async def _try_storage(username: str) -> dict | None:
         # 注意: storage_state 需要 dict 或 path. 直接传 dict.
         # 但 _meta 字段会被 Playwright 拒绝, 先剔除.
         st_clean = {k: v for k, v in st.items() if k in ("cookies", "origins")}
+        # v7.85 — 走 WARP, 跟注册/复现路径出口 IP 一致 (104.28.x.x). 老逻辑裸
+        # launch 让 chromium 直接从 VPS 公网 (45.205.27.69) 打 replit.com,
+        # 跟 cf_clearance 绑定的 WARP IP 不匹配, 大概率被 CF 挑战.
+        _warp = os.environ.get("REPLIT_BROWSER_PROXY") or os.environ.get("BROWSER_PROXY") or "socks5://127.0.0.1:40000"
         br = await pw.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            proxy={"server": _warp},
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+                  "--disable-quic"],
         )
+        _log(f"storage-replay launch: proxy={_warp} (v7.85 WARP)")
         ctx = await br.new_context(
             storage_state=st_clean,
             user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -180,9 +187,17 @@ async def _password_login(args: dict) -> dict | None:
         try:
             br = await pw.chromium.connect_over_cdp(cdp_ws, timeout=20000)
         except Exception as e:
-            _log(f"CDP attach 失败 ({e}), 走 launch 兜底")
-            br = await pw.chromium.launch(headless=True, args=[
-                "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
+            # v7.85 — 兜底 launch 走 WARP, 不走 VPS 公网. 老逻辑裸 launch 让密码
+            # 登录直接从 VPS 出去, reCAPTCHA Enterprise 看到 datacenter IP 直接
+            # 拖到 ban 线以下, 必挂.
+            _warp = os.environ.get("REPLIT_BROWSER_PROXY") or os.environ.get("BROWSER_PROXY") or "socks5://127.0.0.1:40000"
+            _log(f"CDP attach 失败 ({e}), 走 launch 兜底 (proxy={_warp} v7.85 WARP)")
+            br = await pw.chromium.launch(
+                headless=True,
+                proxy={"server": _warp},
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+                      "--disable-quic"],
+            )
         try:
             ctx = br.contexts[0] if br.contexts else await br.new_context()
             page = await ctx.new_page()

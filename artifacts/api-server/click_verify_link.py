@@ -20,6 +20,19 @@ verify_url = html_lib.unescape(verify_url) if verify_url else verify_url
 # 仅当上层显式传入或 env 设置时才用代理。
 proxy_url = data.get("proxy") or os.environ.get("MICROSOFT_BROWSER_PROXY") or os.environ.get("OUTLOOK_BROWSER_PROXY") or os.environ.get("MICROSOFT_HTTP_PROXY") or os.environ.get("OUTLOOK_HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or ""
 
+# v7.85 — chromium 访问 verify link (replit.com / reseek.com) 时必须走 WARP,
+# 否则注册时 chromium 走 socks5://127.0.0.1:40000 (CF WARP, 出口 104.28.x.x),
+# 但 verify 点击却走 VPS 公网 (45.205.27.69), 让 Replit 反爬看到
+# "注册 IP ≠ 验证 IP" 这个极强异常信号 → 账号被风控 + VPS IP 被标黑.
+# 上面的 proxy_url 是给 Graph API (open_url) 读邮件用的 connect-proxy /
+# outlook 通道, chromium 不能复用. 这里独立一个 replit_browser_proxy.
+replit_browser_proxy = (
+    data.get("replit_browser_proxy")
+    or os.environ.get("REPLIT_BROWSER_PROXY")
+    or os.environ.get("BROWSER_PROXY")
+    or "socks5://127.0.0.1:40000"
+)
+
 VERIFY_KWS   = ("verify", "confirm", "activate", "validation", "email-action",
                 "verificationToken", "emailVerification", "signup_success",
                 "token=", "confirmation")
@@ -285,17 +298,25 @@ else:
 try:
     from patchright.sync_api import sync_playwright
     with sync_playwright() as p:
+        # v7.85 — chromium 必须走 WARP, 跟 register/replay 路径出口 IP 一致.
+        # 删除 --no-proxy-server (那个 arg 会强制 chromium 忽略所有代理设置, 包括
+        # 我们下面 ctx 上挂的 proxy, 让浏览器从 VPS 公网直连 replit.com).
         browser = p.chromium.launch(headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
                   "--disable-extensions", "--mute-audio",
-                  "--no-proxy-server"])  # 阻止 Chromium 读取 HTTPS_PROXY 环境变量
-        proxy_conf = patchright_proxy(proxy_url)
+                  "--disable-quic"])  # 防 QUIC over UDP 绕过 socks5
+        replit_proxy_conf = patchright_proxy(replit_browser_proxy)
         ctx_opts = {"user_agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")}
-        # 直连 replit.com（VPS 有出口，connect-proxy 仅用于 Graph API）
-        # if proxy_conf:
-        #     ctx_opts["proxy"] = proxy_conf
+        # v7.85 — 强制走 WARP 代理 (默认 socks5://127.0.0.1:40000), 让 chromium
+        # 出口 IP 落在 CF WARP CIDR (104.28.x.x), 跟注册时一致, 避开 Replit
+        # 反爬 "注册 IP ≠ 验证 IP" 关联检测.
+        if replit_proxy_conf:
+            ctx_opts["proxy"] = replit_proxy_conf
+            print(f"[click_verify] chromium proxy = {replit_proxy_conf.get('server')} (v7.85 WARP)", flush=True)
+        else:
+            print("[click_verify] WARNING: 无 chromium proxy, 将走 VPS 公网直连 (注册-验证 IP 不匹配)", flush=True)
         ctx  = browser.new_context(**ctx_opts)
         page = ctx.new_page()
         # 抓取所有 XHR/fetch，便于诊断 Replit 后端是否被调用
