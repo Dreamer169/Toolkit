@@ -1637,116 +1637,10 @@ async def _complete_via_verify_url(page, verify_url: str, close_fn=None) -> dict
     return None
 
 
-
-# v7.78m — in-page exit-IP probe.
-# register 流程之前用 curl/get_exit_ip(_camoufox) 测的 exit_ip 有 4 种来源歧义:
-# (a) [CDP] curl --interface CloudflareWARP ipify  (broker WARP iface)
-# (b) [CDP] fallback curl ipify                     (VPS 默认路由)
-# (c) get_exit_ip_camoufox(proxy_cfg)               (camoufox + proxy)
-# (d) get_exit_ip(pw, proxy_cfg)                    (playwright + proxy)
-# 这 4 种测出来的 IP 不一定等于 signup HTTP 实际 source IP, 也不一定等于
-# cf_clearance 发放时浏览器看到的 IP (因为 broker 出口 vs new_context 的
-# proxy 出口可能不同, 且 xray pool outbound 在实时漂移).
-#
-# 唯一 ground truth: signup 完成后, 在已通过 CF challenge 的 page 上下文里
-# fetch ipify - 此时的源 IP 一定等于 cf_clearance/connect.sid 绑定 IP, 也
-# 是 replay 时必须严格复刻的 IP.
-async def _probe_inpage_exit_ip(page) -> str:
-    """在 page 内 fetch ipify, 拿浏览器 chromium 链路实际出口 IP."""
-    try:
-        ip = await page.evaluate("""async () => {
-            try {
-                const r = await fetch("https://api.ipify.org/?format=json", {cache: "no-store"});
-                const j = await r.json();
-                return j.ip || "";
-            } catch(e) { return ""; }
-        }""")
-        if ip and isinstance(ip, str) and ip.count(".") == 3:
-            return ip.strip()
-    except Exception as e:
-        log(f"[inpage-ip] err: {e}")
-    return ""
-
-
-async def _probe_inpage_fingerprint(page) -> dict:
-    """v7.78o: signup 完成后, 在 page 内 evaluate 拿浏览器实际 navigator/screen
-    指纹, 写到 result.fingerprint. CDP/playwright 路径下与 _CTX_FINGERPRINT 一致,
-    camoufox 路径下拿到的是 firefox 真实指纹 (跟硬编码的 chromium 默认不同)."""
-    try:
-        fp = await page.evaluate("""async () => {
-            const n = navigator, s = screen;
-            const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-            return {
-                user_agent: n.userAgent,
-                viewport: {width: window.innerWidth, height: window.innerHeight},
-                screen: {width: s.width, height: s.height},
-                device_scale_factor: window.devicePixelRatio || 1,
-                is_mobile: /Mobi|Android/i.test(n.userAgent),
-                has_touch: ('ontouchstart' in window) || (n.maxTouchPoints||0)>0,
-                locale: n.language || n.languages?.[0] || 'en-US',
-                timezone_id: tz || 'America/Los_Angeles',
-                color_scheme: window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
-                platform: n.platform || '',
-                hardware_concurrency: n.hardwareConcurrency || 0,
-                device_memory: n.deviceMemory || null,
-                languages: Array.from(n.languages || []),
-            };
-        }""")
-        if isinstance(fp, dict) and fp.get("user_agent"):
-            return fp
-    except Exception as e:
-        log(f"[inpage-fp] err: {e}")
-    return {}
-
-
-async def _finalize_exit_ip(result: dict, page) -> None:
-    """v7.78m+v7.78o: signup 成功后一次到位:
-    1. in-page fetch ipify → ground truth exit_ip (覆写 preflight 值)
-    2. in-page navigator/screen 探针 → ground truth fingerprint
-    3. 写 result.user_agent / result.fingerprint, accounts.ts INSERT 拿得到
-    全部用 try/except 包住, 避免 page 异常影响 signup-成功 状态."""
-    try:
-        real = await _probe_inpage_exit_ip(page)
-        if real:
-            result["exit_ip_original"] = result.get("exit_ip", "")
-            result["exit_ip"] = real
-            result["exit_ip_real"] = real
-            result["exit_ip_source"] = "inpage_post_signup"
-            log(f"[inpage-ip] ground truth = {real} (覆盖 preflight {result.get('exit_ip_original','')})")
-        else:
-            result["exit_ip_source"] = "preflight_only"
-            log(f"[inpage-ip] probe 失败, 保留 preflight 值 {result.get('exit_ip','')}")
-    except Exception as e:
-        log(f"[inpage-ip] _finalize_exit_ip exit_ip block err (ignored): {e}")
-
-    try:
-        fp = await _probe_inpage_fingerprint(page)
-        if fp:
-            # 与 _CTX_FINGERPRINT 同 schema, replay_session.py 直接 load 用
-            result["fingerprint"] = fp
-            result["user_agent"] = fp.get("user_agent", "")
-            result["fingerprint_source"] = "inpage_post_signup"
-            log(f"[inpage-fp] captured ua={fp.get('user_agent','')[:60]}... viewport={fp.get('viewport')} tz={fp.get('timezone_id')}")
-        else:
-            # 兜底: 用 _CTX_FINGERPRINT (CDP 路径设过) 或保留空
-            ctx_fp = globals().get("_CTX_FINGERPRINT") or {}
-            if ctx_fp:
-                result["fingerprint"] = ctx_fp
-                result["user_agent"] = ctx_fp.get("user_agent", "")
-                result["fingerprint_source"] = "ctx_fallback"
-                log(f"[inpage-fp] probe 失败, 用 _CTX_FINGERPRINT 兜底")
-            else:
-                result["fingerprint_source"] = "missing"
-                log(f"[inpage-fp] probe 失败 + 无 _CTX_FINGERPRINT, fingerprint 字段空")
-    except Exception as e:
-        log(f"[inpage-fp] _finalize_exit_ip fp block err (ignored): {e}")
-
-
 # ── session 持久化 ─────────────────────────────────────────────────────────
 # 注册/登录成功时把 cookies+localStorage 落到 .state/replit/<username>.json,
 # 下次 replit_login.py 直接 load_state 进 context, 0 captcha 0 cf_challenge,
 # 复用直到 connect.sid 过期 (Replit cookieExpiresAt ≈ 7 天).
-_CTX_FINGERPRINT: dict = {}
 STATE_DIR = "/root/Toolkit/.state/replit"
 
 async def _save_replit_state(ctx, username: str, email: str = "", extra: dict | None = None):
@@ -1762,7 +1656,6 @@ async def _save_replit_state(ctx, username: str, email: str = "", extra: dict | 
             "username": username,
             "email": email,
             "saved_at": int(__import__("time").time()),
-            "fingerprint": _CTX_FINGERPRINT,
             **(extra or {}),
         }
         import json as _j
@@ -1790,41 +1683,23 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
         # v7.57 revert v7.52: 不再强行 proxy=proxy_cfg。CDP 路径继承 broker WARP 出口，
         # 与 cf_clearance 来源 IP / Google NID trust cookies 起源 IP 保持一致，
         # 恢复 7d89395 时段 reCAPTCHA Enterprise 高分拓扑。
-        # v7.78k — 把 context 指纹快照写到 _CTX_FINGERPRINT，便于 register 完成时
-        # 一并回写 DB (accounts.user_agent + accounts.fingerprint_json)，replay 时
-        # 重建一致上下文，避免 Cloudflare/Replit 风控因 UA/viewport/timezone 漂移
-        # 把 cf_clearance + connect.sid 拉黑。
-        global _CTX_FINGERPRINT
-        _CTX_FINGERPRINT = {
-            "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
-            "viewport": {"width": 1920, "height": 1040},
-            "screen": {"width": 1920, "height": 1080},
-            "device_scale_factor": 1,
-            "is_mobile": False,
-            "has_touch": False,
-            "locale": "en-US",
-            "timezone_id": "America/Los_Angeles",
-            "color_scheme": "light",
-            "extra_http_headers": {
+        ctx = await browser.new_context(
+            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1040},
+            screen={"width": 1920, "height": 1080},
+            device_scale_factor=1,
+            is_mobile=False,
+            has_touch=False,
+            locale="en-US",
+            timezone_id="America/Los_Angeles",
+            color_scheme="light",
+            ignore_https_errors=True,
+            extra_http_headers={
                 "Accept-Language": "en-US,en;q=0.9",
                 "sec-ch-ua": "\"Chromium\";v=\"145\", \"Not:A-Brand\";v=\"99\", \"Google Chrome\";v=\"145\"",
                 "sec-ch-ua-mobile": "?0",
                 "sec-ch-ua-platform": "\"Linux\"",
             },
-            "platform": "Linux x86_64",
-        }
-        ctx = await browser.new_context(
-            user_agent=_CTX_FINGERPRINT["user_agent"],
-            viewport=_CTX_FINGERPRINT["viewport"],
-            screen=_CTX_FINGERPRINT["screen"],
-            device_scale_factor=_CTX_FINGERPRINT["device_scale_factor"],
-            is_mobile=_CTX_FINGERPRINT["is_mobile"],
-            has_touch=_CTX_FINGERPRINT["has_touch"],
-            locale=_CTX_FINGERPRINT["locale"],
-            timezone_id=_CTX_FINGERPRINT["timezone_id"],
-            color_scheme=_CTX_FINGERPRINT["color_scheme"],
-            ignore_https_errors=True,
-            extra_http_headers=_CTX_FINGERPRINT["extra_http_headers"],
         )
     else:
         ctx  = await browser.new_context(viewport={"width": 1280, "height": 800}, locale="en-US", user_agent=UA)
@@ -2047,15 +1922,10 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 # v7.72: 默认始终禁用 google_proxy_route — 让 chromium 原生出口同时处理
                 # execute() 和 signup POST, 保证 IP 一致 → 不再 code:2 (mismatch).
                 # v7.71 restored: enable google_proxy_route when BROWSER_PROXY non-empty (VLESS).
-                # v7.78g — RESTORE 0391f15 working behavior: google_proxy_route ALWAYS attached.
-                # 0391f15 (e2e verified: tylerreyes307@outlook.com -> userId=58078470) had NO gate
-                # here — *.google traffic was unconditionally routed via clean non-GCP SOCKS pool.
-                # The v7.71-v7.78f BROWSER_PROXY/Tor gate was a misdiagnosis of code:2 (which is
-                # actually a LIVE/LOCKED token-action mismatch, not an IP mismatch — see route-force
-                # at line ~825 which already handles that). DISABLE_GOOGLE_ROUTE=1 kept as escape hatch.
+                _brox = os.environ.get("BROWSER_PROXY","").strip()  # v7.78f: revert v7.74 regression — gate must read broker chromium env, not legacy patchright PROXY param
                 _disable_groute = os.environ.get("DISABLE_GOOGLE_ROUTE","").strip() in ("1","true","yes")
-                if _disable_groute:
-                    log("[CDP] google-route SKIPPED (DISABLE_GOOGLE_ROUTE=1 explicit opt-out)")
+                if not _brox or _disable_groute or ":9050" in _brox:
+                    log(f"[CDP] google-route SKIPPED (BROWSER_PROXY={_brox!r}) — chromium native exit 接管 *.google → IP一致避免 code:2")
                 else:
                     try:
                         import sys as _sys, os as _os
@@ -2064,7 +1934,7 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                             _sys.path.insert(0, _here)
                         from google_proxy_route import attach_google_proxy_routing as _agr
                         await _agr(ctx, log)
-                        log("[CDP] google-route attached (v7.78g restore — *.google ALWAYS via clean non-GCP SOCKS pool)")
+                        log("[CDP] google-route attached (FORCE_GOOGLE_ROUTE=1, *.google → SOCKS clean exits)")
                     except Exception as _ge:
                         log(f"[CDP] google-route attach failed: {_ge}")
             except Exception as _we:
@@ -2331,12 +2201,10 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 log("[step2-miss] 验证邮件已发送 → 交还 TS orchestrator (Graph API + click-verify-link)")
                 result["ok"] = True
                 result["phase"] = "verify_email_sent"
-                # v7.78m: in-page ground-truth IP probe
-                await _finalize_exit_ip(result, page)
                 # 不再 in-python _fetch_replit_verify_url / _complete_via_verify_url
                 # TS Graph API (accounts.ts L900-940) 全权负责拉链接 + 点击, 避免 replit_register 污染
                 try:
-                    _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path":"verify_email_sent","exit_ip_real":result.get("exit_ip_real",""),"exit_ip_source":result.get("exit_ip_source","")})
+                    _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path":"verify_email_sent"})
                     if _sp: result["state_path"] = _sp
                 except Exception as _se:
                     log(f"[state] ⚠ {_se}")
@@ -2366,10 +2234,8 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
         result["ok"] = True
         result["phase"] = "done"
         log("✅ 注册完成（验证邮件发送阶段）")
-        # v7.78m: in-page ground-truth IP probe
-        await _finalize_exit_ip(result, page)
         try:
-            _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path": "step2_done","exit_ip_real":result.get("exit_ip_real",""),"exit_ip_source":result.get("exit_ip_source","")})
+            _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path": "step2_done"})
             if _sp: result["state_path"] = _sp
         except Exception as _se:
             log(f"[state] ⚠ step2-done save_state failed: {_se}")
@@ -2607,11 +2473,9 @@ async def attempt_register_camoufox(proxy_cfg, exit_ip: str) -> dict:
                 if any(h in bck.lower() for h in SUCCESS_HINTS):
                     log("[camoufox][step2-miss] 验证邮件已发送 → 交还 TS orchestrator (Graph API + click-verify-link)")
                     result["ok"] = True; result["phase"] = "verify_email_sent"
-                    # v7.78m: in-page ground-truth IP probe
-                    await _finalize_exit_ip(result, page)
                     # 不再 in-python _fetch / _complete, TS Graph API 全权负责
                     try:
-                        _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path":"verify_email_sent_camoufox","exit_ip_real":result.get("exit_ip_real",""),"exit_ip_source":result.get("exit_ip_source","")})
+                        _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path":"verify_email_sent_camoufox"})
                         if _sp: result["state_path"] = _sp
                     except Exception as _se:
                         log(f"[camoufox][state] ⚠ {_se}")
@@ -2626,10 +2490,8 @@ async def attempt_register_camoufox(proxy_cfg, exit_ip: str) -> dict:
                 result["error"] = "integrity_check_failed_at_step2"; return result
             result["ok"] = True; result["phase"] = "done"
             log("[camoufox] registration complete (verify email phase)")
-            # v7.78m: in-page ground-truth IP probe
-            await _finalize_exit_ip(result, page)
             try:
-                _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path": "step2_done_camoufox","exit_ip_real":result.get("exit_ip_real",""),"exit_ip_source":result.get("exit_ip_source","")})
+                _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path": "step2_done_camoufox"})
                 if _sp: result["state_path"] = _sp
             except Exception as _se:
                 log(f"[camoufox][state] ⚠ step2-done save_state failed: {_se}")

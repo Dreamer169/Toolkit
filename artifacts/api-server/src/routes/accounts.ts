@@ -1031,8 +1031,8 @@ router.post("/replit/register", (req, res) => {
                      updated_at = NOW()`,
               [outlook.email, password, username,
                verified ? "registered" : "unverified",
-               outlook.email, exitIp, pick(XRAY_PORTS),
-               String(parsed.user_agent ?? "") || null,
+               outlook.email, exitIp, tryPort,
+               String(parsed.user_agent ?? (parsed.fingerprint as Record<string, unknown> | undefined)?.user_agent ?? "") || null,
                parsed.fingerprint ? JSON.stringify(parsed.fingerprint) : null]
             );
             dbInsertOk = true;
