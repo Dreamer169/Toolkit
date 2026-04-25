@@ -2242,8 +2242,13 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                     _broker_port = (os.environ.get("BROKER_EXIT_SOCKS_PORT","") or "").strip()
                 if _disable_groute and not _force_groute:
                     log("[CDP] google-route SKIPPED (DISABLE_GOOGLE_ROUTE=1 explicit opt-out)")
-                elif _broker_fam in ("warp","direct") and not _force_groute:
-                    log(f"[CDP] google-route SKIPPED (v7.99 broker={_broker_fam} → 同家族一致策略, *.google 走 broker 原生出口避免跨 ASN)")
+                elif _broker_fam == "warp" and not _force_groute:
+                    # v8.02 — only SKIP for WARP (broker on CF backbone, *.google via WARP = same CF segment).
+                    # broker=direct (45.205.27.69 AS8796 datacenter) MUST NOT skip: empirical evidence
+                    # (job rpl_modt0h8f_uw86 v7.78g SUCCESS vs job rpl_moeaeubb_mz0o v7.99 FAIL with code:1)
+                    # shows reCAPTCHA Enterprise rejects tokens minted on AS8796 datacenter IP.
+                    # Always pin *.google to clean DEFAULT_POOL (v7.78g/v7.94 restored, v7.99 reverted).
+                    log(f"[CDP] google-route SKIPPED (v8.02 broker=warp → *.google 同走 WARP, CF backbone 一致)")
                 else:
                     try:
                         import sys as _sys, os as _os
@@ -2491,12 +2496,13 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
             # 抛 captcha_low_score; 让 audio-challenge fallback 与外层 IP 校验决定.
             if _v3_score_only:
                 log("[retry] reCAPTCHA Enterprise v3 score-only widget (no bframe) → 跳过音频, 直接报 token_invalid")
-                log("[retry] code:2 = IP 一致性问题 (token IP ≠ submit IP). 检查 google_proxy_route 与 BROKER_EXIT_FAMILY 对齐. 不要换 broker IP.")
+                log("[retry] code:1 = reCAPTCHA Enterprise token rejected. 常见原因: (a) token-issuance IP 落在 datacenter ASN 被评低分 (本 VPS 45.205.27.69 AS8796 实证); (b) cf_clearance 缺失或 stealth 指纹被识破; (c) v3 score-only 站点不可能音频升级. 修复方向: 让 google-route attach 到清洁住宅/CDN-friendly SOCKS 池, 不要 SKIP 让 *.google 走 broker datacenter 出口.")
                 result["error"] = "captcha_token_invalid"
                 result["detail"] = (
-                    "reCAPTCHA Enterprise v3 token rejected (code:2). "
-                    "Per v7.78m/v7.78q model: token-issuance IP must equal signup-POST IP. "
-                    "Verify google_proxy_route attaches to broker exit family (warp/socks/direct same)."
+                    "reCAPTCHA Enterprise v3 token rejected (code:1). "
+                    "Likely token-issuance IP is on a datacenter ASN that reCAPTCHA scores low, "
+                    "OR cf_clearance is missing. Fix: ensure google-route attaches a clean SOCKS pool "
+                    "(do NOT skip when broker=direct — that lets *.google exit via VPS datacenter IP)."
                 )
                 try: await browser.close()
                 except Exception: pass
