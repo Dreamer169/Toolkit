@@ -1893,6 +1893,32 @@ async def _save_replit_state(ctx, username: str, email: str = "", extra: dict | 
 async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> dict:
     result = {"ok": False, "phase": "init", "error": "", "exit_ip": exit_ip}
 
+    # ── v8.08 — TRUE same-IP fix ───────────────────────────────────────────
+    # 上层 orchestrator (accounts.ts) 把 SOCKS hint 端口 (e.g. 10822) 作为
+    # proxy_cfg 传进来; chromium 主 ctx 默认用它. 但是:
+    #   * cf_clearance 由 broker chromium 在 WARP 出口 (104.28.x) 颁发
+    #   * google-route (v8.07) 把 *.google PIN 到 WARP 40000 → token mint 在 WARP IP
+    #   * 主 ctx 仍走 SOCKS hint → replit.com signup POST 从另一个 IP 出去
+    # 三 IP 不一致 → reCAPTCHA siteverify 检测到 token-mint-IP ≠ submit-IP
+    # → 评分极低 → Replit 返回 code:1 "Your captcha token is invalid".
+    # 修复: broker=warp 时, 把主 ctx proxy 也强制 PIN 到 WARP 40000,
+    # 保证 replit.com POST + recaptcha mint + cf_clearance 三件全在 WARP IP.
+    try:
+        import json as _jbf08
+        with open("/tmp/replit-broker/exit.json","r") as _bf08:
+            _bj08 = _jbf08.load(_bf08)
+        _fam08 = (_bj08.get("family") or "").strip().lower()
+        if _fam08 == "warp":
+            log(f"[attempt-register] v8.08 broker=warp → main ctx proxy override: {proxy_cfg} → socks5://127.0.0.1:40000 (IP-同源 with cf_clearance + recaptcha mint)")
+            proxy_cfg = {"server": "socks5://127.0.0.1:40000"}
+        elif _fam08 == "socks":
+            _bport08 = str(_bj08.get("port") or "").strip()
+            if _bport08:
+                log(f"[attempt-register] v8.08 broker=socks → main ctx proxy override: {proxy_cfg} → socks5://127.0.0.1:{_bport08} (IP-同源 with broker SOCKS exit)")
+                proxy_cfg = {"server": f"socks5://127.0.0.1:{_bport08}"}
+    except Exception as _e08:
+        log(f"[attempt-register] v8.08 broker hint read failed (keep orchestrator proxy_cfg): {_e08}")
+
     browser = await pw_module.chromium.launch(
         headless=HEADLESS, proxy=proxy_cfg,
         args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
