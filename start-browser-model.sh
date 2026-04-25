@@ -65,6 +65,14 @@ _is_cf_ip() {
 }
 
 _pick_browser_proxy() {
+  # v8.01c — ALL datacenter SOCKS get CF-challenged on replit.com/signup.
+  # Only DIRECT (VPS IP 45.205.27.69) passes CF without challenge.
+  # Temporarily skip SOCKS, force DIRECT.
+  DIRECT_EXIT=$(curl -s --max-time 6 https://api.ipify.org 2>/dev/null | tr -d "[[:space:]]")
+  if [[ -n "$DIRECT_EXIT" ]]; then
+    echo "|DIRECT-VPS@${DIRECT_EXIT}(AS8796-FASTNET)"
+    return 0
+  fi
   # 1) datacenter SOCKS clean 池 — 必须出口非 CF 段
   for cand in 10824:Kirino 10826:DigitalOcean 10830:MULTACOM 10828:Misaka 10822:Vultr 10832:Linode 10838:Static 10820:Static 10825:Static 10831:Static 10836:Static 10837:Static 10845:Static; do
     port="${cand%%:*}"; name="${cand##*:}"
