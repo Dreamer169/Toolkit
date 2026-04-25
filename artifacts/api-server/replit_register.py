@@ -613,14 +613,69 @@ async def fill_step1(page) -> str | None:
     if not ok:
         return "signup_email_field_not_found"
 
-    # v7.27b：等待 email 异步验证完成（显示 "Email is available"），避免 button 被 disabled
+    # ──────────────────────────────────────────────────────────────────────
+    # v7.79: Email 预检 (pre-flight availability probe)
+    # ──────────────────────────────────────────────────────────────────────
+    # 背景: 用户 outlook 池里大量邮箱已经在 Replit 站外被注册过 (NOT EXISTS DB
+    #   过滤抓不到的情况). 现状走完 captcha solve + submit 才知道 "Email already
+    #   in use" → 每个死候选浪费 ~3 分钟. cf-warmup 9 分钟跑了 3 个候选全废.
+    #
+    # 修法: 填完 email 后, 把 Replit 自家的 inline 异步验证结果作为 fast-fail
+    #   信号: success("available"/"looks good") → 继续走完整 flow;
+    #         negative("already in use"/"taken"/"already exists"/"already
+    #         registered") → 直接返回 "Email already in use on Replit", 跳过
+    #         captcha solve, 由上游 accounts.ts 标 replit_used 后立即换下一个
+    #         outlook (省 ~2.5 分钟/候选).
+    #
+    # [LEGACY-v7.78r 备份] 旧的 5 行只等 "available" 不识别 negative:
+    #   await page.wait_for_timeout(_random.randint(1800, 2800))
+    #   try:
+    #       await page.wait_for_selector(
+    #           '[role="alert"]:has-text("available"), .success, [class*="success"]',
+    #           timeout=3000)
+    #       log("[email] 邮箱可用提示出现")
+    #   except Exception: pass
+    # ──────────────────────────────────────────────────────────────────────
     await page.wait_for_timeout(_random.randint(1800, 2800))
+    _NEG_KW = (
+        "already in use", "already registered", "already exists",
+        "already been used", "email is taken", "is already taken",
+        "use a different email", "email taken",
+    )
+    _POS_KW = ("available", "looks good", "valid email")
+    _precheck_decision = None
     try:
-        await page.wait_for_selector('[role="alert"]:has-text("available"), .success, [class*="success"]',
-                                     timeout=3000)
-        log("[email] 邮箱可用提示出现")
-    except Exception:
-        pass
+        # 5s 内轮询: 任一明确判断成立就 break, 优先识别 negative
+        _t_start = asyncio.get_event_loop().time()
+        while asyncio.get_event_loop().time() - _t_start < 5.0:
+            try:
+                _alerts = await page.locator(
+                    '[role="alert"], [class*="error" i], [class*="invalid" i], '
+                    '[class*="warning" i], [data-cy*="error"], '
+                    '[class*="success" i], [class*="valid" i]:not([class*="invalid" i])'
+                ).all_text_contents()
+                _alert_blob = " | ".join(_alerts).lower()
+                if _alert_blob:
+                    if any(kw in _alert_blob for kw in _NEG_KW):
+                        _precheck_decision = "taken"
+                        log(f"[email-precheck] ❌ negative 信号: {_alert_blob[:160]}")
+                        break
+                    if any(kw in _alert_blob for kw in _POS_KW):
+                        _precheck_decision = "available"
+                        log(f"[email-precheck] ✅ 邮箱可用: {_alert_blob[:80]}")
+                        break
+            except Exception:
+                pass
+            await page.wait_for_timeout(250)
+        if _precheck_decision is None:
+            log("[email-precheck] timeout: 未拿到明确信号 → 继续走完整 flow")
+    except Exception as _ev:
+        log(f"[email-precheck] 异常 (忽略, fallback 走完整 flow): {_ev}")
+
+    if _precheck_decision == "taken":
+        # 短路: 直接告诉上游 "Email already in use", 让它标 replit_used 换下一个
+        # outlook. 避免后续 captcha solve + submit 浪费 ~2.5 分钟.
+        return "Email already in use on Replit"
 
     # 填 password
     await _fast_fill(

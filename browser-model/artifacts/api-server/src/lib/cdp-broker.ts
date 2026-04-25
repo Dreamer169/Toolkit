@@ -909,12 +909,23 @@ export class CdpSession {
       timezoneId: "America/Los_Angeles",
       colorScheme: "light",
       ignoreHTTPSErrors: true,
-      // Client Hints —— 现代反爬必查项，必须跟 UA 串自洽
+      // Client Hints —— 现代反爬必查项，必须跟 UA 串自洽。
+      // v7.79: 补 6 个 high-entropy CH 字段 (Bitness/Arch/Full-Version/Platform-Version/
+      //   Full-Version-List/Model + Wow64). Replit /signup 当前 cf-mitigated managed
+      //   challenge 的 accept-ch + critical-ch 明确点名要这些; 缺一个就当 stale-ch
+      //   = non-Chrome bot 标记 → cf_clearance 永远拿不到.
       extraHTTPHeaders: {
         "Accept-Language": "en-US,en;q=0.9",
         "sec-ch-ua": "\"Chromium\";v=\"145\", \"Not:A-Brand\";v=\"99\", \"Google Chrome\";v=\"145\"",
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": "\"Linux\"",
+        "sec-ch-ua-bitness": "\"64\"",
+        "sec-ch-ua-arch": "\"x86\"",
+        "sec-ch-ua-full-version": "\"145.0.7049.114\"",
+        "sec-ch-ua-platform-version": "\"6.5.0\"",
+        "sec-ch-ua-full-version-list": "\"Chromium\";v=\"145.0.7049.114\", \"Not:A-Brand\";v=\"99.0.0.0\", \"Google Chrome\";v=\"145.0.7049.114\"",
+        "sec-ch-ua-model": "\"\"",
+        "sec-ch-ua-wow64": "?0",
       },
       // 跟时区一致：洛杉矶（Mission District 附近），地理位置/时区/locale 三者自洽
       // 否则反爬看到 timezone=LA 但 geolocation=null 立马起疑

@@ -78,7 +78,20 @@ _pick_browser_proxy() {
     echo "socks5://127.0.0.1:${port}|${name}@${EXIT}"
     return 0
   done
-  # 2) DIRECT — VPS 公网 IP (45.205.27.69 AS8796 FASTNET datacenter, CF 友好)
+  # 2) WARP fallback — Cloudflare 消费级 WARP 出口 (104.28.x), 跳过 _is_cf_ip 过滤。
+  #    v7.79+ 推翻 v7.78d "CF 不给自家段发 cf_clearance" 误判：实测 (2026-04-25)
+  #    WARP 出口 curl https://replit.com/signup 与 DIRECT 一样收 HTTP/2 403 + cf-mitigated:challenge,
+  #    走完 JS challenge 同样能拿 cf_clearance。WARP 比单一 VPS IP 抗 ban (CF 不会 ban 自家消费产品池)。
+  #    优先级 lower than 真 datacenter SOCKS, higher than 单一 VPS DIRECT。
+  if ss -uln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b" || ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b"; then
+    WARP_EXIT=$(curl -s --max-time 8 --socks5 "127.0.0.1:40000" https://ifconfig.me/ip 2>/dev/null | tr -d "[:space:]")
+    if [[ -n "$WARP_EXIT" ]]; then
+      echo "socks5://127.0.0.1:40000|WARP@${WARP_EXIT}"
+      return 0
+    fi
+    echo "[picker] WARP port 40000 listen 但 curl 失败, 跳过" >&2
+  fi
+  # 3) DIRECT — VPS 公网 IP (45.205.27.69 AS8796 FASTNET datacenter, CF 友好)
   #    空 BROWSER_PROXY → browser-model 不加 --proxy-server, chromium 直走 OS 路由
   #    跳过 Tor: Replit/CF 几乎全部 ban 已知 Tor exit IPs
   echo "|DIRECT-VPS@45.205.27.69(AS8796-FASTNET)"

@@ -273,6 +273,174 @@ export const STEALTH_INIT = `
     };
     try { wrap(Date.prototype.getTimezoneOffset); } catch (_) {}
   } catch (_) {}
+
+  // === navigator.userAgentData (NavigatorUAData high-entropy) ===
+  // v7.79 — CF managed challenge JS 层会调 navigator.userAgentData.getHighEntropyValues
+  // (['platformVersion','architecture','bitness','model','uaFullVersion',
+  //   'fullVersionList','wow64']) 然后跟 Sec-CH-UA-* 协议头 byte-by-byte 比对。
+  // playwright stock 默认 navigator.userAgentData 在 Linux 上要么 undefined 要么
+  // 返 Headless 标记 → CF 一眼判定 bot. 这里强制全套自洽返回值.
+  try {
+    var _brands = [
+      { brand: "Chromium", version: "145" },
+      { brand: "Not:A-Brand", version: "99" },
+      { brand: "Google Chrome", version: "145" },
+    ];
+    var _fullVerList = [
+      { brand: "Chromium", version: "145.0.7049.114" },
+      { brand: "Not:A-Brand", version: "99.0.0.0" },
+      { brand: "Google Chrome", version: "145.0.7049.114" },
+    ];
+    var _highEntropy = {
+      brands: _brands,
+      mobile: false,
+      platform: "Linux",
+      platformVersion: "6.5.0",
+      architecture: "x86",
+      bitness: "64",
+      model: "",
+      uaFullVersion: "145.0.7049.114",
+      fullVersionList: _fullVerList,
+      wow64: false,
+      formFactors: ["Desktop"],
+    };
+    var _uaData = {
+      brands: _brands,
+      mobile: false,
+      platform: "Linux",
+      getHighEntropyValues: function (hints) {
+        var out = { brands: _brands, mobile: false, platform: "Linux" };
+        try {
+          (hints || []).forEach(function (h) {
+            if (h in _highEntropy) out[h] = _highEntropy[h];
+          });
+        } catch (_) {}
+        return Promise.resolve(out);
+      },
+      toJSON: function () {
+        return { brands: _brands, mobile: false, platform: "Linux" };
+      },
+    };
+    try { wrap(_uaData.getHighEntropyValues); } catch (_) {}
+    try { wrap(_uaData.toJSON); } catch (_) {}
+    Object.defineProperty(Navigator.prototype, 'userAgentData', {
+      get: function () { return _uaData; }, configurable: true,
+    });
+  } catch (_) {}
+
+  // === Canvas / Audio / WebGL fingerprint noise ===
+  // v7.79 — CF/CreepJS canvas hash 黑名单已收录 stock playwright + Mesa-SwiftShader
+  // 的确定性指纹. 注入 deterministic-per-session 微噪声: 同会话内多次读返回一致
+  // (避免 sanity check 失败), 不同会话产生不同 hash → 黑名单失效.
+  try {
+    // sessionStorage seed: 同一 ctx 一致, 跨 ctx 不同
+    var _noiseSeed;
+    try {
+      var _k = "__cnv_noise_seed__";
+      var _v = sessionStorage.getItem(_k);
+      if (!_v) { _v = String(Math.floor(Math.random() * 1e9)); sessionStorage.setItem(_k, _v); }
+      _noiseSeed = (parseInt(_v, 10) || 1) >>> 0;
+    } catch (_) { _noiseSeed = (Math.random() * 1e9) >>> 0; }
+    var _rngState = _noiseSeed || 1;
+    var _rand = function () {
+      _rngState = (Math.imul(_rngState, 1664525) + 1013904223) >>> 0;
+      return _rngState / 4294967296;
+    };
+
+    // -- Canvas 2D toDataURL / toBlob: 渲染前最低位扰动 --
+    var _origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = function () {
+      try {
+        var ctx = this.getContext && this.getContext('2d');
+        if (ctx && this.width > 0 && this.height > 0) {
+          var w = Math.min(this.width, 16), h = Math.min(this.height, 16);
+          var img = ctx.getImageData(0, 0, w, h);
+          var d = img.data;
+          for (var i = 0; i < d.length; i += 4) {
+            d[i]     = (d[i]     ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
+            d[i + 1] = (d[i + 1] ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
+            d[i + 2] = (d[i + 2] ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
+          }
+          ctx.putImageData(img, 0, 0);
+        }
+      } catch (_) {}
+      return _origToDataURL.apply(this, arguments);
+    };
+    try { wrap(HTMLCanvasElement.prototype.toDataURL); } catch (_) {}
+
+    // -- CanvasRenderingContext2D.getImageData: 末位扰动 (前 1024 byte 够) --
+    var _origGID = CanvasRenderingContext2D.prototype.getImageData;
+    CanvasRenderingContext2D.prototype.getImageData = function () {
+      var img = _origGID.apply(this, arguments);
+      try {
+        var d = img.data;
+        var n = Math.min(d.length, 1024);
+        for (var i = 0; i < n; i += 4) {
+          d[i]     = (d[i]     ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
+          d[i + 1] = (d[i + 1] ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
+          d[i + 2] = (d[i + 2] ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
+        }
+      } catch (_) {}
+      return img;
+    };
+    try { wrap(CanvasRenderingContext2D.prototype.getImageData); } catch (_) {}
+
+    // -- AudioBuffer.getChannelData: 1 ± 5e-8 微抖, 听觉零差异 --
+    try {
+      if (typeof AudioBuffer !== 'undefined' && AudioBuffer.prototype.getChannelData) {
+        var _origGCD = AudioBuffer.prototype.getChannelData;
+        AudioBuffer.prototype.getChannelData = function () {
+          var d = _origGCD.apply(this, arguments);
+          try {
+            var factor = 1 + (_rand() - 0.5) * 1e-7;
+            var n = Math.min(d.length, 1024);
+            for (var i = 0; i < n; i++) d[i] = d[i] * factor;
+          } catch (_) {}
+          return d;
+        };
+        try { wrap(AudioBuffer.prototype.getChannelData); } catch (_) {}
+      }
+    } catch (_) {}
+
+    // -- WebGL readPixels: ArrayBufferView 尾扰 --
+    try {
+      if (typeof WebGLRenderingContext !== 'undefined' && WebGLRenderingContext.prototype.readPixels) {
+        var _origRP = WebGLRenderingContext.prototype.readPixels;
+        WebGLRenderingContext.prototype.readPixels = function () {
+          var ret = _origRP.apply(this, arguments);
+          try {
+            var buf = arguments[6];
+            if (buf && buf.length) {
+              var n = Math.min(buf.length, 256);
+              for (var i = 0; i < n; i++) buf[i] = (buf[i] ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
+            }
+          } catch (_) {}
+          return ret;
+        };
+        try { wrap(WebGLRenderingContext.prototype.readPixels); } catch (_) {}
+      }
+      if (typeof WebGL2RenderingContext !== 'undefined' && WebGL2RenderingContext.prototype.readPixels) {
+        var _origRP2 = WebGL2RenderingContext.prototype.readPixels;
+        WebGL2RenderingContext.prototype.readPixels = function () {
+          var ret = _origRP2.apply(this, arguments);
+          try {
+            var buf = arguments[6];
+            if (buf && buf.length) {
+              var n = Math.min(buf.length, 256);
+              for (var i = 0; i < n; i++) buf[i] = (buf[i] ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
+            }
+          } catch (_) {}
+          return ret;
+        };
+        try { wrap(WebGL2RenderingContext.prototype.readPixels); } catch (_) {}
+      }
+    } catch (_) {}
+  } catch (_) {}
+
+  // === pdfViewerEnabled (Chrome ≥ 105) ===
+  try {
+    Object.defineProperty(Navigator.prototype, 'pdfViewerEnabled', { get: () => true, configurable: true });
+  } catch (_) {}
 })();
 `;
 
@@ -382,6 +550,13 @@ async function newFreshContext(): Promise<BrowserContext> {
       "sec-ch-ua": "\"Chromium\";v=\"145\", \"Not:A-Brand\";v=\"99\", \"Google Chrome\";v=\"145\"",
       "sec-ch-ua-mobile": "?0",
       "sec-ch-ua-platform": "\"Linux\"",
+      "sec-ch-ua-bitness": "\"64\"",
+      "sec-ch-ua-arch": "\"x86\"",
+      "sec-ch-ua-full-version": "\"145.0.7049.114\"",
+      "sec-ch-ua-platform-version": "\"6.5.0\"",
+      "sec-ch-ua-full-version-list": "\"Chromium\";v=\"145.0.7049.114\", \"Not:A-Brand\";v=\"99.0.0.0\", \"Google Chrome\";v=\"145.0.7049.114\"",
+      "sec-ch-ua-model": "\"\"",
+      "sec-ch-ua-wow64": "?0",
     },
   });
   ctx.on("close", () => { closedContexts.add(ctx); });
@@ -450,6 +625,13 @@ async function getStickyContext(hostname: string): Promise<BrowserContext> {
       "sec-ch-ua": "\"Chromium\";v=\"145\", \"Not:A-Brand\";v=\"99\", \"Google Chrome\";v=\"145\"",
       "sec-ch-ua-mobile": "?0",
       "sec-ch-ua-platform": "\"Linux\"",
+      "sec-ch-ua-bitness": "\"64\"",
+      "sec-ch-ua-arch": "\"x86\"",
+      "sec-ch-ua-full-version": "\"145.0.7049.114\"",
+      "sec-ch-ua-platform-version": "\"6.5.0\"",
+      "sec-ch-ua-full-version-list": "\"Chromium\";v=\"145.0.7049.114\", \"Not:A-Brand\";v=\"99.0.0.0\", \"Google Chrome\";v=\"145.0.7049.114\"",
+      "sec-ch-ua-model": "\"\"",
+      "sec-ch-ua-wow64": "?0",
     },
   }).then(async (c) => {
     c.on("close", () => { closedContexts.add(c); });
