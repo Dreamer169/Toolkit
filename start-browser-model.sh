@@ -78,25 +78,24 @@ _pick_browser_proxy() {
     echo "socks5://127.0.0.1:${port}|${name}@${EXIT}"
     return 0
   done
-  # v7.95c: 调整顺序 SOCKS → DIRECT → WARP。
-  # 实测 (rpl_moe1u4nj_o89n 2026-04-25): WARP 端到端 (v7.95b SKIP google-route)
-  # 仍 code:1, 说明当前 WARP IP 段在 Google reCAPTCHA Enterprise 评分体系里被
-  # 降权 (CF 自家 backbone, Google 防自动化倾向). VPS 公网 45.205.27.69
-  # AS8796 FASTNET 是真 datacenter, Google 评分中等可过. 把 DIRECT 排在 WARP 前.
+  # v7.97 — REVERT v7.95c 顺序错乱. 恢复 v7.78d/e 已验证模型:
+  #   clean SOCKS (非 CF 段) → WARP → DIRECT (硬兜底).
+  # 关键: WARP 也能正常注册 (v7.78q 实证), 前提是 broker chromium / google_proxy_route /
+  # signup POST 全程 IP 一致 (家族对齐由 BROKER_EXIT_FAMILY 控制).
+  # code:1 是 stealth 指纹问题 (不是 IP 评分), code:2 是 IP 一致性问题 (不是出口 IP score).
   #
-  # 2) DIRECT — VPS 公网 IP (45.205.27.69 AS8796 FASTNET datacenter, Google 评分较 WARP 高)
-  #    空 BROWSER_PROXY → browser-model 不加 --proxy-server, chromium 直走 OS 路由
-  echo "|DIRECT-VPS@45.205.27.69(AS8796-FASTNET)"
-  return 0
-  # 3) WARP — 末位兜底 (Google reCAPTCHA Enterprise 对 WARP CF backbone IP 评分低)
-  #    保留逻辑代码但 unreachable (DIRECT 不返回失败) — 留作 future 反向激活用
+  # 2) WARP — socks5://127.0.0.1:40000 (warp-cli proxy mode)
   if ss -uln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b" || ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b"; then
     WARP_EXIT=$(curl -s --max-time 8 --socks5 "127.0.0.1:40000" https://ifconfig.me/ip 2>/dev/null | tr -d "[:space:]")
     if [[ -n "$WARP_EXIT" ]]; then
       echo "socks5://127.0.0.1:40000|WARP@${WARP_EXIT}"
       return 0
     fi
+    echo "[picker] WARP port 40000 listen 但 curl 失败, 跳过" >&2
   fi
+  # 3) DIRECT — VPS 公网 IP (45.205.27.69) 真 datacenter, 全部上游失活时硬兜底
+  echo "|DIRECT-VPS@45.205.27.69(AS8796-FASTNET)"
+  return 0
 }
 _picked="$(_pick_browser_proxy)"
 export BROWSER_PROXY="${_picked%%|*}"

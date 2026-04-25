@@ -2447,14 +2447,20 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                         _v3_score_only = False; break
             except Exception:
                 _v3_score_only = False
+            # v7.97 — REVERT v7.92 误导分支. v7.78q/r 模型: code:2 是 *IP 一致性*
+            # 问题 (token 生成 IP ≠ submit IP), code:1 是 *stealth 指纹* 问题.
+            # v3 score-only 无 bframe 不代表 score 低, 仅说明站点配置纯 v3.
+            # WARP / datacenter SOCKS / DIRECT 三种出口都能注册 (v7.78q e2e 实证),
+            # 只要 broker / google_proxy_route / signup POST 全程同 IP. 不再早退
+            # 抛 captcha_low_score; 让 audio-challenge fallback 与外层 IP 校验决定.
             if _v3_score_only:
-                log("[retry] reCAPTCHA Enterprise v3 score-only (no bframe iframe) → captcha_low_score 立即返回")
-                log("[retry] 根因: 出口 IP 被 Google 评 0 分；retry 无改善余地。需切换到 residential proxy。")
-                result["error"] = "captcha_low_score"
+                log("[retry] reCAPTCHA Enterprise v3 score-only widget (no bframe) → 跳过音频, 直接报 token_invalid")
+                log("[retry] code:2 = IP 一致性问题 (token IP ≠ submit IP). 检查 google_proxy_route 与 BROKER_EXIT_FAMILY 对齐. 不要换 broker IP.")
+                result["error"] = "captcha_token_invalid"
                 result["detail"] = (
-                    "reCAPTCHA Enterprise v3 rejected token (code:2). "
-                    "Current exit IP scored insufficient by Google risk engine. "
-                    "Datacenter/WARP IPs cannot pass; needs residential proxy."
+                    "reCAPTCHA Enterprise v3 token rejected (code:2). "
+                    "Per v7.78m/v7.78q model: token-issuance IP must equal signup-POST IP. "
+                    "Verify google_proxy_route attaches to broker exit family (warp/socks/direct same)."
                 )
                 try: await browser.close()
                 except Exception: pass

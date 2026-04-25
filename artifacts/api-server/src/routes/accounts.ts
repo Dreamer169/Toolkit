@@ -1844,15 +1844,11 @@ const _CF_BLOCK_PATTERNS = [
   "cf_mitigated",
   "cf-mitigated",
   "cloudflare challenge",
-  // v7.90 - broker WARP exit IP CF-banned symptom: renderWithBrowser loops
-  // captcha-detect retry then returns cookies=[] cfClearance=false. python
-  // forced grecaptcha.enterprise.execute() on a partial /signup page (no
-  // Enterprise widget) -> token page-state mismatch -> Replit returns
-  // 400 captcha token is invalid (code:1).
-  "captcha token is invalid",
-  "(code:1)",
-  "captcha_token_invalid",
-  "captcha_low_score",
+  // v7.97 — 移除 stealth/IP 一致性错误 (per v7.78q/r 模型):
+  //   code:1 = stealth 指纹问题, code:2 = IP 一致性问题. 两者换 broker 出口 IP
+  //   都无效, 只会无意义抖动. captcha_token_invalid / captcha_low_score /
+  //   (code:1) / captcha token is invalid 不再纳入 broker rotation.
+  //   保留真正的 CF block 信号 (cf_warmup_failed: cf_clearance 拿不到才算).
   "cf_warmup_failed",
   "signup_username_field_missing",
 ];
