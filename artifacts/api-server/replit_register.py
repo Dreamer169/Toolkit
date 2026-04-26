@@ -868,8 +868,22 @@ async def fill_step1(page) -> str | None:
     #   2) 9536bc3 cookie 清理只针对 replit.com auth blacklist，保留 Google trust cookies
     #   3) 0391f15 的 google_proxy_route 池子已剔除 10827/10829 GCP 端口，纯非 GCP 出口
     #   4) execute() 在 broker chrome JS 内调用 → ctx.route 拦截 reCAPTCHA POST → 经 xray 干净出口
-    if any_rc and not rc_token:
-        log("[captcha] Enterprise: 触发 execute() 取 score token (max 25s)…")
+    # ── v8.12 ─────────────────────────────────────────────────────────────
+    # ROOT CAUSE confirmed by v7.92 mech still alive: pre-mint here fires
+    # execute() once. Then Replit's submit click handler fires execute() AGAIN
+    # within ~10s. reCAPTCHA Enterprise scores this rapid double-execute pattern
+    # near zero → backend returns code:1 "captcha token is invalid".
+    #
+    # FIX: skip our pre-mint entirely. Let Replit's submit click be the sole
+    # execute() caller → single-execute = clean score profile. The 'rcEnt'
+    # input is auto-populated by Replit's own submit JS; we just need to fill
+    # email+pwd+click. DIAG-RC probe (line ~2090) lets us verify ONE-AND-ONLY
+    # execute call appears before POST.
+    #
+    # Set V812_PREMINT=1 env to revert to old behavior for A/B comparison.
+    _v812_premint = os.environ.get("V812_PREMINT","").strip() in ("1","true","yes")
+    if any_rc and not rc_token and _v812_premint:
+        log("[captcha] v8.12 V812_PREMINT=1 → run legacy pre-mint execute() (DIAG only, expect code:1)")
         try:
             _sk_live = await _live_sitekey_from_page(page)
             log(f"[v8.09] mint sitekey={_sk_live} (LIVE)")
