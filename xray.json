@@ -276,6 +276,106 @@
         "auth": "noauth",
         "udp": true
       }
+    },
+    {
+      "tag": "ss-in-0",
+      "port": 10850,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ss-in-1",
+      "port": 10851,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ss-in-2",
+      "port": 10852,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ss-in-3",
+      "port": 10853,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ss-in-4",
+      "port": 10854,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ss-in-5",
+      "port": 10855,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ss-in-6",
+      "port": 10856,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ss-in-7",
+      "port": 10857,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ss-in-8",
+      "port": 10858,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ss-in-9",
+      "port": 10859,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
     }
   ],
   "outbounds": [
@@ -285,7 +385,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "188.114.96.215",
+            "address": "162.159.21.217",
             "port": 443,
             "users": [
               {
@@ -315,7 +415,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "172.67.199.22",
+            "address": "188.114.98.75",
             "port": 443,
             "users": [
               {
@@ -345,7 +445,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "188.114.96.215",
+            "address": "172.67.64.130",
             "port": 443,
             "users": [
               {
@@ -375,7 +475,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "172.67.199.22",
+            "address": "108.162.194.64",
             "port": 443,
             "users": [
               {
@@ -405,7 +505,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "188.114.96.215",
+            "address": "172.67.234.205",
             "port": 443,
             "users": [
               {
@@ -435,7 +535,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "172.67.199.22",
+            "address": "188.114.99.194",
             "port": 443,
             "users": [
               {
@@ -465,7 +565,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "188.114.96.215",
+            "address": "104.21.239.231",
             "port": 443,
             "users": [
               {
@@ -495,7 +595,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "172.67.199.22",
+            "address": "108.162.194.76",
             "port": 443,
             "users": [
               {
@@ -525,7 +625,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "188.114.96.215",
+            "address": "188.114.97.217",
             "port": 443,
             "users": [
               {
@@ -555,7 +655,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "172.67.199.22",
+            "address": "104.21.102.102",
             "port": 443,
             "users": [
               {
@@ -585,7 +685,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "188.114.96.215",
+            "address": "188.114.97.92",
             "port": 443,
             "users": [
               {
@@ -615,7 +715,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "172.67.199.22",
+            "address": "108.162.193.84",
             "port": 443,
             "users": [
               {
@@ -645,7 +745,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "188.114.96.215",
+            "address": "172.67.169.115",
             "port": 443,
             "users": [
               {
@@ -675,7 +775,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "172.67.199.22",
+            "address": "172.67.87.150",
             "port": 443,
             "users": [
               {
@@ -705,7 +805,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "188.114.96.215",
+            "address": "162.159.90.121",
             "port": 443,
             "users": [
               {
@@ -735,7 +835,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "172.67.199.22",
+            "address": "188.114.99.209",
             "port": 443,
             "users": [
               {
@@ -765,7 +865,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "188.114.96.215",
+            "address": "104.21.31.197",
             "port": 443,
             "users": [
               {
@@ -795,7 +895,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "172.67.199.22",
+            "address": "104.21.62.149",
             "port": 443,
             "users": [
               {
@@ -825,7 +925,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "188.114.96.215",
+            "address": "172.67.92.217",
             "port": 443,
             "users": [
               {
@@ -855,7 +955,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "172.67.199.22",
+            "address": "188.114.96.90",
             "port": 443,
             "users": [
               {
@@ -885,7 +985,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "188.114.96.215",
+            "address": "188.114.97.100",
             "port": 443,
             "users": [
               {
@@ -915,7 +1015,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "172.67.199.22",
+            "address": "188.114.99.215",
             "port": 443,
             "users": [
               {
@@ -945,7 +1045,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "188.114.96.215",
+            "address": "108.162.193.6",
             "port": 443,
             "users": [
               {
@@ -975,7 +1075,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "172.67.199.22",
+            "address": "188.114.97.123",
             "port": 443,
             "users": [
               {
@@ -1005,7 +1105,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "188.114.96.215",
+            "address": "108.162.192.213",
             "port": 443,
             "users": [
               {
@@ -1035,7 +1135,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "172.67.199.22",
+            "address": "188.114.99.50",
             "port": 443,
             "users": [
               {
@@ -1062,11 +1162,251 @@
     {
       "tag": "direct",
       "protocol": "freedom"
+    },
+    {
+      "tag": "ss-out-0",
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "jp.111000.cc.cd",
+            "port": 443,
+            "method": "aes-128-gcm",
+            "password": "931d70c1-8644-433a-9e8a-e09e10f5e7f5"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "ss-out-1",
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "156.146.38.169",
+            "port": 443,
+            "method": "aes-128-gcm",
+            "password": "shadowsocks"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "ss-out-2",
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "38.68.135.123",
+            "port": 443,
+            "method": "aes-256-gcm",
+            "password": "pKEW8JPByTVTLtM"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "ss-out-3",
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "tinkered-pennies-puppies.freesocks.work",
+            "port": 443,
+            "method": "chacha20-ietf-poly1305",
+            "password": "hbGrpfvNrJsUmKmPbR3iY2"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "ss-out-4",
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "141.164.45.187",
+            "port": 7001,
+            "method": "aes-256-gcm",
+            "password": "RexnBgU7EV5ADxG"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "ss-out-5",
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "141.98.101.182",
+            "port": 443,
+            "method": "aes-128-gcm",
+            "password": "shadowsocks"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "ss-out-6",
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "185.235.131.40",
+            "port": 2053,
+            "method": "none",
+            "password": "14b02e2a-8930-4afb-8412-ea4a4954ca5b"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "ss-out-7",
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "r3mrcg007147vhp.cybervena.com",
+            "port": 50099,
+            "method": "chacha20-ietf-poly1305",
+            "password": "7e731ec3-f8e1-43f6-92cf-3978d14705c4"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "ss-out-8",
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "193.108.117.75",
+            "port": 443,
+            "method": "aes-256-gcm",
+            "password": "pKEW8JPByTVTLtM"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "ss-out-9",
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "82.38.31.101",
+            "port": 8080,
+            "method": "chacha20-ietf-poly1305",
+            "password": "oZIoA69Q8yhcQV8ka3Pa3A"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
     }
   ],
   "routing": {
     "domainStrategy": "AsIs",
     "rules": [
+      {
+        "type": "field",
+        "inboundTag": [
+          "ss-in-0"
+        ],
+        "outboundTag": "ss-out-0"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ss-in-1"
+        ],
+        "outboundTag": "ss-out-1"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ss-in-2"
+        ],
+        "outboundTag": "ss-out-2"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ss-in-3"
+        ],
+        "outboundTag": "ss-out-3"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ss-in-4"
+        ],
+        "outboundTag": "ss-out-4"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ss-in-5"
+        ],
+        "outboundTag": "ss-out-5"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ss-in-6"
+        ],
+        "outboundTag": "ss-out-6"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ss-in-7"
+        ],
+        "outboundTag": "ss-out-7"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ss-in-8"
+        ],
+        "outboundTag": "ss-out-8"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ss-in-9"
+        ],
+        "outboundTag": "ss-out-9"
+      },
       {
         "type": "field",
         "inboundTag": [
