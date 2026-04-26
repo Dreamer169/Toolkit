@@ -163,7 +163,7 @@ export default function Monitor() {
     } catch {}
     try {
       const r = await fetch(`${API}/data/accounts?limit=6`).then(r => r.json());
-      if (r.success) setRecentAcc(r.accounts ?? []);
+      if (r.success) setRecentAcc(r.data ?? r.accounts ?? []);
     } catch {}
   }, []);
 

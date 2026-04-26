@@ -746,7 +746,18 @@ export default function MailCenter() {
                     }`}>
                     <div className="flex items-center gap-1.5 min-w-0">
                       <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dot}`} />
-                      <span className="text-xs font-mono truncate text-gray-200">{acc.email}</span>
+                      <button
+                    onClick={e => {
+                      e.stopPropagation();
+                      navigator.clipboard.writeText(acc.email);
+                      setCopied(`em-${acc.id}`);
+                      setTimeout(() => setCopied(c => c === `em-${acc.id}` ? "" : c), 1500);
+                    }}
+                    title="点击复制邮箱"
+                    className="text-xs font-mono truncate text-gray-200 hover:text-emerald-400 text-left"
+                  >
+                    {copied === `em-${acc.id}` ? "已复制 ✓" : acc.email}
+                  </button>
                     </div>
                     <div className="flex items-center gap-2 mt-0.5 ml-3">
                       <span className={`text-[10px] font-medium ${labelCls}`}>{label}</span>
@@ -1212,7 +1223,17 @@ export default function MailCenter() {
                     {/* 行二：完整邮箱（不截断） */}
                     <div className="flex items-center gap-2">
                       <span className="text-[10px] text-gray-500 shrink-0">账号</span>
-                      <span className="text-xs font-mono text-gray-200 select-all break-all">{acc.email}</span>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(acc.email);
+                          setCopied(`boem-${acc.accountId}`);
+                          setTimeout(() => setCopied(c => c === `boem-${acc.accountId}` ? "" : c), 1500);
+                        }}
+                        title="点击复制邮箱"
+                        className="text-xs font-mono text-gray-200 select-all break-all hover:text-emerald-400 text-left"
+                      >
+                        {copied === `boem-${acc.accountId}` ? "已复制 ✓" : acc.email}
+                      </button>
                     </div>
 
                     {/* 行三：密码（复制） */}
