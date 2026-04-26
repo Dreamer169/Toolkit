@@ -1099,22 +1099,47 @@ async def fill_step1(page) -> str | None:
     # challenge, (c) net error / requestfailed, (d) 走了 sub-domain (sp./api.) 被过滤
     _diag_resp: list = []
     _diag_failed: list = []
+    _diag_req_sent: list = []
+    _diag_req_finished: list = []
+    from urllib.parse import urlparse as _diag_urlparse
+    def _diag_is_replit(u: str) -> bool:
+        try:
+            h = (_diag_urlparse(u).hostname or "").lower()
+            return h == "replit.com" or h.endswith(".replit.com")
+        except Exception:
+            return False
     async def _diag_on_response(resp):
         try:
             url = resp.url
-            if "replit.com" in url:
-                _diag_resp.append(f"{resp.request.method} {resp.status} {url[:100]}")
+            if _diag_is_replit(url):
+                _diag_resp.append(f"{resp.request.method} {resp.status} {url[:120]}")
         except Exception:
             pass
     def _diag_on_requestfailed(req):
         try:
             url = req.url
-            if "replit.com" in url:
-                _diag_failed.append(f"{req.method} {url[:100]} fail={req.failure}")
+            if _diag_is_replit(url):
+                _diag_failed.append(f"{req.method} {url[:120]} fail={req.failure}")
+        except Exception:
+            pass
+    def _diag_on_request(req):
+        try:
+            url = req.url
+            if _diag_is_replit(url) and req.method == "POST":
+                _diag_req_sent.append(f"POST {url[:120]}")
+        except Exception:
+            pass
+    def _diag_on_request_finished(req):
+        try:
+            url = req.url
+            if _diag_is_replit(url) and req.method == "POST":
+                _diag_req_finished.append(f"POST {url[:120]}")
         except Exception:
             pass
     page.on("response", _diag_on_response)
     page.on("requestfailed", _diag_on_requestfailed)
+    page.on("request", _diag_on_request)
+    page.on("requestfinished", _diag_on_request_finished)
 
     # 提交 Step1：先尝试正常 click（5s），若 disabled 则 force=True 强制点击
     submitted = False
@@ -1210,6 +1235,12 @@ async def fill_step1(page) -> str | None:
             log(f"[step1-wait] 等待 {(_w+1)*2}s...")
     else:
         log("[step1-wait] 36s 超时，仍在 signup")
+        # v8.14 DIAG: req-sent vs req-finished delta tells us if POST went out at all
+        log(f"[diag-v8.14] replit.com POST sent={len(_diag_req_sent)} finished={len(_diag_req_finished)} (delta={len(_diag_req_sent)-len(_diag_req_finished)} = inflight/dropped)")
+        for _l in _diag_req_sent[-6:]:
+            log(f"[diag-req-sent] {_l}")
+        for _l in _diag_req_finished[-6:]:
+            log(f"[diag-req-fin]  {_l}")
         # v7.77 DIAG dump
         log(f"[diag] 36s 内 replit.com response 总数={len(_diag_resp)}")
         for _l in _diag_resp[-15:]:
@@ -1225,6 +1256,10 @@ async def fill_step1(page) -> str | None:
     try: page.remove_listener("response", _diag_on_response)
     except: pass
     try: page.remove_listener("requestfailed", _diag_on_requestfailed)
+    except: pass
+    try: page.remove_listener("request", _diag_on_request)
+    except: pass
+    try: page.remove_listener("requestfinished", _diag_on_request_finished)
     except: pass
 
     await page.screenshot(path=f"/tmp/replit_after_step1_{USERNAME}.png")
