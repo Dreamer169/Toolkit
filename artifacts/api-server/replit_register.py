@@ -612,38 +612,71 @@ async def _human_warmup(page):
                     await _bezier(_hx, _hy, _nx, _ny, steps=_random.randint(10, 18))
                     await page.wait_for_timeout(_random.randint(120, 350))
                     _hx, _hy = _nx, _ny
-                # Final hover in iframe center (~1.5s) — strongest signal
+                # v8.13 Final hover in iframe center (3-5s) — extended dwell
                 await page.mouse.move(_cx, _cy)
-                await page.wait_for_timeout(_random.randint(1200, 1800))
-                log("[warmup] v8.10 iframe-near phase ✓")
+                # micro-jitter at hover anchor (Enterprise sees realistic hand tremor)
+                _jx, _jy = _cx, _cy
+                for _ji in range(_random.randint(8, 14)):
+                    _dx = _random.uniform(-3.5, 3.5); _dy = _random.uniform(-2.5, 2.5)
+                    _jx += _dx; _jy += _dy
+                    await page.mouse.move(_jx, _jy)
+                    await page.wait_for_timeout(_random.randint(120, 300))
+                await page.wait_for_timeout(_random.randint(800, 1600))
+                log("[warmup] v8.13 iframe-near phase ✓ (extended dwell)")
             else:
                 log("[warmup] v8.10 no recaptcha iframe yet (skip iframe-near phase)")
         except Exception as _ife:
             log(f"[warmup] v8.10 iframe-near phase err (忽略): {_ife}")
 
-        # 阶段 6：最终停顿（用户"决定"开始填表）
-        await page.wait_for_timeout(_random.randint(2000, 4000))
+        # v8.13 阶段 6：focus body + Tab 试探（模拟用户准备填表）
+        try:
+            await page.evaluate("() => document.body && document.body.focus && document.body.focus()")
+            await page.wait_for_timeout(_random.randint(400, 900))
+            await page.keyboard.press("Tab")
+            await page.wait_for_timeout(_random.randint(300, 700))
+            await page.keyboard.press("Tab")
+            await page.wait_for_timeout(_random.randint(300, 700))
+        except Exception:
+            pass
+        # 最终停顿（用户"决定"开始填表）
+        await page.wait_for_timeout(_random.randint(2500, 4500))
 
-        log("[warmup] ✓ 完成（约 40-55s 行为积累 + v8.10 iframe-targeted）")
+        log("[warmup] ✓ v8.13 完成（约 50-70s 行为 + iframe 长 dwell + tab 试探）")
     except Exception as e:
         log(f"[warmup] 异常(忽略): {e}")
 
 async def _fast_fill(page, sel_list: list[str], value: str, label: str,
                      min_ms: int = 90, max_ms: int = 220) -> bool:
-    """人类速度填充：click → type（默认 90-220ms/char，模拟真实打字节奏）。"""
+    """v8.13 人类速度填充：focus dwell → click → type → post-fill thinking pause."""
     for sel in sel_list:
         f = page.locator(sel)
         if await f.count():
+            # v8.13: hover-then-click + pre-click dwell (~300-700ms)
+            try:
+                _bb = await f.first.bounding_box()
+                if _bb:
+                    _hx = _bb["x"] + _bb["width"]/2 + _random.uniform(-12,12)
+                    _hy = _bb["y"] + _bb["height"]/2 + _random.uniform(-4,4)
+                    await page.mouse.move(_hx, _hy)
+                    await page.wait_for_timeout(_random.randint(180, 420))
+            except Exception:
+                pass
             await f.first.click()
-            await page.wait_for_timeout(_random.randint(100, 200))
+            await page.wait_for_timeout(_random.randint(180, 380))
             await f.first.fill("")
+            await page.wait_for_timeout(_random.randint(120, 260))
             for ch in value:
                 await f.first.type(ch)
                 delay = _random.randint(min_ms, max_ms)
                 # 偶尔有短暂停顿（模拟换手/思考）
                 if _random.random() < 0.08:
                     delay += _random.randint(200, 500)
+                # v8.13: 5% 概率长思考（500-1100ms）
+                if _random.random() < 0.05:
+                    delay += _random.randint(500, 1100)
                 await page.wait_for_timeout(delay)
+            # v8.13: post-fill thinking pause (用户检查输入)
+            await page.wait_for_timeout(_random.randint(450, 1100))
             log(f"填 {label} via {sel}")
             return True
     return False
@@ -2557,7 +2590,58 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                     Reflect.defineProperty(screen, 'colorDepth', {get:()=>24, configurable:true});
                     Reflect.defineProperty(screen, 'pixelDepth', {get:()=>24, configurable:true});
                 } catch(_){}
-                window.__STEALTH_v796_OK = {
+                // === v8.13 EXTRA STEALTH (fingerprint hardening) ===
+                try {
+                    if (!navigator.connection || navigator.connection.effectiveType === undefined) {
+                        const _conn = { effectiveType:"4g", rtt:50, downlink:10, saveData:false,
+                                        onchange:null, addEventListener:()=>{}, removeEventListener:()=>{} };
+                        Reflect.defineProperty(Navigator.prototype, "connection", { get: () => _conn, configurable:true });
+                    }
+                } catch(_){}
+                try {
+                    if (window.Notification) {
+                        Reflect.defineProperty(Notification, "permission", { get: () => "default", configurable:true });
+                    }
+                    if (navigator.permissions && navigator.permissions.query) {
+                        const _origQ = navigator.permissions.query.bind(navigator.permissions);
+                        navigator.permissions.query = (p) => {
+                            if (p && p.name === "notifications") return Promise.resolve({ state:"prompt", onchange:null });
+                            return _origQ(p);
+                        };
+                    }
+                } catch(_){}
+                try {
+                    const _exts = ["ANGLE_instanced_arrays","EXT_blend_minmax","EXT_color_buffer_half_float",
+                        "EXT_disjoint_timer_query","EXT_float_blend","EXT_frag_depth","EXT_shader_texture_lod",
+                        "EXT_texture_compression_bptc","EXT_texture_compression_rgtc","EXT_texture_filter_anisotropic",
+                        "EXT_sRGB","KHR_parallel_shader_compile","OES_element_index_uint","OES_fbo_render_mipmap",
+                        "OES_standard_derivatives","OES_texture_float","OES_texture_float_linear","OES_texture_half_float",
+                        "OES_texture_half_float_linear","OES_vertex_array_object","WEBGL_color_buffer_float",
+                        "WEBGL_compressed_texture_s3tc","WEBGL_compressed_texture_s3tc_srgb","WEBGL_debug_renderer_info",
+                        "WEBGL_debug_shaders","WEBGL_depth_texture","WEBGL_draw_buffers","WEBGL_lose_context",
+                        "WEBGL_multi_draw"];
+                    const _wrapExt = (proto) => {
+                        proto.getSupportedExtensions = function(){ return _exts.slice(); };
+                    };
+                    if (typeof WebGLRenderingContext !== "undefined")  _wrapExt(WebGLRenderingContext.prototype);
+                    if (typeof WebGL2RenderingContext !== "undefined") _wrapExt(WebGL2RenderingContext.prototype);
+
+                    const _wrapPrec = (proto) => {
+                        proto.getShaderPrecisionFormat = function(_st, _pt){
+                            return { rangeMin:127, rangeMax:127, precision:23 };
+                        };
+                    };
+                    if (typeof WebGLRenderingContext !== "undefined")  _wrapPrec(WebGLRenderingContext.prototype);
+                    if (typeof WebGL2RenderingContext !== "undefined") _wrapPrec(WebGL2RenderingContext.prototype);
+                } catch(_){}
+                try {
+                    Reflect.defineProperty(window, "outerWidth",  { get: () => 1920, configurable:true });
+                    Reflect.defineProperty(window, "outerHeight", { get: () => 1040, configurable:true });
+                    Reflect.defineProperty(window, "screenX",     { get: () => 0,    configurable:true });
+                    Reflect.defineProperty(window, "screenY",     { get: () => 0,    configurable:true });
+                } catch(_){}
+                // === END v8.13 EXTRA STEALTH ===
+                window.__STEALTH_v813_OK = {
                     hwc: navigator.hardwareConcurrency,
                     dm: navigator.deviceMemory,
                     wd_in_proto: ('webdriver' in Navigator.prototype),
@@ -2569,8 +2653,8 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 };
                 try {
                     const c = document.createElement('canvas').getContext('webgl');
-                    window.__STEALTH_v796_OK.webgl_v = c ? c.getParameter(37445) : 'no-ctx';
-                    window.__STEALTH_v796_OK.webgl_r = c ? c.getParameter(37446) : 'no-ctx';
+                    window.__STEALTH_v813_OK.webgl_v = c ? c.getParameter(37445) : 'no-ctx';
+                    window.__STEALTH_v813_OK.webgl_r = c ? c.getParameter(37446) : 'no-ctx';
                 } catch(_){}
             })();
             """
@@ -2579,11 +2663,11 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 tag.textContent = s;
                 document.documentElement.appendChild(tag);
                 tag.remove();
-                return window.__STEALTH_v796_OK || null;
+                return window.__STEALTH_v813_OK || null;
             }""", _STEALTH_FORCE_v796)
-            log(f"[stealth-v7.96] main-world inject result: {_r796}")
+            log(f"[stealth-v8.13] main-world inject result: {_r796}")
         except Exception as _se796:
-            log(f"[stealth-v7.96] inject failed (non-fatal): {_se796}")
+            log(f"[stealth-v8.13] inject failed (non-fatal): {_se796}")
         # === END v7.96 STEALTH FORCE INJECTION ===
 
 
