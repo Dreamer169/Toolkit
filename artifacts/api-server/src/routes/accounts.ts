@@ -977,13 +977,52 @@ router.post("/replit/register", (req, res) => {
               cfBannedUntil.set(tryPort, Date.now() + 15 * 60 * 1000);
               const cfIpC = xrayPortCfIp.get(tryPort);
               const _cfNote = cfIpC ? ` (CF IP ${cfIpC})` : "";
+              // v8.39 ROOT-FIX 2026-04-27 — captcha_token_invalid 也会丢账号
+              // 实证 rpl_mohil1b5_tubl: attempt 1 captcha_token_invalid (port 10857), attempt 3 isNewUser=false
+              // userId=58286905 (后端真创建了, 但客户端 attempt 1 fast-retry 后报 captcha 错误).
+              // captcha_token_invalid = fast-retry 的 step1 POST 已发往后端, 后端可能创建账号但响应被 reCAPTCHA 校验包成 400.
+              // 同 v8.38 cf-rescue: 探针 outlook 收件箱是否已收到 replit verify 邮件.
+              log(`    [captcha-rescue] captcha_token_invalid on port ${tryPort}${_cfNote} → v8.39 cf-rescue 收件箱探针 (8s)…`);
+              await new Promise(r => setTimeout(r, 8000));
+              let _captchaRescued = false;
+              try {
+                const _crR = await localPost("/api/tools/outlook/click-verify-link", { accountId: outlook.id }) as { success?: boolean; final_url?: string; verify_url?: string; error?: string };
+                const _crE = String(_crR.error ?? "").toLowerCase();
+                if (_crR.success || _crE.includes("invalid") || _crE.includes("has been used") || _crE.includes("已使用")) {
+                  _captchaRescued = true;
+                  const _crD = String(_crR.final_url ?? _crR.verify_url ?? "").slice(0, 80);
+                  log(`    ✅ [captcha-rescue] verify 邮件已到 → attempt ${attempt} 后端真的创建成功了; final=${_crD}`);
+                } else {
+                  log(`    [captcha-rescue] 8s 内无 verify 邮件 (${String(_crR.error ?? "").slice(0,80)}) → 真 captcha_token_invalid, 后端未创建`);
+                }
+              } catch (_crErr) {
+                log(`    [captcha-rescue] 探针异常: ${String(_crErr).slice(0,80)} → 视为真 captcha_token_invalid`);
+              }
+              if (_captchaRescued) {
+                portLastGood.set(tryPort, Date.now());
+                const _crPp = Number(parsed.actual_proxy_port ?? 0);
+                const _crPort = _crPp > 0 ? _crPp : tryPort;
+                await dbE(
+                  `INSERT INTO accounts (platform, email, password, username, status, notes, tags, exit_ip, proxy_port)
+                   VALUES ('replit', $1, NULL, NULL, 'exists_no_password', 'captcha_token_invalid rescued: outlook 收到 replit verify 邮件, 后端创建成功但 password/userId 在 captcha 校验链路丢失', 'replit,exists_no_password,captcha_rescued', $2, $3)
+                   ON CONFLICT (platform, email) DO NOTHING`,
+                  [outlook.email, exitIp, _crPort]
+                ).catch(e => log(`    [captcha-rescue] placeholder insert warn: ${e}`));
+                await dbE(
+                  "UPDATE accounts SET tags = CASE WHEN string_to_array(COALESCE(tags,''), ',') @> ARRAY['replit_used'] THEN tags ELSE NULLIF(TRIM(BOTH ',' FROM COALESCE(tags,'') || ',replit_used'), ',') END, updated_at = NOW() WHERE id = $1",
+                  [outlook.id]
+                ).catch(() => {});
+                log(`    [captcha-rescue] outlook id=${outlook.id} 已标 replit_used + 写 replit placeholder, 跳下一个 outlook`);
+                break;
+              }
+              // 没探到 verify 邮件: 真 captcha_token_invalid, 后端未创建账号
+              // 旧逻辑保留: 第 1 次冷却 port 15min + continue 换 port (reCAPTCHA score 短期翻不了盘)
               if (captchaFailCount >= 2) {
                 log(`    captcha_token_invalid x${captchaFailCount} on port ${tryPort}${_cfNote} → 已换 port 重试仍失败, 跳 Outlook`);
                 break;
               }
               log(`    captcha_token_invalid (${captchaFailCount}/2) on port ${tryPort}${_cfNote} → 冷却 port 15min + 立即换 port 重试`);
               if (cfIpC) {
-                // 同时旋转该 port 在 xray.json 里绑定的 CF backend IP, 缓解未来再被路由到此 port 时仍是同一被封 IP
                 try { rotateCfIpInXray(cfIpC); } catch {}
               }
               continue;
