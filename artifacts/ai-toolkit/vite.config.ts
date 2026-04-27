@@ -27,7 +27,7 @@ export default defineConfig({
     host: "0.0.0.0",
     allowedHosts: true,
     proxy: {
-      "/api": { target: "http://localhost:8080", changeOrigin: true },
+      "/api": { target: "http://localhost:8081", changeOrigin: true },
     },
   },
   preview: { port, host: "0.0.0.0", allowedHosts: true },
