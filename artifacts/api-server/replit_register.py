@@ -1502,6 +1502,16 @@ async def fill_step1(page) -> str | None:
         log(f"[step1] API body integrity error: {_api_body_r[:120]}")
         return "integrity_check_failed_after_step1"
     _abr_low = _api_body_r.lower()
+    # v8.31 ROOT-FIX 2026-04-27 — sign-up POST 200 + isNewUser:false detection
+    # When the email exists on Replit, sign-up endpoint returns 200 with
+    # {"userId":...,"isNewUser":false,"cookieExpiresAt":...} (it auto-logs in).
+    # Without this short-circuit, code would fall through to step2 (username field
+    # not present in login flow) and burn 30s on a wait_for_selector timeout, then
+    # the same outlook account is reused for attempt 2 hitting "Email already in use".
+    # Treat isNewUser:false as taken so upstream marks replit_used + rotates outlook.
+    if _api_status == 200 and ('"isnewuser":false' in _abr_low.replace(' ', '') or '"isnewuser": false' in _abr_low):
+        log(f"[step1] v8.31 isNewUser=false → existing Replit account auto-login → Email already in use on Replit")
+        return "Email already in use on Replit"
     if _api_status in (400, 422) and any(kw in _abr_low for kw in (
         "already in use", "already registered", "already exists", "already been used",
         "email is taken", "email.*already"
