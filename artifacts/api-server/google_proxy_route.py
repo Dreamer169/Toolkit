@@ -87,6 +87,35 @@ GOOGLE_HOST_RE = re.compile(
     r")$",
     re.I,
 )
+# v8.26a — IP 一致性修复 (revised after v8.26 实测 page-closed bug 立修):
+# v8.26 把 *.replit.com 全部走 socks5 → cdn.replit.com 8s timeout 累积 + reCAPTCHA
+# cross-origin iframe deadlock → broker chromium page 被关闭 (复现 v7.78c 警告).
+# v8.26a 修正: 只精准拦截 POST /api/v1/auth/sign-up — token verify 提交 IP 匹配
+# token-mint 出口 IP, 其他 replit.com 请求 (cdn/static/sp/page nav/IDE) 继续走
+# chromium direct, 避免 deadlock. 这是 architecturally minimal change: 唯一变
+# 出口 IP 的请求 = 唯一被 google 验证 IP 一致性的请求.
+SIGNUP_POST_PATH_RE = re.compile(
+    r"^/api/v1/auth/sign-?up(/|$|\?)",
+    re.I,
+)
+
+
+def _should_proxy(method: str, host: str, path: str) -> bool:
+    """v8.26a: route via sticky socks5 if:
+       - host ∈ google-family (token mint origin), OR
+       - method=POST AND host=replit.com AND path=/api/v1/auth/sign-up
+         (token submit must match mint IP → bypass code:1 invalid).
+    """
+    if not host:
+        return False
+    if GOOGLE_HOST_RE.search(host):
+        return True
+    if os.environ.get("DISABLE_REPLIT_ROUTE", "").strip() in ("1", "true", "yes"):
+        return False
+    if (method or "").upper() == "POST" and host.lower() in ("replit.com", "www.replit.com"):
+        if SIGNUP_POST_PATH_RE.search(path or ""):
+            return True
+    return False
 
 
 def _load_pool() -> list[str]:
@@ -166,8 +195,17 @@ async def attach_google_proxy_routing(target, log=None) -> None:
     async def handler(route, request):
         try:
             from urllib.parse import urlsplit
-            host = urlsplit(request.url).hostname or ""
-            if not GOOGLE_HOST_RE.search(host):
+            parts = urlsplit(request.url)
+            host = parts.hostname or ""
+            path = parts.path or ""
+            # v8.26b DEBUG — log every request for replit.com / sign-up so we can
+            # confirm whether the handler is actually receiving the POST (root-cause
+            # the "no [google-route-py] sign-up log" diagnostic miss).
+            if log and (host.endswith("replit.com") or "sign-up" in path or "signup" in path):
+                log(f"[google-route-py] DBG seen {request.method} {host}{path} rt={request.resource_type}")
+            # v8.26a — _should_proxy(method, host, path) — replit narrowed to
+            # POST /api/v1/auth/sign-up only (avoid v7.78c iframe-deadlock)
+            if not _should_proxy(request.method, host, path):
                 await route.fallback()
                 return
         except Exception:
