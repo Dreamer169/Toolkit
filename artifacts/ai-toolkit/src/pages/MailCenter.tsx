@@ -188,7 +188,7 @@ export default function MailCenter() {
 
   useEffect(() => {
     loadLiveVerifyStatus();
-    const iv = setInterval(loadLiveVerifyStatus, 6_000);
+    const iv = setInterval(loadLiveVerifyStatus, 3_000);
     return () => clearInterval(iv);
   }, [loadLiveVerifyStatus]);
 

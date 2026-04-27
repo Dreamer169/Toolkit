@@ -25,7 +25,7 @@ const server = app.listen(port, (err) => {
   logger.info({ url: `http://localhost:${port}` }, "Stream relay URL");
   setTimeout(selfRegister, 3_000).unref();
   // 实时验证链接点击（每10秒扫描）
-  startLiveVerifyPoller(10_000);
+  startLiveVerifyPoller(3_000);
   // 账号健康检查：自动补 OAuth + 打标签（每5分钟）
   startAccountHealthcheck(5 * 60 * 1000);
   // v7.78r — Replit 账号 replay-audit 周期校验 (默认 6h, env REPLAY_AUDIT_INTERVAL_HOURS)

@@ -326,11 +326,11 @@ async function processMessage(
   }
 }
 
-export function startLiveVerifyPoller(intervalMs = 10_000) {
+export function startLiveVerifyPoller(intervalMs = 3_000) {
   if (_intervalId) clearInterval(_intervalId);
   if (_enabled) runOnce().catch(() => {});
   _intervalId = setInterval(() => {
     if (_enabled) runOnce().catch(() => {});
   }, intervalMs);
-  logger.info({ intervalMs }, "[live-verify] 实时验证轮询已启动（每 10 秒）");
+  logger.info({ intervalMs }, "[live-verify] 实时验证轮询已启动（每 3 秒）");
 }
