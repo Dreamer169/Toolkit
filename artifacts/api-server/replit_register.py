@@ -2247,36 +2247,97 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
     except Exception as e:
         log(f"Canvas 噪声注入失败: {e}")
     try:
-        _DIAG_RECAPTCHA_PROBE = """
+        _DIAG_RECAPTCHA_PROBE = r"""
         (() => {
           try {
             const tag = (msg) => {
-              try { console.log('[DIAG-RC]', msg); } catch(e){}
-              try { document.title = '[DIAG-RC] ' + String(msg).slice(0,180); } catch(e){}
+              try { console.log("[DIAG-RC]", msg); } catch(e){}
+              try { document.title = "[DIAG-RC] " + String(msg).slice(0,200); } catch(e){}
             };
-            const wrap = () => {
+            // v8.17 — bulletproof getter/setter wrapper that survives any later
+            // reassignment of grecaptcha.enterprise.execute by Replit's bundle.
+            const wrapExec = (entObj) => {
+              if (!entObj || entObj.__diag_wrapped_v817) return false;
+              let cur = entObj.execute;
+              const wrap = (fn) => {
+                if (!fn || fn.__diag_wrapped_fn) return fn;
+                const w = function(sk, opts){
+                  const action = (opts && opts.action) || "(no-action)";
+                  const skP = String(sk||"").slice(0,18);
+                  const t0 = Date.now();
+                  tag("execute CALLED sk=" + skP + " action=" + action);
+                  let p;
+                  try { p = fn.call(this, sk, opts); }
+                  catch(e){ tag("execute THREW " + String(e&&e.message||e).slice(0,160)); throw e; }
+                  if (p && typeof p.then === "function") {
+                    p.then((tok) => {
+                      const tp = String(tok||"").slice(0,20);
+                      tag("execute RESOLVED action=" + action + " len=" + (tok?tok.length:0) + " prefix=" + tp + " dt=" + (Date.now()-t0) + "ms");
+                    }, (err) => {
+                      tag("execute REJECTED action=" + action + " err=" + String(err&&err.message||err).slice(0,160) + " dt=" + (Date.now()-t0) + "ms");
+                    });
+                  } else {
+                    tag("execute SYNC-RET action=" + action + " type=" + typeof p);
+                  }
+                  return p;
+                };
+                w.__diag_wrapped_fn = true;
+                return w;
+              };
+              try {
+                Object.defineProperty(entObj, "execute", {
+                  configurable: true,
+                  enumerable: true,
+                  get(){ return wrap(cur); },
+                  set(v){ cur = v; tag("execute REASSIGNED type=" + typeof v); },
+                });
+                entObj.__diag_wrapped_v817 = true;
+                tag("wrapped grecaptcha.enterprise.execute (defineProperty v8.17)");
+                return true;
+              } catch(e){
+                tag("defineProperty FAILED " + String(e&&e.message||e).slice(0,160));
+                try {
+                  entObj.execute = wrap(entObj.execute);
+                  entObj.__diag_wrapped_v817 = true;
+                  tag("wrapped grecaptcha.enterprise.execute (assign fallback)");
+                  return true;
+                } catch(e2){ return false; }
+              }
+            };
+            const tryWrap = () => {
               try {
                 const ge = window.grecaptcha;
-                if (!ge || !ge.enterprise || !ge.enterprise.execute || ge.__diag_wrapped) return false;
-                const orig = ge.enterprise.execute.bind(ge.enterprise);
-                ge.enterprise.execute = function(sk, opts){
-                  try { tag('execute sk=' + String(sk).slice(0,18) + ' action=' + JSON.stringify(opts||{})); } catch(e){}
-                  return orig(sk, opts);
-                };
-                ge.__diag_wrapped = true;
-                tag('wrapped grecaptcha.enterprise.execute');
-                return true;
-              } catch(e){ return false; }
+                if (ge && ge.enterprise) return wrapExec(ge.enterprise);
+              } catch(e){}
+              return false;
             };
-            if (!wrap()) {
+            if (!tryWrap()) {
               const t0 = Date.now();
-              const iv = setInterval(() => { if (wrap() || Date.now()-t0>30000) clearInterval(iv); }, 200);
+              const iv = setInterval(() => { if (tryWrap() || Date.now()-t0>30000) clearInterval(iv); }, 200);
             }
+            // v8.17 — also detect VISIBLE bframe challenge (image grid / audio).
+            // If a bframe iframe becomes user-visible, score is too low and the
+            // user must solve a challenge -> we will deadlock waiting forever.
+            const checkChallenge = () => {
+              try {
+                const frames = document.querySelectorAll("iframe[src*='bframe'], iframe[title*='challenge' i], iframe[src*='recaptcha/api2/bframe']");
+                for (const f of frames) {
+                  const r = f.getBoundingClientRect();
+                  const cs = window.getComputedStyle(f);
+                  const visible = r.width > 50 && r.height > 50 && cs.visibility !== "hidden" && cs.display !== "none" && parseFloat(cs.opacity||"1") > 0.1;
+                  if (visible && !f.__diag_seen) {
+                    f.__diag_seen = true;
+                    tag("VISIBLE-CHALLENGE bframe " + Math.round(r.width) + "x" + Math.round(r.height) + " src=" + String(f.src||"").slice(0,80));
+                  }
+                }
+              } catch(e){}
+            };
+            setInterval(checkChallenge, 500);
           } catch(e){}
         })();
         """
         await page.add_init_script(_DIAG_RECAPTCHA_PROBE)
-        log("[DIAG-RC] grecaptcha.execute action probe injected ✓")
+        log("[DIAG-RC] grecaptcha.execute probe v8.17 injected (defineProperty+challenge-watch) ✓")
     except Exception as _de:
         log(f"[DIAG-RC] inject failed: {_de}")
 
