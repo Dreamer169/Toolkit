@@ -57,29 +57,59 @@ except Exception:
 # CLOUD_ASN_BLOCKLIST: 任何 hyperscale 云 ASN 都按 0391f15 原则剔除。后续 xray 节点
 # 轮换重新打分时, 用 "curl --socks5 :PORT https://ipinfo.io/json" 复检 ASN, 命中
 # Google/Microsoft/Amazon/Oracle/Tencent/Alibaba/Huawei 云 ASN 即从池中剔除。
+# v8.29 ROOT-FIX 2026-04-27 — xray.json deep-audit revealed two parallel
+# outbound pools and DEFAULT_POOL was pointing at the WRONG one:
+#   (A) in-socks-0..25  (port 10820-10845)  -> vless proxy-0..25 -> ALL flattened
+#       to same CF Workers IP 172.64.159.138 (AS13335) by v8.26 hot-fix.
+#   (B) ss-in-0..9      (port 10850-10859)  -> shadowsocks ss-out-0..9 -> 9
+#       distinct REAL upstreams (US/KR/GB/TW/NL telecom + small DC).
+# This is also why "previously solved" issue recurred: DEFAULT_POOL still points
+# at pool (A), but xray subscription rotated pool (A) to single CF Worker.
+# Fix: switch to pool (B) and add runtime ASN-probe self-healer below.
+#
+# Per-port ASN probe 2026-04-27 (curl --socks5 + ipinfo.io):
+#   10850 DEAD
+#   10851 US 156.146.38.169 AS60068 Datacamp Limited       (DC, acceptable)
+#   10852 DEAD
+#   10853 US 38.135.24.131  AS27284 Fourplex Telecom LLC   (small telecom ★★)
+#   10854 KR 141.164.45.187 AS20473 The Constant Co (Vultr) (DC, acceptable)
+#   10855 GB 141.98.101.182 AS9009  M247 Europe SRL        (DC, acceptable)
+#   10856 DEAD
+#   10857 TW 114.45.129.72  AS3462  Chunghwa Telecom       (NATIONAL ISP ★★★)
+#   10858 DEAD
+#   10859 NL 193.29.139.250 AS47172 Greenhost BV           (small hosting ★)
+#
+# Order = ASN-quality descending (residential-ISP first, hyperscale last).
+# Sticky-per-context still applies: each ctx pins one and reuses for all
+# google subrequests + sign-up POST (v8.27 IP-consistency).
 DEFAULT_POOL = [
-    # v8.28 — NARROWED to AEZA-only for empirical re-validation. Real-world test
-    # 2026-04-27 (rpl_mogygaxk_4gue): even with v8.27 IP-consistency fix (token mint
-    # via socks5:10820 = POST exit via socks5:10820 = DigitalOcean AS14061), reCAPTCHA
-    # Enterprise still returned code:1. Conclusion: DigitalOcean ASN itself is now on
-    # reCAPTCHA's datacenter blocklist, joining Google/Microsoft/Amazon. Only known
-    # working exit is 10825 AEZA (AS210644, eastern-EU small-ISP). Other ports must
-    # be re-probed individually before re-adding. HostPapa/Cogent/Zenlayer untested
-    # since 0391f15; their inclusion is now suspect. Sticky-per-context still applies
-    # — with single-element pool it is just always-10825.
-    "socks5://127.0.0.1:10825",  # ★ AEZA AS210644 — 实测成功 (userId=58169318, 0391f15)
-    # "socks5://127.0.0.1:10824",  # SUSPECT — Cogent AS174 (no recent success)
-    # "socks5://127.0.0.1:10826",  # SUSPECT — DigitalOcean AS14061 (rpl_mogygaxk: 400 code:1)
-    # "socks5://127.0.0.1:10830",  # SUSPECT — Cogent AS174
-    # "socks5://127.0.0.1:10820",  # FAILED — DigitalOcean AS14061 (rpl_mogygaxk: 400 code:1)
-    # "socks5://127.0.0.1:10822",  # SUSPECT — HostPapa AS36352
-    # "socks5://127.0.0.1:10823",  # SUSPECT — Zenlayer AS21859
-    # "socks5://127.0.0.1:10828",  # SUSPECT — DigitalOcean AS14061
-    # "socks5://127.0.0.1:10831",  # ✗ DROPPED — Microsoft Azure (AS8075)
-    # "socks5://127.0.0.1:10836",  # SUSPECT — DigitalOcean AS14061
-    # "socks5://127.0.0.1:10837",  # SUSPECT — HostPapa AS36352
-    # "socks5://127.0.0.1:10845",  # SUSPECT — HostPapa AS36352
+    "socks5://127.0.0.1:10857",  # ★★★ Chunghwa Telecom AS3462 (TW national ISP)
+    "socks5://127.0.0.1:10853",  # ★★ Fourplex Telecom AS27284 (US small telecom)
+    "socks5://127.0.0.1:10859",  # ★ Greenhost AS47172 (NL small hosting)
+    "socks5://127.0.0.1:10854",  # Vultr AS20473 (DC, KR)
+    "socks5://127.0.0.1:10855",  # M247 AS9009 (DC, GB)
+    "socks5://127.0.0.1:10851",  # Datacamp AS60068 (DC, US)
+    # 10850/10852/10856/10858 DEAD as of probe — self-healer drops at runtime.
+    # Pool (A) 10820-10845 EXCLUDED — all map to CF AS13335 datacenter.
 ]
+
+# v8.29 ASN-blocklist for runtime self-healing. Any port whose exit ASN matches
+# is dropped from the active pool until next restart. Prevents "previously
+# solved" regression when xray subscription rotates upstreams to a poisoned
+# ASN (CF Workers, hyperscale cloud, etc).
+CLOUD_ASN_BLOCKLIST = {
+    "AS13335",  # Cloudflare (CF Workers/anycast — reCAPTCHA -> code:1)
+    "AS15169",  # Google
+    "AS16509",  # Amazon AWS
+    "AS14618",  # Amazon AWS
+    "AS8075",   # Microsoft Azure
+    "AS396982", # Google Cloud
+    "AS32934",  # Facebook
+    "AS31898",  # Oracle Cloud
+    "AS45102",  # Alibaba Cloud
+    "AS132203", # Tencent Cloud
+    "AS55990",  # Huawei Cloud
+}
 GOOGLE_HOST_RE = re.compile(
     r"(^|\.)("
     r"google\.com|gstatic\.com|recaptcha\.net|youtube\.com|googleapis\.com|"
@@ -185,6 +215,53 @@ def get_pinned_proxy_for_page(page):
     return None
 
 
+_PROBED_ASN_CACHE: dict = {}  # proxy_url -> (ok: bool, asn: str, ip: str)
+
+async def _probe_proxy_asn(proxy_url: str, timeout: float = 8.0):
+    """v8.29 — probe a socks5 proxy via ipinfo.io. Returns (ok, asn, ip, org)."""
+    if AsyncProxyTransport is None:
+        return (True, "?", "?", "?")  # cannot probe, assume ok
+    try:
+        tr = AsyncProxyTransport.from_url(proxy_url)
+        async with httpx.AsyncClient(transport=tr, timeout=timeout, http2=False, verify=True) as c:
+            r = await c.get("https://ipinfo.io/json")
+            j = r.json()
+        org = (j.get("org") or "").strip()
+        asn = ""
+        if org.upper().startswith("AS"):
+            parts = org.split(None, 1)
+            asn = parts[0].upper()
+        ip = j.get("ip", "?")
+        return (True, asn, ip, org)
+    except Exception:
+        return (False, "", "", "")
+
+async def _filter_pool_by_asn(pool, log=None):
+    """v8.29 — keep only proxies whose ASN is NOT in CLOUD_ASN_BLOCKLIST and
+    that respond to the probe within the timeout. Cached per-process to avoid
+    re-probing on every attach. Self-healing: if xray rotates upstreams and a
+    previously-good port becomes CF/cloud, this drops it on next process
+    restart (or after cache invalidation).
+    """
+    keep = []
+    for prx in pool:
+        cached = _PROBED_ASN_CACHE.get(prx)
+        if cached is None:
+            ok, asn, ip, org = await _probe_proxy_asn(prx)
+            _PROBED_ASN_CACHE[prx] = (ok, asn, ip, org)
+            if log:
+                tag = "OK" if ok and asn not in CLOUD_ASN_BLOCKLIST else ("DEAD" if not ok else "BLOCKED")
+                log(f"[google-route-py][asn-probe] {prx} -> {tag} ip={ip} {org}")
+        else:
+            ok, asn, ip, org = cached
+        if not ok:
+            continue
+        if asn in CLOUD_ASN_BLOCKLIST:
+            continue
+        keep.append(prx)
+    return keep
+
+
 async def attach_google_proxy_routing(target, log=None) -> None:
     """Attach the per-host google route to a Playwright Page or BrowserContext.
 
@@ -198,9 +275,13 @@ async def attach_google_proxy_routing(target, log=None) -> None:
         return
 
     pool = list(_POOL)
+    # v8.29 self-healer: drop any port whose exit ASN is on the cloud blocklist
+    # OR fails the liveness check. Cached per-process (so we probe at most once
+    # per port per process lifetime).
+    pool = await _filter_pool_by_asn(pool, log=log)
     if not pool:
         if log:
-            log("[google-route-py] empty pool; skipping")
+            log("[google-route-py] empty pool after ASN filter; skipping (CHECK xray.json subscription rotation!)")
         return
     # v7.76 sticky-per-context: 一次 attach (= 一个 BrowserContext 生命周期 = 一次
     # signup attempt) 内, 所有 *.google / gstatic / recaptcha.net 子请求共用同一个

@@ -24,7 +24,31 @@ const XRAY_PORTS_DEAD = new Set<number>([1090, 1091, 1092, 1094, 1095]);  // 友
 // google_proxy_route 端把 *.google 流量钉死走 WARP 提升 reCAPTCHA score, 而
 // chromium 主代理保持 datacenter SOCKS 让 sign-up POST 走得通 (不对称代理).
 const WARP_PORT   = 40000;  // 仅 google_proxy_route 用, 不进 attempt-pool
-const XRAY_PORTS  = [10822, 10824, 10826, 10828, 10830, 10832, 10834, 10836, 10838, 10840, 10842, 10845];  // clean non-GCP datacenter pool
+// v8.30 ROOT-FIX 2026-04-27 — DEEP-AUDIT REVELATION (paired with google_proxy_route v8.29):
+//   The OLD pool [10822..10845] = xray in-socks-2..25 routes -> vless proxy-2..25 ALL
+//   collapsed to single CF Worker IP 172.64.159.138 (AS13335) by v8.26 hot-fix.
+//   broker chromium using these as outer proxy => /signup loaded via CF AS13335 =>
+//   cf_clearance bound to CF IP => v8.27 sign-up POST forced through socks5:10859 =>
+//   cf_clearance IP-mismatch => CF edge 403 "Just a moment..." challenge.
+//   ALSO: even when not 403, reCAPTCHA Enterprise scored CF AS13335 origin as
+//   datacenter -> code:1.
+// The REAL clean-ASN pool was hiding at xray ss-in-0..9 (port 10850-10859),
+// routing to shadowsocks ss-out-0..9 -> 9 distinct REAL upstreams. Per-port ASN
+// audit on 2026-04-27:
+//   10851 US AS60068 Datacamp Limited        (DC star)
+//   10853 US AS27284 Fourplex Telecom        (small US telecom 2-star)
+//   10854 KR AS20473 The Constant Co (Vultr) (DC star)
+//   10855 GB AS9009  M247                    (DC star)
+//   10857 TW AS3462  Chunghwa Telecom        (NATIONAL ISP 3-star residential)
+//   10859 NL AS47172 Greenhost               (small hosting star)
+//   10850/10852/10856/10858 DEAD             (drop)
+// Order = ASN-quality descending so cf-banned-fallback walks toward real-ISP first.
+// google_proxy_route v8.29 has parallel ASN-blocklist self-healer that filters this
+// same pool at runtime, so the two layers stay in lockstep. CRITICAL: outer broker
+// proxy + google_proxy_route + v8.27 sign-up forward MUST share the same exit IP
+// to avoid CF edge IP-mismatch 403 + reCAPTCHA datacenter score.
+const XRAY_PORTS  = [10857, 10853, 10859, 10854, 10855, 10851];  // v8.30 ss-pool (telecom-first)
+const XRAY_PORTS_LEGACY_CF = [10822, 10824, 10826, 10828, 10830, 10832, 10834, 10836, 10838, 10840, 10842, 10845];  // ALL CF AS13335 — DO NOT USE
 const DEAD_PORTS  = XRAY_PORTS_DEAD;
 const TOR_SOCKS_PORT = 9050;  // Tor SOCKS5 (already running on VPS), exit = non-CF/non-GCP
 const DIRECT_PORT    = 0;     // Direct VPS IP (AS8796 FASTNET DATA), exit = 45.205.27.69
