@@ -2138,9 +2138,20 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
             _poll_url = page.url or ''
             print(f'[oauth] 轮询 round={_poll_round+1} url={_poll_url[:80]}', flush=True)
 
-            # 已到达终止 URL
-            if ('nativeclient' in _poll_url or 'code=' in _poll_url or
-                    'error=' in _poll_url):
+            # 已到达终止 URL —— v8.36 ROOT-FIX: 子串匹配 'code=' 会被 'response_type=code' 误命中
+            # (微软会把 authorize 重定向到 login.live.com/oauth20_authorize.srf?client_id=...&response_type=code&...
+            #  → 第1轮误判终止 → wait_for_url(nativeclient) 30s 超时 → [no_redirect] 失败)
+            # 改为解析 query 名(name=code/error/state),只在 nativeclient redirect 真到达时才认终止
+            try:
+                from urllib.parse import urlparse as _urp, parse_qs as _pqs
+                _qs = _pqs(_urp(_poll_url).query) if _poll_url else {}
+            except Exception:
+                _qs = {}
+            if ('nativeclient' in _poll_url
+                    or ('code' in _qs and 'oauth20_authorize' not in _poll_url
+                        and '/authorize' not in _poll_url)
+                    or ('error' in _qs and 'oauth20_authorize' not in _poll_url
+                        and '/authorize' not in _poll_url)):
                 print(f'[oauth] ✅ 已到达授权终止页', flush=True)
                 break
 
