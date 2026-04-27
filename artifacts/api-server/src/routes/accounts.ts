@@ -297,8 +297,11 @@ function sortedByReputation(ports: number[]): number[] {
   const priority = [1094, 1095, 1093, 1092, 1090].filter((p) => ports.includes(p));
   const rest = ports.filter((p) => !priority.includes(p));
   const good = rest.filter(p => portLastGood.has(p)).sort((a, b) => (portLastGood.get(b)!) - (portLastGood.get(a)!));
-  const other = rest.filter(p => !portLastGood.has(p));
-  return [...priority, ...shuffled(good), ...shuffled(other)];
+  // v8.34: 无信誉数据的 port 按 XRAY_PORTS 静态序 (实证战绩降序), 不做 shuffle.
+  // 这样 process restart 后仍优先选历史最佳 (e.g. 10857 TW 中华电信), 不会随机退化.
+  const xrayIdx = (p: number) => { const i = XRAY_PORTS.indexOf(p); return i < 0 ? 999 : i; };
+  const other = rest.filter(p => !portLastGood.has(p)).sort((a, b) => xrayIdx(a) - xrayIdx(b));
+  return [...priority, ...shuffled(good), ...other];
 }
 function shuffled(arr: number[]): number[] { return [...arr].sort(() => Math.random() - 0.5); }
 
@@ -1024,24 +1027,21 @@ router.post("/replit/register", (req, res) => {
               continue;
             }
 
-            // cf_api_blocked: CF CDN exit IP blocked by Cloudflare WAF (CF-on-CF)
-            // Escalation: Tor SOCKS5 (port 9050) -> VPS direct (port 0) -> give up
+            // cf_api_blocked: CF CDN exit IP blocked by Cloudflare WAF / Just-a-moment challenge.
+            // v8.34: failing port → 10min cooldown so picker rotates to a different ss-pool exit.
+            //        Tor/direct injection 已被策略禁用 (仅友节点), 改为纯 port-rotate.
             if (lastErr.includes("cf_api_blocked")) {
               cfBlockedCount++;
-              if (cfBlockedCount === 1) {
-                if (!torRateLimited) {
-                  log(`    ⛔ cf_api_blocked (exit: ${exitIp}) → inject Tor SOCKS5:9050`);
-                  log("      [policy] 已禁用 Tor 出口（仅友节点）");
-                } else {
-                  log(`    ⛔ cf_api_blocked (exit: ${exitIp}) → Tor rate-limited, inject VPS direct`);
-                  log("      [policy] 已禁用直连 VPS 出口（仅友节点）");
-                }
-              } else if (cfBlockedCount === 2) {
-                log(`    ⛔ cf_api_blocked x2 → inject VPS direct (port 0, AS8796)`);
-                log("      [policy] 已禁用直连 VPS 出口（仅友节点）");
-              } else {
-                log(`    ⛔ cf_api_blocked x${cfBlockedCount} → Tor+direct both tried, skip Outlook`);
+              cfBannedUntil.set(tryPort, Date.now() + 10 * 60 * 1000);
+              const _cfIpB = xrayPortCfIp.get(tryPort);
+              const _cfNoteB = _cfIpB ? ` (CF IP ${_cfIpB})` : "";
+              if (cfBlockedCount >= 3) {
+                log(`    ⛔ cf_api_blocked x${cfBlockedCount} on port ${tryPort}${_cfNoteB} → 已尝试 ${cfBlockedCount} 个 port 全被 CF 挑战, 跳 Outlook`);
                 break;
+              }
+              log(`    ⛔ cf_api_blocked (${cfBlockedCount}/3) on port ${tryPort}${_cfNoteB} (exit: ${exitIp}) → 冷却该 port 10min + 立即换 port 重试`);
+              if (_cfIpB) {
+                try { rotateCfIpInXray(_cfIpB); } catch {}
               }
               continue;
             }
