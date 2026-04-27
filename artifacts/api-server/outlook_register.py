@@ -32,7 +32,7 @@ from pathlib import Path
 from faker import Faker
 from browser_fingerprint import gen_profile, context_kwargs, apply_fingerprint_sync, profile_summary
 
-fake = Faker("en_US")  # v8.18: 与浏览器 locale=en-US 一致, 避免名字-locale 矛盾
+fake = Faker("zh_CN")  # v8.18 → v8.18a 紧急回滚: outlook 注册流程内有大量 zh selector (同意并继续/已被占用/月/日/验证质询等), en-US locale 会让 UI 全英文导致 selector 失配
 
 # ─── 配置 ─────────────────────────────────────────────────────────────────────
 BOT_PROTECTION_WAIT = 11          # 秒，与原版一致
@@ -167,7 +167,7 @@ class BaseController:
             page.wait_for_timeout(0.1 * self.wait_time)
             page.get_by_text("同意并继续").click(timeout=30000)
         except Exception as e:
-            return False, f"IP质量不佳，无法进入注册界面: {e}", email
+            return False, f"等待\"同意并继续\"按钮超时(可能是 selector 失配/UI 语言切换/IP 被风控): {e}", email
 
         # ── Step 2: 填写邮箱名、密码、生日、姓名 ─────────────────────────
         try:
@@ -2196,9 +2196,11 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
 
     # ── 共享浏览器指纹档案（与 Cursor 注册完全一致）──────────────────────────
     # gen_profile 生成与 Cursor 相同的 UA/WebGL/canvas/Audio/machine_id/battery
-    # v8.18: locale="en-US" — 与 Replit/Cursor 完整工作流统一为英文站点 UI,
-    # 时区自动从 LOCALE_TIMEZONES["en-US"] (US_TIMEZONES) 池中随机匹配, 保证内部一致.
-    fp = gen_profile(locale="en-US")
+    # v8.18a 紧急回滚: 临时维持 locale="zh-CN", 时区随之 Asia/Shanghai 池.
+    # 完整 en-US 化需先将 outlook_register.py 全部 hard-code zh selector
+    # (同意并继续 / 新建电子邮件 / 已被占用 / 月/日 / 验证质询 等 15+ 处)
+    # 改为 zh|en 双语 regex/union, 否则 UI 切英文后 selector 全部失配.
+    fp = gen_profile(locale="zh-CN")
     print(f"[register] 指纹: {profile_summary(fp)}", flush=True)
 
     # 创建 browser context（统一参数：UA / 时区 / 屏幕 / sec-ch-ua headers）
