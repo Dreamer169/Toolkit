@@ -2657,15 +2657,22 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                         # 触发, 留作 xray 恢复清洁 SOCKS 上游后的自动正确路径) — 强制
                         # google-route 用同 port, 保证 token-IP == submit-IP 一致.
                         if _broker_fam == "direct":
-                            # v8.21 — broker=direct, *.google MUST exit through chromium main proxy
-                            # (= DIRECT VPS 45.205.27.69 AS8796). Installing google-route would PIN
-                            # *.google to DEFAULT_POOL (socks5://10820-10845, CF Workers, rotating)
-                            # → token-mint IP family ≠ submit IP → reCAPTCHA Enterprise rejects token
-                            # → signup POST stuck (observed rpl_mogp51ho_c9rk attempt 2: token len=2318
-                            # mint OK, then 5+ min google-analytics polling timeout).
-                            # SKIP google-route entirely so all *.google traffic exits via DIRECT.
-                            log("[CDP] v8.21 google-route SKIPPED (broker=direct → *.google exits via chromium main proxy = same DIRECT VPS IP, IP-同源)")
-                            raise _GoogleRouteSkip("broker=direct")
+                            # v8.24 — REVERT v8.21 SKIP. v8.21 假设 (xray 池全 CF AS13335) 已过期:
+                            # 2026-04-27 实测 12 端口 (10820/21/22/23/24/25/26/28/30/36/37/45)
+                            # 全部 alive, 出口分布 DigitalOcean / HostPapa / Zenlayer / Cogent /
+                            # Tencent / 小型 EU ISP, 无一在 CF AS13335 段. 池子已恢复清洁.
+                            #
+                            # broker=direct 时若 SKIP, *.google 走 DIRECT VPS 45.205.27.69 AS8796
+                            # FASTNET DATA (datacenter), reCAPTCHA Enterprise 看到 datacenter ASN
+                            # 直接给 ~0.1 score → Replit step1 POST 400 "captcha token is invalid
+                            # (code:1)" — 这正是 rpl_mogtbmo8_l5bu / rpl_mogtduzk_n82s 实测失败的
+                            # 真实根因 (2026-04-27 实证).
+                            #
+                            # 修复: ALWAYS attach google-route 走 DEFAULT_POOL 清洁住宅/小 ISP 出口,
+                            # 让 reCAPTCHA Enterprise 看到合法住宅/edge ISP IP, score 拉回 0.5+.
+                            # (v7.78q + v7.98 历史正确模型, 当池子清洁时此为最优解, 见上方注释)
+                            log("[CDP] v8.24 google-route ATTACH (broker=direct + xray pool 实测清洁 → *.google 走住宅/edge SOCKS, 抬 reCAPTCHA Enterprise score)")
+                            _os.environ.pop("GOOGLE_PROXY_POOL", None)
                         elif _broker_fam == "socks" and _broker_port:
                             _os.environ["GOOGLE_PROXY_POOL"] = f"socks5://127.0.0.1:{_broker_port}"
                             log(f"[CDP] v7.99 google-route pool override → socks5://127.0.0.1:{_broker_port} (sync broker exit, IP 一致)")

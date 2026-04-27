@@ -686,6 +686,43 @@ function looksLikeCaptcha(html: string, finalUrl: string): boolean {
   );
 }
 
+function _classifyCaptchaHit(html: string, finalUrl: string): string {
+  const tags: string[] = [];
+  if (/\/sorry\/index/i.test(finalUrl)) tags.push("google-sorry");
+  if (/\/recaptcha\/api2\/bframe/i.test(finalUrl)) tags.push("recaptcha-v2-visible");
+  if (/\/cdn-cgi\/challenge-platform/i.test(finalUrl)) tags.push("cf-cp-url");
+  if (/challenges\.cloudflare\.com\/turnstile/i.test(finalUrl)) tags.push("cf-turnstile-iframe-url");
+  if (/<title>Just a moment/i.test(html)) tags.push("cf-just-a-moment");
+  if (/cf-browser-verification/i.test(html)) tags.push("cf-browser-verification");
+  if (/id="challenge-form"/i.test(html)) tags.push("cf-managed-challenge-form");
+  if (/cf_chl_opt|__cf_chl_/i.test(html)) tags.push("cf-chl-opt-script");
+  if (/name="cf-turnstile-response"/i.test(html)) tags.push("cf-turnstile-widget");
+  if (/<title>Attention Required/i.test(html)) tags.push("cf-attention-required");
+  if (/Performing security verification/i.test(html)) tags.push("cf-security-verification");
+  if (/Our systems have detected unusual traffic|sending requests, and not a robot/i.test(html)) tags.push("google-unusual-traffic");
+  if (/Unable to connect to the website/i.test(html)) tags.push("cf-unable-connect");
+  if (/cdn-cgi\/challenge-platform/i.test(html)) tags.push("cf-cp-html");
+  return tags.length ? tags.join(",") : "unknown";
+}
+
+async function _dumpCaptcha(html: string, finalUrl: string, status: number, attempt: number, tag: string): Promise<string> {
+  try {
+    const dir = "/tmp/captcha-dumps";
+    await fs.promises.mkdir(dir, { recursive: true });
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const slug = finalUrl.replace(/[^a-zA-Z0-9]+/g, "_").slice(0, 60);
+    const file = `${dir}/${ts}_a${attempt}_${slug}.json`;
+    await fs.promises.writeFile(file, JSON.stringify({
+      ts, finalUrl, status, attempt, tag,
+      html_length: html.length,
+      html_first_8kb: html.slice(0, 8192),
+      html_last_2kb: html.length > 8192 ? html.slice(-2048) : "",
+    }, null, 2));
+    return file;
+  } catch { return "(dump-failed)"; }
+}
+
+
 export async function renderWithBrowser(
   url: string,
   timeoutMs = 30000,
@@ -753,8 +790,10 @@ export async function renderWithBrowser(
     const html = await getPageContent(page);
     const finalUrl = page.url();
     if (attempt < 2 && looksLikeCaptcha(html, finalUrl)) {
+      const _tag = _classifyCaptchaHit(html, finalUrl);
+      const _df = await _dumpCaptcha(html, finalUrl, lastResponseStatus, attempt + 1, _tag);
       console.log(
-        `[renderer] captcha detected on ${finalUrl} (attempt ${attempt + 1}), retrying with new context/connection`
+        `[renderer][D1] captcha on ${finalUrl} status=${lastResponseStatus} attempt=${attempt + 1} tag=${_tag} dump=${_df} — retrying`
       );
       if (!useFresh) dropStickyContext(targetHost);
       await page.close().catch(() => {});
@@ -762,6 +801,11 @@ export async function renderWithBrowser(
       // Brief delay so the SOCKS5 wrapper picks up a new upstream connection
       await new Promise((r) => setTimeout(r, 300));
       return renderWithBrowser(url, timeoutMs, attempt + 1);
+    }
+    if (attempt >= 2 && looksLikeCaptcha(html, finalUrl)) {
+      const _tag = _classifyCaptchaHit(html, finalUrl);
+      const _df = await _dumpCaptcha(html, finalUrl, lastResponseStatus, attempt + 1, _tag);
+      console.log(`[renderer][D1] captcha PERSISTED after ${attempt + 1} on ${finalUrl} status=${lastResponseStatus} tag=${_tag} dump=${_df}`);
     }
     return { html, finalUrl, status: lastResponseStatus };
   } finally {
