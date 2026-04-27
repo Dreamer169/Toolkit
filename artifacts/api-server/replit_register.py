@@ -43,6 +43,13 @@ class _CDPBrowserShim:
     def __init__(self, real_browser):
         self._b = real_browser
         self._owned = []
+        # v8.16: track pages opened on the *reused* broker default ctx so we can
+        # close them on shim.close() — otherwise every registration leaves its
+        # /signup tab open in the broker chromium, accumulating across runs and
+        # eventually making connect_over_cdp time out at 180s while enumerating
+        # 50+ targets. Root cause of all "Attempt N: timeout" cascades.
+        self._owned_pages = []
+        self._page_listeners = {}  # ctx_id -> handler (for cleanup safety)
     def __getattr__(self, name):
         return getattr(self._b, name)
     @property
@@ -61,14 +68,54 @@ class _CDPBrowserShim:
                     await ctx.set_extra_http_headers({"User-Agent": ua})
             except Exception:
                 pass
+            # v8.16: record any page opened on the reused ctx, so close() can
+            # close them — they are *our* pages even though the ctx is shared.
+            cid = id(ctx)
+            if cid not in self._page_listeners:
+                def _track(p, _self=self):
+                    try: _self._owned_pages.append(p)
+                    except Exception: pass
+                try:
+                    ctx.on("page", _track)
+                    self._page_listeners[cid] = _track
+                except Exception:
+                    pass
             return ctx
         ctx = await self._b.new_context(**kw)
         self._owned.append(ctx)
         return ctx
     async def new_page(self, **kw):
         ctx = await self.new_context(**kw)
-        return await ctx.new_page()
+        page = await ctx.new_page()
+        # v8.16: also explicitly track pages created via shim.new_page on
+        # the reused default ctx (on("page") handler covers ctx.new_page,
+        # but be defensive against double-registration race).
+        try:
+            if page not in self._owned_pages:
+                self._owned_pages.append(page)
+        except Exception:
+            pass
+        return page
     async def close(self):
+        # v8.16: first close pages opened on the reused broker default ctx —
+        # these would otherwise leak forever (broker default ctx is never closed).
+        for pg in list(self._owned_pages):
+            try:
+                if not pg.is_closed():
+                    await pg.close()
+            except Exception: pass
+        self._owned_pages.clear()
+        # detach listeners (broker ctx outlives us)
+        for cid, h in list(self._page_listeners.items()):
+            try:
+                # find the matching ctx if still around
+                for c in self._b.contexts:
+                    if id(c) == cid:
+                        try: c.remove_listener("page", h)
+                        except Exception: pass
+                        break
+            except Exception: pass
+        self._page_listeners.clear()
         for ctx in list(self._owned):
             try: await ctx.close()
             except Exception: pass
@@ -98,6 +145,32 @@ class _CDPChromiumShim:
                 return False
 
         # Try direct connect first; on failure, spawn broker chromium via warmup then retry
+        # v8.16: belt-and-suspenders — prune stale leaked broker pages BEFORE attach.
+        # Even with shim.close() page-tracking (above), a crashed/killed registration
+        # process leaves its tab open. Over hours of jobs the broker accumulates
+        # dozens of replit.com/signup tabs + reCAPTCHA iframes/workers, and Playwright
+        # connect_over_cdp() times out at 180s while enumerating all targets.
+        # Close everything except about:blank/chrome:// before each attach.
+        try:
+            import urllib.request as _ureq2, json as _json2
+            with _ureq2.urlopen(self._ws.rstrip("/") + "/json/list", timeout=5) as _r:
+                _tgts = _json2.loads(_r.read())
+            _killed = 0
+            for _t in _tgts:
+                if _t.get("type") != "page":
+                    continue
+                _u = _t.get("url","") or ""
+                if ("replit.com" in _u or "google.com/recaptcha" in _u or
+                        "example.com" in _u or "challenges.cloudflare" in _u):
+                    try:
+                        _ureq2.urlopen(self._ws.rstrip("/") + "/json/close/" + _t["id"], timeout=3)
+                        _killed += 1
+                    except Exception: pass
+            if _killed:
+                log(f"[CDP] prune stale broker pages: closed {_killed} (replit/recaptcha/example tabs)")
+        except Exception as _pe:
+            log(f"[CDP] prune skipped: {_pe}")
+
         last_exc = None
         for tri in range(3):
             try:
