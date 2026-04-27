@@ -314,6 +314,16 @@ async function processMessage(
     failCounts.delete(msg.id);
     markHandled(msg.id);
     stats.clicked++;
+    // v8.17: 验证邮件被真实 verify 成功 (Replit 服务端已确认 oobCode 消费)
+    // → outlook 邮箱已被永久绑定到一个 Replit 账号，立即打 replit_used 落库,
+    //   避免后续轮被再次选中重复注册。严格依赖 trueSuccess (marker=success),
+    //   瞬态错误 / oobCode 已用 / failure 一律不打。
+    try {
+      await tagAccount(acc.id, "replit_used");
+      logger.info({ email: acc.email, accountId: acc.id }, "[live-verify] verify 真实成功 → 已自动标 replit_used");
+    } catch (e) {
+      logger.warn({ email: acc.email, err: String(e) }, "[live-verify] 标 replit_used 失败 (非致命)");
+    }
   } else if (isTerminalUsed) {
     logger.warn({ email: acc.email, msgId: msg.id.slice(0, 20), bodySnip: _bodySnip.slice(0, 80) }, "[live-verify] oobCode 已用/无效，立即放弃并标记已读");
     await markAsRead(accessToken, msg.id);
