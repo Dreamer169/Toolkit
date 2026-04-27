@@ -105,23 +105,49 @@ _pick_browser_proxy() {
   #   1) picker 选 WARP broker (能解 CF JS challenge)
   #   2) python v8.07 broker=warp 分支 PIN GOOGLE_PROXY_POOL=socks5://:40000
   #      → token-mint 和 signup-POST 都走 WARP → mint-IP == submit-IP ✓
-  # 1) WARP — socks5://127.0.0.1:40000 (CF backbone, 能解 CF, IP 一致由 v8.07 保障)
-  if ss -uln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b" || ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b"; then
-    WARP_EXIT=$(curl -s --max-time 8 --socks5 "127.0.0.1:40000" https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
-    if [[ -n "$WARP_EXIT" ]]; then
-      _probe_status=$(_probe_replit_reachable "127.0.0.1:40000")
-      _probe_rc=$?
-      echo "[picker] v8.07 WARP probe: replit.com → ${_probe_status} (exit=${WARP_EXIT})" >&2
-      if [[ $_probe_rc -eq 0 ]]; then
-        echo "socks5://127.0.0.1:40000|WARP@${WARP_EXIT}"
+  # v8.19 — WARP DEMOTED. Evidence (rpl_mogny0wr_xw7b/aozp Apr 27 04:00):
+  #   CF passes (cf_clearance=True) but Replit SSR returns 88KB shell with
+  #   ZERO form/input/recaptcha-script when broker exits via WARP 104.28.x
+  #   (CF AS13335). Replit explicitly bot-mitigates Cloudflare-owned IP ranges
+  #   at the SSR layer. Switch to non-CF SOCKS pool first; WARP only via
+  #   BROKER_USE_WARP=1 env override (kept for emergency).
+  if [[ "${BROKER_USE_WARP:-0}" == "1" ]]; then
+    if ss -uln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b" || ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b"; then
+      WARP_EXIT=$(curl -s --max-time 8 --socks5 "127.0.0.1:40000" https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
+      if [[ -n "$WARP_EXIT" ]]; then
+        _probe_status=$(_probe_replit_reachable "127.0.0.1:40000")
+        _probe_rc=$?
+        echo "[picker] v8.19 BROKER_USE_WARP=1 → WARP probe: ${_probe_status} (exit=${WARP_EXIT})" >&2
+        if [[ $_probe_rc -eq 0 ]]; then
+          echo "socks5://127.0.0.1:40000|WARP@${WARP_EXIT}"
+          return 0
+        fi
+      fi
+    fi
+  else
+    echo "[picker] v8.19 SKIP WARP (set BROKER_USE_WARP=1 to force)" >&2
+  fi
+  # v8.20 — DIRECT-FIRST. 实证 (Apr 27 04:22):
+  #   xray VLESS 上游全跑在 CF Workers, 每条 TCP 出口轮换不同 IP
+  #   (port 10820 五次连续调用得 5 个不同 IP)。cf_clearance 绑定单 IP,
+  #   多 IP 客户端永远拿不到 cf_clearance → CF 卡死。
+  #   DIRECT VPS 45.205.27.69 (AS8796 FASTNET DATA, 稳定单 IP,
+  #   非-CF 段) 历史上 v7.78g+h 经验证能解 CF 且 reCAPTCHA 通过。
+  # 把 DIRECT 提到 SOCKS 前面 (设 BROKER_USE_SOCKS=1 强制走 SOCKS)。
+  if [[ "${BROKER_USE_SOCKS:-0}" != "1" ]]; then
+    DIRECT_EXIT=$(curl -s --max-time 6 https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
+    if [[ -n "$DIRECT_EXIT" ]]; then
+      _direct_probe=$(_probe_replit_reachable "")
+      _direct_rc=$?
+      echo "[picker] v8.20 DIRECT-FIRST probe: replit.com → ${_direct_probe} (exit=${DIRECT_EXIT})" >&2
+      if [[ $_direct_rc -eq 0 ]]; then
+        echo "|DIRECT-VPS@${DIRECT_EXIT}(AS8796-FASTNET)"
         return 0
       fi
-      echo "[picker] WARP probe failed (${_probe_status}) — fall through" >&2
-    else
-      echo "[picker] WARP port 40000 listen 但 ipify 失败, 跳过" >&2
+      echo "[picker] DIRECT probe failed (${_direct_probe}) — fall through to SOCKS" >&2
     fi
   fi
-  # 2) SOCKS clean 池 — fallback (今天 broker=socks 解 CF 失败, 留作未来恢复)
+  # 3) SOCKS clean 池 — fallback (xray 出口轮换, cf_clearance 难拿到)
   for cand in 10824:Kirino 10826:DigitalOcean 10830:MULTACOM 10828:Misaka 10822:Vultr 10832:Linode 10838:Static 10820:Static 10825:Static 10831:Static 10836:Static 10837:Static 10845:Static; do
     port="${cand%%:*}"; name="${cand##*:}"
     ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:${port}\b" || continue
@@ -134,14 +160,12 @@ _pick_browser_proxy() {
     echo "socks5://127.0.0.1:${port}|${name}@${EXIT}"
     return 0
   done
-  # 3) DIRECT — VPS 公网 IP 45.205.27.69 AS8796 FASTNET DATA (兜底, cf_clearance
-  #    在该 IP 上当前不稳定; reCAPTCHA Enterprise 评分曾 OK 但需 WARP cf_clearance 配合)
-  DIRECT_EXIT=$(curl -s --max-time 6 https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
-  if [[ -n "$DIRECT_EXIT" ]]; then
-    echo "|DIRECT-VPS@${DIRECT_EXIT}(AS8796-FASTNET)"
+  # 4) 完全失活硬兜底
+  DIRECT_EXIT2=$(curl -s --max-time 6 https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
+  if [[ -n "$DIRECT_EXIT2" ]]; then
+    echo "|DIRECT-VPS@${DIRECT_EXIT2}(AS8796-FASTNET-tail)"
     return 0
   fi
-  # 4) 完全失活硬兜底
   echo "|DIRECT-VPS@45.205.27.69(AS8796-FASTNET-fallback)"
   return 0
 }
