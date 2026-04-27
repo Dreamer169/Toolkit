@@ -103,21 +103,61 @@ export async function microsoftFetch(input: Parameters<typeof fetch>[0], init: R
   }
 }
 
+// ── Liveness-aware proxy resolver (v8.36 fix for needs_oauth_manual loop) ──
+// Issue: DEFAULT_MICROSOFT_HTTP_PROXY=:8091 has had no listener for months.
+// auto_device_code.py / auto OAuth subprocess receives the dead URL and
+// patchright fails with ERR_PROXY_CONNECTION_FAILED -> account stuck in
+// needs_oauth_manual forever. We probe candidates and cache the live one.
+import { execFileSync } from "child_process";
+const XRAY_LOCAL_PORTS = [10820, 10821, 10822, 10823, 10824, 10825, 10826, 10827, 10828, 10829];
+let _liveProxyCache: { value: string; expires: number } | null = null;
+
+function probeTcpAlive(host: string, port: number, timeoutMs = 1500): boolean {
+  // nc -z exit code is accurate (0=open, 1=refused/closed). Bash /dev/tcp
+  // is unreliable because the trailing "exec 3>&-" always returns 0 even
+  // when the connect failed, causing every port to look alive.
+  try {
+    execFileSync("nc", ["-z", "-w", "1", host, String(port)],
+      { timeout: timeoutMs, stdio: "ignore" });
+    return true;
+  } catch { return false; }
+}
+
+function pickLiveBrowserProxy(): string {
+  const now = Date.now();
+  if (_liveProxyCache && now < _liveProxyCache.expires) return _liveProxyCache.value;
+  // Candidate order: legacy 8091 first (auth-token CONNECT proxy if present), then xray HTTP pool
+  const candidates: string[] = [
+    "http://127.0.0.1:8091",
+    ...XRAY_LOCAL_PORTS.map((p) => `http://127.0.0.1:${p}`),
+  ];
+  for (const cand of candidates) {
+    const u = new URL(cand);
+    if (probeTcpAlive(u.hostname, parseInt(u.port, 10))) {
+      _liveProxyCache = { value: cand, expires: now + 60_000 };
+      return cand;
+    }
+  }
+  _liveProxyCache = { value: "", expires: now + 30_000 };
+  return "";
+}
+
 export function getMicrosoftBrowserProxy(preferred?: string | null): string {
-  return withScheme(preferred?.trim() || firstEnv(BROWSER_PROXY_ENV_KEYS) || DEFAULT_MICROSOFT_HTTP_PROXY);
+  const explicit = preferred?.trim() || firstEnv(BROWSER_PROXY_ENV_KEYS);
+  if (explicit) return withScheme(explicit);
+  return pickLiveBrowserProxy() || DEFAULT_MICROSOFT_HTTP_PROXY;
 }
 
 export function getMicrosoftProxyEnv(preferred?: string | null): Record<string, string> {
   const proxy = getMicrosoftBrowserProxy(preferred);
+  if (!proxy) return {};
   const url = new URL(proxy);
   if (!url.username && !url.password) {
     const token = localProxyToken(url);
     if (token) url.password = token;
   }
   const value = url.toString();
-  // v7.78j — 8091 默认 CONNECT proxy 长期不存在 (无 listener)，注入会让 spawned
-  // python script 把 Microsoft Graph API 请求都打到死端口 → Errno 111。直接
-  // 跳过 → script 走 VPS 直连 graph.microsoft.com (实测可达, AS8796 FASTNET).
-  if (value.includes(":8091")) return {};
+  // 8091 (legacy CONNECT proxy) requires auth-token; when alive (probed) it works.
+  // When dead, pickLiveBrowserProxy already routed us to a live xray port → safe.
   return { HTTP_PROXY: value, HTTPS_PROXY: value, http_proxy: value, https_proxy: value };
 }
