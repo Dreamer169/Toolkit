@@ -2180,8 +2180,17 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
                     except Exception as _ce:
                         print(f'[oauth] CAPTCHA处理异常: {_ce}', flush=True)
                 _after_url = page.url or ''
-                if ('nativeclient' in _after_url or 'code=' in _after_url or
-                        'error=' in _after_url):
+                # v8.37 ROOT-FIX: 与 v8.36 同源 — 子串 'code=' 会被 'response_type=code' 误命中
+                try:
+                    from urllib.parse import urlparse as _urp2, parse_qs as _pqs2
+                    _qs2 = _pqs2(_urp2(_after_url).query) if _after_url else {}
+                except Exception:
+                    _qs2 = {}
+                if ('nativeclient' in _after_url
+                        or ('code' in _qs2 and 'oauth20_authorize' not in _after_url
+                            and '/authorize' not in _after_url)
+                        or ('error' in _qs2 and 'oauth20_authorize' not in _after_url
+                            and '/authorize' not in _after_url)):
                     break
                 print(f'[oauth] 重新导航授权页...', flush=True)
                 try:
@@ -2208,12 +2217,24 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
         # ────────────────────────────────────────────────────────────────────────
 
         # 使用 wait_for_url 等待 nativeclient 重定向（最多30s）
+        # v8.37 ROOT-FIX: 与 v8.36 同源 — 子串 'code=' 会被 'response_type=code' 误命中
         if not captured['code'] and not captured['error']:
+            def _is_terminal(u: str) -> bool:
+                if not u:
+                    return False
+                if 'nativeclient' in u:
+                    return True
+                try:
+                    from urllib.parse import urlparse as _urp3, parse_qs as _pqs3
+                    _qs3 = _pqs3(_urp3(u).query)
+                except Exception:
+                    return False
+                _is_authorize = ('oauth20_authorize' in u) or ('/authorize' in u)
+                if _is_authorize:
+                    return False
+                return ('code' in _qs3) or ('error' in _qs3)
             try:
-                page.wait_for_url(
-                    lambda u: 'nativeclient' in u or 'code=' in u or 'error=' in u,
-                    timeout=30000,
-                )
+                page.wait_for_url(_is_terminal, timeout=30000)
             except Exception:
                 pass
 
