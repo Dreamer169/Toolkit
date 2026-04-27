@@ -10,6 +10,7 @@ interface JobSummary {
   title?: string;
   status: "running" | "done" | "stopped" | "error" | "failed";
   startedAt: number;
+  finishedAt?: number | null;
   logCount: number;
   accountCount: number;
   exitCode: number | null;
@@ -40,11 +41,13 @@ interface RecentAccount { id: number; platform: string; email: string; status: s
 interface ApiHealth { ok: boolean; latency: number }
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────────
-function elapsed(ms: number) {
-  const s = Math.floor((Date.now() - ms) / 1000);
-  if (s < 60) return `${s}s 前`;
-  if (s < 3600) return `${Math.floor(s / 60)}m${s % 60}s 前`;
-  return `${Math.floor(s / 3600)}h 前`;
+function elapsed(ms: number, endMs?: number | null) {
+  // v7.94: 任务结束后用 finishedAt 冻结显示，避免出错任务也持续涨秒数
+  const end = endMs && endMs > 0 ? endMs : Date.now();
+  const s = Math.floor((end - ms) / 1000);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m${s % 60}s`;
+  return `${Math.floor(s / 3600)}h${Math.floor((s % 3600) / 60)}m`;
 }
 function statusColor(s: string) {
   if (s === "running") return "text-blue-400";
@@ -267,7 +270,7 @@ export default function Monitor() {
           <p className="text-xs text-gray-500 mt-0.5">每 2s 自动刷新 · 覆盖 Outlook/Cursor/Replit/流水线/子节点部署任务</p>
         </div>
         <div className="flex items-center gap-3">
-          <span className="text-xs text-gray-600">上次刷新 {elapsed(lastRefresh)}</span>
+          <span className="text-xs text-gray-600">上次刷新 {elapsed(lastRefresh)}前</span>
           <button
             onClick={() => setPaused(p => !p)}
             className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${paused ? "bg-blue-700 text-white" : "bg-[#21262d] text-gray-400 hover:text-white"}`}
@@ -385,7 +388,7 @@ export default function Monitor() {
                         {job.status === "running" ? "运行中" : job.status === "done" ? "完成" : job.status === "stopped" ? "已停止" : "出错"}
                       </span>
                     </div>
-                    <span className="text-xs text-gray-600">{elapsed(job.startedAt)}</span>
+                    <span className="text-xs text-gray-600">{job.status === "running" ? "运行 " + elapsed(job.startedAt) : "耗时 " + elapsed(job.startedAt, job.finishedAt)}</span>
                   </div>
                   <div className="text-xs text-gray-500 font-mono truncate">{job.title ? `${job.title} · ` : ""}{job.id}</div>
                   {job.lastLog && (
@@ -563,7 +566,7 @@ export default function Monitor() {
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
             <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
               <div className="text-gray-500">上次运行</div>
-              <div className="text-white font-medium mt-1">{elapsed(maintainStatus.ts)}</div>
+              <div className="text-white font-medium mt-1">{elapsed(maintainStatus.ts)}前</div>
             </div>
             <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
               <div className="text-gray-500">连通性验证</div>

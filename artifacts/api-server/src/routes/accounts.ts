@@ -327,6 +327,7 @@ interface Job {
   id: string;
   status: "running" | "done" | "error";
   started: number;
+  finished?: number; // v7.94: 任务终态时间戳 — elapsed/UI 用，避免一直涨
   logs: string[];
   result: Record<string, unknown> | null;
 }
@@ -348,7 +349,7 @@ async function _flushJob(id: string) {
     const fs = await import('fs/promises');
     await _ensureJobsDir();
     await fs.writeFile(`${_jobsDir}/${id}.json`, JSON.stringify({
-      id: job.id, status: job.status, started: job.started,
+      id: job.id, status: job.status, started: job.started, finished: job.finished ?? null,
       logs: job.logs.slice(-2000), result: job.result, updated: Date.now(),
     }));
   } catch (e) { console.warn('[jobs-persist] flush fail', id, e); }
@@ -382,8 +383,21 @@ function persistJob(id: string, immediate = false) {
         if (obj.status === 'running') {
           obj.status = 'error';
           obj.logs = [...(obj.logs ?? []), `[${new Date().toISOString().slice(11,19)}] ⚠ pm2 重启截断 — 状态由 running 标记为 error`];
+          (obj as Job & { finished?: number }).finished = (obj as Job & { updated?: number }).updated ?? Date.now();
         }
-        jobs.set(obj.id, { id: obj.id, status: obj.status, started: obj.started, logs: obj.logs ?? [], result: obj.result ?? null });
+        // v7.94 retroactive heal: 旧版本 (okCount==0 → error) 错染红色的任务回收
+        const _logsArr = (obj.logs ?? []) as string[];
+        const _tail    = _logsArr.slice(-8).join("\n");
+        if (obj.status === 'error'
+            && /All done: \d+\/\d+ succeeded/.test(_tail)
+            && !/FATAL|Unexpected error|pm2 重启截断/.test(_tail)) {
+          obj.status = 'done';
+        }
+        jobs.set(obj.id, {
+          id: obj.id, status: obj.status, started: obj.started,
+          finished: (obj as Job & { finished?: number }).finished ?? ((obj as Job & { updated?: number }).updated ?? undefined),
+          logs: obj.logs ?? [], result: obj.result ?? null,
+        });
         n++;
       } catch (e) { console.warn('[jobs-persist] hydrate fail', f, e); }
     }
@@ -412,7 +426,10 @@ router.get("/replit/jobs", (_req, res) => {
     status: normalizeReplitStatus(job.status),
     startedAt: job.started,
     logCount: job.logs.length,
-    accountCount: Array.isArray(job.result?.results) ? job.result.results.length : 0,
+    accountCount: Array.isArray(job.result?.results)
+      ? (job.result.results as unknown[]).filter((r) => (r as Record<string, unknown>).ok).length
+      : 0,
+    finishedAt: job.finished ?? null,
     exitCode: null,
     lastLog: job.logs.length ? ((): { type: string; message: string } => {
       // v7.88: derive type from log content (same regex as GET /:jobId handler) instead
@@ -434,12 +451,21 @@ router.get("/replit/jobs/:jobId", (req, res) => {
     type: /fatal|error|失败|✗|❌/i.test(line) ? "error" : /✓|✅|成功|done/i.test(line) ? "success" : "log",
     message: line,
   }));
+  const _end = job.finished ?? Date.now();
+  const _resultObj = (job.result ?? {}) as Record<string, unknown>;
+  const _accountCount = Array.isArray(_resultObj.results)
+    ? (_resultObj.results as unknown[]).filter((r) => (r as Record<string, unknown>).ok).length
+    : 0;
   res.json({
     success: true,
     jobId: job.id,
     ...classifyReplitJob(job.id),
     status: normalizeReplitStatus(job.status),
-    elapsed: Math.round((Date.now() - job.started) / 1000),
+    startedAt: job.started,
+    finishedAt: job.finished ?? null,
+    elapsed: Math.round((_end - job.started) / 1000),
+    summary: typeof _resultObj.summary === "string" ? _resultObj.summary : null,
+    accountCount: _accountCount,
     logs,
     nextSince: job.logs.length,
     result: job.result,
@@ -452,7 +478,9 @@ router.delete("/replit/jobs/:jobId", (req, res) => {
   if (!job) { res.status(404).json({ success: false, error: "job not found" }); return; }
   if (job.status === "running") {
     job.status = "error";
+    job.finished = Date.now();
     job.logs.push(`[${new Date().toISOString().slice(11,19)}] ⚠ 用户在监控中心标记停止（后台子进程如已启动可能继续到自然结束）`);
+    persistJob(req.params.jobId, true);
   }
   res.json({ success: true });
 });
@@ -1202,14 +1230,18 @@ router.post("/replit/register", (req, res) => {
     }
 
     const okCount = results.filter((r: unknown) => (r as Record<string, unknown>).ok).length;
-    job.status = okCount > 0 ? "done" : "error";
-    job.result = { results, summary: `${okCount}/${count} succeeded` };
+    // v7.94: 脚本能跑到这里就是自然完成；okCount=0 不等于 error，把成败差异放在 result.summary
+    job.status = "done";
+    job.finished = Date.now();
+    job.result = { results, summary: `${okCount}/${count} succeeded`, okCount, total: count };
     persistJob(jobId, true);
     log(`\nAll done: ${okCount}/${count} succeeded`);
     if (!requestedEmail) await checkAndRefillReplitPool(dbQ, log);
   })().catch(err => {
     job.status = "error";
+    job.finished = Date.now();
     job.logs.push(`FATAL: ${String(err)}`);
+    persistJob(jobId, true);
   });
 
   res.json({ success: true, jobId, message: `Replit registration started (${count} accounts)` });
@@ -1222,7 +1254,9 @@ router.get("/replit/register/:jobId", (req, res) => {
   res.json({
     jobId: job.id,
     status: job.status,
-    elapsed: Math.round((Date.now() - job.started) / 1000),
+    startedAt: job.started,
+    finishedAt: job.finished ?? null,
+    elapsed: Math.round(((job.finished ?? Date.now()) - job.started) / 1000),
     logs: job.logs,
     result: job.result,
   });
@@ -1500,19 +1534,28 @@ router.post("/pipeline/full", async (req, res) => {
       );
       log(`\n=== 流水线完成 === 总 Reseek 账号: ${final[0]?.count ?? 0}/${target}`);
       job.status = "done";
+      job.finished = Date.now();
       job.result = { total: parseInt(final[0]?.count ?? "0", 10), target };
+      persistJob(jobId, true);
     } catch (e) {
       log(`FATAL: ${e}`);
       job.status = "error";
+      job.finished = Date.now();
+      persistJob(jobId, true);
     }
-  })().catch((e) => { job.status = "error"; job.logs.push(`FATAL: ${e}`); });
+  })().catch((e) => {
+    job.status = "error";
+    job.finished = Date.now();
+    job.logs.push(`FATAL: ${e}`);
+    persistJob(jobId, true);
+  });
 });
 
 // ── GET /api/pipeline/full/:jobId ─────────────────────────────────────────────
 router.get("/pipeline/full/:jobId", (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) { res.status(404).json({ success: false, error: "job not found" }); return; }
-  res.json({ jobId: job.id, status: job.status, elapsed: Math.round((Date.now() - job.started) / 1000), logs: job.logs, result: job.result });
+  res.json({ jobId: job.id, status: job.status, startedAt: job.started, finishedAt: job.finished ?? null, elapsed: Math.round(((job.finished ?? Date.now()) - job.started) / 1000), logs: job.logs, result: job.result });
 });
 
 
@@ -1549,8 +1592,8 @@ router.post("/replit/deploy-subnode", async (req, res) => {
         );
         acc = rows[0];
       }
-      if (!acc) { job.status = "error"; job.result = { error: "账号未找到" }; return; }
-      if (!acc.password) { job.status = "error"; job.result = { error: "无密码，无法登录" }; return; }
+      if (!acc) { job.status = "error"; job.finished = Date.now(); job.result = { error: "账号未找到" }; persistJob(jobId, true); return; }
+      if (!acc.password) { job.status = "error"; job.finished = Date.now(); job.result = { error: "无密码，无法登录" }; persistJob(jobId, true); return; }
       log(`开始部署 ${acc.email} (id=${acc.id}, username=${acc.username})...`);
 
       // 获取 outlook token
@@ -1582,17 +1625,23 @@ router.post("/replit/deploy-subnode", async (req, res) => {
           } catch (e) { log(`网关注册异常: ${e}`); }
         }
         job.status = "done";
+        job.finished = Date.now();
         job.result = { ok: true, webview_url: webUrl, repl_url: replUrl, email: acc.email };
+        persistJob(jobId, true);
       } else {
         const errMsg = String(deployR.parsed.error ?? deployR.raw.slice(-300) ?? "未知错误");
         log(`✗ 部署失败: ${errMsg.slice(0, 200)}`);
         job.status = "error";
+        job.finished = Date.now();
         job.result = { ok: false, error: errMsg.slice(0, 200) };
+        persistJob(jobId, true);
       }
     } catch (e) {
       log(`FATAL: ${e}`);
       job.status = "error";
+      job.finished = Date.now();
       job.result = { error: String(e) };
+      persistJob(jobId, true);
     }
   })();
 });
@@ -1601,7 +1650,7 @@ router.post("/replit/deploy-subnode", async (req, res) => {
 router.get("/replit/deploy-subnode/:jobId", (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) { res.status(404).json({ success: false, error: "job not found" }); return; }
-  res.json({ jobId: job.id, status: job.status, elapsed: Math.round((Date.now() - job.started) / 1000), logs: job.logs, result: job.result });
+  res.json({ jobId: job.id, status: job.status, startedAt: job.started, finishedAt: job.finished ?? null, elapsed: Math.round(((job.finished ?? Date.now()) - job.started) / 1000), logs: job.logs, result: job.result });
 });
 
 
