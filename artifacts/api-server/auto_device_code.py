@@ -106,27 +106,39 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                 result["msg"] = f"账号已被微软封禁: {final_url[:100]}"
                 print(f"[{email}] 🚫 账号已被封禁，URL: {final_url[:80]}", flush=True)
             else:
-                success_signals = [
-                    "signed in" in content.lower(),
-                    "已登录" in content,
-                    "you can close" in content.lower(),
-                    "可以关闭" in content,
-                    "device login is complete" in content.lower(),
-                    "登录成功" in content,
-                    # oauth20_remoteconnect.srf 是设备码授权完成后的标准成功页
-                    "oauth20_remoteconnect.srf" in final_url.lower(),
-                    "you have signed in" in content.lower(),
-                    "successfully signed in" in content.lower(),
-                    "授权已完成" in content,
-                ]
-                if any(success_signals):
+                # v8.38 ROOT-FIX: success_signals 太宽松, 字串 "signed in" 会被 microsoft.com
+                # 通用页 chrome (导航/页脚/aria-label) 误命中 → 浏览器仅 8s 就回报 done
+                # → device_code 真正 consent 未提交 → 后端 pollForToken 90s 全部 timeout
+                # → 帐号永久卡在 needs_oauth_manual.
+                # 改为: 仅当 URL 是真正的 device-flow 完成端点 + 内容含明确完成文案时才认 done.
+                _u = (final_url or "").lower()
+                _c = content.lower()
+                _has_error_qs = ("error=" in _u) or ("error_description=" in _u)
+                _is_done_endpoint = (
+                    ("oauth20_remoteconnect.srf" in _u and not _has_error_qs)
+                    or ("login.microsoftonline.com/common/oauth2/deviceauth" in _u and not _has_error_qs)
+                    or ("/devicelogin/complete" in _u)
+                )
+                _has_explicit_done_text = (
+                    "device login is complete" in _c
+                    or "you have signed in" in _c
+                    or "you can now close this window" in _c
+                    or "you can close this window" in _c
+                    or "可以关闭此窗口" in content
+                    or "已经登录" in content
+                    or "登录成功" in content
+                    or "授权已完成" in content
+                )
+                # 同时满足 (终端 URL) 或 (终端 URL+ 完成文案), 才算真完成
+                # 防止落到 microsoft.com 主页/marketing 页 chrome 含 "signed in" 误判
+                if _is_done_endpoint and (_has_explicit_done_text or "oauth20_remoteconnect.srf" in _u):
                     result["status"] = "done"
                     result["msg"] = "授权成功"
-                    print(f"[{email}] ✅ 授权成功！", flush=True)
+                    print(f"[{email}] ✅ 授权成功！URL={final_url[:120]}", flush=True)
                 else:
                     result["status"] = "error"
-                    result["msg"] = f"最终页面未知: {final_url[:80]}"
-                    print(f"[{email}] ⚠ 授权结果不确定，URL: {final_url[:80]}", flush=True)
+                    result["msg"] = f"最终页面非完成端点: {final_url[:120]}"
+                    print(f"[{email}] ⚠ 授权未完成 (final_url={final_url[:120]} done_endpoint={_is_done_endpoint} done_text={_has_explicit_done_text})", flush=True)
 
             await browser.close()
     except Exception as e:
