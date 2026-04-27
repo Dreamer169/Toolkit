@@ -937,18 +937,18 @@ router.post("/replit/register", (req, res) => {
             // captcha_token_invalid → Replit server拒绝token → 立即rate-limit该email → 跳下一个Outlook
             if (lastErr.includes("captcha_token_invalid")) {
               captchaFailCount++;
-              if (captchaFailCount >= 3) {
+              if (captchaFailCount >= 1) {  // v8.26d: 1 即停 (避免重复相同 IP-mismatch bug)
                 log(`    captcha_token_invalid x${captchaFailCount} → skip Outlook (rate-limit risk)`);
                 break;
               }
               // 换个 CF CDN IP 再试——captcha 失败通常是 IP 信誉问题
               const cfIpC = xrayPortCfIp.get(tryPort);
               if (cfIpC) {
-                log(`    captcha_token_invalid (${captchaFailCount}/3) → rotate CF IP ${cfIpC} + retry`);
+                log(`    captcha_token_invalid (${captchaFailCount}/1) → rotate CF IP ${cfIpC} + retry`);
                 rotateCfIpInXray(cfIpC);
                 await new Promise(r => setTimeout(r, 2000));
               } else {
-                log(`    captcha_token_invalid (${captchaFailCount}/3) → instant port switch`);
+                log(`    captcha_token_invalid (${captchaFailCount}/1) → instant port switch`);
               }
               continue;
             }
