@@ -47,7 +47,7 @@ const WARP_PORT   = 40000;  // 仅 google_proxy_route 用, 不进 attempt-pool
 // same pool at runtime, so the two layers stay in lockstep. CRITICAL: outer broker
 // proxy + google_proxy_route + v8.27 sign-up forward MUST share the same exit IP
 // to avoid CF edge IP-mismatch 403 + reCAPTCHA datacenter score.
-const XRAY_PORTS  = [10857, 10853, 10859, 10854, 10855, 10851];  // v8.30 ss-pool (telecom-first)
+const XRAY_PORTS  = [10857, 10855, 10853, 10854, 10859, 10851];  // v8.33 reorder by 04/27 实证: 10857(TW中华4✓) 10855(GB M247 3✓) 10853未测 10854未测 10859(NL Greenhost ✗) 10851(US Datacamp ✗)
 const XRAY_PORTS_LEGACY_CF = [10822, 10824, 10826, 10828, 10830, 10832, 10834, 10836, 10838, 10840, 10842, 10845];  // ALL CF AS13335 — DO NOT USE
 const DEAD_PORTS  = XRAY_PORTS_DEAD;
 const TOR_SOCKS_PORT = 9050;  // Tor SOCKS5 (already running on VPS), exit = non-CF/non-GCP
@@ -961,18 +961,22 @@ router.post("/replit/register", (req, res) => {
             // captcha_token_invalid → Replit server拒绝token → 立即rate-limit该email → 跳下一个Outlook
             if (lastErr.includes("captcha_token_invalid")) {
               captchaFailCount++;
-              if (captchaFailCount >= 1) {  // v8.26d: 1 即停 (避免重复相同 IP-mismatch bug)
-                log(`    captcha_token_invalid x${captchaFailCount} → skip Outlook (rate-limit risk)`);
+              // v8.33 ROOT-FIX: ss-pool 是多 ISP 真实节点 (TW Chunghwa / GB M247 / NL Greenhost ...).
+              // captcha_token_invalid = 该节点出口 IP 被 reCAPTCHA Enterprise 评低分
+              //   (实证 2026-04-27: 10859 NL Greenhost / 10851 US Datacamp 被拒, 10857/10855 通过).
+              // 修复: 将失败 port 加入 15min 冷却 (reCAPTCHA score 短期翻不了盘),
+              //       改用 portQueue 中下一个 port 重试; 阈值 1→2 (允许试 1 次换 port).
+              cfBannedUntil.set(tryPort, Date.now() + 15 * 60 * 1000);
+              const cfIpC = xrayPortCfIp.get(tryPort);
+              const _cfNote = cfIpC ? ` (CF IP ${cfIpC})` : "";
+              if (captchaFailCount >= 2) {
+                log(`    captcha_token_invalid x${captchaFailCount} on port ${tryPort}${_cfNote} → 已换 port 重试仍失败, 跳 Outlook`);
                 break;
               }
-              // 换个 CF CDN IP 再试——captcha 失败通常是 IP 信誉问题
-              const cfIpC = xrayPortCfIp.get(tryPort);
+              log(`    captcha_token_invalid (${captchaFailCount}/2) on port ${tryPort}${_cfNote} → 冷却 port 15min + 立即换 port 重试`);
               if (cfIpC) {
-                log(`    captcha_token_invalid (${captchaFailCount}/1) → rotate CF IP ${cfIpC} + retry`);
-                rotateCfIpInXray(cfIpC);
-                await new Promise(r => setTimeout(r, 2000));
-              } else {
-                log(`    captcha_token_invalid (${captchaFailCount}/1) → instant port switch`);
+                // 同时旋转该 port 在 xray.json 里绑定的 CF backend IP, 缓解未来再被路由到此 port 时仍是同一被封 IP
+                try { rotateCfIpInXray(cfIpC); } catch {}
               }
               continue;
             }
