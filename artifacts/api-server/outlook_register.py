@@ -2287,9 +2287,15 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
         if result.get("success"):
             try:
                 _state = context.storage_state()
-                result["cookies_json"]    = json.dumps(_state, ensure_ascii=False)
-                result["fingerprint_json"] = json.dumps(fp, ensure_ascii=False, default=str)
-                result["user_agent"]       = fp.get("user_agent", "")
+                # fp 是 BrowserProfile dataclass, 用 asdict 转 dict 后再序列化
+                try:
+                    import dataclasses as _dc
+                    _fp_dict = _dc.asdict(fp) if _dc.is_dataclass(fp) else (dict(fp) if hasattr(fp,"items") else vars(fp))
+                except Exception:
+                    _fp_dict = vars(fp) if hasattr(fp,"__dict__") else {}
+                result["cookies_json"]     = json.dumps(_state, ensure_ascii=False, default=str)
+                result["fingerprint_json"] = json.dumps(_fp_dict, ensure_ascii=False, default=str)
+                result["user_agent"]       = getattr(fp, "user_agent", "") or _fp_dict.get("user_agent", "")
                 print(f"[register] 📦 identity bundle: cookies={len(result['cookies_json'])}B fp={len(result['fingerprint_json'])}B ua={len(result['user_agent'])}B exit_ip={result['exit_ip']} port={result['proxy_port']}", flush=True)
             except Exception as _ce:
                 print(f"[register] ⚠ identity bundle 收集失败: {_ce}", flush=True)
