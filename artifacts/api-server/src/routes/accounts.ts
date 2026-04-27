@@ -806,6 +806,11 @@ router.post("/replit/register", (req, res) => {
                WHERE r.platform = 'replit'
                  AND r.email = accounts.email
              )
+             AND NOT EXISTS (
+               SELECT 1 FROM archives ar
+               WHERE ar.platform = 'replit'
+                 AND ar.email = accounts.email
+             )
            ORDER BY
              -- v7.80: prefer pre-scanned available emails (replit_avail), then unknown,
              -- defer pre-scanned taken/error emails to the very end so picker hits
@@ -2130,6 +2135,10 @@ export async function executeEmailPrescan(opts: EmailPrescanOpts, source = "manu
            AND NOT EXISTS (
              SELECT 1 FROM accounts r
              WHERE r.platform='replit' AND r.email = accounts.email
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM archives ar
+             WHERE ar.platform='replit' AND ar.email = accounts.email
            )
            ${tagFilter}
          ORDER BY
