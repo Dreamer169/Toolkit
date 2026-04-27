@@ -166,15 +166,15 @@ async function runOnce() {
         const allMsgs: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> = [];
 
         // 1) 全局 /me/messages（含收件箱但不含 junkemail）
-        const filterUrl = `https://graph.microsoft.com/v1.0/me/messages?$filter=isRead eq false and contains(subject,'${SUBJECT_FILTER}')&$select=id,subject,isRead,receivedDateTime&$top=20&$orderby=receivedDateTime desc`;
-        const gr = await microsoftFetch(filterUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
+        const filterUrl = `https://graph.microsoft.com/v1.0/me/messages?$filter=isRead eq false and contains(subject,'${SUBJECT_FILTER}')&$select=id,subject,isRead,receivedDateTime&$top=20`;
+        const gr = await microsoftFetch(filterUrl, { headers: { Authorization: `Bearer ${accessToken}`, ConsistencyLevel: "eventual" } });
         if (gr.ok) {
           const gd = await gr.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
           const inbox = (gd.value ?? []).filter(m => m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase())).filter(m => !isRecentlyHandled(m.id));
           allMsgs.push(...inbox);
         } else {
           const fallbackUrl = `https://graph.microsoft.com/v1.0/me/messages?$search="subject:${SUBJECT_FILTER}"&$select=id,subject,isRead,receivedDateTime&$top=20`;
-          const gr2 = await microsoftFetch(fallbackUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
+          const gr2 = await microsoftFetch(fallbackUrl, { headers: { Authorization: `Bearer ${accessToken}`, ConsistencyLevel: "eventual" } });
           if (gr2.ok) {
             const gd2 = await gr2.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
             const inbox2 = (gd2.value ?? []).filter(m => !m.isRead && m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase())).filter(m => !isRecentlyHandled(m.id));
@@ -183,7 +183,7 @@ async function runOnce() {
         }
 
         // 2) Junk 垃圾邮件文件夹 — /me/messages 不含 junkemail，需单独查
-        const junkUrl = `https://graph.microsoft.com/v1.0/me/mailFolders/junkemail/messages?$filter=isRead eq false and contains(subject,'${SUBJECT_FILTER}')&$select=id,subject,isRead,receivedDateTime&$top=10&$orderby=receivedDateTime desc`;
+        const junkUrl = `https://graph.microsoft.com/v1.0/me/mailFolders/junkemail/messages?$filter=isRead eq false and contains(subject,'${SUBJECT_FILTER}')&$select=id,subject,isRead,receivedDateTime&$top=10`;
         const junkR = await microsoftFetch(junkUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
         if (junkR.ok) {
           const junkD = await junkR.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
@@ -228,7 +228,8 @@ async function processMessage(
   proxy?: string | null
 ) {
   const scriptPath = path.resolve(__dirname, "../click_verify_link.py");
-  const params = JSON.stringify({ token: accessToken, message_id: msg.id, verify_url: "", proxy: getMicrosoftBrowserProxy(proxy) });
+  // proxy: null → python 的 Graph API 调用直连 graph.microsoft.com（注释明示可达），Chromium 走 WARP auto-detect
+  const params = JSON.stringify({ token: accessToken, message_id: msg.id, verify_url: "", proxy: null });
   const result = await new Promise<{ success: boolean; verify_url?: string; final_url?: string; title?: string; http_status?: number; error?: string }>((resolve) => {
     const child = spawn("python3", [scriptPath, params], { env: { ...process.env, ...getMicrosoftProxyEnv(proxy), PYTHONUNBUFFERED: "1" } });
     _inflightChildren.add(child);
@@ -256,6 +257,7 @@ async function processMessage(
   const errStr = (result.error ?? "").toLowerCase();
   const isTransient = !trueSuccess && (
     status === 0 ||
+    status === 403 ||    // Cloudflare bot challenge — 可重试
     status === 407 ||
     status === 408 ||
     status === 429 ||

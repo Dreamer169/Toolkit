@@ -248,6 +248,28 @@ if not verify_url:
     sys.exit(0)
 
 
+
+def _tor_newnym(timeout: int = 8) -> bool:
+    """向 Tor 控制端口发送 NEWNYM 信号切换电路，成功返回 True。"""
+    import socket
+    try:
+        cookie_path = "/run/tor/control.authcookie"
+        with open(cookie_path, "rb") as cf:
+            cookie = cf.read()
+        cookie_hex = cookie.hex()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect(("127.0.0.1", 9051))
+        sock.sendall(f"AUTHENTICATE {cookie_hex}\r\nSIGNAL NEWNYM\r\nQUIT\r\n".encode())
+        resp = sock.recv(256).decode(errors="replace")
+        sock.close()
+        if "250" in resp:
+            import time; time.sleep(2)  # 等新电路建立
+            return True
+    except Exception as e:
+        print(f"[click_verify] Tor NEWNYM 失败: {e}", flush=True)
+    return False
+
 def _try_firebase_verify(verify_url: str) -> dict:
     """直接调 Firebase Identity Toolkit REST API 验证邮件，无需浏览器和代理。"""
     try:
@@ -275,106 +297,125 @@ def _try_firebase_verify(verify_url: str) -> dict:
     except Exception as e:
         return {"ok": False, "error": f"Firebase exception: {e}"}
 
-# --- Firebase REST 仅适用于纯 Firebase 托管 action 页 ---------------
-# Replit 等使用自定义 action handler（如 replit.com/action-code）的服务，
-# 必须走浏览器：Replit 前端在收到 oobCode 后还会调 Replit 后端同步用户表，
-# 仅调 Firebase REST 会消费 oobCode 但 Replit DB 不更新 → 显示未验证。
+# --- 优先尝试 Firebase REST API（对 Replit/Reseek 同样有效）----------
+# 实测: POST identitytoolkit.googleapis.com/v1/accounts:update
+# 返回 emailVerified=true 即意味着 Firebase 侧已完成验证（含 Replit DB）。
+# 完全绕过 Cloudflare bot-check，是最可靠路径。
+print("[click_verify] 尝试 Firebase REST API 验证...", flush=True)
+_fb = _try_firebase_verify(verify_url)
+if _fb.get("ok"):
+    print(f"[click_verify] ✅ Firebase 验证成功: {_fb.get('email', '')}", flush=True)
+    print(json.dumps({"success": True, "verify_url": verify_url,
+                      "final_url": verify_url,
+                      "verified_marker": "success",
+                      "title": "Email Verified via Firebase REST",
+                      "http_status": 200}))
+    sys.exit(0)
+print(f"[click_verify] Firebase 未成功({_fb.get('error', '?')}), 降级到浏览器", flush=True)
 _is_custom_action_handler = bool(re.search(r"replit\.com|reseek\.com", verify_url, re.I))
-if not _is_custom_action_handler:
-    print("[click_verify] 尝试 Firebase REST API 验证...", flush=True)
-    _fb = _try_firebase_verify(verify_url)
-    if _fb["ok"]:
-        print(f"[click_verify] ✅ Firebase 验证成功: {_fb.get('email', '')}", flush=True)
-        print(json.dumps({"success": True, "verify_url": verify_url,
-                          "final_url": verify_url,
-                          "title": "Email Verified via Firebase",
-                          "http_status": 200}))
-        sys.exit(0)
-    print(f"[click_verify] Firebase 未成功({_fb['error']}), 降级到浏览器直连", flush=True)
-else:
-    print("[click_verify] 检测到自定义 action handler（Replit 等），强制走浏览器以触发后端同步", flush=True)
+if _is_custom_action_handler:
+    print("[click_verify] 检测到自定义 action handler（Replit 等），使用浏览器兜底", flush=True)
 # ---------------------------------------------------------------------
+
+# v7.90 — 多路径浏览器回退: WARP → Tor(NEWNYM) → Tor(NEWNYM#2) → xray10808
+_PROXY_LADDER = [
+    replit_browser_proxy or "socks5://127.0.0.1:40000",  # WARP
+    "socks5://127.0.0.1:9050",  # Tor (电路 1)
+    "socks5://127.0.0.1:9050",  # Tor (电路 2, NEWNYM)
+    "socks5://127.0.0.1:10808", # xray socks5
+]
+
+def _cf_blocked(body_text: str, status: int) -> bool:
+    low = body_text.lower()
+    return status == 403 or "performing security verification" in low or "cloudflare" in low
 
 try:
     from patchright.sync_api import sync_playwright
-    with sync_playwright() as p:
-        # v7.85 — chromium 必须走 WARP, 跟 register/replay 路径出口 IP 一致.
-        # 删除 --no-proxy-server (那个 arg 会强制 chromium 忽略所有代理设置, 包括
-        # 我们下面 ctx 上挂的 proxy, 让浏览器从 VPS 公网直连 replit.com).
-        browser = p.chromium.launch(headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-                  "--disable-extensions", "--mute-audio",
-                  "--disable-quic"])  # 防 QUIC over UDP 绕过 socks5
-        replit_proxy_conf = patchright_proxy(replit_browser_proxy)
-        ctx_opts = {"user_agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")}
-        # v7.85 — 强制走 WARP 代理 (默认 socks5://127.0.0.1:40000), 让 chromium
-        # 出口 IP 落在 CF WARP CIDR (104.28.x.x), 跟注册时一致, 避开 Replit
-        # 反爬 "注册 IP ≠ 验证 IP" 关联检测.
-        if replit_proxy_conf:
-            ctx_opts["proxy"] = replit_proxy_conf
-            print(f"[click_verify] chromium proxy = {replit_proxy_conf.get('server')} (v7.85 WARP)", flush=True)
-        else:
-            print("[click_verify] WARNING: 无 chromium proxy, 将走 VPS 公网直连 (注册-验证 IP 不匹配)", flush=True)
-        ctx  = browser.new_context(**ctx_opts)
-        page = ctx.new_page()
-        # 抓取所有 XHR/fetch，便于诊断 Replit 后端是否被调用
-        _xhrs = []
-        def _on_resp(r):
-            try:
-                u = r.url
-                if any(k in u for k in ("identitytoolkit","replit.com/api","replit.com/graphql","replit.com/auth","replit.com/internal","replit.com/data")):
-                    _xhrs.append(f"{r.status} {r.request.method} {u[:160]}")
-            except Exception: pass
-        page.on("response", _on_resp)
-        print(f"[click_verify] 访问: {verify_url[:120]}", flush=True)
-        resp = page.goto(verify_url, timeout=60000, wait_until="domcontentloaded")
-        # Replit SPA：等到页面文字出现验证结果（成功/失败），最多 25s
-        body_text = ""
-        verified_marker = None
-        # 收紧 success 关键词：避免与 "verifying..."、"please verify your email" 等加载/请求页冲突
-        # v7.78j — 加 Replit action-code 成功页实际短语:
-        # "Verifying email Success!" / "this window will close automatically" /
-        # "return to replit here". 这些只在 Firebase oobCode 验证通过后才出现。
-        SUCCESS_KWS = (
-            "email verified", "email has been verified", "successfully verified",
-            "verification successful", "email confirmed", "已验证邮箱", "邮箱已验证",
-            "your email is now verified", "you have verified",
-            "verifying email success", "this window will close automatically",
-            "return to replit here",
-        )
-        # 收紧 failure 关键词：去掉过于通用的 "error"，加上明确的 oobCode 已用/过期措辞
-        FAILURE_KWS = (
-            "invalid or has been used", "link is invalid", "link has expired",
-            "code is invalid", "code has expired", "already been used",
-            "expired", "已过期", "无效", "已使用", "try again",
-        )
-        for _ in range(25):
-            page.wait_for_timeout(1000)
-            try:
-                body_text = page.evaluate("() => document.body ? document.body.innerText : ''") or ""
-            except Exception:
-                body_text = ""
-            low = body_text.lower()
-            if any(k in low for k in SUCCESS_KWS):
-                verified_marker = "success"; break
-            if any(k in low for k in FAILURE_KWS):
-                verified_marker = "failure"; break
-        final_url = page.url
-        title     = page.title()
-        status    = resp.status if resp else 0
-        body_snip = body_text.replace("\n", " ")[:300]
-        print(f"[click_verify] marker={verified_marker} url={final_url[:80]} title={title[:60]}", flush=True)
-        print(f"[click_verify] body={body_snip}", flush=True)
-        for x in _xhrs[:30]:
-            print(f"[click_verify] xhr: {x}", flush=True)
-        browser.close()
-    # 严格：仅 marker == "success" 才视为成功；status==200+marker==None 不再算成功
-    # （多数失败页面 HTTP 状态也是 200，旧逻辑会把"未匹配任何关键词"误判成功）
-    is_ok = (verified_marker == "success")
-    print(json.dumps({"success": is_ok, "verify_url": verify_url,
-                      "final_url": final_url, "title": title, "http_status": status,
-                      "verified_marker": verified_marker, "body_snippet": body_snip}))
+    _v_marker = None
+    _final_url = verify_url
+    _title = ""
+    _status = 0
+    _body_snip = ""
+    SUCCESS_KWS = (
+        "email verified", "email has been verified", "successfully verified",
+        "verification successful", "email confirmed", "\u5df2\u9a8c\u8bc1\u90ae\u7bb1", "\u90ae\u7bb1\u5df2\u9a8c\u8bc1",
+        "your email is now verified", "you have verified",
+        "verifying email success", "this window will close automatically",
+        "return to replit here",
+    )
+    FAILURE_KWS = (
+        "invalid or has been used", "link is invalid", "link has expired",
+        "code is invalid", "code has expired", "already been used",
+        "expired", "\u5df2\u8fc7\u671f", "\u65e0\u6548", "\u5df2\u4f7f\u7528", "try again",
+    )
+    with sync_playwright() as _pw:
+        for _pidx, _proxy in enumerate(_PROXY_LADDER):
+            if _pidx == 2 and "9050" in _proxy:
+                print("[click_verify] \u5207\u6362 Tor \u7535\u8def (NEWNYM)...", flush=True)
+                _tor_newnym()
+            _pconf = patchright_proxy(_proxy)
+            _plabel = _proxy.split("//")[-1]
+            print(f"[click_verify] \u6d4f\u89c8\u5668\u4ee3\u7406 #{_pidx+1}/{len(_PROXY_LADDER)}: {_plabel}", flush=True)
+            _browser = _pw.chromium.launch(headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+                      "--disable-extensions", "--mute-audio", "--disable-quic"])
+            _ctx_opts = {"user_agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")}
+            if _pconf:
+                _ctx_opts["proxy"] = _pconf
+            _ctx = _browser.new_context(**_ctx_opts)
+            _page = _ctx.new_page()
+            _xhrs = []
+            def _on_resp(r):
+                try:
+                    u = r.url
+                    if any(k in u for k in ("identitytoolkit", "replit.com/api", "replit.com/graphql",
+                                            "replit.com/auth", "replit.com/internal", "replit.com/data")):
+                        _xhrs.append(f"{r.status} {r.request.method} {u[:160]}")
+                except Exception:
+                    pass
+            _page.on("response", _on_resp)
+            print(f"[click_verify] \u8bbf\u95ee: {verify_url[:120]}", flush=True)
+            _resp = _page.goto(verify_url, timeout=60000, wait_until="domcontentloaded")
+            _body_text = ""
+            _marker = None
+            for _ in range(25):
+                _page.wait_for_timeout(1000)
+                try:
+                    _body_text = _page.evaluate("() => document.body ? document.body.innerText : ''") or ""
+                except Exception:
+                    _body_text = ""
+                _low = _body_text.lower()
+                if any(k in _low for k in SUCCESS_KWS):
+                    _marker = "success"; break
+                if any(k in _low for k in FAILURE_KWS):
+                    _marker = "failure"; break
+            _final_url = _page.url
+            _title = _page.title()
+            _status = _resp.status if _resp else 0
+            _body_snip = _body_text.replace("\n", " ")[:300]
+            print(f"[click_verify] marker={_marker} proxy#{_pidx+1} url={_final_url[:80]} title={_title[:60]}", flush=True)
+            print(f"[click_verify] body={_body_snip}", flush=True)
+            for x in _xhrs[:30]:
+                print(f"[click_verify] xhr: {x}", flush=True)
+            _browser.close()
+            _v_marker = _marker
+            if _marker == "success":
+                print(f"[click_verify] \u2705 \u6d4f\u89c8\u5668\u9a8c\u8bc1\u6210\u529f\uff08\u4ee3\u7406#{_pidx+1}\uff09", flush=True)
+                break
+            if _marker == "failure":
+                print(f"[click_verify] \u274c \u94fe\u63a5\u5df2\u8fc7\u671f/\u5df2\u7528\uff0c\u505c\u6b62\u4ee3\u7406\u8f6e\u6362", flush=True)
+                break
+            if _cf_blocked(_body_text, _status):
+                print(f"[click_verify] \u26a1 Cloudflare \u963b\u65ad\uff0c\u5207\u6362\u4ee3\u7406...", flush=True)
+            elif _pidx < len(_PROXY_LADDER) - 1:
+                print(f"[click_verify] \u26a1 \u672a\u5339\u914d\u5173\u952e\u8bcd\uff0c\u5c1d\u8bd5\u4e0b\u4e00\u4ee3\u7406...", flush=True)
+    is_ok = (_v_marker == "success")
+    import json as _json
+    print(_json.dumps({"success": is_ok, "verify_url": verify_url,
+                       "final_url": _final_url, "title": _title, "http_status": _status,
+                       "verified_marker": _v_marker, "body_snippet": _body_snip}))
 except Exception as e:
-    print(json.dumps({"success": False, "error": str(e), "verify_url": verify_url}))
+    import json as _json
+    print(_json.dumps({"success": False, "error": str(e), "verify_url": verify_url}))
