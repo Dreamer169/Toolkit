@@ -162,6 +162,35 @@ async def retoken_account(account: dict, headless: bool, proxy: str = "") -> boo
     saved_user_agent       = (account.get("user_agent")       or "").strip()
     saved_exit_ip          = (account.get("exit_ip")          or "").strip()
     saved_proxy_port       = int(account.get("proxy_port") or 0)
+    # v8.21: 二级 fallback — accounts 表字段空(老账号或被清空), 从 archives 表恢复
+    if not (saved_cookies_json or saved_fingerprint_json):
+        try:
+            _conn = db_conn()
+            _cur  = _conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            _cur.execute(
+                "SELECT cookies, fingerprint, identity_data, proxy_used FROM archives "
+                "WHERE platform='outlook' AND email=%s",
+                (email,),
+            )
+            _arc = _cur.fetchone()
+            _conn.close()
+            if _arc:
+                if _arc.get("cookies") and not saved_cookies_json:
+                    saved_cookies_json = json.dumps(_arc["cookies"], ensure_ascii=False)
+                if _arc.get("fingerprint") and not saved_fingerprint_json:
+                    saved_fingerprint_json = json.dumps(_arc["fingerprint"], ensure_ascii=False)
+                _idn = _arc.get("identity_data") or {}
+                if isinstance(_idn, dict):
+                    if _idn.get("user_agent") and not saved_user_agent:
+                        saved_user_agent = _idn["user_agent"]
+                    if _idn.get("exit_ip") and not saved_exit_ip:
+                        saved_exit_ip = str(_idn["exit_ip"])
+                    if _idn.get("proxy_port") and not saved_proxy_port:
+                        saved_proxy_port = int(_idn["proxy_port"] or 0)
+                if saved_cookies_json or saved_fingerprint_json:
+                    log(f"  📚 从 archives 恢复 identity: cookies={len(saved_cookies_json)}B fp={len(saved_fingerprint_json)}B")
+        except Exception as _afe:
+            log(f"  ⚠ archives fallback 查询失败: {_afe}")
 
     log(f"\n{'='*60}")
     log(f"[{acc_id}] 开始处理: {email}")
@@ -191,6 +220,27 @@ async def retoken_account(account: dict, headless: bool, proxy: str = "") -> boo
             log("  ❌ 未安装 patchright/playwright")
             mark_failed(acc_id)
             return False
+
+    # v8.21: IP 一致性 — 若有 saved_exit_ip, 启动专属 XrayRelay 让 patchright 走同一个 CF IP 出口,
+    # 避免微软风控因为 "注册时美东IP, 登录时VPS马来IP" 触发 abuse_mode 封号
+    xray_relay_inst = None
+    saved_proxy_url  = ""
+    if saved_exit_ip and not proxy:  # proxy 是手动传入参数, 优先级更高
+        try:
+            from xray_relay import XrayRelay as _XrayRelay
+            xray_relay_inst = _XrayRelay(saved_exit_ip)
+            if xray_relay_inst.start(timeout=8.0):
+                saved_proxy_url = xray_relay_inst.socks5_url
+                proxy = saved_proxy_url  # 注入到下面 launch_args 用的 proxy 变量
+                log(f"  🌐 IP 一致性: 复用注册时 CF IP {saved_exit_ip} → SOCKS5:{xray_relay_inst.socks_port}")
+            else:
+                log(f"  ⚠ XrayRelay({saved_exit_ip}) 启动失败 — 退化为 VPS 直连 (IP 不一致风险)")
+                xray_relay_inst = None
+        except Exception as _xre:
+            log(f"  ⚠ XrayRelay 启动异常: {_xre} — 退化为 VPS 直连")
+            xray_relay_inst = None
+    elif not saved_exit_ip:
+        log(f"  ⚠ 无 saved_exit_ip (老账号), 用 VPS 直连 — IP 不一致风险高")
 
     # 在后台线程中轮询 token（与浏览器操作并行）
     token_result: list[dict | None] = [None]
@@ -397,7 +447,62 @@ async def retoken_account(account: dict, headless: bool, proxy: str = "") -> boo
         except Exception as e:
             log(f"  ❌ 浏览器操作异常: {e}")
         finally:
+            # v8.22: token 已到手时, 捕获 storage_state + identity 写回 accounts
+            # 解决 "老账号 retoken 永远不写 cookies/fp, 第二轮风控仍被锁" 隐患
+            try:
+                if token_done.is_set() and token_result[0] and token_result[0].get("access_token"):
+                    _new_cookies_json = ""
+                    try:
+                        _state = await context.storage_state()
+                        _new_cookies_json = json.dumps(_state, ensure_ascii=False)
+                    except Exception as _se:
+                        log(f"  ⚠ storage_state 抓取失败: {_se}")
+                    # fingerprint: 优先保留 saved_fp, 否则用当前 _ctx_kwargs 合成最小指纹
+                    if _saved_fp:
+                        _fp_dict = _saved_fp
+                    else:
+                        _fp_dict = {
+                            "user_agent": _ctx_kwargs.get("user_agent", ""),
+                            "locale":     _ctx_kwargs.get("locale", "en-US"),
+                            "timezone_id":_ctx_kwargs.get("timezone_id", "America/Los_Angeles"),
+                            "_synthesized_at_retoken": True,
+                        }
+                        if _ctx_kwargs.get("viewport"): _fp_dict["viewport"] = _ctx_kwargs["viewport"]
+                        if _ctx_kwargs.get("screen"):   _fp_dict["screen"]   = _ctx_kwargs["screen"]
+                    _new_fp_json = json.dumps(_fp_dict, ensure_ascii=False)
+                    _new_ua = _ctx_kwargs.get("user_agent", "") or saved_user_agent
+                    try:
+                        _uconn = db_conn()
+                        _ucur  = _uconn.cursor()
+                        _ucur.execute(
+                            "UPDATE accounts SET "
+                            "cookies_json    = CASE WHEN %s <> '' THEN %s ELSE cookies_json END, "
+                            "fingerprint_json= CASE WHEN %s <> '' THEN %s ELSE fingerprint_json END, "
+                            "user_agent      = CASE WHEN %s <> '' THEN %s ELSE user_agent END, "
+                            "exit_ip         = CASE WHEN %s <> '' THEN %s ELSE exit_ip END, "
+                            "proxy_port      = CASE WHEN %s > 0 THEN %s ELSE proxy_port END, "
+                            "updated_at      = NOW() "
+                            "WHERE id=%s",
+                            (
+                                _new_cookies_json, _new_cookies_json,
+                                _new_fp_json, _new_fp_json,
+                                _new_ua, _new_ua,
+                                saved_exit_ip, saved_exit_ip,
+                                saved_proxy_port, saved_proxy_port,
+                                acc_id,
+                            ),
+                        )
+                        _uconn.commit(); _uconn.close()
+                        log(f"  💾 retoken 后写回 identity: cookies={len(_new_cookies_json)}B fp={len(_new_fp_json)}B ip={saved_exit_ip or 'vps_direct'}")
+                    except Exception as _ue:
+                        log(f"  ⚠ identity 写回 accounts 失败: {_ue}")
+            except Exception as _ce:
+                log(f"  ⚠ identity capture 异常: {_ce}")
             await browser.close()
+            # v8.21: 关闭 IP 一致性专属 xray relay (避免端口/进程泄漏)
+            if xray_relay_inst:
+                try: xray_relay_inst.stop()
+                except Exception: pass
 
     if not poll_task.done():
         poll_task.cancel()

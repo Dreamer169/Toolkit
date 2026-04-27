@@ -1586,26 +1586,49 @@ router.post("/tools/outlook/register", async (req, res) => {
           } catch (emailErr) {
             job.logs.push({ type: "warn", message: `⚠ 邮箱库同步失败(${acc.email}): ${emailErr}` });
           }
-          // 3. 保存到档案库（独立 try，失败不阻断后续）
+          // 3. 保存到档案库 — v8.21: 真持久化 cookies+fingerprint (不再依赖 job.fingerprint=null fallback)
+          //    archives 表 schema 早就有 cookies/fingerprint/identity_data jsonb 字段, 但历年来一直被
+          //    archiveFingerprint=(job as any).fingerprint=null 写空, retoken 也从没读它. 现在
+          //    archives.cookies/fingerprint 存注册时真实浏览器 storage_state + BrowserProfile dict,
+          //    proxy_used 存实际 CF 出口 IP+port, retoken 可用作 accounts 表丢字段时的 fallback 数据源
           try {
-            const tok = tokenMap.get(acc.email);
-            const archiveProxy = proxyList.length > 0 ? proxyList[0] : (proxy || null);
-            const archiveIdentity = (job as unknown as Record<string, unknown>).identity ?? null;
-            const archiveFingerprint = (job as unknown as Record<string, unknown>).fingerprint ?? null;
+            const _idnArc = identityMap.get(acc.email);
+            const archiveProxy = _idnArc?.exit_ip
+              ? `socks5://127.0.0.1:${_idnArc.proxy_port}#cf=${_idnArc.exit_ip}`
+              : (proxyList.length > 0 ? proxyList[0] : (proxy || null));
+            // fingerprint_json/cookies_json 是合法 JSON 字符串, 直接 cast 成 jsonb (PG 自动 cast text->jsonb 失败时报错被 try 截获)
+            const fpJsonForArchive = _idnArc?.fingerprint_json && _idnArc.fingerprint_json.startsWith("{")
+              ? _idnArc.fingerprint_json : null;
+            const cookiesJsonForArchive = _idnArc?.cookies_json && _idnArc.cookies_json.startsWith("{")
+              ? _idnArc.cookies_json : null;
+            const idnDataForArchive = _idnArc?.user_agent
+              ? JSON.stringify({ user_agent: _idnArc.user_agent, exit_ip: _idnArc.exit_ip, proxy_port: _idnArc.proxy_port })
+              : null;
             await execute(
-              `INSERT INTO archives (platform,email,password,token,refresh_token,proxy_used,identity_data,fingerprint,status,notes)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-               ON CONFLICT DO NOTHING`,
+              `INSERT INTO archives (platform,email,password,token,refresh_token,proxy_used,identity_data,fingerprint,cookies,status,notes)
+               VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11)
+               ON CONFLICT (platform,email) DO UPDATE SET
+                 password      = EXCLUDED.password,
+                 token         = COALESCE(NULLIF(EXCLUDED.token,''), archives.token),
+                 refresh_token = COALESCE(NULLIF(EXCLUDED.refresh_token,''), archives.refresh_token),
+                 proxy_used    = COALESCE(NULLIF(EXCLUDED.proxy_used,''), archives.proxy_used),
+                 identity_data = COALESCE(EXCLUDED.identity_data, archives.identity_data),
+                 fingerprint   = COALESCE(EXCLUDED.fingerprint, archives.fingerprint),
+                 cookies       = COALESCE(EXCLUDED.cookies, archives.cookies),
+                 status        = EXCLUDED.status,
+                 updated_at    = NOW()`,
               [
                 "outlook", acc.email, acc.password,
-                tok?.access_token || null, tok?.refresh_token || null,
+                _idnArc?.access_token  || null,
+                _idnArc?.refresh_token || null,
                 archiveProxy,
-                archiveIdentity ? JSON.stringify(archiveIdentity) : null,
-                archiveFingerprint ? JSON.stringify(archiveFingerprint) : null,
+                idnDataForArchive,
+                fpJsonForArchive,
+                cookiesJsonForArchive,
                 "active", "Outlook 自动注册",
               ]
             );
-            job.logs.push({ type: "log", message: `[档案库] ${acc.email} 已保存` });
+            job.logs.push({ type: "log", message: `[档案库] ${acc.email} 已保存 (cookies=${cookiesJsonForArchive?cookiesJsonForArchive.length:0}B fp=${fpJsonForArchive?fpJsonForArchive.length:0}B)` });
           } catch (archErr) {
             job.logs.push({ type: "warn", message: `⚠ 档案库保存失败(${acc.email}): ${archErr}` });
           }
