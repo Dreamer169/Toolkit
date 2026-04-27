@@ -2458,10 +2458,17 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 # Falls back to v7.53 fake generated cookies if the seed file is absent or empty.
                 _real_seed_loaded = False
                 _real_seed_names = set()
+                # v8.18 — kill-switch for Replit-domain seed cookies. Evidence (rpl_mogny0wr_xw7b
+                # Apr 27 04:00) shows /signup SSR returns 88KB shell with zero form/input/recaptcha
+                # script when these cookies are pre-injected. Suspected cause: replit_statsig_stable_id
+                # buckets us into a feature-flag cohort that strips the form.
+                _SKIP_REPLIT_SEED = os.environ.get("DISABLE_REPLIT_SEED_COOKIES", "1") == "1"
+                if _SKIP_REPLIT_SEED:
+                    log("[CDP] v8.18 SKIP all replit-domain seed cookies (DISABLE_REPLIT_SEED_COOKIES=1) — let replit assign fresh stable_id/gating_id/fbp")
                 try:
                     import json as _js, os as _os
                     _seed_path = _os.environ.get("REPLIT_TRUST_SEED_PATH", "/root/.replit-trust-seed.json")
-                    if _os.path.exists(_seed_path):
+                    if not _SKIP_REPLIT_SEED and _os.path.exists(_seed_path):
                         with open(_seed_path) as _sf:
                             _seed_doc = _js.load(_sf)
                         _seed_cookies = []
@@ -2493,6 +2500,8 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 # Reference: successful signup cookie jar had _fbp 9d old + matching marketing_attribution
                 # v7.56: only inject names NOT already covered by real seed (avoids overwriting real values)
                 try:
+                    if _SKIP_REPLIT_SEED:
+                        raise RuntimeError("v8.18-skip-replit-seed")
                     import uuid as _u, time as _t, random as _r
                     _nm = int(_t.time() * 1000)
                     _am = _nm - _r.randint(7, 14) * 86400 * 1000
@@ -2525,7 +2534,10 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                     else:
                         log(f"[CDP] fake-seed 全部被 real-seed 覆盖，跳过")
                 except Exception as _se:
-                    log(f"[CDP] trust seed 注入失败: {_se}")
+                    if "v8.18-skip-replit-seed" in str(_se):
+                        log("[CDP] v8.18 fake-seed cookies skipped (kill-switch active)")
+                    else:
+                        log(f"[CDP] trust seed 注入失败: {_se}")
                 if _skipped_auth:
                     log(f"[CDP] ⚠ 跳过 broker 给的 auth cookies: {_skipped_auth}")
                 if _domain_cleared:
@@ -2901,6 +2913,56 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                 log(f"[step1-miss] screenshot → /tmp/replit_signup_miss.png")
             except Exception as _se:
                 log(f"[step1-miss] screenshot failed: {_se}")
+            # v8.17 — rich DOM dump so we can see WHY form did not render
+            try:
+                _dom = await page.evaluate("""
+                    () => {
+                      const inputs = Array.from(document.querySelectorAll('input')).map(i => ({
+                        name: i.name||'', type: i.type||'', placeholder: i.placeholder||'', id: i.id||'',
+                        visible: i.offsetWidth>0 && i.offsetHeight>0
+                      }));
+                      const buttons = Array.from(document.querySelectorAll('button')).slice(0,20).map(b => ({
+                        text: (b.innerText||'').slice(0,60), dataCy: b.getAttribute('data-cy')||'', disabled: b.disabled
+                      }));
+                      const forms = Array.from(document.querySelectorAll('form')).map(f => ({
+                        action: f.action||'', dataCy: f.getAttribute('data-cy')||'', innerHTMLLen: (f.innerHTML||'').length
+                      }));
+                      const iframes = Array.from(document.querySelectorAll('iframe')).map(f => ({
+                        src: (f.src||'').slice(0,100), title: f.title||'',
+                        w: f.getBoundingClientRect().width, h: f.getBoundingClientRect().height
+                      }));
+                      const root = document.querySelector('#root, #__next, main, [data-cy=signup-form]');
+                      return {
+                        htmlLen: document.documentElement.outerHTML.length,
+                        bodyChildren: document.body ? document.body.children.length : 0,
+                        inputs, buttons, forms, iframes,
+                        rootTag: root ? root.tagName : null,
+                        rootHTMLLen: root ? root.innerHTML.length : 0,
+                        hasRecaptchaScript: !!document.querySelector('script[src*=recaptcha]'),
+                        hasGrecaptcha: typeof window.grecaptcha,
+                        hasGrecaptchaEnt: !!(window.grecaptcha && window.grecaptcha.enterprise),
+                        readyState: document.readyState,
+                        bodyText: (document.body ? document.body.innerText : '').slice(0,500)
+                      };
+                    }
+                """)
+                log(f"[step1-miss-dom] htmlLen={_dom.get('htmlLen')} bodyChildren={_dom.get('bodyChildren')} rootTag={_dom.get('rootTag')} rootHTMLLen={_dom.get('rootHTMLLen')} ready={_dom.get('readyState')}")
+                log(f"[step1-miss-dom] grecaptcha={_dom.get('hasGrecaptcha')} ent={_dom.get('hasGrecaptchaEnt')} rcScript={_dom.get('hasRecaptchaScript')}")
+                log(f"[step1-miss-dom] forms({len(_dom.get('forms',[]))})={_dom.get('forms')}")
+                log(f"[step1-miss-dom] inputs({len(_dom.get('inputs',[]))})={_dom.get('inputs')}")
+                log(f"[step1-miss-dom] buttons={_dom.get('buttons')}")
+                log(f"[step1-miss-dom] iframes={_dom.get('iframes')}")
+                log(f"[step1-miss-dom] bodyText={_dom.get('bodyText')!r}")
+                # save full HTML to /tmp for full inspection
+                try:
+                    _html = await page.content()
+                    with open("/tmp/replit_signup_miss.html","w",encoding="utf-8") as _hf:
+                        _hf.write(_html)
+                    log(f"[step1-miss-dom] full HTML saved /tmp/replit_signup_miss.html ({len(_html)}B)")
+                except Exception as _he:
+                    log(f"[step1-miss-dom] HTML save fail: {_he}")
+            except Exception as _de:
+                log(f"[step1-miss-dom] dump failed: {_de}")
             if is_cf_blocked(t2, b2):
                 result["error"] = "signup_cf_ip_banned"
             else:
