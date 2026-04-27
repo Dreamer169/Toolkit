@@ -56,17 +56,18 @@ def get_accounts(ids: list[int] | None, all_error: bool) -> list[dict]:
     conn = db_conn()
     cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     if ids:
+        # v8.20: 扩展 SELECT, 取 cookies/fingerprint/UA/IP/port 用于 retoken 复用注册时的浏览器指纹
         cur.execute(
-            "SELECT id, email, password FROM accounts WHERE platform='outlook' AND id = ANY(%s) AND password IS NOT NULL AND password != ''",
+            "SELECT id, email, password, cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port FROM accounts WHERE platform='outlook' AND id = ANY(%s) AND password IS NOT NULL AND password != ''",
             (ids,),
         )
     elif all_error:
         cur.execute(
-            "SELECT id, email, password FROM accounts WHERE platform='outlook' AND status='error' AND password IS NOT NULL AND password != '' ORDER BY id"
+            "SELECT id, email, password, cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port FROM accounts WHERE platform='outlook' AND status='error' AND password IS NOT NULL AND password != '' ORDER BY id"
         )
     else:
         cur.execute(
-            "SELECT id, email, password FROM accounts WHERE platform='outlook' AND (token IS NULL OR token='') AND password IS NOT NULL AND password != '' ORDER BY id"
+            "SELECT id, email, password, cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port FROM accounts WHERE platform='outlook' AND (token IS NULL OR token='') AND password IS NOT NULL AND password != '' ORDER BY id"
         )
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
@@ -155,6 +156,12 @@ async def retoken_account(account: dict, headless: bool, proxy: str = "") -> boo
     email    = account["email"]
     password = account["password"]
     acc_id   = account["id"]
+    # v8.20: 提取注册时持久化的 identity bundle, 复用避免微软风控 abuse
+    saved_cookies_json     = (account.get("cookies_json")     or "").strip()
+    saved_fingerprint_json = (account.get("fingerprint_json") or "").strip()
+    saved_user_agent       = (account.get("user_agent")       or "").strip()
+    saved_exit_ip          = (account.get("exit_ip")          or "").strip()
+    saved_proxy_port       = int(account.get("proxy_port") or 0)
 
     log(f"\n{'='*60}")
     log(f"[{acc_id}] 开始处理: {email}")
@@ -222,14 +229,50 @@ async def retoken_account(account: dict, headless: bool, proxy: str = "") -> boo
             launch_args["proxy"] = {"server": proxy}
 
         browser = await p.chromium.launch(**launch_args)
-        # v8.18: locale + timezone_id 统一为 en-US/America/Los_Angeles, 与
-        # outlook_register / replit_register 完整工作流保持一致, 避免 retoken 时
-        # navigator.language 与注册时不一致触发 Microsoft 风控
-        context = await browser.new_context(
-            locale="en-US",
-            timezone_id="America/Los_Angeles",
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        )
+        # v8.20: 优先复用注册时持久化的 fingerprint + cookies + UA, 否则回退默认
+        # 关键修复: 之前每次 retoken 都用全新随机指纹 + 新 IP, 微软风控判定 abuse
+        # 导致大批量账号注册 1-3 天内全部 suspended
+        _ctx_kwargs = {
+            "locale": "en-US",
+            "timezone_id": "America/Los_Angeles",
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        }
+        _saved_fp = None
+        if saved_fingerprint_json:
+            try:
+                _saved_fp = json.loads(saved_fingerprint_json)
+                # 复用注册时 UA / 时区 / 屏幕等
+                if _saved_fp.get("user_agent"):
+                    _ctx_kwargs["user_agent"] = _saved_fp["user_agent"]
+                if _saved_fp.get("locale"):
+                    _ctx_kwargs["locale"] = _saved_fp["locale"]
+                if _saved_fp.get("timezone_id"):
+                    _ctx_kwargs["timezone_id"] = _saved_fp["timezone_id"]
+                if _saved_fp.get("viewport"):
+                    _ctx_kwargs["viewport"] = _saved_fp["viewport"]
+                if _saved_fp.get("screen"):
+                    _ctx_kwargs["screen"] = _saved_fp["screen"]
+                log(f"  📦 复用注册指纹: ua={_ctx_kwargs['user_agent'][:40]}... tz={_ctx_kwargs['timezone_id']}")
+            except Exception as _fpe:
+                log(f"  ⚠ fingerprint_json 解析失败, 用默认: {_fpe}")
+        elif saved_user_agent:
+            _ctx_kwargs["user_agent"] = saved_user_agent
+            log(f"  📦 复用注册 UA (无完整 fp): {saved_user_agent[:40]}...")
+        else:
+            log(f"  ⚠ 账号无持久化 identity (老账号), 用默认 context — 风控风险高")
+
+        context = await browser.new_context(**_ctx_kwargs)
+
+        # v8.20: 注入注册时的 cookies (含 storage_state)
+        if saved_cookies_json:
+            try:
+                _state = json.loads(saved_cookies_json)
+                if isinstance(_state, dict) and _state.get("cookies"):
+                    await context.add_cookies(_state["cookies"])
+                    log(f"  🍪 已注入 {len(_state['cookies'])} 个注册时 cookies")
+            except Exception as _ce:
+                log(f"  ⚠ cookies_json 解析失败: {_ce}")
+
         page = await context.new_page()
 
         try:

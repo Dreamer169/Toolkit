@@ -657,7 +657,7 @@ async function verifyOutlookInbox(
   if (!rt) {
     log(`    [inbox✗] id=${acc.id} 无可用refresh_token → 标token_invalid`);
     await dbE(
-      "UPDATE accounts SET tags = COALESCE(tags || ',', '') || ',token_invalid', status='suspended', updated_at=NOW() WHERE id=$1",
+      "UPDATE accounts SET tags = CASE WHEN COALESCE(tags,'') LIKE '%token_invalid%' THEN tags ELSE NULLIF(COALESCE(tags || ',', '') || 'token_invalid', '') END, status='suspended', updated_at=NOW() WHERE id=$1",
       [acc.id]
     );
     return null;
@@ -685,7 +685,7 @@ async function verifyOutlookInbox(
       const errMsg = (td.error_description ?? td.error ?? "刷新失败").slice(0, 120);
       log(`    [inbox✗] id=${acc.id} token刷新失败: ${errMsg} → 标token_invalid`);
       await dbE(
-        "UPDATE accounts SET tags = COALESCE(tags || ',', '') || ',token_invalid', status='suspended', updated_at=NOW() WHERE id=$1",
+        "UPDATE accounts SET tags = CASE WHEN COALESCE(tags,'') LIKE '%token_invalid%' THEN tags ELSE NULLIF(COALESCE(tags || ',', '') || 'token_invalid', '') END, status='suspended', updated_at=NOW() WHERE id=$1",
         [acc.id]
       );
       return null;

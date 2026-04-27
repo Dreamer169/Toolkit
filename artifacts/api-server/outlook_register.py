@@ -2199,7 +2199,7 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
         return {}
 
 
-def register_one(ctrl, engine_name: str, headless: bool, planned_username: str = "", planned_password: str = "") -> dict:
+def register_one(ctrl, engine_name: str, headless: bool, planned_username: str = "", planned_password: str = "", exit_ip: str = "", proxy_port: int = 0) -> dict:
     if planned_username:
         email = planned_username.split("@")[0].strip()
     else:
@@ -2214,6 +2214,12 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
         "error": "",
         "elapsed": "",
         "engine": engine_name,
+        # v8.20: identity bundle (注册成功后填充, retoken 复用避免风控 abuse)
+        "cookies_json": "",
+        "fingerprint_json": "",
+        "user_agent": "",
+        "exit_ip": exit_ip,
+        "proxy_port": int(proxy_port) if proxy_port else 0,
     }
 
     p, b = ctrl.launch(headless=headless)
@@ -2276,6 +2282,17 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
         except Exception:
             pass
     finally:
+        # v8.20: 注册成功时收集 identity bundle (cookies + fingerprint + UA)
+        # 后续 retoken 复用相同 context 参数, 避免 Microsoft 风控判 abuse
+        if result.get("success"):
+            try:
+                _state = context.storage_state()
+                result["cookies_json"]    = json.dumps(_state, ensure_ascii=False)
+                result["fingerprint_json"] = json.dumps(fp, ensure_ascii=False, default=str)
+                result["user_agent"]       = fp.get("user_agent", "")
+                print(f"[register] 📦 identity bundle: cookies={len(result['cookies_json'])}B fp={len(result['fingerprint_json'])}B ua={len(result['user_agent'])}B exit_ip={result['exit_ip']} port={result['proxy_port']}", flush=True)
+            except Exception as _ce:
+                print(f"[register] ⚠ identity bundle 收集失败: {_ce}", flush=True)
         try:
             b.close()
             p.stop()
@@ -2486,7 +2503,16 @@ def main():
             _effective_pass = planned_password or _retry_password
             if cf_ip_retry > 0 and _effective_user:
                 print(f"   ↳ 复用邮箱 {_effective_user.split('@')[0]}@outlook.com 继续注册（节省表单重填）", flush=True)
-            r = register_one(ctrl, args.engine, headless, _effective_user, _effective_pass)
+            _eip = ""
+            _epp = 0
+            try:
+                if 'ip_info' in dir() and ip_info:
+                    _eip = ip_info.get("ip", "")
+                if 'xray_relay_inst' in dir() and xray_relay_inst:
+                    _epp = int(getattr(xray_relay_inst, "socks_port", 0) or 0)
+            except Exception:
+                pass
+            r = register_one(ctrl, args.engine, headless, _effective_user, _effective_pass, _eip, _epp)
 
             # 保存本次生成的 email/password 供下次重试复用
             if not _retry_email and r.get("email"):

@@ -1500,7 +1500,12 @@ router.post("/tools/outlook/register", async (req, res) => {
 
   child.on("close", async (code) => {
     // 解析 JSON 结果块
-    const tokenMap = new Map<string, { access_token: string; refresh_token: string }>();
+    // v8.20: 扩展为 identityMap, 同时收集 token + cookies + fingerprint + UA + IP + port
+    const identityMap = new Map<string, {
+      access_token: string; refresh_token: string;
+      cookies_json: string; fingerprint_json: string;
+      user_agent: string; exit_ip: string; proxy_port: number;
+    }>();
     try {
       const jsonStart = jsonBuf.indexOf("[");
       if (jsonStart >= 0) {
@@ -1510,14 +1515,21 @@ router.post("/tools/outlook/register", async (req, res) => {
           if (r.success && r.email && r.password) {
             const already = job.accounts.find(a => a.email === r.email);
             if (!already) job.accounts.push({ email: String(r.email), password: String(r.password) });
-            tokenMap.set(String(r.email), {
-              access_token:  String(r.access_token  ?? ""),
-              refresh_token: String(r.refresh_token ?? ""),
+            identityMap.set(String(r.email), {
+              access_token:     String(r.access_token     ?? ""),
+              refresh_token:    String(r.refresh_token    ?? ""),
+              cookies_json:     String(r.cookies_json     ?? ""),
+              fingerprint_json: String(r.fingerprint_json ?? ""),
+              user_agent:       String(r.user_agent       ?? ""),
+              exit_ip:          String(r.exit_ip          ?? ""),
+              proxy_port:       Number(r.proxy_port       ?? 0),
             });
           }
         }
       }
     } catch {}
+    // 兼容: 老代码可能用 tokenMap, 提供别名
+    const tokenMap = identityMap;
 
     const okCount = job.accounts.length;
 
@@ -1529,12 +1541,35 @@ router.post("/tools/outlook/register", async (req, res) => {
           let accountRow: { id: number } | null = null;
           // 1. 保存到账号库（失败则跳过该账号）
           try {
+            // v8.20: identity bundle 同步入库 (cookies/fp/UA/exit_ip/port + token/refresh_token)
+            // 解决: 注册时浏览器指纹/cookies/IP 全丢, retoken 时新指纹访问被微软判 abuse
+            const _idn = identityMap.get(acc.email);
             accountRow = await queryOne<{ id: number }>(
-              `INSERT INTO accounts (platform, email, password, status)
-               VALUES ($1, $2, $3, $4)
-               ON CONFLICT (platform, email) DO UPDATE SET password=EXCLUDED.password,status=EXCLUDED.status,updated_at=NOW()
+              `INSERT INTO accounts (platform, email, password, status, token, refresh_token,
+                                       cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+               ON CONFLICT (platform, email) DO UPDATE SET
+                 password         = EXCLUDED.password,
+                 status           = EXCLUDED.status,
+                 token            = COALESCE(NULLIF(EXCLUDED.token,''), accounts.token),
+                 refresh_token    = COALESCE(NULLIF(EXCLUDED.refresh_token,''), accounts.refresh_token),
+                 cookies_json     = COALESCE(NULLIF(EXCLUDED.cookies_json,''), accounts.cookies_json),
+                 fingerprint_json = COALESCE(NULLIF(EXCLUDED.fingerprint_json,''), accounts.fingerprint_json),
+                 user_agent       = COALESCE(NULLIF(EXCLUDED.user_agent,''), accounts.user_agent),
+                 exit_ip          = COALESCE(NULLIF(EXCLUDED.exit_ip,''), accounts.exit_ip),
+                 proxy_port       = COALESCE(NULLIF(EXCLUDED.proxy_port, 0), accounts.proxy_port),
+                 updated_at       = NOW()
                RETURNING id`,
-              ["outlook", acc.email, acc.password, "active"],
+              [
+                "outlook", acc.email, acc.password, "active",
+                _idn?.access_token  || null,
+                _idn?.refresh_token || null,
+                _idn?.cookies_json     || null,
+                _idn?.fingerprint_json || null,
+                _idn?.user_agent       || null,
+                _idn?.exit_ip          || null,
+                _idn?.proxy_port       || null,
+              ],
             );
           } catch (dbErr) {
             job.logs.push({ type: "warn", message: `⚠ 账号库保存失败(${acc.email}): ${dbErr}` });
