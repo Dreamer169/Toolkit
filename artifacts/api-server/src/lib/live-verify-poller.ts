@@ -113,12 +113,13 @@ async function runOnce() {
   const stats = { total: 0, clicked: 0, skipped: 0, failed: 0, ok: 0 };
   try {
     const { query } = await import("../db.js");
-    // 排除已被标记为 suspended 或 abuse_mode 的账号
+    // 排除 suspended / abuse_mode / token_invalid 账号
     const rows = await query<{ id: number; email: string; token: string | null; refresh_token: string | null }>(
       `SELECT id, email, token, refresh_token FROM accounts
        WHERE platform='outlook'
          AND COALESCE(status,'') != 'suspended'
          AND COALESCE(tags,'') NOT LIKE '%abuse_mode%'
+         AND COALESCE(tags,'') NOT LIKE '%token_invalid%'
          AND (
            (token IS NOT NULL AND token != '')
            OR (refresh_token IS NOT NULL AND refresh_token != '')
@@ -129,8 +130,8 @@ async function runOnce() {
     if (!rows.length) { _running = false; return; }
     logger.info({ count: rows.length }, "[live-verify] 开始本轮扫描");
 
-    for (const acc of rows) {
-      if (!_enabled) { logger.info("[live-verify] 检测到关闭信号，提前结束本轮"); break; }
+    // ── 单账号处理（并发调用）────────────────────────────────────────────
+    const processOneAccount = async (acc: { id: number; email: string; token: string | null; refresh_token: string | null }) => {
       try {
         let accessToken = "";
 
@@ -141,51 +142,73 @@ async function runOnce() {
           } else {
             const desc = result.errorDesc ?? "";
             const code = result.errorCode ?? "";
-            // 检测 service abuse mode（AADSTS70000）
             if (desc.includes("AADSTS70000") || desc.includes("service abuse")) {
               logger.warn({ email: acc.email, errorCode: code }, "[live-verify] 账号触发 service abuse，自动打标签");
               await tagAccount(acc.id, "abuse_mode", "suspended");
               stats.skipped++;
-              continue;
+              return;
             }
-            // invalid_grant = token 已过期/撤销
             if (code === "invalid_grant" || desc.includes("AADSTS70008") || desc.includes("AADSTS700082")) {
               logger.warn({ email: acc.email }, "[live-verify] refresh_token 已失效，自动打 token_invalid");
               await tagAccount(acc.id, "token_invalid", "suspended");
               stats.skipped++;
-              continue;
+              return;
             }
-            // 其他失败（网络等）→ 降级到 DB 里的旧 token 继续尝试
             accessToken = acc.token ?? "";
           }
         } else {
           accessToken = acc.token ?? "";
         }
 
-        if (!accessToken) { stats.skipped++; continue; }
+        if (!accessToken) { stats.skipped++; return; }
 
-        // 搜索未读验证邮件（用 $filter 而非 $search，避免搜索缓存延迟）
+        // 收集所有待处理消息（全局收件 + Junk 文件夹）
+        const allMsgs: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> = [];
+
+        // 1) 全局 /me/messages（含收件箱但不含 junkemail）
         const filterUrl = `https://graph.microsoft.com/v1.0/me/messages?$filter=isRead eq false and contains(subject,'${SUBJECT_FILTER}')&$select=id,subject,isRead,receivedDateTime&$top=20&$orderby=receivedDateTime desc`;
         const gr = await microsoftFetch(filterUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
-        if (!gr.ok) {
+        if (gr.ok) {
+          const gd = await gr.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
+          const inbox = (gd.value ?? []).filter(m => m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase())).filter(m => !isRecentlyHandled(m.id));
+          allMsgs.push(...inbox);
+        } else {
           const fallbackUrl = `https://graph.microsoft.com/v1.0/me/messages?$search="subject:${SUBJECT_FILTER}"&$select=id,subject,isRead,receivedDateTime&$top=20`;
           const gr2 = await microsoftFetch(fallbackUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
-          if (!gr2.ok) { stats.skipped++; continue; }
-          const gd2 = await gr2.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
-          const msgs2 = (gd2.value ?? []).filter(m => !m.isRead && m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase())).filter(m => !isRecentlyHandled(m.id));
-          if (!msgs2.length) { stats.ok++; continue; }
-          for (const msg of msgs2) { if (!_enabled) break; await processMessage(acc, msg, accessToken, stats); }
-          continue;
+          if (gr2.ok) {
+            const gd2 = await gr2.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
+            const inbox2 = (gd2.value ?? []).filter(m => !m.isRead && m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase())).filter(m => !isRecentlyHandled(m.id));
+            allMsgs.push(...inbox2);
+          }
         }
-        const gd = await gr.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
-        const msgs = (gd.value ?? []).filter(m => m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase())).filter(m => !isRecentlyHandled(m.id));
-        if (!msgs.length) { stats.ok++; continue; }
-        logger.info({ email: acc.email, count: msgs.length }, "[live-verify] 发现未读验证邮件");
-        for (const msg of msgs) { if (!_enabled) break; await processMessage(acc, msg, accessToken, stats); }
+
+        // 2) Junk 垃圾邮件文件夹 — /me/messages 不含 junkemail，需单独查
+        const junkUrl = `https://graph.microsoft.com/v1.0/me/mailFolders/junkemail/messages?$filter=isRead eq false and contains(subject,'${SUBJECT_FILTER}')&$select=id,subject,isRead,receivedDateTime&$top=10&$orderby=receivedDateTime desc`;
+        const junkR = await microsoftFetch(junkUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
+        if (junkR.ok) {
+          const junkD = await junkR.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
+          const junk = (junkD.value ?? []).filter(m => !isRecentlyHandled(m.id));
+          if (junk.length) {
+            logger.info({ email: acc.email, count: junk.length }, "[live-verify] 发现垃圾邮件夹未读验证邮件");
+            allMsgs.push(...junk);
+          }
+        }
+
+        if (!allMsgs.length) { stats.ok++; return; }
+        logger.info({ email: acc.email, count: allMsgs.length }, "[live-verify] 发现未读验证邮件");
+        for (const msg of allMsgs) { if (!_enabled) break; await processMessage(acc, msg, accessToken, stats); }
       } catch (e) {
         logger.warn({ email: acc.email, err: String(e) }, "[live-verify] 账号处理出错");
         stats.skipped++;
       }
+    };
+
+    // 并发执行，最多 5 个账号同时处理
+    const CONCURRENCY = 5;
+    for (let i = 0; i < rows.length; i += CONCURRENCY) {
+      if (!_enabled) { logger.info("[live-verify] 检测到关闭信号，提前结束本轮"); break; }
+      const chunk = rows.slice(i, i + CONCURRENCY);
+      await Promise.allSettled(chunk.map(acc => processOneAccount(acc)));
     }
   } catch (e) {
     logger.error({ err: String(e) }, "[live-verify] 轮询出错");
