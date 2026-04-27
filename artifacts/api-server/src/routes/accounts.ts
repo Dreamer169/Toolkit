@@ -684,7 +684,7 @@ async function verifyOutlookInbox(
   if (!rt) {
     log(`    [inbox✗] id=${acc.id} 无可用refresh_token → 标token_invalid`);
     await dbE(
-      "UPDATE accounts SET tags = CASE WHEN COALESCE(tags,'') LIKE '%token_invalid%' THEN tags ELSE NULLIF(COALESCE(tags || ',', '') || 'token_invalid', '') END, status='suspended', updated_at=NOW() WHERE id=$1",
+      "UPDATE accounts SET tags = (SELECT NULLIF(array_to_string(ARRAY(SELECT DISTINCT trim(t) FROM unnest(string_to_array(COALESCE(tags,'') || ',token_invalid', ',')) AS t WHERE trim(t) <> ''), ','), ''), status='suspended', updated_at=NOW() WHERE id=$1",
       [acc.id]
     );
     return null;
@@ -712,7 +712,7 @@ async function verifyOutlookInbox(
       const errMsg = (td.error_description ?? td.error ?? "刷新失败").slice(0, 120);
       log(`    [inbox✗] id=${acc.id} token刷新失败: ${errMsg} → 标token_invalid`);
       await dbE(
-        "UPDATE accounts SET tags = CASE WHEN COALESCE(tags,'') LIKE '%token_invalid%' THEN tags ELSE NULLIF(COALESCE(tags || ',', '') || 'token_invalid', '') END, status='suspended', updated_at=NOW() WHERE id=$1",
+        "UPDATE accounts SET tags = (SELECT NULLIF(array_to_string(ARRAY(SELECT DISTINCT trim(t) FROM unnest(string_to_array(COALESCE(tags,'') || ',token_invalid', ',')) AS t WHERE trim(t) <> ''), ','), ''), status='suspended', updated_at=NOW() WHERE id=$1",
         [acc.id]
       );
       return null;
@@ -743,7 +743,7 @@ async function verifyOutlookInbox(
     const errMsg = `收件箱访问失败 HTTP ${res2.status}`;
     log(`    [inbox✗] id=${acc.id} ${errMsg} → 标inbox_error`);
     await dbE(
-      "UPDATE accounts SET tags = COALESCE(tags || ',', '') || ',inbox_error', updated_at=NOW() WHERE id=$1",
+      "UPDATE accounts SET tags = (SELECT NULLIF(array_to_string(ARRAY(SELECT DISTINCT trim(t) FROM unnest(string_to_array(COALESCE(tags,'') || ',inbox_error', ',')) AS t WHERE trim(t) <> ''), ','), ''), updated_at=NOW() WHERE id=$1",
       [acc.id]
     );
     return null;
@@ -1545,7 +1545,7 @@ router.post("/pipeline/full", async (req, res) => {
           log(`  ✓ 部署成功 webview=${webUrl}`);
           // 标记已部署 + 保存 webview URL
           await dbE(
-            "UPDATE accounts SET tags=COALESCE(tags||\',\',\'\') || \'subnode_deployed\', notes=$1, updated_at=NOW() WHERE id=$2",
+            "UPDATE accounts SET tags=(SELECT NULLIF(array_to_string(ARRAY(SELECT DISTINCT trim(t) FROM unnest(string_to_array(COALESCE(tags,'') || ',subnode_deployed', ',')) AS t WHERE trim(t) <> ''), ','), ''), notes=$1, updated_at=NOW() WHERE id=$2",
             [webUrl, acc.id]
           );
           // 注册为网关友节点
@@ -1647,7 +1647,7 @@ router.post("/replit/deploy-subnode", async (req, res) => {
         const replUrl = String(deployR.parsed.repl_url ?? "");
         log(`✓ 部署成功 webview=${webUrl}`);
         await dbE(
-          "UPDATE accounts SET tags=NULLIF(TRIM(BOTH \',\' FROM COALESCE(tags,\'\') || \',subnode_deployed\'),\',\'), notes=$1, updated_at=NOW() WHERE id=$2",
+          "UPDATE accounts SET tags=(SELECT NULLIF(array_to_string(ARRAY(SELECT DISTINCT trim(t) FROM unnest(string_to_array(COALESCE(tags,'') || ',subnode_deployed', ',')) AS t WHERE trim(t) <> ''), ','), ''), notes=$1, updated_at=NOW() WHERE id=$2",
           [webUrl || replUrl, acc.id]
         );
         if (webUrl) {
