@@ -122,6 +122,12 @@ class _CDPBrowserShim:
         self._owned.clear()
         # NEVER call self._b.close() — that would kill the broker chromium.
 
+class _GoogleRouteSkip(Exception):
+    """v8.21 sentinel — raised inside google-route try-block to indicate intentional
+    SKIP based on broker exit family (e.g. direct → *.google must use chromium main
+    proxy for IP-family alignment with submit). Caught explicitly, not logged as error."""
+    pass
+
 class _CDPChromiumShim:
     def __init__(self, real_chromium, ws_endpoint):
         self._c = real_chromium
@@ -2649,7 +2655,17 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                         # broker=socks 模式下 (当前 xray 退化到全 CF 段, 此分支当前不会
                         # 触发, 留作 xray 恢复清洁 SOCKS 上游后的自动正确路径) — 强制
                         # google-route 用同 port, 保证 token-IP == submit-IP 一致.
-                        if _broker_fam == "socks" and _broker_port:
+                        if _broker_fam == "direct":
+                            # v8.21 — broker=direct, *.google MUST exit through chromium main proxy
+                            # (= DIRECT VPS 45.205.27.69 AS8796). Installing google-route would PIN
+                            # *.google to DEFAULT_POOL (socks5://10820-10845, CF Workers, rotating)
+                            # → token-mint IP family ≠ submit IP → reCAPTCHA Enterprise rejects token
+                            # → signup POST stuck (observed rpl_mogp51ho_c9rk attempt 2: token len=2318
+                            # mint OK, then 5+ min google-analytics polling timeout).
+                            # SKIP google-route entirely so all *.google traffic exits via DIRECT.
+                            log("[CDP] v8.21 google-route SKIPPED (broker=direct → *.google exits via chromium main proxy = same DIRECT VPS IP, IP-同源)")
+                            raise _GoogleRouteSkip("broker=direct")
+                        elif _broker_fam == "socks" and _broker_port:
                             _os.environ["GOOGLE_PROXY_POOL"] = f"socks5://127.0.0.1:{_broker_port}"
                             log(f"[CDP] v7.99 google-route pool override → socks5://127.0.0.1:{_broker_port} (sync broker exit, IP 一致)")
                         elif _broker_fam == "warp":
@@ -2672,6 +2688,8 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                         from google_proxy_route import attach_google_proxy_routing as _agr
                         await _agr(ctx, log)
                         log(f"[CDP] google-route attached (v7.99 — broker={_broker_fam or 'unknown'} family-aligned)")
+                    except _GoogleRouteSkip as _gs:
+                        log(f"[CDP] google-route SKIP confirmed (reason={_gs})")
                     except Exception as _ge:
                         log(f"[CDP] google-route attach failed: {_ge}")
             except Exception as _we:
