@@ -124,7 +124,17 @@ export async function initDatabase(): Promise<void> {
     cookies JSONB, registration_email VARCHAR(255),
     status VARCHAR(32) NOT NULL DEFAULT 'active', notes TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
-  await execute(`CREATE INDEX IF NOT EXISTS archives_platform_email_idx ON archives(platform, email)`);
+  // v8.32 ROOT-FIX: archives 必须 UNIQUE(platform,email) 否则 INSERT ... ON CONFLICT(platform,email) DO UPDATE 全部抛 "no unique or exclusion constraint matching the ON CONFLICT specification" → 档案库静默丢失
+  await execute(`DROP INDEX IF EXISTS archives_platform_email_idx`);
+  await execute(`DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'archives_platform_email_unique') THEN
+      BEGIN
+        ALTER TABLE archives ADD CONSTRAINT archives_platform_email_unique UNIQUE (platform, email);
+      EXCEPTION WHEN unique_violation THEN
+        RAISE NOTICE 'archives has duplicate (platform,email) — leaving without unique constraint, manual dedupe required';
+      END;
+    END IF;
+  END $$;`);
   await execute(`CREATE TABLE IF NOT EXISTS replit_audit_history (
     id SERIAL PRIMARY KEY,
     source VARCHAR(32) NOT NULL DEFAULT 'manual',
