@@ -1040,15 +1040,50 @@ router.post("/replit/register", (req, res) => {
               cfBannedUntil.set(tryPort, Date.now() + 10 * 60 * 1000);
               const _cfIpB = xrayPortCfIp.get(tryPort);
               const _cfNoteB = _cfIpB ? ` (CF IP ${_cfIpB})` : "";
-              if (cfBlockedCount >= 3) {
-                log(`    ⛔ cf_api_blocked x${cfBlockedCount} on port ${tryPort}${_cfNoteB} → 已尝试 ${cfBlockedCount} 个 port 全被 CF 挑战, 跳 Outlook`);
+              // v8.38 ROOT-FIX 2026-04-27 — cf_api_blocked rescue + 同邮箱不重试
+              // 实证 rpl_moh3l7ck_pcp4: attempt 1 报 cf_api_blocked, 但 replit 后端
+              // 实际已成功创建 userId=58269118 (从 attempt 2 isNewUser=false 反向证实).
+              // 旧逻辑 cfBlockedCount<3 时换 port 用同邮箱重试 → 100% 撞 isNewUser=false
+              // → 浪费 outlook + 真账号永久丢失.
+              // 新逻辑 (1) 用 outlook token 探针收件箱是否已收到 replit verify 邮件
+              //   收到 = 后端真创建了 → 写 placeholder + 标 outlook replit_used + break.
+              // 新逻辑 (2) 没收到 → 真 cf_api_blocked, 立即 break 换下一个 outlook (不再同邮箱重试)
+              log(`    ⛔ cf_api_blocked on port ${tryPort}${_cfNoteB} (exit: ${exitIp}) → v8.38 cf-rescue 收件箱探针…`);
+              if (_cfIpB) { try { rotateCfIpInXray(_cfIpB); } catch {} }
+              await new Promise(r => setTimeout(r, 8000));
+              let _cfRescued = false;
+              try {
+                const _cfRescueR = await localPost("/api/tools/outlook/click-verify-link", { accountId: outlook.id }) as { success?: boolean; final_url?: string; verify_url?: string; error?: string };
+                const _eL = String(_cfRescueR.error ?? "").toLowerCase();
+                if (_cfRescueR.success || _eL.includes("invalid") || _eL.includes("has been used") || _eL.includes("已使用")) {
+                  _cfRescued = true;
+                  const _detail = String(_cfRescueR.final_url ?? _cfRescueR.verify_url ?? "").slice(0, 80);
+                  log(`    ✅ [cf-rescue] verify 邮件已到 → attempt ${attempt} 后端真的创建成功了; final=${_detail}`);
+                } else {
+                  log(`    [cf-rescue] 8s 内无 verify 邮件 (${String(_cfRescueR.error ?? "").slice(0,80)}) → 真 cf_api_blocked, 后端未创建`);
+                }
+              } catch (_cfre) {
+                log(`    [cf-rescue] 探针异常: ${String(_cfre).slice(0,80)} → 视为真 cf_api_blocked`);
+              }
+              if (_cfRescued) {
+                portLastGood.set(tryPort, Date.now());
+                const _aPp2 = Number(parsed.actual_proxy_port ?? 0);
+                const _portPh2 = _aPp2 > 0 ? _aPp2 : tryPort;
+                await dbE(
+                  `INSERT INTO accounts (platform, email, password, username, status, notes, tags, exit_ip, proxy_port)
+                   VALUES ('replit', $1, NULL, NULL, 'exists_no_password', 'cf_api_blocked rescued: outlook 收到 replit verify 邮件, 后端创建成功但 password/userId 在 CF blackhole 丢失', 'replit,exists_no_password,cf_rescued', $2, $3)
+                   ON CONFLICT (platform, email) DO NOTHING`,
+                  [outlook.email, exitIp, _portPh2]
+                ).catch(e => log(`    [cf-rescue] placeholder insert warn: ${e}`));
+                await dbE(
+                  "UPDATE accounts SET tags = CASE WHEN string_to_array(COALESCE(tags,''), ',') @> ARRAY['replit_used'] THEN tags ELSE NULLIF(TRIM(BOTH ',' FROM COALESCE(tags,'') || ',replit_used'), ',') END, updated_at = NOW() WHERE id = $1",
+                  [outlook.id]
+                ).catch(() => {});
+                log(`    [cf-rescue] outlook id=${outlook.id} 已标 replit_used + 写 replit placeholder, 跳下一个 outlook`);
                 break;
               }
-              log(`    ⛔ cf_api_blocked (${cfBlockedCount}/3) on port ${tryPort}${_cfNoteB} (exit: ${exitIp}) → 冷却该 port 10min + 立即换 port 重试`);
-              if (_cfIpB) {
-                try { rotateCfIpInXray(_cfIpB); } catch {}
-              }
-              continue;
+              log(`    ⛔ cf_api_blocked 真失败 → break 换 outlook (旧逻辑会同邮箱再试必撞 isNewUser=false)`);
+              break;
             }
 
             const isInstantSwitch =
