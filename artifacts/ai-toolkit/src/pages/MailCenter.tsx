@@ -168,22 +168,47 @@ export default function MailCenter() {
 
   useEffect(() => { loadAccounts(); }, [loadAccounts]);
 
-  // ── 实时验证轮询：加载状态 ─────────────────────────────────────────────
+  // ── 实时验证轮询：加载状态 (v8.15 修复 toggle 覆盖) ─────────────────────
+  // 用 ref 保存 toggle 后的"静默期"截止时间戳：toggle 后 5 秒内不接受
+  // 来自 /status 的覆盖（避免轮询返回旧值反复盖住用户操作）。
+  const liveVerifyMuteUntilRef = useRef<number>(0);
+  const liveVerifyAbortRef     = useRef<AbortController | null>(null);
+
   const loadLiveVerifyStatus = useCallback(async () => {
-    const d = await fetch(`${API}/tools/outlook/live-verify/status`).then(r => r.json()).catch(() => null);
-    if (d?.success) setLiveVerify(d);
+    if (Date.now() < liveVerifyMuteUntilRef.current) return;  // 静默期内跳过
+    liveVerifyAbortRef.current?.abort();
+    const ctrl = new AbortController();
+    liveVerifyAbortRef.current = ctrl;
+    try {
+      const d = await fetch(`${API}/tools/outlook/live-verify/status`, { signal: ctrl.signal }).then(r => r.json()).catch(() => null);
+      if (Date.now() < liveVerifyMuteUntilRef.current) return; // 响应回来时已进入静默期，丢弃
+      if (d?.success) setLiveVerify(d);
+    } catch { /* aborted */ }
   }, []);
 
   const toggleLiveVerify = async () => {
     if (!liveVerify) return;
     setLiveVerifyBusy(true);
+    // 立即 abort 在飞的 status 请求 + 设置 5s 静默期，防止旧响应覆盖
+    liveVerifyAbortRef.current?.abort();
+    liveVerifyMuteUntilRef.current = Date.now() + 5_000;
+    const target = !liveVerify.enabled;
+    // 乐观更新：UI 立刻翻转
+    setLiveVerify({ ...liveVerify, enabled: target });
     const d = await fetch(`${API}/tools/outlook/live-verify/toggle`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: !liveVerify.enabled }),
+      body: JSON.stringify({ enabled: target }),
     }).then(r => r.json()).catch(() => null);
     setLiveVerifyBusy(false);
-    if (d?.success) setLiveVerify(d);
+    if (d?.success) {
+      setLiveVerify(d);
+      // toggle 成功后保留 5s 静默期；之后 polling 自然恢复
+    } else {
+      // 失败回滚 UI
+      setLiveVerify({ ...liveVerify, enabled: !target });
+      liveVerifyMuteUntilRef.current = 0;
+    }
   };
 
   useEffect(() => {

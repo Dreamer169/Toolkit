@@ -297,24 +297,27 @@ def _try_firebase_verify(verify_url: str) -> dict:
     except Exception as e:
         return {"ok": False, "error": f"Firebase exception: {e}"}
 
-# --- 优先尝试 Firebase REST API（对 Replit/Reseek 同样有效）----------
-# 实测: POST identitytoolkit.googleapis.com/v1/accounts:update
-# 返回 emailVerified=true 即意味着 Firebase 侧已完成验证（含 Replit DB）。
-# 完全绕过 Cloudflare bot-check，是最可靠路径。
-print("[click_verify] 尝试 Firebase REST API 验证...", flush=True)
-_fb = _try_firebase_verify(verify_url)
-if _fb.get("ok"):
-    print(f"[click_verify] ✅ Firebase 验证成功: {_fb.get('email', '')}", flush=True)
-    print(json.dumps({"success": True, "verify_url": verify_url,
-                      "final_url": verify_url,
-                      "verified_marker": "success",
-                      "title": "Email Verified via Firebase REST",
-                      "http_status": 200}))
-    sys.exit(0)
-print(f"[click_verify] Firebase 未成功({_fb.get('error', '?')}), 降级到浏览器", flush=True)
+# --- v7.91 修复：Replit/Reseek 必须走浏览器 ----------------------------
+# Firebase REST 仅消费 oobCode，不会触发 Replit 后端用户表同步：
+# 实测 jtaylormjh@outlook.com / shugheshan@outlook.com 走 Firebase REST 后
+# 浏览器仍停留在 https://replit.com/verify?goto=/~?authModal=signup，
+# 账号在 Replit DB 中 verified=false。所以 Replit/Reseek URL 必须直接走
+# 带 cookie 的浏览器路径触发 SPA 内的 backend sync XHR。
 _is_custom_action_handler = bool(re.search(r"replit\.com|reseek\.com", verify_url, re.I))
-if _is_custom_action_handler:
-    print("[click_verify] 检测到自定义 action handler（Replit 等），使用浏览器兜底", flush=True)
+if not _is_custom_action_handler:
+    print("[click_verify] 尝试 Firebase REST API 验证...", flush=True)
+    _fb = _try_firebase_verify(verify_url)
+    if _fb.get("ok"):
+        print(f"[click_verify] ✅ Firebase 验证成功: {_fb.get('email', '')}", flush=True)
+        print(json.dumps({"success": True, "verify_url": verify_url,
+                          "final_url": verify_url,
+                          "verified_marker": "success",
+                          "title": "Email Verified via Firebase REST",
+                          "http_status": 200}))
+        sys.exit(0)
+    print(f"[click_verify] Firebase 未成功({_fb.get('error', '?')}), 降级到浏览器", flush=True)
+else:
+    print("[click_verify] 检测到 Replit/Reseek 自定义 action handler，强制走浏览器以触发后端同步", flush=True)
 # ---------------------------------------------------------------------
 
 # v7.90 — 多路径浏览器回退: WARP → Tor(NEWNYM) → Tor(NEWNYM#2) → xray10808
