@@ -222,8 +222,12 @@ async def retoken_account(account: dict, headless: bool, proxy: str = "") -> boo
             launch_args["proxy"] = {"server": proxy}
 
         browser = await p.chromium.launch(**launch_args)
+        # v8.18: locale + timezone_id 统一为 en-US/America/Los_Angeles, 与
+        # outlook_register / replit_register 完整工作流保持一致, 避免 retoken 时
+        # navigator.language 与注册时不一致触发 Microsoft 风控
         context = await browser.new_context(
-            locale="zh-CN",
+            locale="en-US",
+            timezone_id="America/Los_Angeles",
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         )
         page = await context.new_page()

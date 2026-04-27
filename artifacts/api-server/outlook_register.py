@@ -32,7 +32,7 @@ from pathlib import Path
 from faker import Faker
 from browser_fingerprint import gen_profile, context_kwargs, apply_fingerprint_sync, profile_summary
 
-fake = Faker("zh_CN")
+fake = Faker("en_US")  # v8.18: 与浏览器 locale=en-US 一致, 避免名字-locale 矛盾
 
 # ─── 配置 ─────────────────────────────────────────────────────────────────────
 BOT_PROTECTION_WAIT = 11          # 秒，与原版一致
@@ -2196,9 +2196,9 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
 
     # ── 共享浏览器指纹档案（与 Cursor 注册完全一致）──────────────────────────
     # gen_profile 生成与 Cursor 相同的 UA/WebGL/canvas/Audio/machine_id/battery
-    # locale="zh-CN"：Outlook 注册 UI 中文模式（时区自动匹配 Asia/Shanghai）
-    # browser_fingerprint.py 的 LOCALE_TIMEZONES 确保时区与 locale 完全一致
-    fp = gen_profile(locale="zh-CN")
+    # v8.18: locale="en-US" — 与 Replit/Cursor 完整工作流统一为英文站点 UI,
+    # 时区自动从 LOCALE_TIMEZONES["en-US"] (US_TIMEZONES) 池中随机匹配, 保证内部一致.
+    fp = gen_profile(locale="en-US")
     print(f"[register] 指纹: {profile_summary(fp)}", flush=True)
 
     # 创建 browser context（统一参数：UA / 时区 / 屏幕 / sec-ch-ua headers）

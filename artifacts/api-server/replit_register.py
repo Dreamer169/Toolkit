@@ -1804,6 +1804,7 @@ async def _fetch_replit_verify_url(email_addr: str, password: str, timeout_s: in
             _br2 = await _pw2.chromium.launch(headless=True, args=_launch_args)
             _ctx2 = await _br2.new_context(
                 locale="en-US",
+                timezone_id="America/Los_Angeles",  # v8.18: 与 locale 配套, 避免 navigator.language=en + Intl.tz=Asia 矛盾
                 user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
                             " AppleWebKit/537.36 (KHTML, like Gecko)"
                             " Chrome/131.0.0.0 Safari/537.36"))
