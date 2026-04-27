@@ -74,30 +74,6 @@ export default function FullWorkflow() {
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
-  // 恢复运行中的任务（切换页面后自动恢复轮询）
-  useEffect(() => {
-    const savedJobId = sessionStorage.getItem('fw_jobId');
-    if (!savedJobId) return;
-    fetch(API + '/tools/outlook/register/' + savedJobId + '?since=0')
-      .then(r => r.json())
-      .then(d => {
-        if (!d.success || d.status === 'done' || d.status === 'stopped') {
-          sessionStorage.removeItem('fw_jobId');
-          return;
-        }
-        setJobId(savedJobId);
-        setPhase('registering');
-        if (d.logs && d.logs.length) {
-          setLogs(d.logs.map(function(l: { message?: string }) { return { ts: Date.now(), text: l.message || '', level: 'info' }; }));
-        }
-        sinceRef.current = d.nextSince || 0;
-        addLog('🔄 已自动恢复运行中的任务: ' + savedJobId);
-        startPolling(savedJobId);
-      })
-      .catch(function() { sessionStorage.removeItem('fw_jobId'); });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   // 加载代理池数量
   useEffect(() => {
     // 只显示 DB 共享 socks5 代理池数量（与其他功能共用的住宅代理池）
@@ -156,7 +132,6 @@ export default function FullWorkflow() {
       const d = await r.json();
       if (!d.success || !d.jobId) { addLog("❌ 启动失败: " + (d.error || "未知")); setPhase("error"); return; }
       setJobId(d.jobId);
-      sessionStorage.setItem('fw_jobId', d.jobId);
       addLog(`📋 任务 ID: ${d.jobId}`);
       addLog(`🪪 Outlook预生成: ${data.outlook.email} / ${data.outlook.password}`);
       addLog(`🎭 指纹: UA=${data.fingerprint.userAgent.slice(0,60)}…`);
@@ -177,7 +152,6 @@ export default function FullWorkflow() {
           clearInterval(pollRef.current!);
           addLog("⚠️ 任务已失效（服务器重启导致），请重新启动注册");
           setResult({ ok: false, msg: "任务丢失（服务器重启），请重试" });
-          sessionStorage.removeItem('fw_jobId');
           setPhase("done");
           return;
         }
@@ -201,7 +175,6 @@ export default function FullWorkflow() {
             setSaved(true);
             setSaveMsg(`✅ ${accts.length} 个账号已自动入库`);
           }
-          sessionStorage.removeItem('fw_jobId');
           setPhase("done");
         }
       } catch {}
