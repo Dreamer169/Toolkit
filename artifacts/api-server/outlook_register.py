@@ -32,7 +32,39 @@ from pathlib import Path
 from faker import Faker
 from browser_fingerprint import gen_profile, context_kwargs, apply_fingerprint_sync, profile_summary
 
-fake = Faker("zh_CN")  # v8.18 → v8.18a 紧急回滚: outlook 注册流程内有大量 zh selector (同意并继续/已被占用/月/日/验证质询等), en-US locale 会让 UI 全英文导致 selector 失配
+fake = Faker("en_US")  # v8.19: 双语 selector 完成后切回 en_US (与 browser locale 一致, 名字-locale 不矛盾)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# v8.19: 双语 selector 常量 (zh-CN + en-US 并存, locale 切换不再失配)
+# ═══════════════════════════════════════════════════════════════════════════
+# 文本匹配 — 用 re.compile 实现 OR (Playwright get_by_text 接受 Pattern 对象)
+TXT_AGREE_CONTINUE = re.compile(r"^\s*(同意并继续|Agree and continue|Continue|Next)\s*$")
+TXT_USERNAME_TAKEN = re.compile(r"已被占用|该用户名不可用|username is taken|already (taken|exists|in use)|is not available|cannot be used|Someone already has", re.IGNORECASE)
+TXT_UNUSUAL_ACTIVITY = re.compile(r"一些异常活动|unusual activity|something went wrong", re.IGNORECASE)
+TXT_SITE_MAINTENANCE = re.compile(r"此站点正在维护|currently (down|unavailable)|under maintenance|service is unavailable", re.IGNORECASE)
+TXT_CANCEL_BTN = re.compile(r"^\s*(取消|Cancel)\s*$")
+
+# CSS attribute selector union (comma-separated, Playwright/CSS 原生支持 OR)
+SEL_EMAIL_INPUT = '[aria-label="新建电子邮件"], [aria-label="New email"], [aria-label="New email address"]'
+SEL_IFRAME_CHALLENGE = 'iframe[title="验证质询"], iframe[title="Verification challenge"], iframe[title*="challenge" i]'
+SEL_A11Y_CHALLENGE = '[aria-label="可访问性挑战"], [aria-label="Accessible challenge"], [aria-label="Accessibility challenge"], [aria-label="Audio challenge"]'
+SEL_PRESS_AGAIN = '[aria-label="再次按下"], [aria-label="Press again"], [aria-label="Press and hold"]'
+
+# 月份英文名映射 (date picker text-is fallback)
+EN_MONTHS = ["", "January", "February", "March", "April", "May", "June",
+             "July", "August", "September", "October", "November", "December"]
+
+def date_option_selector(value: str, zh_suffix: str, is_month: bool = False) -> str:
+    """生成日期 picker 的 zh+en 双语 :text-is union selector.
+    is_month=True: zh '5月' / en 'May'
+    is_month=False (day): zh '5日' / en '5'
+    """
+    if is_month:
+        en_text = EN_MONTHS[int(value)]
+    else:
+        en_text = value  # day 在 en-US 是纯数字
+    return f'[role="option"]:text-is("{value}{zh_suffix}"), [role="option"]:text-is("{en_text}")'
+
 
 # ─── 配置 ─────────────────────────────────────────────────────────────────────
 BOT_PROTECTION_WAIT = 11          # 秒，与原版一致
@@ -162,17 +194,17 @@ class BaseController:
         # ── Step 1: 打开注册页，等待同意按钮 ──────────────────────────────
         try:
             page.goto(REGISTER_URL, timeout=20000, wait_until="domcontentloaded")
-            page.get_by_text("同意并继续").wait_for(timeout=30000)
+            page.get_by_text(TXT_AGREE_CONTINUE).wait_for(timeout=30000)
             start_time = time.time()
             page.wait_for_timeout(0.1 * self.wait_time)
-            page.get_by_text("同意并继续").click(timeout=30000)
+            page.get_by_text(TXT_AGREE_CONTINUE).click(timeout=30000)
         except Exception as e:
-            return False, f"等待\"同意并继续\"按钮超时(可能是 selector 失配/UI 语言切换/IP 被风控): {e}", email
+            return False, f"等待同意按钮(zh:同意并继续/en:Continue)超时(可能是 IP 被风控或页面未加载): {e}", email
 
         # ── Step 2: 填写邮箱名、密码、生日、姓名 ─────────────────────────
         try:
             # 邮箱（支持用户名被占时自动切换建议名）
-            email_input = page.locator('[aria-label="新建电子邮件"]')
+            email_input = page.locator(SEL_EMAIL_INPUT)
             email_input.wait_for(timeout=20000)
             email_input.click()
             email_input.type(email, delay=max(20, 0.006 * self.wait_time), timeout=15000)
@@ -188,11 +220,8 @@ class BaseController:
                 if username_accepted:
                     print(f"  ✅ 用户名 {email} 已接受，进入密码步骤", flush=True)
                     break
-                taken = (
-                    page.get_by_text("已被占用").count() > 0
-                    or page.get_by_text("username is taken").count() > 0
-                    or page.get_by_text("该用户名不可用").count() > 0
-                )
+                # v8.19: 双语 regex 单次检测 (zh+en 全部 username taken 提示)
+                taken = page.get_by_text(TXT_USERNAME_TAKEN).count() > 0
                 password_visible = page.locator('[type="password"]').count() > 0
                 if password_visible:
                     username_accepted = True
@@ -204,7 +233,7 @@ class BaseController:
                     email = picked
                     # 冷却 5 秒，避免触发速率限制
                     page.wait_for_timeout(5000)
-                    email_input = page.locator('[aria-label="新建电子邮件"]')
+                    email_input = page.locator(SEL_EMAIL_INPUT)
                     email_input.click()
                     page.keyboard.press("Control+a")
                     page.keyboard.press("Delete")
@@ -251,11 +280,11 @@ class BaseController:
             except Exception:
                 page.locator('[name="BirthMonth"]').click()
                 page.wait_for_timeout(0.02 * self.wait_time)
-                page.locator(f'[role="option"]:text-is("{month}月")').click()
+                page.locator(date_option_selector(month, "月", is_month=True)).first.click()
                 page.wait_for_timeout(0.04 * self.wait_time)
                 page.locator('[name="BirthDay"]').click()
                 page.wait_for_timeout(0.03 * self.wait_time)
-                page.locator(f'[role="option"]:text-is("{day}日")').click()
+                page.locator(date_option_selector(day, "日", is_month=False)).first.click()
                 page.locator('[data-testid="primaryButton"]').click(timeout=5000)
 
             # 姓名
@@ -279,8 +308,8 @@ class BaseController:
 
             page.wait_for_timeout(400)
 
-            if (page.get_by_text("一些异常活动").count()
-                    or page.get_by_text("此站点正在维护，暂时无法使用，请稍后重试。").count()):
+            if (page.get_by_text(TXT_UNUSUAL_ACTIVITY).count()
+                    or page.get_by_text(TXT_SITE_MAINTENANCE).count()):
                 return False, "当前IP注册频率过快", email
 
             if page.locator("iframe#enforcementFrame").count() > 0:
@@ -416,8 +445,8 @@ class PatchrightController(BaseController):
                     print(f"[captcha] ⚠️ Enter第{_t+1}次：需重试", flush=True)
                     continue
                 except Exception:
-                    if (page.get_by_text("一些异常活动").count()
-                            or page.get_by_text("此站点正在维护，暂时无法使用，请稍后重试。").count()):
+                    if (page.get_by_text(TXT_UNUSUAL_ACTIVITY).count()
+                            or page.get_by_text(TXT_SITE_MAINTENANCE).count()):
                         return False
                     print(f"[captcha] ✅ Enter键第{_t+1}次通过！", flush=True)
                     return True
@@ -545,12 +574,12 @@ class PatchrightController(BaseController):
         """
         # 等 CAPTCHA iframe 出现
         try:
-            page.wait_for_selector('iframe[title="验证质询"]', timeout=12000)
+            page.wait_for_selector(SEL_IFRAME_CHALLENGE, timeout=12000)
         except Exception:
             # 没有 CAPTCHA，也许已通过
             return True
 
-        frame1 = page.frame_locator('iframe[title="验证质询"]')
+        frame1 = page.frame_locator(SEL_IFRAME_CHALLENGE)
 
         # 可能的无障碍按钮 aria-label（中文/英文变体）
         ACCESSIBILITY_LABELS = [
@@ -867,7 +896,7 @@ class PatchrightController(BaseController):
 
             # frame_locator 自动处理 iframe 坐标偏移，比 page.frames[] 更可靠
             import random as _rnd
-            _TITLE_SELS = ['iframe[title="验证质询"]', 'iframe[title*="challenge"]',
+            _TITLE_SELS = [SEL_IFRAME_CHALLENGE, 'iframe[title*="challenge"]',
                            'iframe[title*="Challenge"]', 'iframe[title*="Captcha"]',
                            'iframe[title*="captcha"]']
             _BLOCK_SELS = ['iframe[style*="display: block"]', 'iframe[style*="display:block"]',
@@ -901,7 +930,7 @@ class PatchrightController(BaseController):
                 try:
                     _f2_try = _frame1.frame_locator(_bsel)
                     # 验证 frame2 可见
-                    _a11y_try = _f2_try.locator('[aria-label="可访问性挑战"]')
+                    _a11y_try = _f2_try.locator(SEL_A11Y_CHALLENGE)
                     _cnt = _a11y_try.count()
                     if _cnt > 0:
                         print(f"[captcha] ✅ frame_locator frame2: {_bsel} (可访问性挑战 count={_cnt})", flush=True)
@@ -916,7 +945,7 @@ class PatchrightController(BaseController):
             if _a11y_btn is None:
                 # 最后回退：直接在页面中找
                 print("[captcha] ⚠ 回退：直接在页面中找 [aria-label='可访问性挑战']", flush=True)
-                _a11y_btn = page.locator('[aria-label="可访问性挑战"]')
+                _a11y_btn = page.locator(SEL_A11Y_CHALLENGE)
 
             # ── 点击 [aria-label="可访问性挑战"]（轮椅图标，进入音频/按压模式）──
             try:
@@ -942,9 +971,9 @@ class PatchrightController(BaseController):
                 try:
                     _press_again = None
                     if _frame2 is not None:
-                        _press_again = _frame2.locator('[aria-label="再次按下"]')
+                        _press_again = _frame2.locator(SEL_PRESS_AGAIN)
                     if _press_again is None or _press_again.count() == 0:
-                        _press_again = page.locator('[aria-label="再次按下"]')
+                        _press_again = page.locator(SEL_PRESS_AGAIN)
                     _box2 = _press_again.first.bounding_box(timeout=2000)
                     if _box2 and _box2['width'] > 0:
                         _cx2 = _box2['x'] + _box2['width'] / 2 + _rnd.randint(-10, 10)
@@ -992,7 +1021,7 @@ class PatchrightController(BaseController):
                                     try:
                                         _disabled = _chk_fr.evaluate("""
                                             () => {
-                                                const btn = document.querySelector('[aria-label="可访问性挑战"]');
+                                                const btn = document.querySelector('[aria-label="可访问性挑战"], [aria-label="Accessible challenge"], [aria-label="Accessibility challenge"], [aria-label="Audio challenge"]');
                                                 return btn ? btn.getAttribute('aria-disabled') : null;
                                             }
                                         """)
@@ -1035,7 +1064,7 @@ class PatchrightController(BaseController):
                     # 第一轮：精确找 [aria-label="再次按下"] —— 10-frame变体中在frame[9]
                     for _hfr in page.frames:
                         try:
-                            _pa_loc = _hfr.locator('[aria-label="再次按下"]')
+                            _pa_loc = _hfr.locator(SEL_PRESS_AGAIN)
                             if _pa_loc.count() > 0:
                                 # Bug2修复: about:blank 跨域嵌套frame的bounding_box()
                                 # 即使返回非None坐标也是frame内坐标而非page坐标，不可信
@@ -1183,11 +1212,10 @@ class PatchrightController(BaseController):
             page.wait_for_timeout(3500)
             try:
                 _early_solved_reason = None
-                if page.get_by_text("取消").count() > 0:
-                    _early_solved_reason = "出现取消按钮"
-                elif page.get_by_text("Cancel").count() > 0:
-                    _early_solved_reason = "出现 Cancel 按钮"
-                elif page.locator("iframe[title=\"验证质询\"]").count() == 0:
+                # v8.19: 双语 Cancel 检测合并
+                if page.get_by_text(TXT_CANCEL_BTN).count() > 0:
+                    _early_solved_reason = "出现取消/Cancel 按钮"
+                elif page.locator(SEL_IFRAME_CHALLENGE).count() == 0:
                     _early_solved_reason = "验证质询 iframe 已消失"
                 else:
                     for _pf_chk in page.frames:
@@ -1289,11 +1317,10 @@ class PatchrightController(BaseController):
             # v7.60 二次早期检测：20s 后若 CAPTCHA 已消失，跳过深度扫描+音频解析
             try:
                 _late_solved_reason = None
-                if page.get_by_text("取消").count() > 0:
-                    _late_solved_reason = "出现取消按钮"
-                elif page.get_by_text("Cancel").count() > 0:
-                    _late_solved_reason = "出现 Cancel 按钮"
-                elif page.locator("iframe[title=\"验证质询\"]").count() == 0:
+                # v8.19: 双语 Cancel 检测合并
+                if page.get_by_text(TXT_CANCEL_BTN).count() > 0:
+                    _late_solved_reason = "出现取消/Cancel 按钮"
+                elif page.locator(SEL_IFRAME_CHALLENGE).count() == 0:
                     _late_solved_reason = "验证质询 iframe 已消失"
                 else:
                     # v7.61: 全量 hsprotect frame 清空检测
@@ -1394,22 +1421,22 @@ class PatchrightController(BaseController):
                 # 等待 CAPTCHA 消失
                 page.wait_for_timeout(1500)
                 try:
-                    page.wait_for_selector('iframe[title="验证质询"]', state="detached", timeout=8000)
+                    page.wait_for_selector(SEL_IFRAME_CHALLENGE, state="detached", timeout=8000)
                     return True
                 except Exception:
-                    if (page.get_by_text("取消").count() > 0
-                            or page.get_by_text("一些异常活动").count() == 0):
+                    if (page.get_by_text(TXT_CANCEL_BTN).count() > 0
+                            or page.get_by_text(TXT_UNUSUAL_ACTIVITY).count() == 0):
                         return True
                     return False
 
             # ── 兜底：检查页面是否已通过 ─────────────────────────────────────
             page.wait_for_timeout(1500)
             try:
-                if page.get_by_text("取消").count() > 0:
+                if page.get_by_text(TXT_CANCEL_BTN).count() > 0:
                     print("[captcha] ✅ 出现取消按钮，认为已通过", flush=True)
                     return True
-                if (page.get_by_text("一些异常活动").count()
-                        or page.get_by_text("此站点正在维护，暂时无法使用，请稍后重试。").count()):
+                if (page.get_by_text(TXT_UNUSUAL_ACTIVITY).count()
+                        or page.get_by_text(TXT_SITE_MAINTENANCE).count()):
                     return False
             except Exception as nav_err:
                 if "context was destroyed" in str(nav_err).lower() or "navigation" in str(nav_err).lower():
@@ -1417,7 +1444,7 @@ class PatchrightController(BaseController):
                     return True
                 raise
             try:
-                page.wait_for_selector('iframe[title="验证质询"]', timeout=2000)
+                page.wait_for_selector(SEL_IFRAME_CHALLENGE, timeout=2000)
                 # v7.61 终极兜底：iframe 在 DOM 中但 hsprotect 内容已清空 → 视为通过
                 try:
                     for _pf_final in page.frames:
@@ -1557,7 +1584,7 @@ class PatchrightController(BaseController):
                     try:
                         _a11y_check = fr.evaluate("""
                             () => {
-                                const btn = document.querySelector('[aria-label="可访问性挑战"]');
+                                const btn = document.querySelector('[aria-label="可访问性挑战"], [aria-label="Accessible challenge"], [aria-label="Accessibility challenge"], [aria-label="Audio challenge"]');
                                 const hasAudio = document.querySelector('[aria-label*="play"],[aria-label*="Play"],[class*="play"],[class*="audio"]');
                                 return { isA11yOnly: !!btn && !hasAudio };
                             }
@@ -1777,8 +1804,8 @@ class PlaywrightController(BaseController):
                     page.wait_for_timeout(2000)
                     continue
                 except Exception:
-                    if (page.get_by_text("一些异常活动").count()
-                            or page.get_by_text("此站点正在维护，暂时无法使用，请稍后重试。").count()):
+                    if (page.get_by_text(TXT_UNUSUAL_ACTIVITY).count()
+                            or page.get_by_text(TXT_SITE_MAINTENANCE).count()):
                         return False
                     break
             except Exception:
@@ -1882,8 +1909,8 @@ class CamoufoxController(BaseController):
                     page.wait_for_timeout(2000)
                     continue
                 except Exception:
-                    if (page.get_by_text("一些异常活动").count()
-                            or page.get_by_text("此站点正在维护，暂时无法使用，请稍后重试。").count()):
+                    if (page.get_by_text(TXT_UNUSUAL_ACTIVITY).count()
+                            or page.get_by_text(TXT_SITE_MAINTENANCE).count()):
                         return False
                     break
             except Exception:
@@ -2196,11 +2223,11 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
 
     # ── 共享浏览器指纹档案（与 Cursor 注册完全一致）──────────────────────────
     # gen_profile 生成与 Cursor 相同的 UA/WebGL/canvas/Audio/machine_id/battery
-    # v8.18a 紧急回滚: 临时维持 locale="zh-CN", 时区随之 Asia/Shanghai 池.
-    # 完整 en-US 化需先将 outlook_register.py 全部 hard-code zh selector
-    # (同意并继续 / 新建电子邮件 / 已被占用 / 月/日 / 验证质询 等 15+ 处)
-    # 改为 zh|en 双语 regex/union, 否则 UI 切英文后 selector 全部失配.
-    fp = gen_profile(locale="zh-CN")
+    # v8.19: 全部 hard-code zh selector 已重构为 zh|en 双语 regex/union
+    # (TXT_* / SEL_* / date_option_selector), 现可安全使用 locale="en-US",
+    # 时区从 LOCALE_TIMEZONES["en-US"] (US_TIMEZONES) 池中随机, navigator.language
+    # 与 Intl.tz 内部一致, 与 Cursor/Replit 完整工作流统一.
+    fp = gen_profile(locale="en-US")
     print(f"[register] 指纹: {profile_summary(fp)}", flush=True)
 
     # 创建 browser context（统一参数：UA / 时区 / 屏幕 / sec-ch-ua headers）
