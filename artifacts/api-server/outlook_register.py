@@ -71,6 +71,24 @@ BOT_PROTECTION_WAIT = 11          # 秒，与原版一致
 MAX_CAPTCHA_RETRIES = 2
 REGISTER_URL = "https://outlook.live.com/mail/0/?prompt=create_account"
 
+# v8.22: CAPTCHA 误判修复 — 注册成功后微软重定向链 (consent → terms → mail/init shell)
+# 在 datacenter ASN 出口下经常 25-50s, 老代码 30s wait_for_url + 5s 选择器 fallback
+# 一过期就把已成功账号写成失败. POST_NAV_TIMEOUT 拉到 60s, 并加 cookie 正向证据判定.
+POST_NAV_TIMEOUT = int(os.environ.get("POST_NAV_TIMEOUT_MS", "60000"))
+# 微软注册成功后必然下发的 auth/profile cookies (任意一个出现 → 注册已生效)
+SUCCESS_COOKIE_NAMES = (
+    "RPSAuth", "MSPAuth", "MSPProf", "ESTSAUTH", "ESTSAUTHPERSISTENT",
+    "PPAuth", "WLSSC", "MSCC", "MUID", "ANON",
+)
+# 成功 URL 关键词 (扩展原列表 — 命中任一即视为成功)
+SUCCESS_URL_KEYWORDS = (
+    "account.live.com", "account.microsoft.com",
+    "outlook.live.com", "outlook.com/mail",
+    "login.live.com/login.srf", "login.live.com/ppsecure",
+    "consent.live.com", "signup.live.com/CreateAccount.aspx?id=",
+    "/owa/", "hotmail.com/mail",
+)
+
 
 # ─── 工具函数 ──────────────────────────────────────────────────────────────────
 def gen_password(n=None):
@@ -320,39 +338,76 @@ class BaseController:
             if not captcha_ok:
                 return False, "验证码处理失败", email
 
-            # ── 验证注册真正完成（等待跳转到成功页）────────────────────
-            # 微软成功页：account.live.com, outlook.com, login.live.com/login.srf
-            # 只有页面实际跳转到这些域才算真正注册成功
+            # ── 验证注册真正完成 ── v8.22 CAPTCHA 误判修复 (POST_NAV_TIMEOUT) ──
+            # 微软注册成功后链路: captcha-pass → consent/terms → account.live → outlook.live/mail
+            # 在 datacenter ASN + xray/CF/SOCKS 加层下整链路常 25-50s, 30s 不够.
+            # 三种正向证据任意命中即视为成功 (避免把已成功账号误判为失败):
+            #   1. URL 命中 SUCCESS_URL_KEYWORDS
+            #   2. context cookies 出现 SUCCESS_COOKIE_NAMES (RPSAuth/MSPAuth 等)
+            #   3. DOM 出现登录/个人中心标记
+            def _has_success_cookie() -> bool:
+                try:
+                    cks = page.context.cookies()
+                    for c in cks:
+                        nm = (c.get("name") or "").strip()
+                        if nm in SUCCESS_COOKIE_NAMES:
+                            return True
+                except Exception:
+                    pass
+                return False
+
+            def _is_success_now() -> bool:
+                if any(k in page.url for k in SUCCESS_URL_KEYWORDS):
+                    return True
+                if _has_success_cookie():
+                    return True
+                return False
+
+            ok_signal = False
             try:
+                # 第一层: 等 URL 跳转 (POST_NAV_TIMEOUT)
                 page.wait_for_url(
-                    lambda u: any(x in u for x in [
-                        "account.live.com",
-                        "account.microsoft.com",
-                        "outlook.live.com",
-                        "outlook.com/mail",
-                        "login.live.com/login.srf",
-                    ]),
-                    timeout=30000,
+                    lambda u: any(x in u for x in SUCCESS_URL_KEYWORDS),
+                    timeout=POST_NAV_TIMEOUT,
                 )
-                print("[register] ✅ 检测到成功跳转页", flush=True)
+                print(f"[register] ✅ 检测到成功跳转页: {page.url[:100]}", flush=True)
+                ok_signal = True
             except Exception:
-                # 检查当前页面是否有成功标志（避免误判）
-                cur_url = page.url
-                success_keywords = ["account.live", "account.microsoft", "outlook.live", "outlook.com/mail"]
-                if not any(k in cur_url for k in success_keywords):
-                    # 尝试等待页面出现 "你好" 或 "欢迎" 等完成标志
+                # 第二层: cookie 正向证据 (微软已下发 auth cookie → 后端账号已建好, 仅是前端壳没渲染)
+                if _has_success_cookie():
+                    print(f"[register] ✅ URL 未跳转但已检出成功 cookie (后端注册已完成)", flush=True)
+                    ok_signal = True
+                else:
+                    # 第三层: DOM 标记 (兼容老版终端 UI)
                     try:
                         page.wait_for_selector(
-                            '[data-testid="ocid-login"] , [aria-label="Outlook"] , .welcome-msg , #mectrl_headerPicture',
-                            timeout=5000,
+                            '[data-testid="ocid-login"] , [aria-label="Outlook"] , '
+                            '.welcome-msg , #mectrl_headerPicture , '
+                            '[data-testid="appConsentPrimaryButton"] , #idSIButton9 , '
+                            '#KmsiCheckboxField , [data-task="consent"] , #appName',
+                            timeout=8000,
                         )
+                        print("[register] ✅ DOM 出现登录/同意标记", flush=True)
+                        ok_signal = True
                     except Exception:
-                        # 截图记录当前状态
+                        pass
+                    # 第四层: 短暂再等一次 cookie/URL (重定向链可能在 wait_for_selector 期间继续)
+                    if not ok_signal:
                         try:
-                            page.screenshot(path=f"/tmp/outlook_captcha_done_{email}.png")
+                            page.wait_for_timeout(2500)
+                            if _is_success_now():
+                                print(f"[register] ✅ 二次轮询命中: {page.url[:100]}", flush=True)
+                                ok_signal = True
                         except Exception:
                             pass
-                        return False, f"CAPTCHA 已点击但页面未跳转到成功页（当前: {cur_url[:80]}）", email
+
+            if not ok_signal:
+                cur_url = page.url
+                try:
+                    page.screenshot(path=f"/tmp/outlook_captcha_done_{email}.png")
+                except Exception:
+                    pass
+                return False, f"CAPTCHA 已点击但页面未跳转到成功页（当前: {cur_url[:80]}）", email
 
         except Exception as e:
             import traceback
