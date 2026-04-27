@@ -1042,20 +1042,60 @@ export async function warmupGoogleSession(hostnameForKey: string): Promise<{
 }
 
 
-// ── v8.10 — Google trust-cookie deep bootstrap ──────────────────────────────
-// Runs ONCE per chromium lifetime (after first connectOverCDP succeeds).
-// Visits youtube + google.com + google search over ~40s in a fresh context to
-// drop NID / AEC / SOCS / __Secure-1PSIDTS / VISITOR_INFO1_LIVE / SIDCC etc.
-// trust cookies into the persistent --user-data-dir profile + shared cache.
+// ── v8.23 — Google trust-cookie REAL-human bootstrap ──────────────────────────
+// Runs ONCE per chromium lifetime. Vs v8.10 (固定坐标 / 固定滚动 / search "hello world"
+// / 从不点击 replit), v8.23 模拟真实用户:
+//   1. 从词表随机抽 1 个真实意图搜索词 (不是 hello+world)
+//   2. youtube + google.com 用随机化坐标和滚动距离
+//   3. google search 后真正点击 replit.com 结果链接 (注入 domain familiarity 信号)
+//   4. 在 Replit 首页停 8-15s 自然滚动 (告诉 reCAPTCHA Enterprise: 此用户最近确实访问过目标域)
+// 这是 datacenter ASN VPS 出口下唯一能拉高 reCAPTCHA Enterprise score 的合法手段.
 let _googleTrustDone = false;
 let _googleTrustInFlight = false;
+
+function _ri(min: number, max: number): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function _pick<T>(arr: T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+const _SEARCH_QUERIES = [
+  "replit online ide",
+  "replit features",
+  "replit vs codespaces",
+  "replit pricing",
+  "best browser based code editor",
+  "online python interpreter free",
+  "collaborative coding playground",
+  "free web hosting tutorial",
+];
+
+async function _humanScroll(page: import("playwright-core").Page): Promise<void> {
+  const steps = _ri(2, 4);
+  for (let i = 0; i < steps; i++) {
+    const dy = _ri(180, 520) * (Math.random() < 0.85 ? 1 : -1);
+    await page.evaluate(`window.scrollBy(0, ${dy})`);
+    await page.waitForTimeout(_ri(900, 2200));
+  }
+}
+
+async function _humanMouse(page: import("playwright-core").Page): Promise<void> {
+  const moves = _ri(2, 4);
+  for (let i = 0; i < moves; i++) {
+    await page.mouse.move(_ri(200, 1700), _ri(150, 900), { steps: _ri(8, 18) });
+    await page.waitForTimeout(_ri(400, 1100));
+  }
+}
+
 async function _bootstrapGoogleTrust(browser: Browser): Promise<void> {
   if (_googleTrustDone || _googleTrustInFlight) return;
   _googleTrustInFlight = true;
   const t0 = Date.now();
   let ctx: BrowserContext | null = null;
   try {
-    console.log("[v8.10] google-trust bootstrap START (~40s real-visit warmup)");
+    console.log("[v8.23] google-trust REAL-human bootstrap START (~50s, will click replit.com)");
     ctx = await browser.newContext({
       userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
       viewport: { width: 1920, height: 1040 },
@@ -1072,72 +1112,100 @@ async function _bootstrapGoogleTrust(browser: Browser): Promise<void> {
     });
     try { await ctx.addInitScript(STEALTH_INIT); } catch (_) { /* */ }
     const page = await ctx.newPage();
-    // Phase 1: youtube.com (~13s) — VISITOR_INFO1_LIVE / YSC / LOGIN_INFO / __Secure-3PSIDCC
+
+    // Phase 1: youtube.com (~10-13s) — 随机化滚动 + 鼠标
     try {
       await page.goto("https://www.youtube.com/", { waitUntil: "domcontentloaded", timeout: 18000 });
-      await page.waitForTimeout(2500);
-      await page.evaluate("window.scrollBy(0, 450)");
-      await page.waitForTimeout(2500);
-      await page.evaluate("window.scrollBy(0, 700)");
-      await page.waitForTimeout(2500);
-      await page.evaluate("window.scrollBy(0, -400)");
-      await page.waitForTimeout(2500);
-      console.log(`[v8.10] phase-1 youtube.com OK (${Date.now() - t0}ms)`);
+      await page.waitForTimeout(_ri(1500, 2800));
+      await _humanMouse(page);
+      await _humanScroll(page);
+      console.log(`[v8.23] phase-1 youtube.com OK (${Date.now() - t0}ms)`);
     } catch (e) {
-      console.warn("[v8.10] phase-1 youtube.com failed:", (e as Error).message);
+      console.warn("[v8.23] phase-1 youtube.com failed:", (e as Error).message);
     }
-    // Phase 2: google.com (~10s) — NID / AEC / SOCS / __Secure-1PSIDTS
+
+    // Phase 2: google.com (~6-9s) — 随机化, 准备搜索
     try {
       await page.goto("https://www.google.com/", { waitUntil: "domcontentloaded", timeout: 15000 });
-      await page.waitForTimeout(2000);
-      await page.mouse.move(700, 400);
-      await page.waitForTimeout(1500);
-      await page.evaluate("window.scrollBy(0, 200)");
-      await page.waitForTimeout(2000);
-      await page.mouse.move(900, 600);
-      await page.waitForTimeout(2000);
-      await page.evaluate("window.scrollBy(0, -150)");
-      await page.waitForTimeout(1500);
-      console.log(`[v8.10] phase-2 google.com OK (${Date.now() - t0}ms)`);
+      await page.waitForTimeout(_ri(1200, 2400));
+      await _humanMouse(page);
+      await page.waitForTimeout(_ri(800, 1500));
+      console.log(`[v8.23] phase-2 google.com OK (${Date.now() - t0}ms)`);
     } catch (e) {
-      console.warn("[v8.10] phase-2 google.com failed:", (e as Error).message);
+      console.warn("[v8.23] phase-2 google.com failed:", (e as Error).message);
     }
-    // Phase 3: google search (~13s) — registers SIDCC + recent search activity
+
+    // Phase 3: google search 真实意图词 → 找 replit.com 结果点击
+    const query = _pick(_SEARCH_QUERIES);
     try {
-      await page.goto("https://www.google.com/search?q=hello+world", { waitUntil: "domcontentloaded", timeout: 15000 });
-      await page.waitForTimeout(2000);
-      await page.evaluate("window.scrollBy(0, 500)");
-      await page.waitForTimeout(2500);
-      await page.evaluate("window.scrollBy(0, 800)");
-      await page.waitForTimeout(2500);
-      await page.mouse.move(800, 500);
-      await page.waitForTimeout(2000);
-      await page.evaluate("window.scrollBy(0, -400)");
-      await page.waitForTimeout(2000);
-      console.log(`[v8.10] phase-3 google search OK (${Date.now() - t0}ms)`);
+      const url = `https://www.google.com/search?q=${encodeURIComponent(query)}&hl=en`;
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
+      await page.waitForTimeout(_ri(1500, 2800));
+      await _humanScroll(page);
+      console.log(`[v8.23] phase-3 google search "${query}" OK (${Date.now() - t0}ms)`);
+
+      // 找第一条 replit.com 结果 → click → 跳到 Replit 官网
+      let clicked = false;
+      try {
+        const replitLinks = await page.locator("a[href*='replit.com']:visible").all();
+        for (const link of replitLinks) {
+          try {
+            const href = await link.getAttribute("href");
+            if (!href || !/replit\.com/.test(href)) continue;
+            // 只点击实际指向 replit.com (跳过 google 内部 /url? 重定向之外的)
+            await link.scrollIntoViewIfNeeded({ timeout: 3000 });
+            await page.waitForTimeout(_ri(600, 1200));
+            await link.click({ timeout: 5000 });
+            clicked = true;
+            console.log(`[v8.23] phase-4 clicked replit.com link href=${href.slice(0, 80)} (${Date.now() - t0}ms)`);
+            break;
+          } catch (_) { /* try next */ }
+        }
+      } catch (e) {
+        console.warn("[v8.23] phase-4 replit link locate failed:", (e as Error).message);
+      }
+
+      // Phase 5: 在 Replit 首页 (或重定向后任意 replit 页) 停 8-12s 自然滚动
+      if (clicked) {
+        try {
+          await page.waitForLoadState("domcontentloaded", { timeout: 12000 });
+          await page.waitForTimeout(_ri(2000, 3500));
+          await _humanScroll(page);
+          await _humanMouse(page);
+          await page.waitForTimeout(_ri(1500, 2500));
+          await _humanScroll(page);
+          const finalUrl = page.url();
+          console.log(`[v8.23] phase-5 Replit landing dwell complete url=${finalUrl.slice(0, 80)} (${Date.now() - t0}ms)`);
+        } catch (e) {
+          console.warn("[v8.23] phase-5 Replit dwell failed:", (e as Error).message);
+        }
+      } else {
+        console.warn("[v8.23] phase-4 no replit.com link clicked — domain-familiarity signal MISSING");
+      }
     } catch (e) {
-      console.warn("[v8.10] phase-3 google search failed:", (e as Error).message);
+      console.warn("[v8.23] phase-3 google search failed:", (e as Error).message);
     }
-    // Harvest google-family cookies into shared cache
+
+    // Harvest google-family cookies into shared cache (now richer: SIDCC + replit nav signal)
     try {
       const allCks = await ctx.cookies();
       const googleCks = allCks.filter((c) =>
         /(^|\.)(google\.com|gstatic\.com|youtube\.com|recaptcha\.net|googleapis\.com|googleusercontent\.com|googletagmanager\.com)$/i.test(c.domain)
       );
-      console.log(`[v8.10] google-trust cookies harvested: ${googleCks.length} (${Date.now() - t0}ms)`);
+      console.log(`[v8.23] google-trust cookies harvested: ${googleCks.length} (${Date.now() - t0}ms)`);
       try {
         writeCachedGoogleCookies(googleCks as Parameters<typeof writeCachedGoogleCookies>[0]);
-        console.log("[v8.10] google-trust cookies written to shared cache");
+        console.log("[v8.23] google-trust cookies written to shared cache");
       } catch (e) {
-        console.warn("[v8.10] writeCachedGoogleCookies failed:", (e as Error).message);
+        console.warn("[v8.23] writeCachedGoogleCookies failed:", (e as Error).message);
       }
     } catch (e) {
-      console.warn("[v8.10] cookie harvest failed:", (e as Error).message);
+      console.warn("[v8.23] cookie harvest failed:", (e as Error).message);
     }
     _googleTrustDone = true;
-    console.log(`[v8.10] google-trust bootstrap COMPLETE (${Date.now() - t0}ms)`);
+    console.log(`[v8.23] google-trust REAL-human bootstrap COMPLETE (${Date.now() - t0}ms)`);
   } catch (e) {
-    console.error("[v8.10] google-trust bootstrap fatal:", (e as Error).message);
+    console.error("[v8.23] google-trust bootstrap fatal:", (e as Error).message);
   } finally {
     _googleTrustInFlight = false;
     if (ctx) try { await ctx.close(); } catch (_) { /* */ }

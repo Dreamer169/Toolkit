@@ -625,7 +625,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "188.114.97.217",
+            "address": "104.24.80.160",
             "port": 443,
             "users": [
               {
@@ -925,7 +925,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "172.67.92.217",
+            "address": "104.24.58.47",
             "port": 443,
             "users": [
               {

@@ -19,7 +19,35 @@ if (Number.isNaN(port) || port <= 0) throw new Error(`Invalid PORT value: "${raw
 // v7.78r Bug O: 启动前确保所有 CREATE TABLE IF NOT EXISTS 跑过
 await initDatabase().catch((e) => { logger.error({ err: String(e) }, "initDatabase failed"); process.exit(1); });
 
-const server = app.listen(port, (err) => {
+// v8.23 — listen with EADDRINUSE retry (防 pm2 重启风暴)
+async function _listenWithRetry(): Promise<ReturnType<typeof app.listen>> {
+  let lastErr: unknown = null;
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    try {
+      const sv = await new Promise<ReturnType<typeof app.listen>>((resolve, reject) => {
+        const s = app.listen(port);
+        s.once("listening", () => resolve(s));
+        s.once("error", reject);
+      });
+      if (attempt > 1) logger.warn({ attempt }, "listen succeeded after EADDRINUSE retry");
+      return sv;
+    } catch (e: unknown) {
+      lastErr = e;
+      const code = (e as { code?: string })?.code;
+      if (code === "EADDRINUSE") {
+        const wait = Math.min(2000 * attempt, 8000);
+        logger.warn({ attempt, port, wait }, "EADDRINUSE — old process still binding port, sleep+retry");
+        await new Promise((r) => setTimeout(r, wait));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr;
+}
+const server = await _listenWithRetry();
+{
+  const err: Error | null = null;
   if (err) { logger.error({ err }, "Error listening on port"); process.exit(1); }
   logger.info({ port }, "Server listening");
   logger.info({ url: `http://localhost:${port}` }, "Stream relay URL");
@@ -37,6 +65,6 @@ const server = app.listen(port, (err) => {
   PersistenceManager.reapOrphans()
     .then((n) => { if (n > 0) logger.warn({ reaped: n }, "reaped orphan running jobs"); })
     .catch((err) => logger.error({ err }, "reapOrphans failed"));
-});
+}
 
 server.on("error", (err) => { logger.error({ err }, "Server error"); });
