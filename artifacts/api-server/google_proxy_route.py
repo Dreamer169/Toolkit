@@ -58,26 +58,27 @@ except Exception:
 # 轮换重新打分时, 用 "curl --socks5 :PORT https://ipinfo.io/json" 复检 ASN, 命中
 # Google/Microsoft/Amazon/Oracle/Tencent/Alibaba/Huawei 云 ASN 即从池中剔除。
 DEFAULT_POOL = [
-    # v7.94 — REVERT v7.93d. WARP-only DEFAULT_POOL was wrong: in v7.78q-era working
-    # topology broker chromium itself exits via clean datacenter SOCKS (Kirino/DO/MULTACOM,
-    # see start-browser-model.sh v7.78e picker), and google_proxy_route routes *.google
-    # via the SAME family of clean non-GCP/non-Azure datacenter exits. IP-segment of
-    # Google sub-requests therefore matches IP-segment of Replit sign-up POST (both are
-    # non-CF, non-cloud datacenter), and reCAPTCHA Enterprise scores them as a
-    # consistent residential-class small-DC client. WARP exit (104.28.x) is CF backbone,
-    # which Google scores aggressively against. Restore v7.87 verified pool below.
-    "socks5://127.0.0.1:10825",  # ★ AEZA — 实测成功 (userId=58169318)
-    "socks5://127.0.0.1:10824",  # 0391f15 原班 — Cogent
-    "socks5://127.0.0.1:10826",  # 0391f15 原班 — DigitalOcean
-    "socks5://127.0.0.1:10830",  # 0391f15 原班 — Cogent
-    "socks5://127.0.0.1:10820",  # DigitalOcean
-    "socks5://127.0.0.1:10822",  # HostPapa
-    "socks5://127.0.0.1:10823",  # Zenlayer
-    "socks5://127.0.0.1:10828",  # DigitalOcean
-    # "socks5://127.0.0.1:10831",  # ✗ DROPPED — Microsoft Azure (AS8075) hyperscale cloud
-    "socks5://127.0.0.1:10836",  # DigitalOcean
-    "socks5://127.0.0.1:10837",  # HostPapa
-    "socks5://127.0.0.1:10845",  # HostPapa
+    # v8.28 — NARROWED to AEZA-only for empirical re-validation. Real-world test
+    # 2026-04-27 (rpl_mogygaxk_4gue): even with v8.27 IP-consistency fix (token mint
+    # via socks5:10820 = POST exit via socks5:10820 = DigitalOcean AS14061), reCAPTCHA
+    # Enterprise still returned code:1. Conclusion: DigitalOcean ASN itself is now on
+    # reCAPTCHA's datacenter blocklist, joining Google/Microsoft/Amazon. Only known
+    # working exit is 10825 AEZA (AS210644, eastern-EU small-ISP). Other ports must
+    # be re-probed individually before re-adding. HostPapa/Cogent/Zenlayer untested
+    # since 0391f15; their inclusion is now suspect. Sticky-per-context still applies
+    # — with single-element pool it is just always-10825.
+    "socks5://127.0.0.1:10825",  # ★ AEZA AS210644 — 实测成功 (userId=58169318, 0391f15)
+    # "socks5://127.0.0.1:10824",  # SUSPECT — Cogent AS174 (no recent success)
+    # "socks5://127.0.0.1:10826",  # SUSPECT — DigitalOcean AS14061 (rpl_mogygaxk: 400 code:1)
+    # "socks5://127.0.0.1:10830",  # SUSPECT — Cogent AS174
+    # "socks5://127.0.0.1:10820",  # FAILED — DigitalOcean AS14061 (rpl_mogygaxk: 400 code:1)
+    # "socks5://127.0.0.1:10822",  # SUSPECT — HostPapa AS36352
+    # "socks5://127.0.0.1:10823",  # SUSPECT — Zenlayer AS21859
+    # "socks5://127.0.0.1:10828",  # SUSPECT — DigitalOcean AS14061
+    # "socks5://127.0.0.1:10831",  # ✗ DROPPED — Microsoft Azure (AS8075)
+    # "socks5://127.0.0.1:10836",  # SUSPECT — DigitalOcean AS14061
+    # "socks5://127.0.0.1:10837",  # SUSPECT — HostPapa AS36352
+    # "socks5://127.0.0.1:10845",  # SUSPECT — HostPapa AS36352
 ]
 GOOGLE_HOST_RE = re.compile(
     r"(^|\.)("
@@ -160,6 +161,30 @@ _STRIP_RESP_HDRS = {
 }
 
 
+
+# v8.27 — sticky-pin registry for cross-module IP consistency.
+# replit_register.py v7.75 route-force handler reads this to forward POST sign-up
+# via the SAME socks5 IP that minted the recaptcha token (IP consistency root-fix).
+_PINNED_BY_CTX: dict = {}
+
+def get_pinned_proxy(target):
+    try:
+        return _PINNED_BY_CTX.get(id(target))
+    except Exception:
+        return None
+
+def get_pinned_proxy_for_page(page):
+    try:
+        v = _PINNED_BY_CTX.get(id(page))
+        if v: return v
+        ctx = getattr(page, "context", None)
+        if ctx is not None:
+            return _PINNED_BY_CTX.get(id(ctx))
+    except Exception:
+        pass
+    return None
+
+
 async def attach_google_proxy_routing(target, log=None) -> None:
     """Attach the per-host google route to a Playwright Page or BrowserContext.
 
@@ -186,6 +211,10 @@ async def attach_google_proxy_routing(target, log=None) -> None:
     # 修复后整个 ctx 内 IP 只一个, 评分能上来。不同 ctx 之间通过 random 起点
     # 分散, 避免所有 ctx 都撞到 pool[0]。
     _pinned_proxy = pool[random.randrange(len(pool))]
+    try:
+        _PINNED_BY_CTX[id(target)] = _pinned_proxy
+    except Exception:
+        pass
     if log:
         log(f"[google-route-py] ctx pinned to {_pinned_proxy} (sticky, pool={len(pool)})")
 

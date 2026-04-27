@@ -1115,22 +1115,62 @@ async def fill_step1(page) -> str | None:
     if rc_token and len(rc_token) > 50 and bool(_brox_rf) and ":9050" not in _brox_rf:
         _locked_rc = rc_token
         async def _signup_force_token(route, request):
+            # v8.27 — IP-consistency root-fix: forward POST sign-up via the SAME socks5
+            # IP that minted the recaptcha token. Previous v7.75 route.continue_() sent
+            # the POST out the broker chromium default exit (CF AS13335 datacenter) ->
+            # reCAPTCHA Enterprise IP-mismatch -> code:1 invalid. Empirical 2026-04-27
+            # rpl_mogy1gc8: token mint via socks5:10826 (DigitalOcean), POST exit
+            # 104.28.195.186 (CF AS13335 datacenter) -> 400 code:1.
             try:
                 import json as _jft
                 bd = _jft.loads(request.post_data or "{}")
                 _orig_t = bd.get("recaptchaToken", "") or ""
-                # v7.75: 放行 LIVE token (>=1000 chars 且 0c 开头 = grecaptcha enterprise 正确格式)
-                # 只在 LIVE 异常时才回填 LOCKED — 这是真正的 fallback 而非强制覆盖。
                 if len(_orig_t) >= 1000 and _orig_t.startswith("0c"):
-                    log(f"[route-force] LIVE token OK ({len(_orig_t)}chars, 0c... prefix) → 放行不覆盖")
-                    await route.continue_()
+                    log(f"[route-force] LIVE token OK ({len(_orig_t)}chars, 0c... prefix) → 放行不覆盖, 走 socks5")
+                    _body = request.post_data_buffer
+                else:
+                    bd["recaptchaToken"] = _locked_rc
+                    log(f"[route-force] LIVE token 异常 (len={len(_orig_t)}, prefix={_orig_t[:4]!r}) → 回填 locked={len(_locked_rc)}chars, 走 socks5")
+                    _body = _jft.dumps(bd).encode("utf-8")
+                _proxy = None
+                try:
+                    from google_proxy_route import get_pinned_proxy_for_page
+                    _proxy = get_pinned_proxy_for_page(page)
+                except Exception as _ie:
+                    log(f"[route-force v8.27] get_pinned_proxy import err: {_ie}")
+                if not _proxy:
+                    log("[route-force v8.27] no pinned proxy → fallback to route.continue_ (IP mismatch risk)")
+                    await route.continue_(post_data=_body)
                     return
-                bd["recaptchaToken"] = _locked_rc
-                log(f"[route-force] LIVE token 异常 (len={len(_orig_t)}, prefix={_orig_t[:4]!r}) → 回填 locked={len(_locked_rc)}chars")
-                await route.continue_(post_data=_jft.dumps(bd))
+                try:
+                    from httpx_socks import AsyncProxyTransport
+                    import httpx as _hx
+                    _hdrs = {}
+                    _STRIP = {"host","connection","content-length","accept-encoding","transfer-encoding","expect","upgrade"}
+                    for _k, _v in (request.headers or {}).items():
+                        if _k.lower() in _STRIP or _k.startswith(":"):
+                            continue
+                        _hdrs[_k] = _v
+                    _tr = AsyncProxyTransport.from_url(_proxy)
+                    async with _hx.AsyncClient(transport=_tr, http2=False, timeout=20.0, follow_redirects=False, verify=True) as _cl:
+                        _r = await _cl.request(request.method, request.url, headers=_hdrs, content=_body)
+                    _resp_h = []
+                    _STRIP_R = {"content-encoding","content-length","transfer-encoding","connection","keep-alive"}
+                    for _k, _v in _r.headers.multi_items():
+                        if _k.lower() in _STRIP_R: continue
+                        _resp_h.append((_k, _v))
+                    log(f"[route-force v8.27] sign-up POST -> {_proxy} -> {_r.status_code} ({len(_r.content)}B)")
+                    await route.fulfill(status=_r.status_code, headers=dict(_resp_h), body=_r.content)
+                    return
+                except Exception as _fe:
+                    log(f"[route-force v8.27] socks5 forward FAIL: {_fe} -> fallback route.continue_")
+                    await route.continue_(post_data=_body)
             except Exception as _re:
                 log(f"[route-force] err: {_re}")
-                await route.continue_()
+                try:
+                    await route.continue_()
+                except Exception:
+                    pass
         try:
             await page.route("**/api/v1/auth/sign-up**", _signup_force_token)
             log(f"[route-force] v7.75 sign-up POST 拦截器已挂载（LIVE-token 优先, LOCKED 回填）")

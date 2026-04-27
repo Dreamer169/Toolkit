@@ -8,7 +8,7 @@ module.exports = {
       "interpreter_args": "--enable-source-maps",
       "env": {
         "DATABASE_URL": "postgresql://postgres:postgres@localhost/toolkit",
-        "PORT": "8080",
+        "PORT": "8081",
         "REMOTE_GATEWAY_BASE_URL": "http://localhost:9090",
         "SUB2API_ADMIN_BASE_URL": "http://localhost:9090",
         "SUB2API_ADMIN_EMAIL": "admin@proxy.local",
