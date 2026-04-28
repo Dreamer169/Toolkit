@@ -1436,7 +1436,22 @@ router.post("/tools/outlook/register", async (req, res) => {
   } else if (proxy) {
     args.push("--proxy", proxy);
   }
-  if (effectiveProxyMode === "cf") {
+  // v8.51 ROOT-FIX: Microsoft 封禁 CF Worker IP 段 (141.101.x/104.24.x/188.114.x)
+  // → outlook.live.com 全部 ERR_CONNECTION_CLOSED. 实测 Pool B 真实 SOCKS5 节点 (10851/10853/10854/10855/10857/10859)
+  // 可正常到达 outlook.live.com (HTTP/2 417 真应答). 当 CF 模式被请求且未指定 proxy 列表时, 自动改用 Pool B 轮换.
+  if (effectiveProxyMode === "cf" && proxyList.length === 0) {
+    const POOL_B = [
+      "socks5://127.0.0.1:10857",  // Chunghwa Telecom TW AS3462 ★★★
+      "socks5://127.0.0.1:10853",  // Fourplex US ★★
+      "socks5://127.0.0.1:10859",  // Greenhost NL ★
+      "socks5://127.0.0.1:10854",  // Vultr KR
+      "socks5://127.0.0.1:10855",  // M247 GB
+      "socks5://127.0.0.1:10851",  // Datacamp US
+    ];
+    args.push("--proxies", POOL_B.join(","));
+    job.logs.push({ type: "log", message: `🌐 v8.51 自动改用 Pool B 实时 SOCKS5 (6 节点) — CF Worker IP 段已被 Microsoft 封禁` });
+    effectiveProxyMode = "";  // 不再传 --proxy-mode cf
+  } else if (effectiveProxyMode === "cf") {
     args.push("--proxy-mode", "cf", "--cf-port", String(cfPort));
     job.logs.push({ type: "log", message: `☁️ CF+xray 代理池：共享代理不可用时作为备用，每账号独占一个已测速 CF 节点` });
   }
