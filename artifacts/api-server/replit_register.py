@@ -297,7 +297,7 @@ async def _ctx_self_warmup(page, log_fn):
     try:
         # Phase A: youtube.com — 3-5s scroll (cross-service NID activity)
         try:
-            await page.goto("https://www.youtube.com/", wait_until="domcontentloaded", timeout=15000)
+            await page.goto("https://www.youtube.com/", wait_until="domcontentloaded", timeout=25000)  # v8.68b: SOCKS 慢出口对称 25s
             await page.wait_for_timeout(_r.randint(1200, 2400))
             await page.evaluate("window.scrollBy(0, " + str(_r.randint(280, 620)) + ")")
             await page.wait_for_timeout(_r.randint(800, 1600))
