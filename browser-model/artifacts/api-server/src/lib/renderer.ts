@@ -1094,7 +1094,9 @@ export async function warmupGoogleSession(hostnameForKey: string): Promise<{
 //   3. google search 后真正点击 replit.com 结果链接 (注入 domain familiarity 信号)
 //   4. 在 Replit 首页停 8-15s 自然滚动 (告诉 reCAPTCHA Enterprise: 此用户最近确实访问过目标域)
 // 这是 datacenter ASN VPS 出口下唯一能拉高 reCAPTCHA Enterprise score 的合法手段.
-let _googleTrustDone = false;
+// v8.66 — refresh trust cookies every 25min (cookies stale by hour 2-3 → score collapse)
+let _googleTrustAt = 0;
+const _GOOGLE_TRUST_TTL_MS = 25 * 60 * 1000;
 let _googleTrustInFlight = false;
 
 function _ri(min: number, max: number): number {
@@ -1134,7 +1136,8 @@ async function _humanMouse(page: import("playwright-core").Page): Promise<void> 
 }
 
 async function _bootstrapGoogleTrust(browser: Browser): Promise<void> {
-  if (_googleTrustDone || _googleTrustInFlight) return;
+  if (_googleTrustInFlight) return;
+  if (Date.now() - _googleTrustAt < _GOOGLE_TRUST_TTL_MS) return; // v8.66 TTL
   _googleTrustInFlight = true;
   const t0 = Date.now();
   let ctx: BrowserContext | null = null;
@@ -1179,14 +1182,23 @@ async function _bootstrapGoogleTrust(browser: Browser): Promise<void> {
       console.warn("[v8.23] phase-2 google.com failed:", (e as Error).message);
     }
 
-    // Phase 3: google search 真实意图词 → 找 replit.com 结果点击
+    // Phase 3 v8.66: 真键盘 type 进 google.com 搜索框 (不是 URL?q=, 触发真 input fingerprint)
     const query = _pick(_SEARCH_QUERIES);
     try {
-      const url = `https://www.google.com/search?q=${encodeURIComponent(query)}&hl=en`;
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
+      // 已经在 phase-2 google.com 上 → 找 [name=q] 输入
+      const qInput = page.locator("textarea[name=q], input[name=q]").first();
+      await qInput.click({ timeout: 5000 });
+      await page.waitForTimeout(_ri(300, 700));
+      // 逐字符变频率 type (60-180ms/char) — 真人键入节奏
+      for (const ch of query) {
+        await page.keyboard.type(ch, { delay: _ri(60, 180) });
+      }
+      await page.waitForTimeout(_ri(500, 1200));
+      await page.keyboard.press("Enter");
+      await page.waitForLoadState("domcontentloaded", { timeout: 15000 });
       await page.waitForTimeout(_ri(1500, 2800));
       await _humanScroll(page);
-      console.log(`[v8.23] phase-3 google search "${query}" OK (${Date.now() - t0}ms)`);
+      console.log(`[v8.66] phase-3 REAL-keystroke search "${query}" OK (${Date.now() - t0}ms)`);
 
       // 找第一条 replit.com 结果 → click → 跳到 Replit 官网
       let clicked = false;
@@ -1230,7 +1242,30 @@ async function _bootstrapGoogleTrust(browser: Browser): Promise<void> {
       console.warn("[v8.23] phase-3 google search failed:", (e as Error).message);
     }
 
-    // Harvest google-family cookies into shared cache (now richer: SIDCC + replit nav signal)
+    // Phase 6 v8.66: maps.google.com — 跨服务 NID 活跃信号 (compose google-family trust)
+    try {
+      await page.goto("https://www.google.com/maps", { waitUntil: "domcontentloaded", timeout: 15000 });
+      await page.waitForTimeout(_ri(1800, 3200));
+      await _humanMouse(page);
+      await _humanScroll(page);
+      console.log(`[v8.66] phase-6 maps.google.com OK (${Date.now() - t0}ms)`);
+    } catch (e) {
+      console.warn("[v8.66] phase-6 maps failed:", (e as Error).message);
+    }
+
+    // Phase 7 v8.66: news.google.com — 第三个 google 服务, 强化 cross-service trust
+    try {
+      await page.goto("https://news.google.com/", { waitUntil: "domcontentloaded", timeout: 15000 });
+      await page.waitForTimeout(_ri(1500, 2800));
+      await _humanScroll(page);
+      await _humanMouse(page);
+      await page.waitForTimeout(_ri(1200, 2200));
+      console.log(`[v8.66] phase-7 news.google.com OK (${Date.now() - t0}ms)`);
+    } catch (e) {
+      console.warn("[v8.66] phase-7 news failed:", (e as Error).message);
+    }
+
+    // Harvest google-family cookies into shared cache (v8.66: 5 services, TTL refresh)
     try {
       const allCks = await ctx.cookies();
       const googleCks = allCks.filter((c) =>
@@ -1246,8 +1281,8 @@ async function _bootstrapGoogleTrust(browser: Browser): Promise<void> {
     } catch (e) {
       console.warn("[v8.23] cookie harvest failed:", (e as Error).message);
     }
-    _googleTrustDone = true;
-    console.log(`[v8.23] google-trust REAL-human bootstrap COMPLETE (${Date.now() - t0}ms)`);
+    _googleTrustAt = Date.now(); // v8.66
+    console.log(`[v8.66] google-trust REAL-human bootstrap COMPLETE (${Date.now() - t0}ms)`);
   } catch (e) {
     console.error("[v8.23] google-trust bootstrap fatal:", (e as Error).message);
   } finally {
