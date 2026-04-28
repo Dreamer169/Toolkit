@@ -243,7 +243,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = HTTPServer(("0.0.0.0", PORT), Handler)
+    server = HTTPServer(("127.0.0.1", PORT), Handler)
     print(f"FakeMail Bridge running on port {PORT}", flush=True)
     import signal
     def _shutdown(sig, frame):
