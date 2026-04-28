@@ -142,8 +142,19 @@ _pick_browser_proxy() {
   # 选中后 BROKER_EXIT_FAMILY=socks → replit_register.py v8.30 自动 PIN
   # google-route 到同 port → 三条链 (chromium / *.google / signup-POST)
   # 全部出口同 IP → reCAPTCHA Enterprise score 抬高 → code:1 修掉.
+  # v8.63 cooldown skip — load cooled ports from /root/Toolkit/.local/port_cooldown.json
+  _COOLED_PORTS=""
+  if [[ -f /root/Toolkit/.local/port_cooldown.json ]]; then
+    _COOLED_PORTS=$(python3 -c "import json,time; d=json.load(open('/root/Toolkit/.local/port_cooldown.json')); now=time.time()*1000; print(' '.join(p for p,t in d.get('bans',{}).items() if t>now))" 2>/dev/null)
+    [[ -n "$_COOLED_PORTS" ]] && echo "[picker] v8.63 cooldown skip set: ${_COOLED_PORTS}" >&2
+  fi
+  _is_cooled() {
+    local p="$1"
+    [[ " $_COOLED_PORTS " == *" $p "* ]]
+  }
   for cand in 10857:Chunghwa-TW 10853:Fourplex-US 10859:Greenhost-NL 10854:Vultr-KR 10855:M247-GB 10851:Datacamp-US; do
     port="${cand%%:*}"; name="${cand##*:}"
+    if _is_cooled "$port"; then echo "[picker] v8.63 skip ${name}(${port}) — in cooldown" >&2; continue; fi
     ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:${port}\b" || { echo "[picker] v8.30 skip ${name}(${port}) — port not listening" >&2; continue; }
     EXIT=$(curl -s --max-time 8 --socks5 "127.0.0.1:${port}" https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
     [[ -z "$EXIT" ]] && { echo "[picker] v8.30 skip ${name}(${port}) — exit IP probe failed" >&2; continue; }

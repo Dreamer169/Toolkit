@@ -224,6 +224,15 @@ def is_cf_blocked(title: str, body: str) -> bool:
         ("cloudflare" in t and "block" in b)
     )
 
+def is_replit_offline_block(title: str, body: str) -> bool:
+    # v8.60: replit edge static offline.html (5644B) sham-offline rejection
+    t, b = title.lower(), body.lower()
+    return (
+        ("offline - replit" in t) or
+        ("you're offline" in b and "access replit" in b) or
+        ("check your connection" in b and "refresh to access replit" in b)
+    )
+
 def is_integrity_error(body: str) -> bool:
     b = body.lower()
     return "failed to evaluate" in b or "browser integrity" in b or "integrity check" in b
@@ -3077,7 +3086,10 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
                     log(f"[step1-miss-dom] HTML save fail: {_he}")
             except Exception as _de:
                 log(f"[step1-miss-dom] dump failed: {_de}")
-            if is_cf_blocked(t2, b2):
+            if is_replit_offline_block(t2, b2):
+                # v8.60: replit edge sham-offline.html — port deeply blacklisted
+                result["error"] = "replit_edge_blocked_offline_page"
+            elif is_cf_blocked(t2, b2):
                 result["error"] = "signup_cf_ip_banned"
             else:
                 result["error"] = "signup_email_field_timeout"
@@ -3442,7 +3454,14 @@ async def attempt_register_camoufox(proxy_cfg, exit_ip: str) -> dict:
                     timeout=15000)
             except Exception:
                 t2 = await page.title(); b2 = (await page.locator("body").inner_text())[:300]
-                result["error"] = "signup_cf_ip_banned" if is_cf_blocked(t2, b2) else "signup_email_field_timeout"
+                if is_replit_offline_block(t2, b2):
+                    result["error"] = "replit_edge_blocked_offline_page"
+                elif is_cf_blocked(t2, b2):
+                    result["error"] = "signup_cf_ip_banned"
+                elif is_spa_hydration_failed(t2, b2):
+                    result["error"] = "signup_spa_not_hydrated"
+                else:
+                    result["error"] = "signup_email_field_timeout"
                 return result
             result["phase"] = "fill_step1"
             err1 = await fill_step1(page)

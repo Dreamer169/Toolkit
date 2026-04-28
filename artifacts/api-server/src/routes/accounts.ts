@@ -68,6 +68,79 @@ const cfBannedUntil = new Map<number, number>();
 const portDeadUntil = new Map<number, number>();
 // Port reputation: last time port returned a real form response (not cf_ban/captcha_invalid)
 const portLastGood = new Map<number, number>();
+// v8.57 参照 CLIProxyAPI nextQuotaCooldown: 指数退避 per-port (5min, 10min, 20min, 40min, 80min, 160min, cap 4h)
+// v8.58 参照 CLIProxyAPI persist_policy: 写盘持久化, pm2 重启不丢
+const portCooldownLevel = new Map<number, number>();
+const PORT_COOLDOWN_BASE_MS = 5 * 60 * 1000;
+const PORT_COOLDOWN_MAX_MS  = 4 * 60 * 60 * 1000;
+const PORT_COOLDOWN_FILE = "/root/Toolkit/.local/port_cooldown.json";
+function _loadPortCooldown() {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require("fs") as typeof import("fs");
+    if (!fs.existsSync(PORT_COOLDOWN_FILE)) return;
+    const j = JSON.parse(fs.readFileSync(PORT_COOLDOWN_FILE, "utf8")) as { levels?: Record<string,number>; bans?: Record<string,number> };
+    const now = Date.now();
+    if (j.bans) for (const [k,v] of Object.entries(j.bans)) {
+      const p = parseInt(k, 10); const t = Number(v);
+      if (Number.isFinite(p) && Number.isFinite(t) && t > now) cfBannedUntil.set(p, t);
+    }
+    if (j.levels) for (const [k,v] of Object.entries(j.levels)) {
+      const p = parseInt(k, 10); const lv = Number(v);
+      if (Number.isFinite(p) && Number.isFinite(lv) && lv > 0 && cfBannedUntil.has(p)) portCooldownLevel.set(p, lv);
+    }
+    console.log(`[port-cooldown] loaded persist: ${cfBannedUntil.size} ban, ${portCooldownLevel.size} level`);
+  } catch (e) { console.warn(`[port-cooldown] load fail: ${String(e).slice(0,120)}`); }
+}
+function _savePortCooldown() {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require("fs") as typeof import("fs");
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const path = require("path") as typeof import("path");
+    fs.mkdirSync(path.dirname(PORT_COOLDOWN_FILE), { recursive: true });
+    const bans: Record<string, number> = {};
+    const levels: Record<string, number> = {};
+    for (const [p, t] of cfBannedUntil.entries()) bans[String(p)] = t;
+    for (const [p, lv] of portCooldownLevel.entries()) levels[String(p)] = lv;
+    fs.writeFileSync(PORT_COOLDOWN_FILE, JSON.stringify({ bans, levels }, null, 2));
+  } catch (e) { console.warn(`[port-cooldown] save fail: ${String(e).slice(0,120)}`); }
+}
+_loadPortCooldown();
+function bumpPortCooldown(port: number, reason: string, minLevel: number = 0): { ms: number; level: number } {
+  // v8.60: minLevel 让 replit_edge_blocked_offline_page 这种深度屏蔽直接跳到 high level (40min+)
+  const cur = (portCooldownLevel.get(port) ?? 0);
+  const lv = Math.max(cur, minLevel);
+  const ms = Math.min(PORT_COOLDOWN_BASE_MS * (1 << lv), PORT_COOLDOWN_MAX_MS);
+  portCooldownLevel.set(port, lv + 1);
+  cfBannedUntil.set(port, Date.now() + ms);
+  console.log(`[port-cooldown] port=${port} reason=${reason} level=${cur}->${lv+1} ban=${Math.round(ms/60000)}min`);
+  _savePortCooldown();
+  return { ms, level: lv + 1 };
+}
+// v8.61: CPA-style availability check — 全部 port 冷却时 fail-fast 给出 earliest reset
+function getEarliestPortReset(): number | null {
+  const now = Date.now();
+  let earliest: number | null = null;
+  let totalLive = 0;
+  for (const p of XRAY_PORTS) {
+    if (DEAD_PORTS.has(p)) continue;
+    totalLive++;
+    const ban = cfBannedUntil.get(p) ?? 0;
+    if (ban <= now) return null;  // 至少有 1 个 port 可用
+    if (earliest === null || ban < earliest) earliest = ban;
+  }
+  return totalLive > 0 ? earliest : null;
+}
+
+function resetPortCooldown(port: number) {
+  if (portCooldownLevel.has(port)) {
+    console.log(`[port-cooldown] port=${port} reset (was level=${portCooldownLevel.get(port)})`);
+    portCooldownLevel.delete(port);
+  }
+  cfBannedUntil.delete(port);
+  _savePortCooldown();
+}
 
 // ── 启动时从 xray.json 建立 port → CF IP 映射表 ─────────────────────────────
 const xrayPortCfIp = new Map<number, string>();
@@ -886,6 +959,14 @@ router.post("/replit/register", (req, res) => {
             }
             // Special ports (Tor=9050, direct=0) are always valid; skip livePorts check for them
             const SPECIAL_PORTS = new Set([TOR_SOCKS_PORT, DIRECT_PORT]);
+            // v8.61: CPA-fastfail — 全 port 冷却时立刻跳出, 不浪费 outlook
+            const _earliest = getEarliestPortReset();
+            if (_earliest !== null) {
+              const _resetIn = Math.max(0, _earliest - Date.now());
+              log(`    [port-cpa-fastfail v8.61] 全部 ${XRAY_PORTS.length} 个 port 在冷却中, 最早 ${Math.round(_resetIn/60000)}min 后解锁 → 跳过该 outlook`);
+              lastErr = `all_ports_cooldown:reset_in_${Math.round(_resetIn/60000)}min`;
+              break;
+            }
             let tryPort = portQueue.find((p) => SPECIAL_PORTS.has(p) || livePorts.includes(p));
             if (tryPort === undefined) {  // use === undefined, not !tryPort (0 is falsy)
               portQueue = sortedByReputation(livePorts);
@@ -919,6 +1000,7 @@ router.post("/replit/register", (req, res) => {
 
             if (parsed.ok) {
               portLastGood.set(tryPort, Date.now()); // successful registration
+              resetPortCooldown(tryPort);
               lastUsedPort = tryPort; // v7.78p: 让 Step4 INSERT 能拿到真实端口
               log(`    ✅ Registered! phase=${parsed.phase} exit_ip=${exitIp}`);
 
@@ -1002,10 +1084,20 @@ router.post("/replit/register", (req, res) => {
                   log(`    [v8.40] outlook id=${outlook.id} → replit_used + placeholder, 跳下一个 outlook`);
                   break;
                 }
+                // v8.59 参照 CLIProxyAPI MarkResult: rescue 没救回 = 这次 step1 POST 真到后端但被边缘评分拦, 出口 IP 信誉差 → 同 port 必须冷却
+                // v8.60: replit_edge_blocked_offline_page (sham-offline.html 伪装) 是深度拉黑 → 直接 minLevel=3 (40min 起)
+                const _isOffline = lastErr.includes("replit_edge_blocked_offline_page");
+                const _bumpR = bumpPortCooldown(tryPort, `rescue_failed:${lastErr.split(":")[0].slice(0,40)}`, _isOffline ? 3 : 0);
+                log(`    [port-burn v8.59${_isOffline?"+v8.60":""}] rescue 未确认${_isOffline?" (sham-offline)":""} → port ${tryPort} 冷却 ${Math.round(_bumpR.ms/60000)}min (level=${_bumpR.level})`);
                 log(`    [v8.40 attempt-rescue] 拒绝同邮箱重试 (POST 已到后端但救援未确认) → break 换下一个 outlook`);
                 break;
               }
               if (_v840IsEarly) {
+                // v8.59: 早期错误如果是 SOCKS/TUNNEL 类 (port 本身死的) 也要冷却该 port
+                if (/ERR_PROXY_CONNECTION_FAILED|ERR_SOCKS_CONNECTION_FAILED|ERR_TUNNEL_CONNECTION_FAILED|ERR_CONNECTION_REFUSED|ECONNREFUSED|ERR_NAME_NOT_RESOLVED/i.test(lastErr)) {
+                  const _bumpE = bumpPortCooldown(tryPort, `early_socks_dead`);
+                  log(`    [port-burn v8.59] 早期 SOCKS 错误 → port ${tryPort} 冷却 ${Math.round(_bumpE.ms/60000)}min (level=${_bumpE.level})`);
+                }
                 log(`    [v8.40] attempt ${attempt} 客户端早期错误 (POST 未发, 后端 100% 未创建) → 允许同邮箱重试`);
               }
             }
@@ -1049,6 +1141,22 @@ router.post("/replit/register", (req, res) => {
               }
               break;
             }
+            // v8.58 参照 CLIProxyAPI MarkResult: 这些 error 都是 IP/出口被 replit 边缘评低信任分的症状, 把 port 加入指数退避冷却
+            // - integrity_check_failed_after_step1/step2: replit Cloudflare 集成的 "failed to evaluate browser integrity"
+            // - signup_email_field_timeout: replit 给 "Offline-Replit" 拦截页 (出口 IP 被边缘屏蔽)
+            // - captcha_token_invalid: reCAPTCHA Enterprise 给 token 评低分 (IP 信誉差)
+            if (lastErr.includes("integrity_check_failed") || lastErr.includes("signup_email_field_timeout") || lastErr.includes("replit_edge_blocked_offline_page") || lastErr.includes("signup_spa_not_hydrated")) {
+              // v8.62: signup_spa_not_hydrated = SPA bundle 加载但 React 未 hydrate (captcha JS 阻塞主线程, IP 评分极低)
+              //        与 captcha_token_invalid 同源, 用 minLevel=2 (20min) 让 IP 信誉恢复
+              const _isSpa = lastErr.includes("signup_spa_not_hydrated");
+              const _isOff = lastErr.includes("offline_page");
+              const _isInt = lastErr.includes("integrity");
+              const _cls = _isInt ? "integrity_check_failed" : (_isOff ? "replit_edge_blocked_offline_page" : (_isSpa ? "signup_spa_not_hydrated" : "signup_email_field_timeout"));
+              const _ml = _isOff ? 3 : (_isSpa ? 2 : 0);
+              const _bumpI = bumpPortCooldown(tryPort, _cls, _ml);
+              log(`    [port-burn v8.62] ${_cls} on port ${tryPort} → cooldown ${Math.round(_bumpI.ms/60000)}min (level=${_bumpI.level}) → 跳 outlook`);
+              break;
+            }
             // captcha_token_invalid → Replit server拒绝token → 立即rate-limit该email → 跳下一个Outlook
             if (lastErr.includes("captcha_token_invalid")) {
               captchaFailCount++;
@@ -1057,7 +1165,7 @@ router.post("/replit/register", (req, res) => {
               //   (实证 2026-04-27: 10859 NL Greenhost / 10851 US Datacamp 被拒, 10857/10855 通过).
               // 修复: 将失败 port 加入 15min 冷却 (reCAPTCHA score 短期翻不了盘),
               //       改用 portQueue 中下一个 port 重试; 阈值 1→2 (允许试 1 次换 port).
-              cfBannedUntil.set(tryPort, Date.now() + 15 * 60 * 1000);
+              const _bump1 = bumpPortCooldown(tryPort, "captcha_token_invalid", 2);  // v8.61: CPA-style 401 IP-scoring → minLevel=2 (20min)
               const cfIpC = xrayPortCfIp.get(tryPort);
               const _cfNote = cfIpC ? ` (CF IP ${cfIpC})` : "";
               // v8.39 ROOT-FIX 2026-04-27 — captcha_token_invalid 也会丢账号
@@ -1159,7 +1267,7 @@ router.post("/replit/register", (req, res) => {
             //        Tor/direct injection 已被策略禁用 (仅友节点), 改为纯 port-rotate.
             if (lastErr.includes("cf_api_blocked")) {
               cfBlockedCount++;
-              cfBannedUntil.set(tryPort, Date.now() + 10 * 60 * 1000);
+              const _bump2 = bumpPortCooldown(tryPort, "cf_api_blocked", 3); // v8.61
               const _cfIpB = xrayPortCfIp.get(tryPort);
               const _cfNoteB = _cfIpB ? ` (CF IP ${_cfIpB})` : "";
               // v8.38 ROOT-FIX 2026-04-27 — cf_api_blocked rescue + 同邮箱不重试
@@ -1249,7 +1357,7 @@ router.post("/replit/register", (req, res) => {
                   if (lastErr.includes("cf_ip_banned") || lastErr.includes("cf_hard_block")) {
                     cfBannedUntil.set(tryPort, Date.now() + 5 * 60 * 1000);
                   } else if (lastErr.includes("cf_js_challenge_timeout")) {
-                    cfBannedUntil.set(tryPort, Date.now() + 1 * 60 * 1000); // 1min cooldown
+                    bumpPortCooldown(tryPort, "cf_js_challenge_timeout", 2); // v8.61
                     if (tryPort === TOR_SOCKS_PORT) {
                       // Tor itself got CF-challenged → disable Tor entirely
                       torRateLimited = true;
@@ -2148,6 +2256,12 @@ const _CF_BLOCK_PATTERNS = [
   "cf_mitigated",
   "cf-mitigated",
   "cloudflare challenge",
+  // v8.63 ROOT-FIX: broker chromium pin 死 SOCKS port (例 10857 启动时活, 8h 后死)
+  // 但旧 watchdog 不识别 replit edge sham-offline / SPA-no-hydrate 这两个最强信号
+  // → broker 永远不 rotate. 加入这 3 个 + signup_email_field_timeout 让 watchdog 能感知 broker 死局
+  "replit_edge_blocked_offline_page",
+  "signup_spa_not_hydrated",
+  "signup_email_field_timeout",
   // v7.97 — 移除 stealth/IP 一致性错误 (per v7.78q/r 模型):
   //   code:1 = stealth 指纹问题, code:2 = IP 一致性问题. 两者换 broker 出口 IP
   //   都无效, 只会无意义抖动. captcha_token_invalid / captcha_low_score /
