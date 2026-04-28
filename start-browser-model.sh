@@ -127,6 +127,42 @@ _pick_browser_proxy() {
   else
     echo "[picker] v8.19 SKIP WARP (set BROKER_USE_WARP=1 to force)" >&2
   fi
+  # ── v8.30 Pool B (ss-out-* shadowsocks 真上游, sticky single IP, 非 CF) ───
+  # 实证 2026-04-28 02:41 ASN 探针 (curl --socks5 ... ipinfo.io, 5次/端口):
+  #   10857 → 114.45.129.72  AS3462  中華電信 TW (国家级 ISP) ★★★ 5次完全 sticky
+  #   10853 → 38.135.24.131  AS27284 Fourplex Telecom US (小电信)  ★★
+  #   10859 → 193.29.139.250 AS47172 Greenhost NL (small hosting)  ★
+  #   10854 → 141.164.45.187 AS20473 Vultr KR (DC)
+  #   10855 → 141.98.101.182 AS9009  M247 GB (DC)
+  #   10851 → 156.146.38.169 AS60068 Datacamp US (DC)
+  # 全 6 端口 cf_clearance 路径 OK (curl 拿到 CF JS challenge, chromium 能解).
+  # 全 6 端口 google.com / gstatic.com / recaptcha.net 200 应答 (Google 不封).
+  # 单 IP sticky → cf_clearance 整 session 绑得住.
+  # 与 google_proxy_route.py v8.29 DEFAULT_POOL 严格对齐 (同 6 端口同序).
+  # 选中后 BROKER_EXIT_FAMILY=socks → replit_register.py v8.30 自动 PIN
+  # google-route 到同 port → 三条链 (chromium / *.google / signup-POST)
+  # 全部出口同 IP → reCAPTCHA Enterprise score 抬高 → code:1 修掉.
+  for cand in 10857:Chunghwa-TW 10853:Fourplex-US 10859:Greenhost-NL 10854:Vultr-KR 10855:M247-GB 10851:Datacamp-US; do
+    port="${cand%%:*}"; name="${cand##*:}"
+    ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:${port}\b" || { echo "[picker] v8.30 skip ${name}(${port}) — port not listening" >&2; continue; }
+    EXIT=$(curl -s --max-time 8 --socks5 "127.0.0.1:${port}" https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
+    [[ -z "$EXIT" ]] && { echo "[picker] v8.30 skip ${name}(${port}) — exit IP probe failed" >&2; continue; }
+    if _is_cf_ip "$EXIT"; then
+      echo "[picker] v8.30 skip ${name}(${port}) — exit ${EXIT} 在 CF 段 (Pool B 端口异常退化, 检查 xray ss-out-*)" >&2
+      continue
+    fi
+    _probe_status=$(_probe_replit_reachable "127.0.0.1:${port}")
+    _probe_rc=$?
+    if [[ $_probe_rc -ne 0 ]]; then
+      echo "[picker] v8.30 skip ${name}(${port}) — Replit unreachable via this exit: ${_probe_status}" >&2
+      continue
+    fi
+    echo "[picker] v8.30 ✓ Pool B PICK ${name}(${port}) — exit ${EXIT} (${_probe_status})" >&2
+    echo "socks5://127.0.0.1:${port}|${name}@${EXIT}"
+    return 0
+  done
+  echo "[picker] v8.30 — no Pool B candidate alive, falling through to legacy Pool A (will be all-CF-skipped → DIRECT)" >&2
+
   # v8.20 — DIRECT-FIRST. 实证 (Apr 27 04:22):
   #   xray VLESS 上游全跑在 CF Workers, 每条 TCP 出口轮换不同 IP
   #   (port 10820 五次连续调用得 5 个不同 IP)。cf_clearance 绑定单 IP,
