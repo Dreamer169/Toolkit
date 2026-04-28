@@ -388,6 +388,50 @@ async def retoken_account(account: dict, headless: bool, proxy: str = "") -> boo
                     log(f"  🔒 [写库 locked] 密码框未出现且封号: {email}")
                     return False
                 log("  ⚠️  密码框未出现，可能已登录或被拦截，继续等待 token…")
+                # v8.70 fix Bug5: device-consent page stuck -> click visible advance button
+                _consent_advanced = False
+                for _sel in [
+                    'button:has-text("Continue")', 'button:has-text("继续")',
+                    'button:has-text("Yes")', 'button:has-text("是")',
+                    'input[type="submit"][value*="Continue"]',
+                    'input[type="submit"][value*="Yes"]',
+                    'a[role="button"]:has-text("Sign in")',
+                    'button:has-text("Sign in")', 'input[type="submit"]',
+                ]:
+                    try:
+                        _b = page.locator(_sel).first
+                        if await _b.is_visible(timeout=1200):
+                            await _b.click()
+                            log(f"  ✅ device-consent 推进: {_sel}")
+                            _consent_advanced = True
+                            await asyncio.sleep(3)
+                            break
+                    except Exception:
+                        continue
+                if not _consent_advanced and ("oauth20_remoteconnect" in page.url or "login.live" in page.url):
+                    try:
+                        await context.clear_cookies()
+                        log("  ♻️  清理 cookies, 重新走 device flow")
+                        await page.goto(verification_uri, wait_until="domcontentloaded", timeout=30000)
+                        await asyncio.sleep(2)
+                        _ci = page.locator('input[name="otc"], input[id="otc"], input[type="text"]').first
+                        await _ci.wait_for(timeout=8000)
+                        await _ci.fill(user_code)
+                        await page.locator('input[type="submit"], button[type="submit"]').first.click()
+                        await asyncio.sleep(3)
+                        _ei = page.locator('input[type="email"], input[name="loginfmt"]').first
+                        if await _ei.is_visible(timeout=5000):
+                            await _ei.fill(email)
+                            await page.locator('input[type="submit"], button[type="submit"]').first.click()
+                            await asyncio.sleep(3)
+                        _pw = page.locator('input[type="password"], input[name="passwd"]').first
+                        if await _pw.is_visible(timeout=8000):
+                            await _pw.fill(password)
+                            log("  🔑 重试: 输入密码")
+                            await page.locator('input[type="submit"], button[type="submit"]').first.click()
+                            await asyncio.sleep(4)
+                    except Exception as _re:
+                        log(f"  ⚠️  device-flow 重试失败: {_re}")
 
             # ── 密码提交后检测封号 ──
             if await check_locked(page):
