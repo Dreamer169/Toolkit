@@ -215,13 +215,23 @@ def log(msg): print(f"[replit_reg] {msg}", flush=True)
 
 # ── CF / 错误检测 ─────────────────────────────────────────────────────────────
 def is_cf_blocked(title: str, body: str) -> bool:
+    # v8.64 ROOT-FIX 2026-04-28: 实测 6 个 SOCKS 出口 (Datacamp/Fourplex/M247/Greenhost/Vultr/Chunghwa) curl 探针
+    # 全部命中 replit.com/signup → HTTP 403 5568B <title>Just a moment...</title> CF 交互式 JS 挑战页.
+    # 旧 helper 漏识别此最常见 CF 拦截签名 → 在 attempt_register/attempt_register_camoufox 的 fallback 分支 (L3092/L3459)
+    # 把 page-render 阶段的 CF challenge 误归 signup_email_field_timeout → bumpPortCooldown level=0 (5min) 而非
+    # cf_ip_banned 应得的 5min 平凡冷却, 更重要是失去了 cf-ip 真因度量, 上层 watchdog/swap 决策都靠错信号.
+    # 内联调用点 (L588/L594/L1432/L1524) 早就识别此字符串, 此处补齐统一.
     t, b = title.lower(), body.lower()
     return (
         "attention required" in t or "attention required" in b or
         "have been blocked" in b or "sorry, you have been blocked" in b or
         "you are unable to access" in b or
         "error 1020" in b or "error 1010" in b or
-        ("cloudflare" in t and "block" in b)
+        ("cloudflare" in t and "block" in b) or
+        ("just a moment" in t) or  # v8.64: CF interactive JS challenge interstitial
+        ("cf-mitigated" in b) or   # v8.64: CF response header surfaced into body in some renders
+        ("checking your browser before accessing" in b) or  # v8.64: legacy CF challenge text
+        ("enable javascript and cookies to continue" in b)  # v8.64: managed challenge fallback
     )
 
 def is_replit_offline_block(title: str, body: str) -> bool:
