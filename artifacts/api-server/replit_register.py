@@ -279,6 +279,62 @@ _JS_FULL_PROBE = """() => {
 def is_rate_limited(t: str) -> bool:
     t = t.lower()
     return any(p in t for p in ("too quickly","doing this too quickly","please wait a bit","rate limit","too many requests","wait a bit"))
+
+# ── v8.67 — same-ctx Google activity warmup ─────────────────────────────────
+# Before goto /signup, drive THIS camoufox ctx through youtube + google search +
+# recaptcha demo for ~15-20s. broker warmup seeds google trust cookies into the
+# broker chromium ctx, but those cookies are then injected into a DIFFERENT
+# camoufox ctx (the one doing actual signup). Google reCAPTCHA Enterprise
+# scores ALSO factor "same-ctx-recently-active" signals (page navigation
+# history, viewport timing, mouse/scroll cadence) — those signals do NOT
+# transfer cross-ctx via cookies. So the camoufox ctx looks "newborn" to
+# Google despite having NID cookies. v8.67 fixes that by giving THIS ctx
+# real Google activity right before the score-relevant grecaptcha.execute
+# call inside signup.
+async def _ctx_self_warmup(page, log_fn):
+    import random as _r, asyncio as _a
+    t0 = _a.get_event_loop().time()
+    try:
+        # Phase A: youtube.com — 3-5s scroll (cross-service NID activity)
+        try:
+            await page.goto("https://www.youtube.com/", wait_until="domcontentloaded", timeout=15000)
+            await page.wait_for_timeout(_r.randint(1200, 2400))
+            await page.evaluate("window.scrollBy(0, " + str(_r.randint(280, 620)) + ")")
+            await page.wait_for_timeout(_r.randint(800, 1600))
+            log_fn("[v8.67 ctx-warmup] phase-A youtube OK ({}ms)".format(int((_a.get_event_loop().time()-t0)*1000)))
+        except Exception as _e:
+            log_fn("[v8.67 ctx-warmup] phase-A youtube fail: {}".format(str(_e)[:80]))
+        # Phase B: google.com search (real input typing)
+        try:
+            await page.goto("https://www.google.com/", wait_until="domcontentloaded", timeout=15000)
+            await page.wait_for_timeout(_r.randint(900, 1800))
+            try:
+                qInput = page.locator("textarea[name=q], input[name=q]").first
+                await qInput.click(timeout=4000)
+                await page.wait_for_timeout(_r.randint(200, 500))
+                _query = _r.choice(["replit signup", "online code editor", "free python ide", "browser based ide"])
+                for ch in _query:
+                    await page.keyboard.type(ch, delay=_r.randint(60, 170))
+                await page.wait_for_timeout(_r.randint(400, 900))
+                await page.keyboard.press("Enter")
+                await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                await page.wait_for_timeout(_r.randint(1200, 2400))
+                await page.evaluate("window.scrollBy(0, " + str(_r.randint(180, 440)) + ")")
+            except Exception as _ie:
+                log_fn("[v8.67 ctx-warmup] phase-B input fail (skip): {}".format(str(_ie)[:80]))
+            log_fn("[v8.67 ctx-warmup] phase-B google search OK ({}ms)".format(int((_a.get_event_loop().time()-t0)*1000)))
+        except Exception as _e:
+            log_fn("[v8.67 ctx-warmup] phase-B google fail: {}".format(str(_e)[:80]))
+        # Phase C: recaptcha demo (kicks Enterprise to issue a fresh client token bound to this ctx + IP)
+        try:
+            await page.goto("https://www.google.com/recaptcha/api2/demo", wait_until="domcontentloaded", timeout=12000)
+            await page.wait_for_timeout(_r.randint(2200, 3800))
+            log_fn("[v8.67 ctx-warmup] phase-C recaptcha-demo OK ({}ms)".format(int((_a.get_event_loop().time()-t0)*1000)))
+        except Exception as _e:
+            log_fn("[v8.67 ctx-warmup] phase-C demo fail: {}".format(str(_e)[:80]))
+    except Exception as e:
+        log_fn("[v8.67 ctx-warmup] fatal: {}".format(str(e)[:120]))
+
 # ── v8.09 — dynamic sitekey defense (auto-track LIVE drift) ─────────────────
 # Empirical: 2026-04-25 8 cleared sessions all returned 6LfyLYUsAAAAAP0Xmu-hJvZOYJLSL7E410qvKyII
 # (no drift today). But hardcoding the key in execute() means a future rotation
@@ -3411,6 +3467,11 @@ async def attempt_register_camoufox(proxy_cfg, exit_ip: str) -> dict:
                         _nav_status["code"] = resp.status
                 except Exception: pass
             page.on("response", _on_main_nav)
+            # v8.67 — same-ctx Google activity warmup BEFORE signup goto (lifts reCAPTCHA Enterprise score)
+            try:
+                await _ctx_self_warmup(page, log)
+            except Exception as _wue:
+                log("[v8.67 ctx-warmup] outer err (ignore): " + str(_wue)[:80])
             try:
                 await page.goto("https://replit.com/signup", wait_until="domcontentloaded", timeout=30000)
             except Exception as _ge:
