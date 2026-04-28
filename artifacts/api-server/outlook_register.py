@@ -2144,8 +2144,16 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
             # nativeclient 检测下移到 elif 链里 (精确, 不参与终止页"判定"); 其他真终止靠循环外 wait_for_url 兜底.
 
             # nativeclient redirect 已捕获 → OAuth code 拿到, 退出循环
-            if 'nativeclient' in _poll_url:
-                print(f'[oauth] ✅ nativeclient redirect 捕获 → break', flush=True)
+            # v8.42 ROOT-FIX 2026-04-28: 'nativeclient' 子串会被 redirect_uri query value 误命中
+            # (REDIRECT_URI='https://login.microsoftonline.com/common/oauth2/nativeclient' URL-encoded 进 query → page.url 含 nativeclient 子串)
+            # 必须用 urlparse 提取 path 单独判定.
+            try:
+                from urllib.parse import urlparse as _urpX
+                _path_X = _urpX(_poll_url).path or ''
+            except Exception:
+                _path_X = ''
+            if 'nativeclient' in _path_X:
+                print(f'[oauth] ✅ nativeclient redirect 捕获 (path={_path_X}) → break', flush=True)
                 break
 
             # 同意页（account.live.com/Consent）：原地等待并尝试 Accept
@@ -2173,17 +2181,19 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
                     except Exception as _ce:
                         print(f'[oauth] CAPTCHA处理异常: {_ce}', flush=True)
                 _after_url = page.url or ''
-                # v8.37 ROOT-FIX: 与 v8.36 同源 — 子串 'code=' 会被 'response_type=code' 误命中
+                # v8.42 ROOT-FIX 2026-04-28: 子串匹配会被 query value 误命中 (nativeclient/oauth20_authorize/authorize 都在 redirect_uri query 里) → 全用 path 判定
                 try:
                     from urllib.parse import urlparse as _urp2, parse_qs as _pqs2
-                    _qs2 = _pqs2(_urp2(_after_url).query) if _after_url else {}
+                    _parsed2 = _urp2(_after_url) if _after_url else None
+                    _path2 = (_parsed2.path or '') if _parsed2 else ''
+                    _qs2   = _pqs2(_parsed2.query) if _parsed2 else {}
                 except Exception:
+                    _path2 = ''
                     _qs2 = {}
-                if ('nativeclient' in _after_url
-                        or ('code' in _qs2 and 'oauth20_authorize' not in _after_url
-                            and '/authorize' not in _after_url)
-                        or ('error' in _qs2 and 'oauth20_authorize' not in _after_url
-                            and '/authorize' not in _after_url)):
+                _is_authz2 = ('oauth20_authorize' in _path2) or _path2.endswith('/authorize') or _path2.endswith('/authorize/')
+                if ('nativeclient' in _path2
+                        or ('code' in _qs2 and not _is_authz2)
+                        or ('error' in _qs2 and not _is_authz2)):
                     break
                 print(f'[oauth] 重新导航授权页...', flush=True)
                 try:
@@ -2213,16 +2223,19 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
         # v8.37 ROOT-FIX: 与 v8.36 同源 — 子串 'code=' 会被 'response_type=code' 误命中
         if not captured['code'] and not captured['error']:
             def _is_terminal(u: str) -> bool:
+                # v8.42 ROOT-FIX 2026-04-28: 子串匹配会被 query value 误命中 → 全用 path
                 if not u:
                     return False
-                if 'nativeclient' in u:
-                    return True
                 try:
                     from urllib.parse import urlparse as _urp3, parse_qs as _pqs3
-                    _qs3 = _pqs3(_urp3(u).query)
+                    _parsed3 = _urp3(u)
+                    _path3   = _parsed3.path or ''
+                    _qs3     = _pqs3(_parsed3.query)
                 except Exception:
                     return False
-                _is_authorize = ('oauth20_authorize' in u) or ('/authorize' in u)
+                if 'nativeclient' in _path3:
+                    return True
+                _is_authorize = ('oauth20_authorize' in _path3) or _path3.endswith('/authorize') or _path3.endswith('/authorize/')
                 if _is_authorize:
                     return False
                 return ('code' in _qs3) or ('error' in _qs3)
