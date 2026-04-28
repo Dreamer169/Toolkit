@@ -10,7 +10,7 @@ XRAY_BIN     = os.path.join(os.path.dirname(__file__), "xray", "xray")
 VLESS_UUID   = "b3be1361-709c-4cad-824a-732e434ea06f"
 VLESS_SNI    = "iam.jimhacker.qzz.io"
 VLESS_HOST   = "iam.jimhacker.qzz.io"
-VLESS_PATH   = "/?ed=2048"
+VLESS_PATH   = "/?ed=2048&p=ProxyIP.HK.CMLiussss.net%3A443&rm=no"
 VLESS_PORT   = 443
 
 def _find_free_port(start: int = 20000, end: int = 29999) -> int:
