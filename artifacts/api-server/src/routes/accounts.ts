@@ -921,6 +921,34 @@ router.post("/replit/register", (req, res) => {
               portLastGood.set(tryPort, Date.now()); // successful registration
               lastUsedPort = tryPort; // v7.78p: 让 Step4 INSERT 能拿到真实端口
               log(`    ✅ Registered! phase=${parsed.phase} exit_ip=${exitIp}`);
+
+              // ── v8.41 ROOT-FIX 2026-04-28 — Step1 success 立即 INSERT 安全网 ────
+              // 真因 (实测多 job 验证): Step3 verify-email polling 频繁卡死 (live-verify-poller
+              //   抢消费 / token refresh / Graph API 间歇 fail) → Step4 INSERT 永远不跑
+              //   → 即使 pm2 restart 截断, Replit 端 userId 已创建但本地 0 行 = 永久数据黑洞.
+              // 修复: 拿到 verify_email_sent (parsed.ok=true) 那一刻, 立刻 INSERT 'unverified'
+              //   占位行 (含 password + email + userId/phase 进 notes). Step3/4 verify 通过后
+              //   再 ON CONFLICT UPDATE 升级 status='registered' + 加 username.
+              // 保证: 即使 Step3 永远 fail / pm2 restart, 数据也已落库, 用户能登录 + 不丢 outlook.
+              try {
+                const _v841UserId = String((parsed as Record<string, unknown>).user_id ?? (parsed as Record<string, unknown>).userId ?? "");
+                const _v841Phase  = String(parsed.phase ?? "");
+                const _v841Pp     = Number(parsed.actual_proxy_port ?? 0);
+                const _v841Port   = _v841Pp > 0 ? _v841Pp : (lastUsedPort >= 0 ? lastUsedPort : tryPort);
+                await dbE(
+                  `INSERT INTO accounts (platform, email, password, username, status, notes, tags, exit_ip, proxy_port, user_agent, fingerprint_json)
+                   VALUES ('replit', $1, $2, NULL, 'unverified', $5, 'replit,unverified,step1_safety_net,subnode', $3, $4, $6, $7::jsonb)
+                   ON CONFLICT (platform, email) DO NOTHING`,
+                  [outlook.email, password, exitIp, _v841Port,
+                   `v8.41 step1-safety-net: phase=${_v841Phase} userId=${_v841UserId} jobId=${jobId} ts=${new Date().toISOString()} — awaiting Step3 verify`,
+                   String(parsed.user_agent ?? (parsed.fingerprint as Record<string, unknown> | undefined)?.user_agent ?? "") || null,
+                   parsed.fingerprint ? JSON.stringify(parsed.fingerprint) : null]
+                );
+                log(`    [v8.41] ✅ step1-safety-net INSERT (email=${outlook.email}, status=unverified, userId=${_v841UserId})`);
+              } catch (_v841e) {
+                log(`    [v8.41] safety-net INSERT 失败 (Step4 仍会再试): ${String(_v841e).slice(0,120)}`);
+              }
+
               regOk = true;
               break;
             }
@@ -1286,18 +1314,26 @@ router.post("/replit/register", (req, res) => {
             const vr = await localPost("/api/tools/outlook/click-verify-link", {
               accountId: outlook.id,
               verifyUrl: pyVerifyUrl,
-            }) as { success?: boolean; final_url?: string; error?: string };
+            }) as { success?: boolean; final_url?: string; error?: string; verified_marker?: string; body_snippet?: string };
             if (vr.success) {
               log(`    ✅ Verified! => ${vr.final_url?.slice(0, 70)}`);
               verified = true;
             } else {
-              const errStr = String(vr.error ?? "").toLowerCase();
-              // "invalid or has been used" = 链接已被消费 (python goto / live-verify) → 实际已激活
-              if (errStr.includes("invalid") || errStr.includes("has been used") || errStr.includes("已使用")) {
-                log(`    ✅ 链接已被消费 (视为已验证): ${String(vr.error).slice(0, 80)}`);
+              // v8.45 — also inspect verified_marker + body_snippet (click_verify_link.py
+              // returns these instead of error when browser detects "invalid or has been used")
+              const errStr  = String(vr.error ?? "").toLowerCase();
+              const bodyStr = String(vr.body_snippet ?? "").toLowerCase();
+              const marker  = String(vr.verified_marker ?? "").toLowerCase();
+              const consumed =
+                errStr.includes("invalid") || errStr.includes("has been used") || errStr.includes("已使用") ||
+                bodyStr.includes("invalid or has been used") || bodyStr.includes("link is invalid") ||
+                bodyStr.includes("已使用") || bodyStr.includes("已过期") ||
+                marker === "failure";
+              if (consumed) {
+                log(`    ✅ 链接已被消费 (视为已验证): ${(vr.body_snippet || vr.error || marker || "").toString().slice(0, 100)}`);
                 verified = true;
               } else {
-                log(`    ✗ 直接点击失败: ${String(vr.error).slice(0, 80)} → 退回收件箱轮询`);
+                log(`    ✗ 直接点击失败: ${String(vr.error || vr.body_snippet || marker || "unknown").slice(0, 80)} → 退回收件箱轮询`);
               }
             }
           }
@@ -1309,19 +1345,29 @@ router.post("/replit/register", (req, res) => {
               log(`    Poll ${t + 1}/30 (accountId=${outlook.id})...`);
               const vr = await localPost("/api/tools/outlook/click-verify-link", {
                 accountId: outlook.id,
-              }) as { success?: boolean; final_url?: string; error?: string };
+              }) as { success?: boolean; final_url?: string; error?: string; verified_marker?: string; body_snippet?: string };
               if (vr.success) {
                 log(`    ✅ Verified! => ${vr.final_url?.slice(0, 70)}`);
                 verified = true;
                 break;
               }
-              const errStr = String(vr.error ?? "no link yet").toLowerCase();
-              if (errStr.includes("invalid") || errStr.includes("has been used") || errStr.includes("已使用")) {
-                log(`    ✅ 链接已被消费 (视为已验证): ${String(vr.error).slice(0, 80)}`);
+              // v8.45 — also inspect verified_marker + body_snippet (live-verify-poller may
+              // have consumed oobCode → click_verify_link.py returns marker=failure +
+              // body_snippet="...invalid or has been used...", no error field)
+              const errStr  = String(vr.error ?? "no link yet").toLowerCase();
+              const bodyStr = String(vr.body_snippet ?? "").toLowerCase();
+              const marker  = String(vr.verified_marker ?? "").toLowerCase();
+              const consumed =
+                errStr.includes("invalid") || errStr.includes("has been used") || errStr.includes("已使用") ||
+                bodyStr.includes("invalid or has been used") || bodyStr.includes("link is invalid") ||
+                bodyStr.includes("已使用") || bodyStr.includes("已过期") ||
+                marker === "failure";
+              if (consumed) {
+                log(`    ✅ 链接已被消费 (视为已验证): ${(vr.body_snippet || vr.error || marker || "").toString().slice(0, 100)}`);
                 verified = true;
                 break;
               }
-              log(`    Waiting... (${String(vr.error ?? "no link yet").slice(0, 60)})`);
+              log(`    Waiting... (${String(vr.error ?? vr.body_snippet ?? "no link yet").slice(0, 60)})`);
               await new Promise(r => setTimeout(r, 15000));
             }
           }
