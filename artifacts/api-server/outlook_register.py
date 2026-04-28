@@ -2081,7 +2081,12 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
             pass
 
     try:
-        page.route('**/nativeclient**', _intercept_nativeclient)
+        # v8.43 ROOT-FIX 2026-04-28: 歧义 bug — glob "**/nativeclient**" 同样会匹配 authorize 页
+        # (URL 中 redirect_uri=https%3A%2F%2F...%2Fnativeclient 的 query value 含 nativeclient 子串)
+        # → route.abort() 中止真正的 authorize 导航 → OAuth 流程基础不稳定.
+        # 改用 path-only 正则: 只匹配 URL path 含 /nativeclient, 完全绕开 query value.
+        _NC_PATH_RE = re.compile(r"^https?://[^/]+/[^?]*nativeclient", re.IGNORECASE)
+        page.route(_NC_PATH_RE, _intercept_nativeclient)
     except Exception as _re:
         print(f'[oauth] ⚠ 路由拦截器安装失败: {_re}', flush=True)
 
