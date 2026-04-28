@@ -1400,11 +1400,13 @@ async def fill_step1(page) -> str | None:
         # re-attach response listener (was removed above) so we can read new responses
         page.on("response", _on_response)
         try:
-            for _fr in range(1):  # v8.26c: 1 round (IP mismatch 结构性, multi-retry 浪费 ~3min), each preceded by 35s backoff to dodge replit 429
+            _fr_extra_s = 0  # v8.49: extra wait accumulates when 429 received
+            for _fr in range(3):  # v8.49: 3 rounds; 429→+60s extra cool-down; code:1 on all rounds ok
                 try:
-                    # replit per-(IP,email) rate-limit window ~30s. Sleep BEFORE retry submit to avoid 429.
-                    _bw = 35 + (_fr * 5)
-                    log(f"[fast-retry {_fr+1}/1] 等 {_bw}s 避开 replit 429 速率窗口…")
+                    # replit per-(IP,email) rate-limit window ~30-90s. Sleep BEFORE retry submit.
+                    _bw = 35 + (_fr * 5) + _fr_extra_s
+                    _fr_extra_s = 0  # consume
+                    log(f"[fast-retry {_fr+1}/3] 等 {_bw}s 避开 replit 429 速率窗口…")
                     await page.wait_for_timeout(_bw * 1000)
                     _api_resp.clear()
                     _sk_live2 = await _live_sitekey_from_page(page)
@@ -1437,9 +1439,9 @@ async def fill_step1(page) -> str | None:
                         })
                     """, _sk_live2)
                     if not (isinstance(_new, dict) and _new.get("ok")):
-                        log(f"[fast-retry {_fr+1}/1] execute 失败: {(_new or {}).get('err','?')[:120]}")
+                        log(f"[fast-retry {_fr+1}/3] execute 失败: {(_new or {}).get('err','?')[:120]}")
                         break
-                    log(f"[fast-retry {_fr+1}/1] 新 token len={_new.get('len')} prefix={_new.get('token','')[:20]}")
+                    log(f"[fast-retry {_fr+1}/3] 新 token len={_new.get('len')} prefix={_new.get('token','')[:20]}")
                     # v7.95 — REVERT v7.92/v7.93 直 fetch. 直 fetch 缺 Replit 真实 XHR 的
                     # CSRF / origin / 完整 header 链, 必然 403 "Expected X-Requested-With".
                     # 回到 v7.78r click-submit: Replit JS 调用 execute() 拿 fresh LIVE token,
@@ -1457,7 +1459,7 @@ async def fill_step1(page) -> str | None:
                         except Exception:
                             continue
                     if not _clicked:
-                        log(f"[fast-retry {_fr+1}/1] submit click 失败")
+                        log(f"[fast-retry {_fr+1}/3] submit click 失败")
                         continue
                     # 等 Replit POST 响应进入 _on_response (max 30s)
                     for _w in range(15):
@@ -1466,9 +1468,9 @@ async def fill_step1(page) -> str | None:
                             break
                     _s2 = _api_resp.get("status", 0)
                     _b2 = _api_resp.get("body", "")
-                    log(f"[fast-retry {_fr+1}/1] CLICK-API={_s2} body={_b2[:140]}")
+                    log(f"[fast-retry {_fr+1}/3] CLICK-API={_s2} body={_b2[:140]}")
                     if _s2 in (200, 201, 204):
-                        log(f"[fast-retry {_fr+1}/1] ✅ 成功")
+                        log(f"[fast-retry {_fr+1}/3] ✅ 成功")
                         return None
                     _b2l = _b2.lower()
                     if _s2 == 400 and "captcha" in _b2l:
@@ -1482,21 +1484,26 @@ async def fill_step1(page) -> str | None:
                     if _s2 in (403, 503) and ("just a moment" in _b2l or "challenge" in _b2l or "cloudflare" in _b2l):
                         return "cf_api_blocked"
                     if _s2 == 429:
-                        log(f"[fast-retry {_fr+1}/1] 429 速率限制 → 继续等待下轮")
-                        continue
+                        if _fr < 2:
+                            log(f"[fast-retry {_fr+1}/3] 429 速率限制 → 额外 60s 冷却后继续 (round {_fr+2}/3)")
+                            _fr_extra_s = 60
+                            continue
+                        else:
+                            log(f"[fast-retry {_fr+1}/3] 429 速率限制 (第3轮已到) → 放弃")
+                            break
                     # v7.93: 403 CSRF / 'expected x-requested-with' = 网络层噪声, 不是 captcha 终态, 继续重试
                     if _s2 == 403 and ('x-requested-with' in _b2l or 'csrf' in _b2l or 'expected' in _b2l):
-                        log(f"[fast-retry {_fr+1}/1] 403 CSRF/header 噪声 → 继续下一轮")
+                        log(f"[fast-retry {_fr+1}/3] 403 CSRF/header 噪声 → 继续下一轮")
                         continue
-                    log(f"[fast-retry {_fr+1}/1] 非 captcha 错误 ({_s2}) → 退出循环 body={_b2[:80]}")
+                    log(f"[fast-retry {_fr+1}/3] 非 captcha 错误 ({_s2}) → 退出循环 body={_b2[:80]}")
                     break
                 except Exception as _fre:
-                    log(f"[fast-retry {_fr+1}/1] 异常: {_fre}")
+                    log(f"[fast-retry {_fr+1}/3] 异常: {_fre}")
                     break
         finally:
             try: page.remove_listener("response", _on_response)
             except Exception: pass
-        log("[step1] fast-retry 1 轮失败 → captcha_token_invalid")
+        log("[step1] fast-retry 3 轮全失败 → captcha_token_invalid")
         return "captcha_token_invalid"
     if is_integrity_error(_api_body_r):
         log(f"[step1] API body integrity error: {_api_body_r[:120]}")
