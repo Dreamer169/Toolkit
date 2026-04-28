@@ -2196,26 +2196,57 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
     # → 评分极低 → Replit 返回 code:1 "Your captcha token is invalid".
     # 修复: broker=warp 时, 把主 ctx proxy 也强制 PIN 到 WARP 40000,
     # 保证 replit.com POST + recaptcha mint + cf_clearance 三件全在 WARP IP.
+    #
+    # v8.44 — Bug fix: 旧 v8.08 盲信 /tmp/replit-broker/exit.json 的 family/port
+    # hint, 不校验时间戳, 也不与 broker 实测 WARP 出口交叉验证. 当 broker 实际处于
+    # WARP 出口但 hint 文件还停留在上一次 SOCKS 状态 (常见: broker 切换出口后写
+    # exit.json 失败 / 进程重启竞态) 时, v8.08 反向把 main ctx PIN 到陈旧的 SOCKS
+    # 端口 → 实测出口落到上游 SOCKS pool 节点 IP (e.g. 114.45.129.72 台湾) ≠
+    # cf_clearance/recaptcha 的 WARP CIDR → 评分极低 → Replit 后端 silent block,
+    # 不发 verify email → Step3 polling 30 轮全空, 账号永远卡 unverified.
+    # 修复: 主动 curl --socks5 127.0.0.1:40000 ipify 实测 broker 当前真实出口,
+    # 实测 IP ∈ WARP CIDR → 强制 warp 分支 (无视 hint), 真同源.
     try:
-        import json as _jbf08
-        with open("/tmp/replit-broker/exit.json","r") as _bf08:
-            _bj08 = _jbf08.load(_bf08)
-        _fam08 = (_bj08.get("family") or "").strip().lower()
+        import json as _jbf08, time as _tbf08
+        _bj08 = {}
+        try:
+            with open("/tmp/replit-broker/exit.json","r") as _bf08:
+                _bj08 = _jbf08.load(_bf08)
+        except Exception as _jr08:
+            log(f"[attempt-register] v8.44 exit.json unreadable (will use live probe only): {_jr08}")
+        _fam08    = (_bj08.get("family") or "").strip().lower()
+        _hint_ts  = int(_bj08.get("ts") or 0)
+        _hint_age = int(_tbf08.time()) - _hint_ts if _hint_ts else 99999
+        # v8.44 live probe — broker WARP 实际出口 (与 USE_CDP block 同款 curl)
+        _live_warp_ip = ""
+        try:
+            _live_warp_ip = subprocess.check_output(
+                ["curl","-s","--max-time","6","--socks5","127.0.0.1:40000","https://api.ipify.org"],
+                text=True,
+            ).strip()
+        except Exception as _wpr:
+            log(f"[attempt-register] v8.44 broker WARP live probe failed: {_wpr}")
+        _live_is_warp = _ip_is_warp(_live_warp_ip) if _live_warp_ip else False
         # v8.11 — opt-out switch to bypass WARP override (let chromium use orchestrator
         # SOCKS5 proxy = real residential/DC IP for higher reCAPTCHA Enterprise score).
         # Trade-off: cf_clearance from broker WARP IP may be invalidated → CF may issue
         # fresh challenge on signup nav. Use NO_WARP_OVERRIDE=1 env to enable.
         _no_warp = os.environ.get("NO_WARP_OVERRIDE","").strip() in ("1","true","yes")
-        if _fam08 == "warp" and not _no_warp:
-            log(f"[attempt-register] v8.08 broker=warp → main ctx proxy override: {proxy_cfg} → socks5://127.0.0.1:40000 (IP-同源 with cf_clearance + recaptcha mint)")
+        # v8.44 决策矩阵 — 实测 IP > 陈旧 hint
+        if _live_is_warp and not _no_warp:
+            if _fam08 != "warp":
+                log(f"[attempt-register] v8.44 hint stale (family={_fam08}, age={_hint_age}s) — broker live WARP probe={_live_warp_ip} ∈ WARP CIDR → 强制 warp 分支 (覆盖 hint)")
+            log(f"[attempt-register] v8.08 broker=warp → main ctx proxy override: {proxy_cfg} → socks5://127.0.0.1:40000 (IP-同源 with cf_clearance + recaptcha mint, live_warp_ip={_live_warp_ip})")
             proxy_cfg = {"server": "socks5://127.0.0.1:40000"}
-        elif _fam08 == "warp" and _no_warp:
+        elif _live_is_warp and _no_warp:
             log(f"[attempt-register] v8.11 NO_WARP_OVERRIDE=1 → keep orchestrator proxy_cfg={proxy_cfg} (better reCAPTCHA score, may CF challenge)")
-        elif _fam08 == "socks":
+        elif _fam08 == "socks" and _hint_age <= 60:
             _bport08 = str(_bj08.get("port") or "").strip()
             if _bport08:
-                log(f"[attempt-register] v8.08 broker=socks → main ctx proxy override: {proxy_cfg} → socks5://127.0.0.1:{_bport08} (IP-同源 with broker SOCKS exit)")
+                log(f"[attempt-register] v8.08 broker=socks (hint age={_hint_age}s, fresh) → main ctx proxy override: {proxy_cfg} → socks5://127.0.0.1:{_bport08} (IP-同源 with broker SOCKS exit)")
                 proxy_cfg = {"server": f"socks5://127.0.0.1:{_bport08}"}
+        else:
+            log(f"[attempt-register] v8.44 cannot reliably IP-align (hint family={_fam08} age={_hint_age}s, live_warp={_live_warp_ip or 'unreachable'}) → 保留 orchestrator proxy_cfg={proxy_cfg} 不 override (避免错配)")
     except Exception as _e08:
         log(f"[attempt-register] v8.08 broker hint read failed (keep orchestrator proxy_cfg): {_e08}")
 
