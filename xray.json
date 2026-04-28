@@ -1188,10 +1188,10 @@
       "settings": {
         "servers": [
           {
-            "address": "156.146.38.169",
-            "port": 443,
+            "address": "03centerhk-3.center-link.org",
+            "port": 602,
             "method": "aes-128-gcm",
-            "password": "shadowsocks"
+            "password": "534f34a4-ffea-4466-9832-4a6586a29228"
           }
         ]
       },
@@ -1222,10 +1222,10 @@
       "settings": {
         "servers": [
           {
-            "address": "tinkered-pennies-puppies.freesocks.work",
-            "port": 443,
-            "method": "chacha20-ietf-poly1305",
-            "password": "hbGrpfvNrJsUmKmPbR3iY2"
+            "address": "05layercon-05.center-link.org",
+            "port": 1021,
+            "method": "aes-128-gcm",
+            "password": "534f34a4-ffea-4466-9832-4a6586a29228"
           }
         ]
       },
@@ -1239,10 +1239,10 @@
       "settings": {
         "servers": [
           {
-            "address": "141.164.45.187",
-            "port": 7001,
-            "method": "aes-256-gcm",
-            "password": "RexnBgU7EV5ADxG"
+            "address": "03centerhk-3.center-link.org",
+            "port": 601,
+            "method": "aes-128-gcm",
+            "password": "534f34a4-ffea-4466-9832-4a6586a29228"
           }
         ]
       },
@@ -1256,10 +1256,10 @@
       "settings": {
         "servers": [
           {
-            "address": "141.98.101.182",
-            "port": 443,
+            "address": "04line-hk04.center-link.org",
+            "port": 1158,
             "method": "aes-128-gcm",
-            "password": "shadowsocks"
+            "password": "534f34a4-ffea-4466-9832-4a6586a29228"
           }
         ]
       },
@@ -1290,10 +1290,10 @@
       "settings": {
         "servers": [
           {
-            "address": "r3mrcg007147vhp.cybervena.com",
-            "port": 50099,
-            "method": "chacha20-ietf-poly1305",
-            "password": "7e731ec3-f8e1-43f6-92cf-3978d14705c4"
+            "address": "cuzthk01.center-link.org",
+            "port": 651,
+            "method": "aes-128-gcm",
+            "password": "534f34a4-ffea-4466-9832-4a6586a29228"
           }
         ]
       },
@@ -1324,10 +1324,10 @@
       "settings": {
         "servers": [
           {
-            "address": "82.38.31.101",
-            "port": 8080,
-            "method": "chacha20-ietf-poly1305",
-            "password": "oZIoA69Q8yhcQV8ka3Pa3A"
+            "address": "cuzthk01.center-link.org",
+            "port": 653,
+            "method": "aes-128-gcm",
+            "password": "534f34a4-ffea-4466-9832-4a6586a29228"
           }
         ]
       },

@@ -66,3 +66,7 @@ tmp_gateway_update_files/
 **/*.bak.*
 **/*.bak
 artifacts/api-server/data.db
+
+# auto-versioned backups (v8.x series)
+.backup_v*/
+*.bak_*
