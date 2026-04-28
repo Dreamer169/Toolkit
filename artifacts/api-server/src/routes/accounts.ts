@@ -927,6 +927,61 @@ router.post("/replit/register", (req, res) => {
 
             log(`    ✗ Attempt ${attempt}: ${lastErr.slice(0, 100)}`);
 
+            // === v8.40 ROOT-FIX 2026-04-27 — 通用 attempt-rescue 兜底 ===
+            // 用户痛点: attempt 1 失败后, attempt 2/3 同邮箱重试 → 若 step1 POST 已到后端 → 100% 撞 isNewUser=false
+            //   → "Email already in use" → 真实 userId 永久丢失 (实证 58269118 cf_api_blocked / 58286905 captcha_token_invalid).
+            // 根因: 凡是"非客户端早期错误", step1 POST 都可能已经发到 replit 后端, 同邮箱重试不安全.
+            // 修复: attempt 失败 + 非早期错误 + 非"已被用"(后者已有专路径) → 8s 收件箱探针 → 探到 = 救回; 探不到 = 也 break, 绝不同邮箱重试.
+            //       只有"客户端早期错误"(Page.goto / SOCKS / 浏览器还没拿到 replit response) 才允许同邮箱 attempt N+1 retry.
+            // 此 patch 是 v8.38 (cf_api_blocked) / v8.39 (captcha_token_invalid) 的统一根治, 旧的特定分支变成 dead code 但保留作回溯文档.
+            {
+              const _v840EarlyRe = /Page\.goto|ERR_PROXY_CONNECTION_FAILED|ERR_SOCKS_CONNECTION_FAILED|ERR_TIMED_OUT|ERR_CONNECTION_REFUSED|ECONNREFUSED|net::ERR_NAME_NOT_RESOLVED|net::ERR_TUNNEL_CONNECTION_FAILED|browser_launch_failed|browser_proxy_unavailable|broker_unavailable|Page\.wait_for_timeout.*navigation/i;
+              const _v840PostRe = /\[?step1|recaptcha|captcha_token|cf_api_blocked|account_rate_limited|isNewUser|sign-up POST|API=[45]\d\d|already.*use|too.quickly|signup_username_field_missing|signup_form_input_missing|cf_ip_banned|cf_hard_block|cf_js_challenge_timeout|turnstile/i;
+              const _v840IsEarly = _v840EarlyRe.test(lastErr) && !_v840PostRe.test(lastErr);
+              const _v840AlreadyUsed = lastErr.toLowerCase().includes("already") && lastErr.toLowerCase().includes("use");
+              if (lastErr && !_v840IsEarly && !_v840AlreadyUsed) {
+                log(`    [v8.40 attempt-rescue] attempt ${attempt} 失败, 后端可能已创建账号 → 8s 收件箱探针…`);
+                await new Promise(r => setTimeout(r, 8000));
+                let _v840Rescued = false;
+                let _v840Final = "";
+                try {
+                  const _v840R = await localPost("/api/tools/outlook/click-verify-link", { accountId: outlook.id }) as { success?: boolean; final_url?: string; verify_url?: string; error?: string };
+                  const _v840E = String(_v840R.error ?? "").toLowerCase();
+                  if (_v840R.success || _v840E.includes("invalid") || _v840E.includes("has been used") || _v840E.includes("已使用")) {
+                    _v840Rescued = true;
+                    _v840Final = String(_v840R.final_url ?? _v840R.verify_url ?? "").slice(0, 80);
+                    log(`    ✅ [v8.40 attempt-rescue] verify 邮件已到 → attempt ${attempt} 后端真创建; final=${_v840Final}`);
+                  } else {
+                    log(`    [v8.40 attempt-rescue] 8s 内无 verify 邮件 (${String(_v840R.error ?? "").slice(0, 80)}) → 后端可能未创建`);
+                  }
+                } catch (_v840Err) {
+                  log(`    [v8.40 attempt-rescue] 探针异常: ${String(_v840Err).slice(0, 80)}`);
+                }
+                if (_v840Rescued) {
+                  portLastGood.set(tryPort, Date.now());
+                  const _v840Pp = Number(parsed.actual_proxy_port ?? 0);
+                  const _v840Port = _v840Pp > 0 ? _v840Pp : tryPort;
+                  await dbE(
+                    `INSERT INTO accounts (platform, email, password, username, status, notes, tags, exit_ip, proxy_port)
+                     VALUES ('replit', $1, NULL, NULL, 'exists_no_password', $4, 'replit,exists_no_password,attempt_rescued', $2, $3)
+                     ON CONFLICT (platform, email) DO NOTHING`,
+                    [outlook.email, exitIp, _v840Port, `v8.40 attempt-rescue: outlook 收到 replit verify 邮件, 后端创建成功但客户端 attempt ${attempt} 失败 — ${lastErr.slice(0, 120)}`]
+                  ).catch(e => log(`    [v8.40] placeholder insert warn: ${e}`));
+                  await dbE(
+                    "UPDATE accounts SET tags = CASE WHEN string_to_array(COALESCE(tags,''), ',') @> ARRAY['replit_used'] THEN tags ELSE NULLIF(TRIM(BOTH ',' FROM COALESCE(tags,'') || ',replit_used'), ',') END, updated_at = NOW() WHERE id = $1",
+                    [outlook.id]
+                  ).catch(() => {});
+                  log(`    [v8.40] outlook id=${outlook.id} → replit_used + placeholder, 跳下一个 outlook`);
+                  break;
+                }
+                log(`    [v8.40 attempt-rescue] 拒绝同邮箱重试 (POST 已到后端但救援未确认) → break 换下一个 outlook`);
+                break;
+              }
+              if (_v840IsEarly) {
+                log(`    [v8.40] attempt ${attempt} 客户端早期错误 (POST 未发, 后端 100% 未创建) → 允许同邮箱重试`);
+              }
+            }
+
             // 邮箱已被用 → 落 placeholder 保留 outlook→replit 映射关系，再标 replit_used
             if (lastErr.toLowerCase().includes("already") && lastErr.toLowerCase().includes("use")) {
               portLastGood.set(tryPort, Date.now()); // port got form response → mark good
