@@ -115,7 +115,7 @@ function bumpPortCooldown(port: number, reason: string, minLevel: number = 0): {
   // 改成 fixed 5min flat ban + level 不递增, 让 broker 有机会 CF IP rotation / Tor swap 自救; 端口质量类错 (timeout/
   // integrity/spa_not_hydrated) 仍走原递增逻辑. replit_edge_blocked_offline_page 是 Replit 自己 CDN 静态页, 仍按 v8.60
   // 深度屏蔽处理 (minLevel=3), 不属于 CF-class.
-  const _CF_FLAT_RE = /^(cf_api_blocked|cf_js_challenge_timeout|signup_cf_ip_banned|signup_cf_js_challenge_timeout|rescue_failed:cf_)/i;
+  const _CF_FLAT_RE = /^(cf_api_blocked|cf_js_challenge_timeout|signup_cf_ip_banned|signup_cf_js_challenge_timeout|rescue_failed:cf_|captcha_token_invalid|signup_spa_not_hydrated)/i;
   if (_CF_FLAT_RE.test(reason)) {
     const flatMs = PORT_COOLDOWN_BASE_MS;
     cfBannedUntil.set(port, Date.now() + flatMs);
@@ -1181,7 +1181,7 @@ router.post("/replit/register", (req, res) => {
               //   (实证 2026-04-27: 10859 NL Greenhost / 10851 US Datacamp 被拒, 10857/10855 通过).
               // 修复: 将失败 port 加入 15min 冷却 (reCAPTCHA score 短期翻不了盘),
               //       改用 portQueue 中下一个 port 重试; 阈值 1→2 (允许试 1 次换 port).
-              const _bump1 = bumpPortCooldown(tryPort, "captcha_token_invalid", 2);  // v8.61: CPA-style 401 IP-scoring → minLevel=2 (20min)
+              const _bump1 = bumpPortCooldown(tryPort, "captcha_token_invalid", 0);  // v8.69: captcha 失败=IP 评分问题, 同 CF-class 走 5min flat (避免 cooldown 雪崩)
               const cfIpC = xrayPortCfIp.get(tryPort);
               const _cfNote = cfIpC ? ` (CF IP ${cfIpC})` : "";
               // v8.39 ROOT-FIX 2026-04-27 — captcha_token_invalid 也会丢账号
