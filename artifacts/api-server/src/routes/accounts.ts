@@ -108,6 +108,22 @@ function _savePortCooldown() {
 }
 _loadPortCooldown();
 function bumpPortCooldown(port: number, reason: string, minLevel: number = 0): { ms: number; level: number } {
+  // v8.65 ROOT-FIX 2026-04-28: CF-class 错 (cf_api_blocked / cf_js_challenge_timeout / signup_cf_ip_banned /
+  // signup_cf_js_challenge_timeout / rescue_failed:cf_*) 是上游 CF IP-list 标记, IP 不会自己换, 长冷却也无意义.
+  // 实证: 6 端口 (Datacamp/Fourplex/Vultr/M247/Chunghwa/Greenhost) 全是数据中心 ASN 全被 CF challenge,
+  // 旧 minLevel=3 起步 40min 一轮失败 80→160min, 全 6 port 几小时熔断, broker watchdog 拿不到任何 live port.
+  // 改成 fixed 5min flat ban + level 不递增, 让 broker 有机会 CF IP rotation / Tor swap 自救; 端口质量类错 (timeout/
+  // integrity/spa_not_hydrated) 仍走原递增逻辑. replit_edge_blocked_offline_page 是 Replit 自己 CDN 静态页, 仍按 v8.60
+  // 深度屏蔽处理 (minLevel=3), 不属于 CF-class.
+  const _CF_FLAT_RE = /^(cf_api_blocked|cf_js_challenge_timeout|signup_cf_ip_banned|signup_cf_js_challenge_timeout|rescue_failed:cf_)/i;
+  if (_CF_FLAT_RE.test(reason)) {
+    const flatMs = PORT_COOLDOWN_BASE_MS;
+    cfBannedUntil.set(port, Date.now() + flatMs);
+    const curLv = portCooldownLevel.get(port) ?? 0;
+    console.log(`[port-cooldown v8.65] port=${port} reason=${reason} CF-class flat ban=${Math.round(flatMs/60000)}min (level=${curLv} untouched)`);
+    _savePortCooldown();
+    return { ms: flatMs, level: curLv };
+  }
   // v8.60: minLevel 让 replit_edge_blocked_offline_page 这种深度屏蔽直接跳到 high level (40min+)
   const cur = (portCooldownLevel.get(port) ?? 0);
   const lv = Math.max(cur, minLevel);
