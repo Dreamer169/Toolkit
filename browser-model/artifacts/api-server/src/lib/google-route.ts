@@ -11,19 +11,18 @@ import { SocksClient } from "socks";
 import * as tls from "node:tls";
 import type { BrowserContext } from "playwright";
 
+// v8.48 ROOT-FIX: switch DEFAULT_POOL from Pool A (10820-10845, all CF Workers
+// AS13335, dead/timeout) to Pool B (10851-10859, real shadowsocks upstreams,
+// verified alive 2026-04-28). Pool A was causing all cf-warmup requests to
+// timeout at 120s (request aborted) -> signup_cf_js_challenge_timeout / code:1.
 const DEFAULT_POOL = [
-  "socks5://127.0.0.1:10820",
-  "socks5://127.0.0.1:10822",
-  "socks5://127.0.0.1:10823",
-  "socks5://127.0.0.1:10824",
-  "socks5://127.0.0.1:10825",
-  "socks5://127.0.0.1:10826",
-  "socks5://127.0.0.1:10828",
-  "socks5://127.0.0.1:10830",
-  "socks5://127.0.0.1:10831",
-  "socks5://127.0.0.1:10836",
-  "socks5://127.0.0.1:10837",
-  "socks5://127.0.0.1:10845",
+  "socks5://127.0.0.1:10857",  // ★★★ Chunghwa Telecom AS3462 (TW national ISP)
+  "socks5://127.0.0.1:10853",  // ★★ Fourplex Telecom AS27284 (US small telecom)
+  "socks5://127.0.0.1:10859",  // ★ Greenhost AS47172 (NL small hosting)
+  "socks5://127.0.0.1:10854",  // Vultr AS20473 (DC, KR)
+  "socks5://127.0.0.1:10855",  // M247 AS9009 (DC, GB)
+  "socks5://127.0.0.1:10851",  // Datacamp AS60068 (DC, US)
+  // 10852/10856/10858 DEAD; 10850 DEAD
 ];
 
 function loadPool(): URL[] {
