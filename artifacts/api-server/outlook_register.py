@@ -2138,21 +2138,14 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
             _poll_url = page.url or ''
             print(f'[oauth] 轮询 round={_poll_round+1} url={_poll_url[:80]}', flush=True)
 
-            # 已到达终止 URL —— v8.36 ROOT-FIX: 子串匹配 'code=' 会被 'response_type=code' 误命中
-            # (微软会把 authorize 重定向到 login.live.com/oauth20_authorize.srf?client_id=...&response_type=code&...
-            #  → 第1轮误判终止 → wait_for_url(nativeclient) 30s 超时 → [no_redirect] 失败)
-            # 改为解析 query 名(name=code/error/state),只在 nativeclient redirect 真到达时才认终止
-            try:
-                from urllib.parse import urlparse as _urp, parse_qs as _pqs
-                _qs = _pqs(_urp(_poll_url).query) if _poll_url else {}
-            except Exception:
-                _qs = {}
-            if ('nativeclient' in _poll_url
-                    or ('code' in _qs and 'oauth20_authorize' not in _poll_url
-                        and '/authorize' not in _poll_url)
-                    or ('error' in _qs and 'oauth20_authorize' not in _poll_url
-                        and '/authorize' not in _poll_url)):
-                print(f'[oauth] ✅ 已到达授权终止页', flush=True)
+            # v8.41 ROOT-FIX 2026-04-28 — 删除"已到达终止页"误导判定
+            # 原 v8.36/v8.37 判定 (基于 parse_qs 解析 query 名 + 排除 oauth20_authorize) 实证 reg_1777341248972 仍误命中 → break → wait_for_url 30s 超时 → no_redirect.
+            # 真终止 = nativeclient redirect 已发生 (OAuth 标准 callback URI).
+            # nativeclient 检测下移到 elif 链里 (精确, 不参与终止页"判定"); 其他真终止靠循环外 wait_for_url 兜底.
+
+            # nativeclient redirect 已捕获 → OAuth code 拿到, 退出循环
+            if 'nativeclient' in _poll_url:
+                print(f'[oauth] ✅ nativeclient redirect 捕获 → break', flush=True)
                 break
 
             # 同意页（account.live.com/Consent）：原地等待并尝试 Accept
@@ -2169,10 +2162,10 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
                 else:
                     page.wait_for_timeout(5000)
 
-            # 重 CAPTCHA 页（signup.live.com 等）：handler 后重导航
-            elif ('signup.live.com' in _poll_url or
-                  'login.live.com/oauth' in _poll_url):
-                print(f'[oauth] ⚠ 重CAPTCHA页，调用处理器 (round={_poll_round+1})...', flush=True)
+            # 重 CAPTCHA 页（仅 signup.live.com）：handler 后重导航
+            # v8.41 ROOT-FIX: 移除 'login.live.com/oauth' 子串 — 它会匹配 oauth20_authorize.srf 正常 OAuth 中间页 → 误判为重 CAPTCHA → 调 handler 失败 → 失去 round 浪费.
+            elif 'signup.live.com' in _poll_url:
+                print(f'[oauth] ⚠ 重CAPTCHA页 (signup.live.com)，调用处理器 (round={_poll_round+1})...', flush=True)
                 if captcha_handler:
                     try:
                         captcha_handler(page)
