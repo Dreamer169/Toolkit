@@ -304,27 +304,22 @@ async def _ctx_self_warmup(page, log_fn):
             log_fn("[v8.67 ctx-warmup] phase-A youtube OK ({}ms)".format(int((_a.get_event_loop().time()-t0)*1000)))
         except Exception as _e:
             log_fn("[v8.67 ctx-warmup] phase-A youtube fail: {}".format(str(_e)[:80]))
-        # Phase B: google.com search (real input typing)
+        # Phase B: google.com/search direct URL (v8.68 BUG-FIX: 跳过首页 consent dialog
+        # + 延长 timeout 到 25s 避免 SOCKS 慢出口 + google-route 劫持双重拖累)
         try:
-            await page.goto("https://www.google.com/", wait_until="domcontentloaded", timeout=15000)
-            await page.wait_for_timeout(_r.randint(900, 1800))
+            _query = _r.choice(["replit signup", "online code editor", "free python ide", "browser based ide"])
+            _qurl = "https://www.google.com/search?q=" + _query.replace(" ", "+") + "&hl=en"
+            await page.goto(_qurl, wait_until="domcontentloaded", timeout=25000)
+            await page.wait_for_timeout(_r.randint(1400, 2600))
             try:
-                qInput = page.locator("textarea[name=q], input[name=q]").first
-                await qInput.click(timeout=4000)
-                await page.wait_for_timeout(_r.randint(200, 500))
-                _query = _r.choice(["replit signup", "online code editor", "free python ide", "browser based ide"])
-                for ch in _query:
-                    await page.keyboard.type(ch, delay=_r.randint(60, 170))
-                await page.wait_for_timeout(_r.randint(400, 900))
-                await page.keyboard.press("Enter")
-                await page.wait_for_load_state("domcontentloaded", timeout=10000)
-                await page.wait_for_timeout(_r.randint(1200, 2400))
-                await page.evaluate("window.scrollBy(0, " + str(_r.randint(180, 440)) + ")")
-            except Exception as _ie:
-                log_fn("[v8.67 ctx-warmup] phase-B input fail (skip): {}".format(str(_ie)[:80]))
+                await page.evaluate("window.scrollBy(0, " + str(_r.randint(220, 540)) + ")")
+                await page.wait_for_timeout(_r.randint(700, 1400))
+                await page.evaluate("window.scrollBy(0, " + str(_r.randint(180, 380)) + ")")
+            except Exception:
+                pass
             log_fn("[v8.67 ctx-warmup] phase-B google search OK ({}ms)".format(int((_a.get_event_loop().time()-t0)*1000)))
         except Exception as _e:
-            log_fn("[v8.67 ctx-warmup] phase-B google fail: {}".format(str(_e)[:80]))
+            log_fn("[v8.67 ctx-warmup] phase-B google fail (non-fatal): {}".format(str(_e)[:80]))
         # Phase C: recaptcha demo (kicks Enterprise to issue a fresh client token bound to this ctx + IP)
         try:
             await page.goto("https://www.google.com/recaptcha/api2/demo", wait_until="domcontentloaded", timeout=12000)
@@ -3203,8 +3198,15 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
             # 只要 broker / google_proxy_route / signup POST 全程同 IP. 不再早退
             # 抛 captcha_low_score; 让 audio-challenge fallback 与外层 IP 校验决定.
             if _v3_score_only:
-                log("[retry] reCAPTCHA Enterprise v3 score-only widget (no bframe) → 跳过音频, 直接报 token_invalid")
-                log("[retry] code:1 = reCAPTCHA Enterprise token rejected. 常见原因: (a) token-issuance IP 落在 datacenter ASN 被评低分 (本 VPS 45.205.27.69 AS8796 实证); (b) cf_clearance 缺失或 stealth 指纹被识破; (c) v3 score-only 站点不可能音频升级. 修复方向: 让 google-route attach 到清洁住宅/CDN-friendly SOCKS 池, 不要 SKIP 让 *.google 走 broker datacenter 出口.")
+                log("[retry] reCAPTCHA Enterprise v3 score-only widget (no bframe) → 无 audio challenge 可走, 直接报 token_invalid")
+                # v8.68 实测结论 (基于 rpl_moj04brs/0bcry/0kt09 三批对照):
+                # code:1 由 Google 后端拒绝 token, 与本地代码无关. site-key 实测固定
+                # 6LfyLYUsAAAAAP0Xmu (无漂移), action=signUpPassword 无误.
+                # 已穷尽行为侧 fix: v8.66 broker 7-phase Google 预热 + v8.67b 同 ctx
+                # youtube/recaptcha-demo 自预热 (~33s) 全部触发, score 仍低于阈值.
+                # 唯一已知有效路径是上游 IP 信誉提升 (住宅 SOCKS 池 / 第三方 v3 token
+                # solver 如 2Captcha RecaptchaV3Enterprise / CapMonster), 不是再加行为脚本.
+                log("[retry] code:1 = Google 后端按 IP+行为综合评分拒绝 token. v8.66 broker 预热 + v8.67b 同 ctx 预热实测无效, 当前 datacenter SOCKS 出口已触顶.")
                 result["error"] = "captcha_token_invalid"
                 result["detail"] = (
                     "reCAPTCHA Enterprise v3 token rejected (code:1). "

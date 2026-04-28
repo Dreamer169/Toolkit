@@ -1138,7 +1138,7 @@ router.post("/replit/register", (req, res) => {
               break; // 跳出 attempt 循环，尝试下一个 Outlook
             }
 
-            // 立即换端口：CF封禁 / Turnstile超时 / captcha token失效
+            // 立即换端口：CF封禁 / captcha_token_invalid (reCAPTCHA Enterprise v3 code:1)
             // "too quickly" → 该邮箱/用户名被限速，非可重试（直接下一个Outlook）
             if (lastErr.toLowerCase().includes("too quickly") || lastErr.toLowerCase().includes("doing this too")) {
               portLastGood.set(tryPort, Date.now()); // port got form response → mark good
@@ -1550,7 +1550,7 @@ router.post("/replit/register", (req, res) => {
 
         if (!accountDone) {
           log(`  All ${candidates.length} Outlook candidates failed for account ${i + 1}`);
-          results.push({ ok: false, error: `All ${candidates.length} candidates failed (already-used or Turnstile)` });
+          results.push({ ok: false, error: `All ${candidates.length} candidates failed (captcha_token_invalid / reCAPTCHA Enterprise v3 code:1 — exit IP score below threshold)` });
         }
 
       } catch (err) {
