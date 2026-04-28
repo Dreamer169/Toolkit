@@ -1556,7 +1556,7 @@ router.post("/replit/retry-verify", async (_req, res) => {
       "SELECT id, email, username FROM accounts WHERE platform='replit' AND status='unverified'"
     );
     if (!unverified.length) { res.json({ success: true, message: "没有待验证账号", results: [] }); return; }
-    const results: Array<{ replitId: number; email: string; status: string; error?: string }> = [];
+    const results: Array<{ replitId: number; email: string; status: string; error?: string; final_url?: string; consumed?: boolean }> = [];
     for (const acc of unverified) {
       // 找对应 Outlook 账号
       const ol = await dbQ<{ id: number; email: string; token: string | null; refresh_token: string | null }>(
@@ -1592,15 +1592,37 @@ router.post("/replit/retry-verify", async (_req, res) => {
         results.push({ replitId: acc.id, email: acc.email, status: "no_token", error: "无 access token" });
         continue;
       }
-      // 调用 click-verify-link
+      // v8.49 断点修复: 调用 click-verify-link 并正确处理「链接已被消费」场景
+      // 历史断点: verifyResult.success=false 但 body_snippet 含 "has been used"
+      // → 链接已被主流程或 live-verify-poller 消费 → 账号实际已验证，此处错误报 failed.
+      // 修复: 增加 consumed 检测; 成功后同步给 Outlook 打 replit_used 标签; results 携带 final_url.
       const verifyResult = await localPost("/api/tools/outlook/click-verify-link", {
         accountId: outlook.id,
-      }) as { success?: boolean; final_url?: string; error?: string };
-      if (verifyResult.success) {
+      }) as { success?: boolean; final_url?: string; error?: string; verified_marker?: string; body_snippet?: string };
+      const _rvErr  = String((verifyResult as Record<string,unknown>).error  ?? "").toLowerCase();
+      const _rvBody = String((verifyResult as Record<string,unknown>).body_snippet ?? "").toLowerCase();
+      const _rvMark = String((verifyResult as Record<string,unknown>).verified_marker ?? "").toLowerCase();
+      const _rvFinalUrl = String((verifyResult as Record<string,unknown>).final_url ?? "");
+      // oobCode 单次消费 — 若链接被早期流程点过, body 含 "has been used" → 视为已验证
+      const _rvConsumed = !verifyResult.success && (
+        _rvErr.includes("has been used")    || _rvBody.includes("has been used")    ||
+        _rvErr.includes("already been used") || _rvBody.includes("already been used") ||
+        _rvBody.includes("link is invalid")  || _rvBody.includes("已使用")
+      );
+      if (verifyResult.success || _rvConsumed) {
         await dbE("UPDATE accounts SET status='registered', updated_at=NOW() WHERE id=$1", [acc.id]);
-        results.push({ replitId: acc.id, email: acc.email, status: "verified" });
+        // 同步给 Outlook 打 replit_used（幂等，防止账号被重复选中注册）
+        await dbE(
+          "UPDATE accounts SET tags = CASE WHEN string_to_array(COALESCE(tags,''), ',') @> ARRAY['replit_used'] THEN tags ELSE NULLIF(TRIM(BOTH ',' FROM COALESCE(tags,'') || ',replit_used'), ',') END, updated_at = NOW() WHERE id = $1",
+          [outlook.id]
+        ).catch(() => {});
+        results.push({ replitId: acc.id, email: acc.email, status: "verified",
+                       final_url: _rvFinalUrl.slice(0, 120), consumed: _rvConsumed });
       } else {
-        results.push({ replitId: acc.id, email: acc.email, status: "failed", error: String(verifyResult.error ?? "未找到验证链接") });
+        const _rvExpired = _rvBody.includes("expired") || _rvErr.includes("expired") || _rvBody.includes("已过期");
+        results.push({ replitId: acc.id, email: acc.email,
+                       status: _rvExpired ? "link_expired" : "failed",
+                       error: String((verifyResult as Record<string,unknown>).error ?? "未找到验证链接") });
       }
     }
     res.json({ success: true, results });
