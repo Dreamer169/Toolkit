@@ -878,7 +878,7 @@ router.post("/replit/register", (req, res) => {
           }
 
           let lastUsedPort = -1; // v7.78p: 记录 success break 时实际用的端口, 供 Step4 INSERT
-          for (let attempt = 1; attempt <= 3; attempt++) {
+          for (let attempt = 1; attempt <= 1; attempt++) {  // v8.56: 砍掉同 Outlook 3 次端口重试, 直接换下一个 Outlook 候选
             const livePorts = availablePorts();
             if (livePorts.length === 0) {
               log(`    No live SOCKS ports available, stop retrying this Outlook`);
