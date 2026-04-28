@@ -2883,6 +2883,16 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
 
         log("打开 replit.com/signup ...")
         log("=== v8.00-MARKER REACHED (stealth aligned) ===")
+        # v8.67b — same-ctx Google activity warmup BEFORE signup goto (lifts reCAPTCHA Enterprise score)
+        # broker cf-warmup primed broker chromium with Google trust cookies, but the page is now
+        # already on /signup. Navigate AWAY through youtube + google + recaptcha-demo for ~15-20s
+        # to give THIS exact ctx + exit IP fresh, observable Google activity right before the
+        # signup-time grecaptcha.enterprise.execute() call. This generates the same-ctx-recently-active
+        # signals (nav history, viewport timing, mouse/scroll cadence) that DO NOT transfer via cookies.
+        try:
+            await _ctx_self_warmup(page, log)
+        except Exception as _wue:
+            log("[v8.67b ctx-warmup] outer err (ignore): " + str(_wue)[:80])
         await page.goto("https://replit.com/signup", wait_until="domcontentloaded", timeout=75000)
 
         # === v7.96 STEALTH FORCE INJECTION (main-world via <script> tag) ===
