@@ -162,41 +162,18 @@ async function runOnce() {
 
         if (!accessToken) { stats.skipped++; return; }
 
-        // 收集所有待处理消息（全局收件 + Junk 文件夹）
-        const allMsgs: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> = [];
-
-        // 1) 全局 /me/messages（含收件箱但不含 junkemail）
-        const filterUrl = `https://graph.microsoft.com/v1.0/me/messages?$filter=isRead eq false and contains(subject,'${SUBJECT_FILTER}')&$select=id,subject,isRead,receivedDateTime&$top=20`;
-        const gr = await microsoftFetch(filterUrl, { headers: { Authorization: `Bearer ${accessToken}`, ConsistencyLevel: "eventual" } });
-        if (gr.ok) {
-          const gd = await gr.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
-          const inbox = (gd.value ?? []).filter(m => m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase())).filter(m => !isRecentlyHandled(m.id));
-          allMsgs.push(...inbox);
-        } else {
-          const fallbackUrl = `https://graph.microsoft.com/v1.0/me/messages?$search="subject:${SUBJECT_FILTER}"&$select=id,subject,isRead,receivedDateTime&$top=20`;
-          const gr2 = await microsoftFetch(fallbackUrl, { headers: { Authorization: `Bearer ${accessToken}`, ConsistencyLevel: "eventual" } });
-          if (gr2.ok) {
-            const gd2 = await gr2.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
-            const inbox2 = (gd2.value ?? []).filter(m => !m.isRead && m.subject.toLowerCase().includes(SUBJECT_FILTER.toLowerCase())).filter(m => !isRecentlyHandled(m.id));
-            allMsgs.push(...inbox2);
-          }
-        }
-
-        // 2) Junk 垃圾邮件文件夹 — /me/messages 不含 junkemail，需单独查
-        const junkUrl = `https://graph.microsoft.com/v1.0/me/mailFolders/junkemail/messages?$filter=isRead eq false and contains(subject,'${SUBJECT_FILTER}')&$select=id,subject,isRead,receivedDateTime&$top=10`;
-        const junkR = await microsoftFetch(junkUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
-        if (junkR.ok) {
-          const junkD = await junkR.json() as { value?: Array<{ id: string; subject: string; isRead: boolean; receivedDateTime: string }> };
-          const junk = (junkD.value ?? []).filter(m => !isRecentlyHandled(m.id));
-          if (junk.length) {
-            logger.info({ email: acc.email, count: junk.length }, "[live-verify] 发现垃圾邮件夹未读验证邮件");
-            allMsgs.push(...junk);
-          }
-        }
-
-        if (!allMsgs.length) { stats.ok++; return; }
-        logger.info({ email: acc.email, count: allMsgs.length }, "[live-verify] 发现未读验证邮件");
-        for (const msg of allMsgs) { if (!_enabled) break; await processMessage(acc, msg, accessToken, stats); }
+        // ── v8.46 — 禁用邮件扫描+自动点击 (保留 token 健康检查, 上面已完成) ──
+        // 历史 bug: live-verify-poller 跟 accounts.ts 的 Step3 polling 都点同一个
+        // verify 链接, 但 oobCode 是单次消费的. live-verify-poller 每 3s 跑赢 Step3
+        // (12s 启动延迟 + 30 轮 * 15s) → 抢先点击成功 → 把 outlook 标 replit_used,
+        // 但因为不知道 outlook ↔ replit 的关联, 没法把对应 replit 行写 status=registered.
+        // 与此同时 Step3 polling 拿到的链接已被消费 → "invalid or has been used"
+        // → verified=false → replit 行永远卡 status=unverified.
+        // 修复: 只保留 token 健康检查 (refresh_token 失败 → abuse_mode/token_invalid),
+        // 邮件扫描+点击完全交给 accounts.ts Step3 polling (它知道 outlook ↔ replit 关联).
+        // processMessage 函数体保留, 便于通过 git revert 快速恢复.
+        stats.ok++;
+        return;
       } catch (e) {
         logger.warn({ email: acc.email, err: String(e) }, "[live-verify] 账号处理出错");
         stats.skipped++;
