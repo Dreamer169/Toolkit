@@ -850,16 +850,47 @@ async def fill_step1(page) -> str | None:
         _t_start = asyncio.get_event_loop().time()
         while asyncio.get_event_loop().time() - _t_start < _probe_budget:
             try:
-                _alerts = await page.locator(
-                    '[role="alert"], [class*="error" i], [class*="invalid" i], '
-                    '[class*="warning" i], [data-cy*="error"], '
-                    '[class*="success" i], [class*="valid" i]:not([class*="invalid" i])'
-                ).all_text_contents()
+                # v8.55 FIX placeholder 误报: 收紧 selector
+                #   旧版 [class*="success" i],[class*="valid" i] 容易抓到表单库
+                #   隐藏的模板组件,模板里 placeholder 文字 + literal "Email already
+                #   in use" 拼一起污染 _alert_blob → 误判 taken.
+                #   新版只信 [role=alert]/[aria-live=*] 这种语义化 live region,
+                #   并要求 元素可见 (filter visible) + outerHTML dump 到 /tmp.
+                _alert_handles = await page.locator(
+                    '[role="alert"], [aria-live="polite"], [aria-live="assertive"], '
+                    '[data-cy*="error"], [data-testid*="error"]'
+                ).element_handles()
+                _alerts = []
+                _alert_diag = []
+                for _h in _alert_handles:
+                    try:
+                        _vis = await _h.is_visible()
+                    except Exception:
+                        _vis = False
+                    if not _vis:
+                        continue
+                    try:
+                        _txt = (await _h.text_content()) or ""
+                    except Exception:
+                        _txt = ""
+                    _txt = _txt.strip()
+                    if not _txt:
+                        continue
+                    _alerts.append(_txt)
+                    try:
+                        _oh = await _h.evaluate('e=>e.outerHTML')
+                    except Exception:
+                        _oh = ""
+                    _alert_diag.append(f"text={_txt[:120]!r} html={_oh[:200]}")
                 _alert_blob = " | ".join(_alerts).lower()
                 if _alert_blob:
                     if any(kw in _alert_blob for kw in _NEG_KW):
                         _precheck_decision = "taken"
                         log(f"[email-precheck] ❌ negative 信号: {_alert_blob[:160]}")
+                        try:
+                            with open('/tmp/precheck_taken_dump.txt','w') as _df:
+                                _df.write("BLOB:\n"+_alert_blob+"\n\nELEMENTS:\n"+"\n---\n".join(_alert_diag))
+                        except Exception: pass
                         break
                     if any(kw in _alert_blob for kw in _POS_KW):
                         _precheck_decision = "available"
