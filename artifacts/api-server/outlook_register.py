@@ -2139,9 +2139,15 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
                     continue
             return False
 
-        for _poll_round in range(7):
+        # v8.73 Bug1: 卡 URL 早退 + 强力按钮兜底 (避免 7 轮空轮 65s 浪费)
+        _stuck_same_url_count = 0
+        _last_url = ''
+        for _poll_round in range(5):
             _poll_url = page.url or ''
-            print(f'[oauth] 轮询 round={_poll_round+1} url={_poll_url[:80]}', flush=True)
+            _is_same = (_poll_url == _last_url)
+            _last_url = _poll_url
+            _stuck_same_url_count = (_stuck_same_url_count + 1) if _is_same else 0
+            print(f'[oauth] 轮询 round={_poll_round+1} url={_poll_url[:80]} stuck={_stuck_same_url_count}', flush=True)
 
             # v8.41 ROOT-FIX 2026-04-28 — 删除"已到达终止页"误导判定
             # 原 v8.36/v8.37 判定 (基于 parse_qs 解析 query 名 + 排除 oauth20_authorize) 实证 reg_1777341248972 仍误命中 → break → wait_for_url 30s 超时 → no_redirect.
@@ -2218,10 +2224,38 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
                     pass
                 page.wait_for_timeout(3000)
 
-            # 其他页（login、interrupt、未知）：驱散中断后等待
+            # 其他页（login、interrupt、未知）：驱散中断 → 强力按钮 → 早退
             else:
-                _skip_ms_interrupts(page, label=f'oauth-poll-{_poll_round}')
-                page.wait_for_timeout(5000)
+                _clicked = _skip_ms_interrupts(page, label=f'oauth-poll-{_poll_round}')
+                # v8.73 Bug1: 卡在 oauth20_authorize.srf / login.live.com 时, 尝试常见 forward 按钮
+                if not _clicked:
+                    for _bsel in (
+                        'input[type="submit"][value="Yes"]',
+                        'button:has-text("Yes")', 'button:has-text("是")',
+                        'input[type="submit"][value="Continue"]',
+                        'button:has-text("Continue")', 'button:has-text("继续")',
+                        'input[type="submit"][value="Next"]',
+                        'button:has-text("Next")', 'button:has-text("下一步")',
+                        'input[type="submit"][value="Accept"]',
+                        'button:has-text("Accept")', 'button:has-text("接受")',
+                        'button:has-text("Approve")', 'button:has-text("允许")',
+                        '#idSIButton9', '[data-report-event="Signin_Submit"]',
+                    ):
+                        try:
+                            _b = page.locator(_bsel).first
+                            if _b.is_visible(timeout=800):
+                                _b.click()
+                                print(f'[oauth] ✅ 强力按钮点击: {_bsel}', flush=True)
+                                page.wait_for_timeout(2500)
+                                _clicked = True
+                                break
+                        except Exception:
+                            continue
+                # v8.73 Bug1: URL 连续 2 轮未变 + 没按钮可点 → 提前退出 (避免 5×2s 空耗)
+                if _stuck_same_url_count >= 2 and not _clicked:
+                    print(f'[oauth] ⏭ URL 连续 {_stuck_same_url_count+1} 轮未变且无可点按钮 → 早退', flush=True)
+                    break
+                page.wait_for_timeout(2000)
         # ────────────────────────────────────────────────────────────────────────
 
         # 使用 wait_for_url 等待 nativeclient 重定向（最多30s）
@@ -2245,7 +2279,7 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
                     return False
                 return ('code' in _qs3) or ('error' in _qs3)
             try:
-                page.wait_for_url(_is_terminal, timeout=30000)
+                page.wait_for_url(_is_terminal, timeout=8000)  # v8.73 Bug1: 30s→8s
             except Exception:
                 pass
 

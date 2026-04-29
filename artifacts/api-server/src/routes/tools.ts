@@ -1678,8 +1678,16 @@ router.post("/tools/outlook/register", async (req, res) => {
               if (autoPayload.length > 0) {
                 const { spawn: spawnAuto } = await import('child_process');
                 const autoScript = new URL('../auto_device_code.py', import.meta.url).pathname;
+                // v8.73 Bug4: 用 signup 时的 per-account CF Worker SOCKS5 (而非全局 10809)
+                // 保 IP/UA 一致, 避 MS New-device 触发额外 New-app-connected 邮件 + 风控
+                const _firstEmail = autoPayload[0]?.email || '';
+                const _idnFor = identityMap.get(_firstEmail);
+                const _autoProxy = _idnFor?.proxy_port
+                  ? `socks5://127.0.0.1:${_idnFor.proxy_port}`
+                  : 'http://127.0.0.1:10809';
+                job.logs.push({ type: 'log', message: `🌐 自动授权代理: ${_autoProxy} (consistency-preserving)` });
                 const autoProc = spawnAuto(
-                  'python3', [autoScript, JSON.stringify(autoPayload), 'http://127.0.0.1:10809'],
+                  'python3', [autoScript, JSON.stringify(autoPayload), _autoProxy],
                   { detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: '1' } }
                 );
                 job.logs.push({ type: 'log', message: `🤖 自动完成 ${autoPayload.length} 个账号的设备码授权…` });
@@ -1692,19 +1700,39 @@ router.post("/tools/outlook/register", async (req, res) => {
                   const { execute: dbAuto } = await import('../db.js');
                   const CLIENT_ID = '9e5f94bc-e8a4-4e73-b8be-63364c29d753';
                   const ps = batchOAuthSessions.get(sessionId) || [];
+                  // v8.73 Bug2/Bug3: 单次 poll → 60s loop, 静默 catch → 显式日志
                   for (const s2 of ps.filter((x2: BatchOAuthSession) => x2.status === 'pending')) {
-                    try {
-                      const r2 = await microsoftFetch('https://login.microsoftonline.com/consumers/oauth2/v2.0/token', {
-                        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                        body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:device_code', client_id: CLIENT_ID, device_code: s2.deviceCode }).toString(),
-                      });
-                      const td = await r2.json() as { access_token?: string; refresh_token?: string };
-                      if (td.access_token) {
-                        s2.status = 'done'; s2.accessToken = td.access_token; s2.refreshToken = td.refresh_token ?? '';
-                        await dbAuto('UPDATE accounts SET token=$1, refresh_token=$2, status=\'active\', updated_at=NOW() WHERE id=$3', [td.access_token, td.refresh_token ?? '', s2.accountId]);
-                        job.logs.push({ type: 'success', message: `✅ [auto-auth] ${s2.email} token 已入库` });
+                    let _saved = false;
+                    let _lastErr = '';
+                    const _deadline = Date.now() + 60000;
+                    while (Date.now() < _deadline && !_saved) {
+                      try {
+                        const r2 = await microsoftFetch('https://login.microsoftonline.com/consumers/oauth2/v2.0/token', {
+                          method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                          body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:device_code', client_id: CLIENT_ID, device_code: s2.deviceCode }).toString(),
+                        });
+                        const td = await r2.json() as { access_token?: string; refresh_token?: string; error?: string; error_description?: string };
+                        if (td.access_token) {
+                          s2.status = 'done'; s2.accessToken = td.access_token; s2.refreshToken = td.refresh_token ?? '';
+                          await dbAuto('UPDATE accounts SET token=$1, refresh_token=$2, status=\'active\', updated_at=NOW() WHERE id=$3', [td.access_token, td.refresh_token ?? '', s2.accountId]);
+                          await dbAuto('UPDATE archives SET token=$1, refresh_token=$2, status=\'active\', updated_at=NOW() WHERE platform=\'outlook\' AND email=$3', [td.access_token, td.refresh_token ?? '', s2.email]);
+                          job.logs.push({ type: 'success', message: `✅ [auto-auth] ${s2.email} token 已入库 (access=${td.access_token.length}B refresh=${(td.refresh_token||'').length}B)` });
+                          _saved = true;
+                          break;
+                        }
+                        _lastErr = `${td.error || 'no_token'}: ${(td.error_description || '').slice(0, 80)}`;
+                        if (td.error && !['authorization_pending', 'slow_down'].includes(td.error)) {
+                          job.logs.push({ type: 'warn', message: `⚠ [auto-auth] ${s2.email} 终止错误 ${td.error}: ${(td.error_description||'').slice(0,120)}` });
+                          break;
+                        }
+                      } catch (e) {
+                        _lastErr = String(e).slice(0, 120);
                       }
-                    } catch {}
+                      await new Promise(r => setTimeout(r, 3000));
+                    }
+                    if (!_saved) {
+                      job.logs.push({ type: 'warn', message: `⚠ [auto-auth] ${s2.email} 60s 内未拿到 token, 最后错误: ${_lastErr}` });
+                    }
                   }
                 });
               }
