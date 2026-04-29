@@ -1188,15 +1188,12 @@
       "settings": {
         "servers": [
           {
-            "address": "03centerhk-3.center-link.org",
-            "port": 602,
+            "address": "edir2end.cloud2orbit.com",
+            "port": 1061,
             "method": "aes-128-gcm",
             "password": "534f34a4-ffea-4466-9832-4a6586a29228"
           }
         ]
-      },
-      "streamSettings": {
-        "network": "tcp"
       }
     },
     {
@@ -1222,15 +1219,12 @@
       "settings": {
         "servers": [
           {
-            "address": "05layercon-05.center-link.org",
-            "port": 1021,
+            "address": "edir2end.cloud2orbit.com",
+            "port": 1059,
             "method": "aes-128-gcm",
             "password": "534f34a4-ffea-4466-9832-4a6586a29228"
           }
         ]
-      },
-      "streamSettings": {
-        "network": "tcp"
       }
     },
     {
@@ -1256,15 +1250,12 @@
       "settings": {
         "servers": [
           {
-            "address": "04line-hk04.center-link.org",
-            "port": 1158,
+            "address": "edir2end.cloud2orbit.com",
+            "port": 1025,
             "method": "aes-128-gcm",
             "password": "534f34a4-ffea-4466-9832-4a6586a29228"
           }
         ]
-      },
-      "streamSettings": {
-        "network": "tcp"
       }
     },
     {
@@ -1290,15 +1281,12 @@
       "settings": {
         "servers": [
           {
-            "address": "cuzthk01.center-link.org",
-            "port": 651,
+            "address": "05layercon-05.center-link.org",
+            "port": 1021,
             "method": "aes-128-gcm",
             "password": "534f34a4-ffea-4466-9832-4a6586a29228"
           }
         ]
-      },
-      "streamSettings": {
-        "network": "tcp"
       }
     },
     {
