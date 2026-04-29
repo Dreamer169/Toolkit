@@ -2252,7 +2252,7 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
                         except Exception:
                             continue
                 # v8.73 Bug1: URL 连续 2 轮未变 + 没按钮可点 → 提前退出 (避免 5×2s 空耗)
-                if _stuck_same_url_count >= 2 and not _clicked:
+                if _stuck_same_url_count >= 2:
                     print(f'[oauth] ⏭ URL 连续 {_stuck_same_url_count+1} 轮未变且无可点按钮 → 早退', flush=True)
                     break
                 page.wait_for_timeout(2000)
