@@ -33,6 +33,60 @@ async function ensureArchivesTable() {
   archivesTableReady = true;
 }
 
+// v8.81 ── 漂移检测 endpoint: accounts vs archives 字段不一致即立刻告警 ───────
+// 即便有 trigger 兜底, 这里也作为只读审计入口供前端/CI 定期 ping. 前端可显示红色 banner.
+router.get("/data/archives/drift", async (_req, res) => {
+  try {
+    await ensureArchivesTable();
+    type DriftRow = {
+      email: string; acc_status: string | null; arc_status: string | null;
+      acc_token_len: number; arc_token_len: number;
+      acc_refresh_len: number; arc_refresh_len: number;
+      drift_kind: string;
+    };
+    const rows = await query<DriftRow>(`
+      SELECT a.email,
+             a.status AS acc_status, ar.status AS arc_status,
+             COALESCE(LENGTH(a.token),0)         AS acc_token_len,
+             COALESCE(LENGTH(ar.token),0)        AS arc_token_len,
+             COALESCE(LENGTH(a.refresh_token),0) AS acc_refresh_len,
+             COALESCE(LENGTH(ar.refresh_token),0) AS arc_refresh_len,
+             CASE
+               WHEN ar.email IS NULL THEN 'archive_missing'
+               WHEN a.status IS DISTINCT FROM ar.status THEN 'status_mismatch'
+               WHEN COALESCE(a.token,'') IS DISTINCT FROM COALESCE(ar.token,'') THEN 'token_mismatch'
+               WHEN COALESCE(a.refresh_token,'') IS DISTINCT FROM COALESCE(ar.refresh_token,'') THEN 'refresh_mismatch'
+               ELSE 'unknown'
+             END AS drift_kind
+        FROM accounts a
+        LEFT JOIN archives ar ON ar.platform='outlook' AND ar.email = a.email
+       WHERE a.platform = 'outlook'
+         AND ( ar.email IS NULL
+            OR a.status IS DISTINCT FROM ar.status
+            OR COALESCE(a.token,'')         IS DISTINCT FROM COALESCE(ar.token,'')
+            OR COALESCE(a.refresh_token,'') IS DISTINCT FROM COALESCE(ar.refresh_token,'') )
+       ORDER BY a.email
+       LIMIT 500
+    `);
+    const orphans = await query<{ email: string; status: string | null }>(`
+      SELECT ar.email, ar.status
+        FROM archives ar
+       WHERE ar.platform = 'outlook'
+         AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.platform='outlook' AND a.email = ar.email)
+       ORDER BY ar.email
+       LIMIT 500
+    `);
+    res.json({
+      success: true,
+      drift_count: rows.length,
+      orphan_archive_count: orphans.length,
+      drift: rows,
+      orphan_archives: orphans,
+      healthy: rows.length === 0 && orphans.length === 0,
+    });
+  } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
 // ─── 档案库 CRUD ─────────────────────────────────────────────────────────────
 router.get("/data/archives", async (req, res) => {
   try {
