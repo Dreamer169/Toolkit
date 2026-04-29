@@ -1640,8 +1640,11 @@ router.post("/tools/outlook/register", async (req, res) => {
             const inlineRefresh = tok?.refresh_token || undefined;
             // Bug fix: inlineRefresh 存在时也应保存并跳过设备码（防止 refresh_token 被浏览器拦截但 access_token 未捕到时重复授权）
             if (inlineAccess || inlineRefresh) {
+              // v8.80 Bug N: 注册成功 in-browser OAuth 路径必须显式 status='active', 否则邮件中心/健康检查
+              // 基于 status 过滤会漏掉这些账号 (设备码 fallback path 已 active, 这里也补齐)
+              // archives 表通过 PG trigger 自动同步, 无需在此处手写 UPDATE archives.
               await execute(
-                "UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE email=$3 AND platform='outlook'",
+                "UPDATE accounts SET token=$1, refresh_token=$2, status='active', updated_at=NOW() WHERE email=$3 AND platform='outlook'",
                 [inlineAccess ?? null, inlineRefresh ?? null, acc.email],
               );
               job.logs.push({ type: "success", message: `[key] ${acc.email} in-browser OAuth 授权成功` });
