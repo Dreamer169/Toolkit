@@ -161,24 +161,31 @@ export async function initDatabase(): Promise<void> {
   // 2) trigger 改 INSERT ... ON CONFLICT DO UPDATE — 自动建缺失行
   // 3) 加 AFTER INSERT trigger 同样路径 (新注册账号即时建档案)
   await execute(`CREATE UNIQUE INDEX IF NOT EXISTS archives_platform_email_uniq ON archives(platform, email)`);
+  // v8.82 Bug S ROOT-FIX: 把 trigger 平台白名单从 'outlook' 扩为 ('outlook','replit').
+  // 实测 DB: 106 个 replit 账号 archives 表里 0 行 — 整个下游档案库缺失 replit 历史.
+  // 5 处 INSERT INTO accounts (platform='replit', ...) 路径 + 多处 UPDATE replit status 全部不触发.
+  // archives schema 通用 (platform/email/password/username/token/refresh_token/status), 兼容 replit.
+  // status 白名单也补 replit 专用值 (registered/unverified/exists_no_password/stale).
   await execute(`
     CREATE OR REPLACE FUNCTION sync_account_token_to_archives() RETURNS trigger AS $func$
     BEGIN
-      IF NEW.platform = 'outlook' AND (
+      IF NEW.platform IN ('outlook','replit') AND (
            TG_OP = 'INSERT'
         OR NEW.token         IS DISTINCT FROM OLD.token
         OR NEW.refresh_token IS DISTINCT FROM OLD.refresh_token
         OR NEW.status        IS DISTINCT FROM OLD.status
       ) THEN
         INSERT INTO archives (platform, email, password, username, token, refresh_token, status, updated_at)
-        VALUES ('outlook', NEW.email, NEW.password, NEW.username, NEW.token, NEW.refresh_token,
-                CASE WHEN NEW.status IN ('active','suspended','token_invalid','needs_oauth','needs_oauth_pending','done','error')
+        VALUES (NEW.platform, NEW.email, NEW.password, NEW.username, NEW.token, NEW.refresh_token,
+                CASE WHEN NEW.status IN ('active','suspended','token_invalid','needs_oauth','needs_oauth_pending','done','error',
+                                         'registered','unverified','exists_no_password','stale')
                      THEN NEW.status ELSE 'active' END,
                 NOW())
         ON CONFLICT (platform, email) DO UPDATE
           SET token         = COALESCE(NULLIF(EXCLUDED.token, ''),         archives.token),
               refresh_token = COALESCE(NULLIF(EXCLUDED.refresh_token, ''), archives.refresh_token),
-              status        = CASE WHEN EXCLUDED.status IN ('active','suspended','token_invalid','needs_oauth','needs_oauth_pending','done','error')
+              status        = CASE WHEN EXCLUDED.status IN ('active','suspended','token_invalid','needs_oauth','needs_oauth_pending','done','error',
+                                                            'registered','unverified','exists_no_password','stale')
                                    THEN EXCLUDED.status ELSE archives.status END,
               updated_at    = NOW();
       END IF;
@@ -200,20 +207,22 @@ export async function initDatabase(): Promise<void> {
     FOR EACH ROW
     EXECUTE FUNCTION sync_account_token_to_archives()
   `);
-  // v8.81 升级 backfill 为 UPSERT — 修 18 个 archive_missing (历史上 INSERT INTO accounts 漏写 archives)
-  // 同时回填存量字段差异. 只对 archives 没有的行 INSERT, 已有行用 COALESCE 保护非空字段.
+  // v8.81 升级 backfill 为 UPSERT — 修 archive_missing (历史上 INSERT INTO accounts 漏写 archives)
+  // v8.82 扩到 replit (实测 106 个 replit 账号 archives 缺失). 同时回填存量字段差异.
   const _bf = await execute(`
     INSERT INTO archives (platform, email, password, username, token, refresh_token, status, updated_at)
-    SELECT 'outlook', ac.email, ac.password, ac.username, ac.token, ac.refresh_token,
-           CASE WHEN ac.status IN ('active','suspended','token_invalid','needs_oauth','needs_oauth_pending','done','error')
+    SELECT ac.platform, ac.email, ac.password, ac.username, ac.token, ac.refresh_token,
+           CASE WHEN ac.status IN ('active','suspended','token_invalid','needs_oauth','needs_oauth_pending','done','error',
+                                   'registered','unverified','exists_no_password','stale')
                 THEN ac.status ELSE 'active' END,
            NOW()
       FROM accounts ac
-     WHERE ac.platform = 'outlook'
+     WHERE ac.platform IN ('outlook','replit')
     ON CONFLICT (platform, email) DO UPDATE
       SET token         = COALESCE(NULLIF(EXCLUDED.token, ''),         archives.token),
           refresh_token = COALESCE(NULLIF(EXCLUDED.refresh_token, ''), archives.refresh_token),
-          status        = CASE WHEN EXCLUDED.status IN ('active','suspended','token_invalid','needs_oauth','needs_oauth_pending','done','error')
+          status        = CASE WHEN EXCLUDED.status IN ('active','suspended','token_invalid','needs_oauth','needs_oauth_pending','done','error',
+                                                        'registered','unverified','exists_no_password','stale')
                                THEN EXCLUDED.status ELSE archives.status END,
           updated_at    = NOW()
      WHERE archives.token         IS DISTINCT FROM EXCLUDED.token
@@ -221,16 +230,17 @@ export async function initDatabase(): Promise<void> {
         OR archives.status        IS DISTINCT FROM EXCLUDED.status
   `);
   if (_bf.rowCount > 0) {
-    process.stderr.write(`[db.init] v8.81 archives upsert backfill: ${_bf.rowCount} rows synced/created from accounts → archives\n`);
+    process.stderr.write(`[db.init] v8.82 archives upsert backfill: ${_bf.rowCount} rows synced/created (outlook+replit) from accounts → archives\n`);
   }
 
   // v8.81 Bug Q ROOT-FIX: 6 处 DELETE FROM accounts 路径全部漏写 DELETE FROM archives → 历史 orphan
   // 档案库残留无主数据. 加 AFTER DELETE trigger 自动级联, 永久解决 (用户意图 "彻底移除").
+  // v8.82 cascade delete 也扩到 replit 平台.
   await execute(`
     CREATE OR REPLACE FUNCTION cascade_delete_archives() RETURNS trigger AS $func$
     BEGIN
-      IF OLD.platform = 'outlook' THEN
-        DELETE FROM archives WHERE platform = 'outlook' AND email = OLD.email;
+      IF OLD.platform IN ('outlook','replit') THEN
+        DELETE FROM archives WHERE platform = OLD.platform AND email = OLD.email;
       END IF;
       RETURN OLD;
     END;
@@ -243,13 +253,13 @@ export async function initDatabase(): Promise<void> {
     FOR EACH ROW
     EXECUTE FUNCTION cascade_delete_archives()
   `);
-  // 启动时一次性清理已 orphan 的存量数据 (历史已删除账号的档案残留)
+  // 启动时一次性清理已 orphan 的存量数据 (历史已删除账号的档案残留, outlook+replit)
   const _orphan = await execute(`
     DELETE FROM archives ar
-     WHERE ar.platform = 'outlook'
-       AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.platform = 'outlook' AND a.email = ar.email)
+     WHERE ar.platform IN ('outlook','replit')
+       AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.platform = ar.platform AND a.email = ar.email)
   `);
   if (_orphan.rowCount > 0) {
-    process.stderr.write(`[db.init] v8.81 orphan cleanup: removed ${_orphan.rowCount} orphaned archives rows (account already deleted)\n`);
+    process.stderr.write(`[db.init] v8.82 orphan cleanup: removed ${_orphan.rowCount} orphaned archives rows (outlook+replit)\n`);
   }
 }
