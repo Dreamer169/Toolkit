@@ -50,8 +50,9 @@ router.get("/data/archives/drift", async (_req, res) => {
     // - token_mismatch: accounts 与 archives token 都非空且不一致 → 真同步问题
     // - archive_legacy_token (info): accounts.token 已清空 (失效/needs_oauth/error) 但 archives 保留旧 token →
     //   设计意图 (COALESCE 保护历史 token 在 archives 不被空值覆盖, 供未来参考). 不算 unhealthy.
-    const rows = await query<DriftRow>(`
-      SELECT a.email,
+    // v8.82 drift endpoint 扩到 outlook+replit, 反映 trigger 平台白名单同步范围
+    const rows = await query<DriftRow & { platform: string }>(`
+      SELECT a.platform, a.email,
              a.status AS acc_status, ar.status AS arc_status,
              COALESCE(LENGTH(a.token),0)         AS acc_token_len,
              COALESCE(LENGTH(ar.token),0)        AS arc_token_len,
@@ -61,7 +62,7 @@ router.get("/data/archives/drift", async (_req, res) => {
                WHEN ar.email IS NULL THEN 'archive_missing'
                WHEN a.status IS DISTINCT FROM ar.status THEN 'status_mismatch'
                WHEN COALESCE(a.token,'') = '' AND COALESCE(ar.token,'') <> ''
-                    AND a.status IN ('needs_oauth','needs_oauth_pending','token_invalid','error','suspended')
+                    AND a.status IN ('needs_oauth','needs_oauth_pending','token_invalid','error','suspended','stale','exists_no_password')
                  THEN 'archive_legacy_token'
                WHEN COALESCE(a.token,'') <> '' AND COALESCE(ar.token,'') <> ''
                     AND a.token IS DISTINCT FROM ar.token
@@ -72,24 +73,24 @@ router.get("/data/archives/drift", async (_req, res) => {
                ELSE 'minor'
              END AS drift_kind
         FROM accounts a
-        LEFT JOIN archives ar ON ar.platform='outlook' AND ar.email = a.email
-       WHERE a.platform = 'outlook'
+        LEFT JOIN archives ar ON ar.platform = a.platform AND ar.email = a.email
+       WHERE a.platform IN ('outlook','replit')
          AND ( ar.email IS NULL
             OR a.status IS DISTINCT FROM ar.status
             OR COALESCE(a.token,'')         IS DISTINCT FROM COALESCE(ar.token,'')
             OR COALESCE(a.refresh_token,'') IS DISTINCT FROM COALESCE(ar.refresh_token,'') )
-       ORDER BY a.email
+       ORDER BY a.platform, a.email
        LIMIT 500
     `);
     const seriousKinds = new Set(['archive_missing','status_mismatch','token_mismatch','refresh_mismatch']);
     const serious = rows.filter(r => seriousKinds.has(r.drift_kind));
     const informational = rows.filter(r => !seriousKinds.has(r.drift_kind));
-    const orphans = await query<{ email: string; status: string | null }>(`
-      SELECT ar.email, ar.status
+    const orphans = await query<{ platform: string; email: string; status: string | null }>(`
+      SELECT ar.platform, ar.email, ar.status
         FROM archives ar
-       WHERE ar.platform = 'outlook'
-         AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.platform='outlook' AND a.email = ar.email)
-       ORDER BY ar.email
+       WHERE ar.platform IN ('outlook','replit')
+         AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.platform = ar.platform AND a.email = ar.email)
+       ORDER BY ar.platform, ar.email
        LIMIT 500
     `);
     res.json({
