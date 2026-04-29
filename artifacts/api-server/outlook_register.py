@@ -247,10 +247,10 @@ class BaseController:
                     break
                 if taken:
                     picked, _, _ = gen_email_username()
-                    print(f"  ⚠ 用户名被占（第{_attempt+1}次），冷却5s后切换为: {picked}", flush=True)
+                    # v8.77 优化 J: 用户名被占冷却 5s → 1.5s (MS 用户名查询不需长冷却, 实测 [3/3] case 损失 10s)
+                    print(f"  ⚠ 用户名被占（第{_attempt+1}次），冷却1.5s后切换为: {picked}", flush=True)
                     email = picked
-                    # 冷却 5 秒，避免触发速率限制
-                    page.wait_for_timeout(5000)
+                    page.wait_for_timeout(1500)
                     email_input = page.locator(SEL_EMAIL_INPUT)
                     email_input.click()
                     page.keyboard.press("Control+a")
@@ -899,8 +899,14 @@ class PatchrightController(BaseController):
             # FunCaptcha 图像拼图加载后，左下角有音频(轮椅)图标需再次点击
             # 注意：必须用 Playwright loc.bounding_box() 获取 PAGE 绝对坐标
             #       frame.evaluate(getBoundingClientRect) 返回的是 frame 内部坐标，不能直接给 page.mouse.click()
-            print("[captcha] 等待图像拼图加载(3s)，寻找音频/轮椅按钮…", flush=True)
-            page.wait_for_timeout(3000)
+            # v8.77 优化 G: 原固定 3s 等待 → 改 1.5s + 短轮询 frame 增加 (省 1.5s)
+            print("[captcha] 等待图像拼图加载(轮询 1.5s)，寻找音频/轮椅按钮…", flush=True)
+            _img_t0 = time.time()
+            _fr_init = len(page.frames)
+            while time.time() - _img_t0 < 1.5:
+                if len(page.frames) > _fr_init:
+                    break
+                page.wait_for_timeout(150)
             _second_click_done = False
             # 先检查 frame 数量是否增加（说明拼图已加载）
             _fr_count_now = len(page.frames)
@@ -2148,6 +2154,26 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
             _last_url = _poll_url
             _stuck_same_url_count = (_stuck_same_url_count + 1) if _is_same else 0
             print(f'[oauth] 轮询 round={_poll_round+1} url={_poll_url[:80]} stuck={_stuck_same_url_count}', flush=True)
+            # v8.78 Bug K: 检测到 sign-in/login 页 (注册 cookie 缺失 → OAuth 要求重新登录) 立即 bail
+            # 实测 elizabethcollins675 case: 5 轮 Next click 在 sign-in 页死循环, 浪费 35s
+            # bail 后 device-code fallback 接管 (~10s), 比死循环快 25s
+            if 'oauth20_authorize.srf' in _poll_url and _poll_round >= 1:
+                try:
+                    _signin_marker = page.evaluate("""()=>{const t=document.body?.innerText||'';return (t.includes('Use your Microsoft account')||t.includes('使用 Microsoft 帐户'))&&!!document.querySelector('input[type=email],input[name=loginfmt]');}""")
+                    if _signin_marker:
+                        print(f'[oauth] ⛔ 检测到 sign-in 页 (注册 cookie 失效 / OAuth 要求重新登录) → 立即 bail, 由设备码 fallback 接管', flush=True)
+                        break
+                except Exception:
+                    pass
+            # v8.77 oauth 卡页探针: 每轮截图 + dump 可见按钮文本, 用于事后 visual debugging
+            try:
+                _shot_p = f"/tmp/oauth_round_{email}_{_poll_round+1}.png"
+                page.screenshot(path=_shot_p)
+                _btns = page.evaluate("""()=>{const els=[...document.querySelectorAll('button,input[type=submit],a[role=button],[data-testid]')]; return els.slice(0,10).map(e=>({tag:e.tagName,tid:e.getAttribute('data-testid')||'',txt:(e.innerText||e.value||'').slice(0,40),vis:!!(e.offsetParent)}));}""")
+                _vis_btns = [b for b in (_btns or []) if b.get('vis')]
+                print(f'[oauth] 📸 round{_poll_round+1} 可见按钮({len(_vis_btns)}): ' + ' | '.join(f"{b.get('tid') or b.get('tag')}:'{b.get('txt')}'" for b in _vis_btns[:6]), flush=True)
+            except Exception as _shote:
+                print(f'[oauth] ⚠ round{_poll_round+1} 探针失败: {_shote}', flush=True)
 
             # v8.41 ROOT-FIX 2026-04-28 — 删除"已到达终止页"误导判定
             # 原 v8.36/v8.37 判定 (基于 parse_qs 解析 query 名 + 排除 oauth20_authorize) 实证 reg_1777341248972 仍误命中 → break → wait_for_url 30s 超时 → no_redirect.
@@ -2376,9 +2402,21 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
         "proxy_port": int(proxy_port) if proxy_port else 0,
     }
 
+    # v8.77 timing instrumentation: 给 register_one 全部 print 加 [T+s] 前缀, 用于精准时间分布分析
+    import builtins as _b
+    _t_start = time.time()
+    _orig_print = _b.print
+    def _timed_print(*a, **kw):
+        try:
+            _orig_print(f"[T+{time.time()-_t_start:6.1f}s]", *a, **kw)
+        except Exception:
+            _orig_print(*a, **kw)
+    _b.print = _timed_print
+
     p, b = ctrl.launch(headless=headless)
     if not p:
         result["error"] = "浏览器启动失败"
+        _b.print = _orig_print
         return result
 
     # ── 共享浏览器指纹档案（与 Cursor 注册完全一致）──────────────────────────
@@ -2458,6 +2496,11 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
             p.stop()
         except Exception:
             pass
+        # v8.77 timing instrumentation: 还原 print
+        try:
+            _b.print = _orig_print
+        except Exception:
+            pass
 
     result["elapsed"] = f"{time.time()-t0:.1f}s"
     return result
@@ -2520,7 +2563,7 @@ def main():
     parser.add_argument("--headless",        type=str,   default="true",       help="true/false")
     parser.add_argument("--wait",            type=int,   default=BOT_PROTECTION_WAIT, help="bot_protection_wait (秒)")
     parser.add_argument("--retries",         type=int,   default=MAX_CAPTCHA_RETRIES)
-    parser.add_argument("--delay",           type=int,   default=5,            help="每次注册间隔秒数")
+    parser.add_argument("--delay",           type=int,   default=2,            help="每次注册间隔秒数 (v8.77: 5→2, CF 池每账号独立 IP 无需冷却)")
     parser.add_argument("--output",          type=str,   default="",           help="输出文件")
     parser.add_argument("--proxy-mode",      type=str,   default="",           help="cf = 从 CF IP 池自动分配代理")
     parser.add_argument("--cf-port",         type=int,   default=443,          help="CF 代理端口（默认443）")
@@ -2697,6 +2740,12 @@ def main():
                 or "频率过快" in _err_str
                 or "ERR_TUNNEL_CONNECTION_FAILED" in _err_str
                 or ("Timeout" in _err_str and "注册界面" in _err_str)
+                # v8.77 Bug F: "等待同意按钮超时" 实证 = IP 被风控 (CF 节点 104.24.22.21 案例)
+                # 之前未触发 retry 直接 fail, 损失账号. 加入 retry 触发器.
+                or "等待同意按钮" in _err_str
+                or "Consent" in _err_str
+                or "ERR_CONNECTION" in _err_str
+                or "net::ERR" in _err_str
             )
             if (not r["success"] and use_cf_pool and ip_info and _cf_pool
                     and _should_retry
