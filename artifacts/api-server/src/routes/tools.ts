@@ -1678,14 +1678,31 @@ router.post("/tools/outlook/register", async (req, res) => {
               if (autoPayload.length > 0) {
                 const { spawn: spawnAuto } = await import('child_process');
                 const autoScript = new URL('../auto_device_code.py', import.meta.url).pathname;
-                // v8.73 Bug4: 用 signup 时的 per-account CF Worker SOCKS5 (而非全局 10809)
-                // 保 IP/UA 一致, 避 MS New-device 触发额外 New-app-connected 邮件 + 风控
-                const _firstEmail = autoPayload[0]?.email || '';
-                const _idnFor = identityMap.get(_firstEmail);
-                const _autoProxy = _idnFor?.proxy_port
-                  ? `socks5://127.0.0.1:${_idnFor.proxy_port}`
-                  : 'http://127.0.0.1:10809';
-                job.logs.push({ type: 'log', message: `🌐 自动授权代理: ${_autoProxy} (consistency-preserving)` });
+                // v8.75 Bug C: 动态 xray 已被 kill → TCP probe 决定 fallback
+                // 优先用 per-account port 保 IP 严格一致; dead 则用 Pool A 10820
+                // (同 AS13335 CF Workers, MS 视为同 /16 不触发警告; 比 10809 全局口好得多)
+                const _net = await import('net');
+                const _probePort = (port: number, timeoutMs = 1500): Promise<boolean> => new Promise((resolve) => {
+                  const sock = _net.createConnection({ host: '127.0.0.1', port, timeout: timeoutMs });
+                  let done = false;
+                  const finish = (ok: boolean) => { if (done) return; done = true; try { sock.destroy(); } catch {} resolve(ok); };
+                  sock.once('connect', () => finish(true));
+                  sock.once('error', () => finish(false));
+                  sock.once('timeout', () => finish(false));
+                });
+                // 在所有 pending 账号 proxy_port 中找一个还活着的; 都没活就用 Pool A 10820
+                const _pendingPorts = Array.from(new Set(
+                  autoPayload.map(a => identityMap.get(a.email)?.proxy_port || 0).filter(p => p > 0)
+                ));
+                let _aliveProxyPort = 0;
+                for (const _p of _pendingPorts) {
+                  if (await _probePort(_p)) { _aliveProxyPort = _p; break; }
+                }
+                const _autoProxy = _aliveProxyPort > 0
+                  ? `socks5://127.0.0.1:${_aliveProxyPort}`
+                  : 'socks5://127.0.0.1:10820';  // Pool A 静态, 保 CF Workers AS13335 一致性
+                const _proxyTag = _aliveProxyPort > 0 ? 'per-account-alive' : 'pool-A-fallback (dyn-xray dead)';
+                job.logs.push({ type: 'log', message: `🌐 自动授权代理: ${_autoProxy} [${_proxyTag}]` });
                 const autoProc = spawnAuto(
                   'python3', [autoScript, JSON.stringify(autoPayload), _autoProxy],
                   { detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: '1' } }
