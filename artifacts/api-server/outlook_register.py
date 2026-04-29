@@ -2228,8 +2228,11 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
             else:
                 _clicked = _skip_ms_interrupts(page, label=f'oauth-poll-{_poll_round}')
                 # v8.73 Bug1: 卡在 oauth20_authorize.srf / login.live.com 时, 尝试常见 forward 按钮
+                # v8.76 Bug D: 加 [data-testid="primaryButton"] (MS React UI 标准按钮, Next/Continue/Accept 都用同一 testid)
+                #              加 [data-testid="secondaryButton"] 在 stuck>=1 时启用 (跳过 passkey/recovery 等可选步)
                 if not _clicked:
-                    for _bsel in (
+                    _primary_sels = (
+                        '[data-testid="primaryButton"]',  # v8.76 Bug D: MS React UI primary
                         'input[type="submit"][value="Yes"]',
                         'button:has-text("Yes")', 'button:has-text("是")',
                         'input[type="submit"][value="Continue"]',
@@ -2240,19 +2243,38 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
                         'button:has-text("Accept")', 'button:has-text("接受")',
                         'button:has-text("Approve")', 'button:has-text("允许")',
                         '#idSIButton9', '[data-report-event="Signin_Submit"]',
-                    ):
+                    )
+                    # v8.76 Bug D: stuck>=1 → primary 已点过没用 → 启用 secondary 跳过 (Skip/Maybe later/Cancel)
+                    _secondary_sels = (
+                        '[data-testid="secondaryButton"]',
+                        'button:has-text("Skip for now")',
+                        'button:has-text("Maybe later")',
+                        'button:has-text("Not now")',
+                        'button:has-text("Skip")',
+                        'button:has-text("跳过")',
+                        'button:has-text("稍后")',
+                        '#idBtn_Back',
+                    ) if _stuck_same_url_count >= 1 else ()
+                    for _bsel in (_secondary_sels + _primary_sels):
                         try:
                             _b = page.locator(_bsel).first
                             if _b.is_visible(timeout=800):
                                 _b.click()
-                                print(f'[oauth] ✅ 强力按钮点击: {_bsel}', flush=True)
+                                _tag = 'secondary' if _bsel in _secondary_sels else 'primary'
+                                print(f'[oauth] ✅ 强力按钮点击 [{_tag}]: {_bsel}', flush=True)
                                 page.wait_for_timeout(2500)
                                 _clicked = True
                                 break
                         except Exception:
                             continue
-                # v8.73 Bug1: URL 连续 2 轮未变 + 没按钮可点 → 提前退出 (避免 5×2s 空耗)
-                if _stuck_same_url_count >= 2:
+                # v8.76 Bug D: 成功 click 但 URL 不变 ≠ 真 stuck (MS React UI 是 SPA 内部翻页, URL 不动)
+                # 重置 stuck 计数, 给 SPA 多轮翻页机会; 只有"既无按钮可点 又 URL 不动"才算真 stuck
+                if _clicked and _stuck_same_url_count > 0:
+                    print(f'[oauth] ↻ click 成功 → 重置 stuck 计数 (SPA 内部翻页, URL 不变)', flush=True)
+                    _stuck_same_url_count = 0
+                    _last_url = ''  # 下轮不会被判同 URL
+                # v8.73 Bug1 / v8.76 Bug D: 真 stuck (无按钮 + URL 不变 2 轮) → 早退
+                if (not _clicked) and _stuck_same_url_count >= 2:
                     print(f'[oauth] ⏭ URL 连续 {_stuck_same_url_count+1} 轮未变且无可点按钮 → 早退', flush=True)
                     break
                 page.wait_for_timeout(2000)
