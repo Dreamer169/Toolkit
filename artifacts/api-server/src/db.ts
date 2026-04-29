@@ -166,7 +166,7 @@ export async function initDatabase(): Promise<void> {
         UPDATE archives
            SET token         = COALESCE(NULLIF(NEW.token, ''),         archives.token),
                refresh_token = COALESCE(NULLIF(NEW.refresh_token, ''), archives.refresh_token),
-               status        = CASE WHEN NEW.status IN ('active','suspended','token_invalid','needs_oauth_pending')
+               status        = CASE WHEN NEW.status IN ('active','suspended','token_invalid','needs_oauth','needs_oauth_pending','done','error')
                                     THEN NEW.status ELSE archives.status END,
                updated_at    = NOW()
          WHERE platform = 'outlook' AND email = NEW.email;
@@ -189,7 +189,7 @@ export async function initDatabase(): Promise<void> {
     UPDATE archives a
        SET token         = COALESCE(NULLIF(ac.token, ''),         a.token),
            refresh_token = COALESCE(NULLIF(ac.refresh_token, ''), a.refresh_token),
-           status        = CASE WHEN ac.status IN ('active','suspended','token_invalid','needs_oauth_pending')
+           status        = CASE WHEN ac.status IN ('active','suspended','token_invalid','needs_oauth','needs_oauth_pending','done','error')
                                 THEN ac.status ELSE a.status END,
            updated_at    = NOW()
       FROM accounts ac
