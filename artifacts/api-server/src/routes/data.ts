@@ -44,6 +44,12 @@ router.get("/data/archives/drift", async (_req, res) => {
       acc_refresh_len: number; arc_refresh_len: number;
       drift_kind: string;
     };
+    // v8.81 区分真 drift vs informational:
+    // - archive_missing: accounts 有但 archives 没有 → 严重, 后端有 trigger 已自动建 (剩余报告即历史 race)
+    // - status_mismatch: status 不一致 → 严重 (trigger 应 100% 同步)
+    // - token_mismatch: accounts 与 archives token 都非空且不一致 → 真同步问题
+    // - archive_legacy_token (info): accounts.token 已清空 (失效/needs_oauth/error) 但 archives 保留旧 token →
+    //   设计意图 (COALESCE 保护历史 token 在 archives 不被空值覆盖, 供未来参考). 不算 unhealthy.
     const rows = await query<DriftRow>(`
       SELECT a.email,
              a.status AS acc_status, ar.status AS arc_status,
@@ -54,9 +60,16 @@ router.get("/data/archives/drift", async (_req, res) => {
              CASE
                WHEN ar.email IS NULL THEN 'archive_missing'
                WHEN a.status IS DISTINCT FROM ar.status THEN 'status_mismatch'
-               WHEN COALESCE(a.token,'') IS DISTINCT FROM COALESCE(ar.token,'') THEN 'token_mismatch'
-               WHEN COALESCE(a.refresh_token,'') IS DISTINCT FROM COALESCE(ar.refresh_token,'') THEN 'refresh_mismatch'
-               ELSE 'unknown'
+               WHEN COALESCE(a.token,'') = '' AND COALESCE(ar.token,'') <> ''
+                    AND a.status IN ('needs_oauth','needs_oauth_pending','token_invalid','error','suspended')
+                 THEN 'archive_legacy_token'
+               WHEN COALESCE(a.token,'') <> '' AND COALESCE(ar.token,'') <> ''
+                    AND a.token IS DISTINCT FROM ar.token
+                 THEN 'token_mismatch'
+               WHEN COALESCE(a.refresh_token,'') <> '' AND COALESCE(ar.refresh_token,'') <> ''
+                    AND a.refresh_token IS DISTINCT FROM ar.refresh_token
+                 THEN 'refresh_mismatch'
+               ELSE 'minor'
              END AS drift_kind
         FROM accounts a
         LEFT JOIN archives ar ON ar.platform='outlook' AND ar.email = a.email
@@ -68,6 +81,9 @@ router.get("/data/archives/drift", async (_req, res) => {
        ORDER BY a.email
        LIMIT 500
     `);
+    const seriousKinds = new Set(['archive_missing','status_mismatch','token_mismatch','refresh_mismatch']);
+    const serious = rows.filter(r => seriousKinds.has(r.drift_kind));
+    const informational = rows.filter(r => !seriousKinds.has(r.drift_kind));
     const orphans = await query<{ email: string; status: string | null }>(`
       SELECT ar.email, ar.status
         FROM archives ar
@@ -79,10 +95,14 @@ router.get("/data/archives/drift", async (_req, res) => {
     res.json({
       success: true,
       drift_count: rows.length,
+      serious_drift_count: serious.length,
+      informational_drift_count: informational.length,
       orphan_archive_count: orphans.length,
       drift: rows,
+      serious,
+      informational,
       orphan_archives: orphans,
-      healthy: rows.length === 0 && orphans.length === 0,
+      healthy: serious.length === 0 && orphans.length === 0,
     });
   } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
 });
