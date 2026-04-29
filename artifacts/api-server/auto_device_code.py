@@ -70,23 +70,65 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                 if btn: await btn.click()
                 await asyncio.sleep(6)
 
-            # 步骤5: 保持登录弹窗
-            stay_btn = await page.query_selector('button:has-text("Yes"), button:has-text("是"), input[value="Yes"]')
-            if stay_btn:
-                await stay_btn.click()
-                await asyncio.sleep(2)
+            # 步骤5: 保持登录弹窗 (KMSI) — v8.74 改 wait_for_selector 给渲染时间
+            kmsi_selectors = [
+                'input[type="submit"][value="Yes"]',
+                'input[type="submit"][value="是"]',
+                'button:has-text("Yes")',
+                'button:has-text("是")',
+                '#idSIButton9',
+            ]
+            for _kmsi_sel in kmsi_selectors:
+                try:
+                    _kbtn = await page.wait_for_selector(_kmsi_sel, timeout=4000, state="visible")
+                    if _kbtn:
+                        await _kbtn.click()
+                        print(f"[{email}] ✅ KMSI 点 Yes: {_kmsi_sel}", flush=True)
+                        await asyncio.sleep(3)
+                        break
+                except Exception:
+                    continue
 
-            # 步骤6: 授权确认页面（"XXX wants access..."）
-            confirm_btn = await page.query_selector(
-                'button:has-text("Continue"), button:has-text("继续"), '
-                'button:has-text("Accept"), button:has-text("接受"), '
-                'button:has-text("Allow"), button:has-text("允许"), '
-                'input[value="Continue"], input[value="Accept"]'
-            )
-            if confirm_btn:
-                await confirm_btn.click()
-                print(f"[{email}] 点击授权确认", flush=True)
-                await asyncio.sleep(3)
+            # 步骤6: 授权确认页面（"XXX wants access..."） — v8.74 wait_for_selector 多重重试
+            consent_selectors = [
+                'input[type="submit"][value="Continue"]',
+                'input[type="submit"][value="Accept"]',
+                'input[type="submit"][value="Yes"]',
+                'button:has-text("Continue")',
+                'button:has-text("继续")',
+                'button:has-text("Accept")',
+                'button:has-text("接受")',
+                'button:has-text("Allow")',
+                'button:has-text("允许")',
+                'button:has-text("Approve")',
+                'button:has-text("Yes")',
+                '#idSIButton9',
+                '[data-testid="primaryButton"]',
+            ]
+            _consent_clicked = False
+            for _retry in range(3):
+                for _csel in consent_selectors:
+                    try:
+                        _cbtn = await page.wait_for_selector(_csel, timeout=4000, state="visible")
+                        if _cbtn:
+                            await _cbtn.click()
+                            print(f"[{email}] ✅ Consent 点击 ({_retry+1}/3): {_csel}", flush=True)
+                            await asyncio.sleep(4)
+                            _consent_clicked = True
+                            break
+                    except Exception:
+                        continue
+                if _consent_clicked:
+                    # 检查是否到了完成页, 若仍在 consent 类页面则再点 (二次确认按钮场景)
+                    cur = (page.url or "").lower()
+                    if "oauth20_remoteconnect.srf" in cur or "/devicelogin/complete" in cur:
+                        break
+                    print(f"[{email}] consent 点击后 URL={cur[:120]} → 再轮检查", flush=True)
+                    await asyncio.sleep(2)
+                    _consent_clicked = False  # 允许下一轮再点 (Approve → Continue → Allow 多步)
+                else:
+                    break  # 完全没找到按钮 → 放弃
+            print(f"[{email}] consent 阶段完成, final={page.url[:120]}", flush=True)
 
             final_url = page.url
             content = await page.content()

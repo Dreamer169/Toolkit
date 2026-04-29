@@ -162,16 +162,70 @@ async function runOnce() {
 
         if (!accessToken) { stats.skipped++; return; }
 
-        // ── v8.46 — 禁用邮件扫描+自动点击 (保留 token 健康检查, 上面已完成) ──
-        // 历史 bug: live-verify-poller 跟 accounts.ts 的 Step3 polling 都点同一个
-        // verify 链接, 但 oobCode 是单次消费的. live-verify-poller 每 3s 跑赢 Step3
-        // (12s 启动延迟 + 30 轮 * 15s) → 抢先点击成功 → 把 outlook 标 replit_used,
-        // 但因为不知道 outlook ↔ replit 的关联, 没法把对应 replit 行写 status=registered.
-        // 与此同时 Step3 polling 拿到的链接已被消费 → "invalid or has been used"
-        // → verified=false → replit 行永远卡 status=unverified.
-        // 修复: 只保留 token 健康检查 (refresh_token 失败 → abuse_mode/token_invalid),
-        // 邮件扫描+点击完全交给 accounts.ts Step3 polling (它知道 outlook ↔ replit 关联).
-        // processMessage 函数体保留, 便于通过 git revert 快速恢复.
+        // ── v8.74 ROOT-FIX 2026-04-29 — 恢复邮件扫描, 加 race-fix ──
+        // v8.46 禁用扫描避免抢消费, 但导致超时/重启后的 Replit 验证邮件无人点.
+        // 修法: 仅当 outlook.email 在 accounts 表有对应 replit 行 (status IN unverified/stale/exists_no_password)
+        //       才触发扫描+点击; 点击成功后反向 UPDATE 该 replit 行 status='registered' + verified tag.
+        //       这样 poller 跟 Step3 协作: Step3 在 job 期间优先, poller 接管 timeout/restart 的孤儿.
+        const { query: q2, execute: ex2 } = await import("../db.js");
+        let replitRows: Array<{id:number;status:string|null;tags:string|null}> = [];
+        try {
+          replitRows = await q2<{id:number;status:string|null;tags:string|null}>(
+            `SELECT id,status,tags FROM accounts WHERE platform='replit' AND email=$1
+             AND COALESCE(status,'') IN ('unverified','stale','pending','exists_no_password')`,
+            [acc.email]
+          );
+        } catch (e) {
+          logger.warn({email: acc.email, err: String(e)}, "[live-verify] replit 行查询失败");
+        }
+        if (replitRows.length === 0) {
+          // 没有 pending Replit 注册 → 不点 (避免 oobCode 抢消费 + 误标 replit_used)
+          stats.ok++;
+          return;
+        }
+        // 拉取 verify 邮件 (未读, 主题含 verify/confirm/Replit)
+        let msgs: Array<{id:string;subject:string;receivedDateTime?:string}> = [];
+        try {
+          const listResp = await microsoftFetch(
+            `https://graph.microsoft.com/v1.0/me/messages?$top=20&$orderby=receivedDateTime%20desc&$select=id,subject,receivedDateTime,isRead`,
+            { headers: { Authorization: `Bearer ${accessToken}` } }
+          );
+          const list = await listResp.json() as { value?: Array<{id:string;subject:string;receivedDateTime?:string;isRead?:boolean}> };
+          msgs = (list.value || [])
+            .filter(m => !m.isRead)
+            .filter(m => {
+              const s = (m.subject || '').toLowerCase();
+              return s.includes('verify') || s.includes('confirm') || s.includes('replit');
+            });
+        } catch (e) {
+          logger.warn({email: acc.email, err: String(e)}, "[live-verify] 拉取邮件失败");
+          stats.skipped++;
+          return;
+        }
+        if (msgs.length === 0) { stats.ok++; return; }
+        // 处理每封 verify 邮件; 成功 click → 反向 UPDATE replit 行
+        for (const m of msgs) {
+          if (isRecentlyHandled(m.id)) continue;
+          const _clickedBefore = stats.clicked;
+          await processMessage(acc, m, accessToken, stats);
+          if (stats.clicked > _clickedBefore) {
+            for (const r of replitRows) {
+              try {
+                const newTags = Array.from(new Set([
+                  ...(r.tags || '').split(',').map(t => t.trim()).filter(Boolean),
+                  'verified', 'auto_verified_by_poller',
+                ])).join(',');
+                await ex2(
+                  `UPDATE accounts SET status='registered', tags=$1, updated_at=NOW() WHERE id=$2`,
+                  [newTags, r.id]
+                );
+                logger.info({outlookEmail: acc.email, replitId: r.id}, "[live-verify] ✅ 反向 UPDATE replit 行 status=registered");
+              } catch (e) {
+                logger.warn({replitId: r.id, err: String(e)}, "[live-verify] 反向 UPDATE replit 行失败");
+              }
+            }
+          }
+        }
         stats.ok++;
         return;
       } catch (e) {

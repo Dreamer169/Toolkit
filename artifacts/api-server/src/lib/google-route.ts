@@ -11,18 +11,25 @@ import { SocksClient } from "socks";
 import * as tls from "node:tls";
 import type { BrowserContext } from "playwright";
 
-// v8.48 ROOT-FIX: switch DEFAULT_POOL from Pool A (10820-10845, all CF Workers
-// AS13335, dead/timeout) to Pool B (10851-10859, real shadowsocks upstreams,
-// verified alive 2026-04-28). Pool A was causing all cf-warmup requests to
-// timeout at 120s (request aborted) -> signup_cf_js_challenge_timeout / code:1.
+// v8.72 REVERT to Pool A (10820-10845, CF Workers AS13335) — empirical 2026-04-29:
+// xray subscription rotated CF Worker pool to multi-IP distribution
+// (104.28.152.187 / 104.28.158.227 / 104.28.157.118 / 104.28.166.25 ...).
+// No more flatten-to-single-IP issue that motivated v8.48 Pool B switch.
+// CF cf_clearance + reCAPTCHA token now resolve correctly via Pool A again.
 const DEFAULT_POOL = [
-  "socks5://127.0.0.1:10857",  // ★★★ Chunghwa Telecom AS3462 (TW national ISP)
-  "socks5://127.0.0.1:10853",  // ★★ Fourplex Telecom AS27284 (US small telecom)
-  "socks5://127.0.0.1:10859",  // ★ Greenhost AS47172 (NL small hosting)
-  "socks5://127.0.0.1:10854",  // Vultr AS20473 (DC, KR)
-  "socks5://127.0.0.1:10855",  // M247 AS9009 (DC, GB)
-  "socks5://127.0.0.1:10851",  // Datacamp AS60068 (DC, US)
-  // 10852/10856/10858 DEAD; 10850 DEAD
+  "socks5://127.0.0.1:10820",  // CF Worker A (104.28.152.187 San Jose)
+  "socks5://127.0.0.1:10822",  // CF Worker A
+  "socks5://127.0.0.1:10824",  // CF Worker A
+  "socks5://127.0.0.1:10825",  // CF Worker A (★ historically clean)
+  "socks5://127.0.0.1:10828",  // CF Worker A
+  "socks5://127.0.0.1:10830",  // CF Worker A (104.28.157.118 San Jose)
+  "socks5://127.0.0.1:10832",  // CF Worker A
+  "socks5://127.0.0.1:10834",  // CF Worker A
+  "socks5://127.0.0.1:10836",  // CF Worker A
+  "socks5://127.0.0.1:10838",  // CF Worker A
+  "socks5://127.0.0.1:10840",  // CF Worker A (104.28.166.25 San Jose)
+  "socks5://127.0.0.1:10842",  // CF Worker A
+  "socks5://127.0.0.1:10845",  // CF Worker A
 ];
 
 function loadPool(): URL[] {
