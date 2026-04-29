@@ -199,4 +199,33 @@ export async function initDatabase(): Promise<void> {
   if (_bf.rowCount > 0) {
     process.stderr.write(`[db.init] v8.80 archives backfill: synced ${_bf.rowCount} rows from accounts → archives\n`);
   }
+
+  // v8.81 Bug Q ROOT-FIX: 6 处 DELETE FROM accounts 路径全部漏写 DELETE FROM archives → 历史 orphan
+  // 档案库残留无主数据. 加 AFTER DELETE trigger 自动级联, 永久解决 (用户意图 "彻底移除").
+  await execute(`
+    CREATE OR REPLACE FUNCTION cascade_delete_archives() RETURNS trigger AS $func$
+    BEGIN
+      IF OLD.platform = 'outlook' THEN
+        DELETE FROM archives WHERE platform = 'outlook' AND email = OLD.email;
+      END IF;
+      RETURN OLD;
+    END;
+    $func$ LANGUAGE plpgsql;
+  `);
+  await execute(`DROP TRIGGER IF EXISTS trg_cascade_delete_archives ON accounts`);
+  await execute(`
+    CREATE TRIGGER trg_cascade_delete_archives
+    AFTER DELETE ON accounts
+    FOR EACH ROW
+    EXECUTE FUNCTION cascade_delete_archives()
+  `);
+  // 启动时一次性清理已 orphan 的存量数据 (历史已删除账号的档案残留)
+  const _orphan = await execute(`
+    DELETE FROM archives ar
+     WHERE ar.platform = 'outlook'
+       AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.platform = 'outlook' AND a.email = ar.email)
+  `);
+  if (_orphan.rowCount > 0) {
+    process.stderr.write(`[db.init] v8.81 orphan cleanup: removed ${_orphan.rowCount} orphaned archives rows (account already deleted)\n`);
+  }
 }
