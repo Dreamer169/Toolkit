@@ -70,3 +70,5 @@ artifacts/api-server/data.db
 # auto-versioned backups (v8.x series)
 .backup_v*/
 *.bak_*
+tailscale-backup/
+tailscaled.state*
