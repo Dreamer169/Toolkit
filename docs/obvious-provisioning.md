@@ -193,3 +193,55 @@ jq '.[] | "\(.label)\t\(.egressIp)\t\(.tier // "?")\t\(.createdAt)"' -r \
 - 不要在 git 里提交 `<out-dir>` —— 已经在 `.gitignore` 加了
   `/root/obvious-accounts/`（如果你换路径要自己加）。
 - `storage_state.json` 含会话凭据，泄漏 = 被人冒用账号 + 烧光 credits。
+
+---
+
+## 十、obvious 当作 Replit 任务诊断助手
+
+### 背景：obvious 沙箱不能直接当 Replit 注册的 IP 池
+
+obvious 沙箱的 e2b 出口是 datacenter ASN（实测 47.83.x / 219.76.x /
+176.98.x），跟当前失败的 SOCKS sub-node 同类，**reCAPTCHA Enterprise 同样会拒**。
+所以不要把 obvious 接到 replit_register.py 的 attempt 链上。
+
+### 真正的用法：让 obvious 读 Toolkit 的失败任务日志，给可执行建议
+
+`scripts/obvious_diagnose.py` 把任意 `rpl_xxx` 任务的 logs + result 喂给
+obvious sandbox，让它在 deep / skill-builder 模式分析 → 输出 4 段结构化诊断
+(ROOT CAUSE / EVIDENCE / CHEAPEST FIX / INFRA RECOMMENDATION)。
+
+```bash
+# 单条任务深度诊断
+python3 /root/Toolkit/scripts/obvious_diagnose.py rpl_moj4wx0o_9kx2
+
+# 批量分析最近 5 条失败任务
+python3 /root/Toolkit/scripts/obvious_diagnose.py --tail 5
+
+# 指定其他账号 / 模式
+python3 /root/Toolkit/scripts/obvious_diagnose.py rpl_xxx \
+    --account /root/obvious-accounts/eu-test1 --mode skill-builder
+```
+
+实测：v8.71 patch 之前 6 条连续失败的 `captcha_token_invalid`，obvious 一句话定位
+"low-reputation exit IP fails reCAPTCHA Enterprise score gate"，并给出可直接落地的
+ASN allow/block 关键词列表 (Comcast / Verizon / BT / Orange 加分; M247 / OVH / Hetzner
+/ DigitalOcean / Vultr 减分)。
+
+### 注册前 IP 评分预检 (替代 obvious 直接当 IP 池)
+
+`scripts/replit_ip_probe.py` 用 `ip-api.com` 公开 API 给每个 SOCKS 端口实时打分
+(综合 ASN / hosting / mobile / residential 关键词)，broker 调度可以直接用：
+
+```bash
+# 表格 + 推荐
+python3 /root/Toolkit/scripts/replit_ip_probe.py
+
+# JSON 给 broker 解析
+python3 /root/Toolkit/scripts/replit_ip_probe.py --json --respect-cooldown
+
+# 只输出最佳 port 的 socks5 URL (适合 shell 嵌入)
+BEST=$(python3 /root/Toolkit/scripts/replit_ip_probe.py --pick --respect-cooldown)
+DISPLAY=:99 python3 replit_register.py --proxy "$BEST" ...
+```
+
+输出按 score 排序，> 0 的能打过 reCAPTCHA Enterprise，< 0 的几乎必拒。

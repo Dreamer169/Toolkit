@@ -1065,23 +1065,47 @@ router.post("/replit/register", (req, res) => {
               const _v840PostRe = /\[?step1|recaptcha|captcha_token|cf_api_blocked|account_rate_limited|isNewUser|sign-up POST|API=[45]\d\d|already.*use|too.quickly|signup_username_field_missing|signup_form_input_missing|cf_ip_banned|cf_hard_block|cf_js_challenge_timeout|turnstile/i;
               const _v840IsEarly = _v840EarlyRe.test(lastErr) && !_v840PostRe.test(lastErr);
               const _v840AlreadyUsed = lastErr.toLowerCase().includes("already") && lastErr.toLowerCase().includes("use");
+
+              // v8.71 ROOT-FIX 2026-04-30 — frontend_reject fast-path
+              // captcha_token_invalid / signup_form_input_missing / signup_spa_not_hydrated 等错误是
+              // 在 step1 POST 之前被本地校验拦下的 (Replit 客户端 grecaptcha.execute 拿到低分 token →
+              // 客户端 if(score<thresh) return 不发 POST), 后端 100% 没看到这个邮箱.
+              // ⇒ 跳过 8s 收件箱探针 (注定 0 邮件) + 改 break → continue (允许同邮箱换 port 重试).
+              // ⇒ 仍 burn port (说明该 IP 被 reCAPTCHA Enterprise 评分拦, 短期不会自愈).
+              // 实测影响: 旧逻辑单次浪费 8s probe + 3s click-verify-link API ≈ 11s/attempt;
+              //   3 attempts × 6 任务连失败 = 198s 完全浪费 + 6 outlook 被无效 break 释放. v8.71 后清零.
+              const _v840FrontendRejectRe = /^(captcha_token_invalid|signup_form_input_missing|signup_username_field_missing|signup_spa_not_hydrated|recaptcha_v2_audio_failed)/i;
+              const _v840FrontendReject = _v840FrontendRejectRe.test(lastErr);
+              if (_v840FrontendReject) {
+                const _bumpFr = bumpPortCooldown(tryPort, `frontend_reject:${lastErr.split(":")[0].slice(0,40)}`);
+                log(`    [v8.71 frontend-reject fast-path] ${lastErr.split(":")[0].slice(0,40)} 在 step1 POST 之前被前端拒 (后端 0 创建)`);
+                log(`    [port-burn v8.71] → port ${tryPort} 冷却 ${Math.round(_bumpFr.ms/60000)}min (level=${_bumpFr.level})`);
+                log(`    [v8.71] 同邮箱安全, 允许 attempt ${attempt+1} 换 port 重试`);
+                continue;
+              }
+
               if (lastErr && !_v840IsEarly && !_v840AlreadyUsed) {
-                log(`    [v8.40 attempt-rescue] attempt ${attempt} 失败, 后端可能已创建账号 → 8s 收件箱探针…`);
-                await new Promise(r => setTimeout(r, 8000));
+                log(`    [v8.40 attempt-rescue] attempt ${attempt} 失败, 后端可能已创建账号 → 多轮收件箱探针 (max 30s)…`);
+                // v8.71: 8s 单轮改 30s 多轮 (5s/13s/21s/30s 早返回). verify 邮件实测 15-30s 到达,
+                //   旧 8s 误判率高 → 同邮箱 break 浪费 outlook. 多轮探针: 早期探到立即停, 否则等满 30s.
                 let _v840Rescued = false;
                 let _v840Final = "";
-                try {
-                  const _v840R = await localPost("/api/tools/outlook/click-verify-link", { accountId: outlook.id }) as { success?: boolean; final_url?: string; verify_url?: string; error?: string };
-                  const _v840E = String(_v840R.error ?? "").toLowerCase();
-                  if (_v840R.success || _v840E.includes("invalid") || _v840E.includes("has been used") || _v840E.includes("已使用")) {
-                    _v840Rescued = true;
-                    _v840Final = String(_v840R.final_url ?? _v840R.verify_url ?? "").slice(0, 80);
-                    log(`    ✅ [v8.40 attempt-rescue] verify 邮件已到 → attempt ${attempt} 后端真创建; final=${_v840Final}`);
-                  } else {
-                    log(`    [v8.40 attempt-rescue] 8s 内无 verify 邮件 (${String(_v840R.error ?? "").slice(0, 80)}) → 后端可能未创建`);
+                const _v840Probes = [5000, 8000, 8000, 9000];  // 累计 5/13/21/30s
+                for (let _pi = 0; _pi < _v840Probes.length && !_v840Rescued; _pi++) {
+                  await new Promise(r => setTimeout(r, _v840Probes[_pi]));
+                  try {
+                    const _v840R = await localPost("/api/tools/outlook/click-verify-link", { accountId: outlook.id }) as { success?: boolean; final_url?: string; verify_url?: string; error?: string };
+                    const _v840E = String(_v840R.error ?? "").toLowerCase();
+                    if (_v840R.success || _v840E.includes("invalid") || _v840E.includes("has been used") || _v840E.includes("已使用")) {
+                      _v840Rescued = true;
+                      _v840Final = String(_v840R.final_url ?? _v840R.verify_url ?? "").slice(0, 80);
+                      log(`    ✅ [v8.40 attempt-rescue] verify 邮件已到 (probe ${_pi+1}/${_v840Probes.length}) → attempt ${attempt} 后端真创建; final=${_v840Final}`);
+                    } else if (_pi === _v840Probes.length - 1) {
+                      log(`    [v8.40 attempt-rescue] ${_v840Probes.reduce((a,b)=>a+b,0)/1000}s 内无 verify 邮件 (${String(_v840R.error ?? "").slice(0, 80)}) → 后端可能未创建`);
+                    }
+                  } catch (_v840Err) {
+                    log(`    [v8.40 attempt-rescue] probe ${_pi+1} 异常: ${String(_v840Err).slice(0, 80)}`);
                   }
-                } catch (_v840Err) {
-                  log(`    [v8.40 attempt-rescue] 探针异常: ${String(_v840Err).slice(0, 80)}`);
                 }
                 if (_v840Rescued) {
                   portLastGood.set(tryPort, Date.now());
