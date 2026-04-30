@@ -194,7 +194,7 @@ async function runCheck() {
          AND COALESCE(tags, '') LIKE '%needs_oauth_manual%'
          AND COALESCE(tags, '') NOT LIKE '%abuse_mode%'
          AND password IS NOT NULL AND password != ''
-         AND updated_at < NOW() - INTERVAL '12 hours'
+         AND updated_at < NOW() - INTERVAL '1 hour'
        ORDER BY updated_at ASC
        LIMIT 2`,
       []

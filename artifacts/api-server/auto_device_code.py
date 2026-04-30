@@ -80,7 +80,7 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
             ]
             for _kmsi_sel in kmsi_selectors:
                 try:
-                    _kbtn = await page.wait_for_selector(_kmsi_sel, timeout=4000, state="visible")
+                    _kbtn = await page.query_selector(_kmsi_sel)  # v8.87 Bug L: 即时返回, 不 4s 阻塞
                     if _kbtn:
                         await _kbtn.click()
                         print(f"[{email}] ✅ KMSI 点 Yes: {_kmsi_sel}", flush=True)
@@ -105,30 +105,64 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                 '#idSIButton9',
                 '[data-testid="primaryButton"]',
             ]
-            _consent_clicked = False
+            # v8.84 Bug F: 严格终态判定 = action=remoteConnectComplete OR 显式完成文案
+            # oauth20_remoteconnect.srf 是 device-flow BASE URL, 包含 enterCode/login/consentApproval/complete 所有阶段,
+            # 不能当终态指标. 真终态: ?action=remoteConnectComplete (服务端跳转) OR 页面显式说"已登录/可以关闭".
+            def _is_real_done(_u: str, _c: str) -> bool:
+                _ul = (_u or "").lower(); _cl = (_c or "").lower()
+                if "action=remoteconnectcomplete" in _ul: return True
+                if "/devicelogin/complete" in _ul: return True
+                if any(t in _cl for t in ["device login is complete","you have signed in","you can now close this window","you can close this window"]): return True
+                if any(t in _c for t in ["可以关闭此窗口","已经登录","登录成功","授权已完成"]): return True
+                return False
+
+            # v8.88 Bug M: consent 一旦点成功立刻 break, 不再过度点
+            # (#idSIButton9 是 MS 通用 primary, 多次点会把"完成页"按钮也点了→跳回起始页).
+            _consent_clicked_once = False
+            _real_done = False
             for _retry in range(3):
+                _round_clicked = False
                 for _csel in consent_selectors:
                     try:
-                        _cbtn = await page.wait_for_selector(_csel, timeout=4000, state="visible")
-                        if _cbtn:
-                            await _cbtn.click()
-                            print(f"[{email}] ✅ Consent 点击 ({_retry+1}/3): {_csel}", flush=True)
-                            await asyncio.sleep(4)
-                            _consent_clicked = True
-                            break
+                        _btn_found = await page.query_selector(_csel)
+                        if _btn_found:
+                            _is_visible = await _btn_found.is_visible()
+                            if _is_visible:
+                                await _btn_found.click()
+                                print(f"[{email}] ✅ Consent 点击 ({_retry+1}/3): {_csel}", flush=True)
+                                await asyncio.sleep(6)
+                                _consent_clicked_once = True
+                                _round_clicked = True
+                                break
                     except Exception:
                         continue
-                if _consent_clicked:
-                    # 检查是否到了完成页, 若仍在 consent 类页面则再点 (二次确认按钮场景)
-                    cur = (page.url or "").lower()
-                    if "oauth20_remoteconnect.srf" in cur or "/devicelogin/complete" in cur:
-                        break
-                    print(f"[{email}] consent 点击后 URL={cur[:120]} → 再轮检查", flush=True)
-                    await asyncio.sleep(2)
-                    _consent_clicked = False  # 允许下一轮再点 (Approve → Continue → Allow 多步)
-                else:
-                    break  # 完全没找到按钮 → 放弃
-            print(f"[{email}] consent 阶段完成, final={page.url[:120]}", flush=True)
+                # 真终态优先检查
+                try:
+                    _content_now = await page.content()
+                except Exception:
+                    _content_now = ""
+                if _is_real_done(page.url or "", _content_now):
+                    _real_done = True
+                    print(f"[{email}] ✅ 真终态 round={_retry+1}", flush=True)
+                    break
+                # v8.88: 本轮成功 click → 立即 break, 让外层判定 (避免 round2/3 过度点)
+                if _round_clicked:
+                    print(f"[{email}] ✓ consent 已点, 跳出 loop 让后端 pollForToken 验证", flush=True)
+                    break
+                # 没找到按钮 → 等 2.5s 重试 (页面可能还在渲染)
+                await asyncio.sleep(2.5)
+
+            # v8.84: 循环结束后再 8s 兜底等待 + 二次读 URL/content (有时 MS 跳转延迟)
+            if not _real_done:
+                await asyncio.sleep(8)
+                try:
+                    _final_content = await page.content()
+                except Exception:
+                    _final_content = ""
+                if _is_real_done(page.url or "", _final_content):
+                    _real_done = True
+                    print(f"[{email}] ✅ 兜底等待后检测到真终态 URL={(page.url or '')[:140]}", flush=True)
+            print(f"[{email}] consent 阶段完成, real_done={_real_done} final={(page.url or '')[:140]}", flush=True)
 
             final_url = page.url
             content = await page.content()
@@ -173,14 +207,21 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                 )
                 # 同时满足 (终端 URL) 或 (终端 URL+ 完成文案), 才算真完成
                 # 防止落到 microsoft.com 主页/marketing 页 chrome 含 "signed in" 误判
-                if _is_done_endpoint and (_has_explicit_done_text or "oauth20_remoteconnect.srf" in _u):
+                # v8.84 Bug F: 移除 "oauth20_remoteconnect.srf in _u" OR 短路漏洞.
+                _has_done_action = "action=remoteconnectcomplete" in _u
+                _has_devicelogin_complete = "/devicelogin/complete" in _u
+                # v8.88 Bug M: _consent_clicked_once=True 也认 "done" (乐观)
+                # 真终态 URL 检测在 SPA/重定向场景常 miss, 但 consent 已点 → 设备码大概率被消费,
+                # 后端 pollForToken 90s 内会真校验 (拿到 token=真成功, 90s 超时=真失败再标 manual).
+                if (_real_done or _has_done_action or _has_devicelogin_complete or _has_explicit_done_text
+                    or _consent_clicked_once):
                     result["status"] = "done"
-                    result["msg"] = "授权成功"
-                    print(f"[{email}] ✅ 授权成功！URL={final_url[:120]}", flush=True)
+                    result["msg"] = "consent 已点 (待 pollForToken 校验)" if _consent_clicked_once and not _real_done else "授权成功"
+                    print(f"[{email}] ✅ 返回 done (consent_clicked={_consent_clicked_once} real_done={_real_done}) URL={final_url[:140]}", flush=True)
                 else:
                     result["status"] = "error"
-                    result["msg"] = f"最终页面非完成端点: {final_url[:120]}"
-                    print(f"[{email}] ⚠ 授权未完成 (final_url={final_url[:120]} done_endpoint={_is_done_endpoint} done_text={_has_explicit_done_text})", flush=True)
+                    result["msg"] = f"未检测到 consent 按钮: {final_url[:120]}"
+                    print(f"[{email}] ⚠ 未点过 consent (final_url={final_url[:120]})", flush=True)
 
             await browser.close()
     except Exception as e:

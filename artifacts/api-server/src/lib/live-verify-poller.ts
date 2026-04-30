@@ -133,10 +133,24 @@ async function runOnce() {
     // ── 单账号处理（并发调用）────────────────────────────────────────────
     const processOneAccount = async (acc: { id: number; email: string; token: string | null; refresh_token: string | null }) => {
       try {
+        // v8.85 Bug G: 先做 replit-row 廉价 DB 查询门控, 没 pending 直接 return
+        // 省掉 ~95% 无意义的 MS token refresh + Graph API 调用 (旧版每 3s 全量调).
+        const { query: _qGate } = await import("../db.js");
+        const _gateRows = await _qGate<{id:number}>(
+          `SELECT id FROM accounts WHERE platform='replit' AND email=$1
+           AND COALESCE(status,'') IN ('unverified','stale','pending','exists_no_password') LIMIT 1`,
+          [acc.email]
+        ).catch(() => [] as Array<{id:number}>);
+        if (_gateRows.length === 0) { stats.ok++; return; }
+
+        // v8.86 Bug K: 解析一次代理, 复用于 refreshToken + Graph API 调用
+        // (旧版裸 IP 出, 7账号同源高频 → MS 风控聚合特征).
+        const _proxy = getMicrosoftBrowserProxy();
+
         let accessToken = "";
 
         if (acc.refresh_token) {
-          const result = await refreshToken(acc.refresh_token);
+          const result = await refreshToken(acc.refresh_token, _proxy);
           if (result.token) {
             accessToken = result.token;
           } else {
@@ -188,7 +202,8 @@ async function runOnce() {
         try {
           const listResp = await microsoftFetch(
             `https://graph.microsoft.com/v1.0/me/messages?$top=20&$orderby=receivedDateTime%20desc&$select=id,subject,receivedDateTime,isRead`,
-            { headers: { Authorization: `Bearer ${accessToken}` } }
+            { headers: { Authorization: `Bearer ${accessToken}` } },
+            _proxy  // v8.86 Bug K: 与 refreshToken 同代理, 维持出向 IP 一致
           );
           const list = await listResp.json() as { value?: Array<{id:string;subject:string;receivedDateTime?:string;isRead?:boolean}> };
           msgs = (list.value || [])
@@ -207,7 +222,7 @@ async function runOnce() {
         for (const m of msgs) {
           if (isRecentlyHandled(m.id)) continue;
           const _clickedBefore = stats.clicked;
-          await processMessage(acc, m, accessToken, stats);
+          await processMessage(acc, m, accessToken, stats, _proxy);  // v8.86 Bug K: 同代理
           if (stats.clicked > _clickedBefore) {
             for (const r of replitRows) {
               try {
@@ -392,11 +407,13 @@ async function processMessage(
   }
 }
 
-export function startLiveVerifyPoller(intervalMs = 3_000) {
+export function startLiveVerifyPoller(intervalMs = 30_000) {
+  // v8.85 Bug G: 默认 3s → 30s. 验证邮件到达后 30s 检出仍秒级响应,
+  // 但 MS API 调用频次降到 1/10, 长跑不再触发 service abuse 风控.
   if (_intervalId) clearInterval(_intervalId);
   if (_enabled) runOnce().catch(() => {});
   _intervalId = setInterval(() => {
     if (_enabled) runOnce().catch(() => {});
   }, intervalMs);
-  logger.info({ intervalMs }, "[live-verify] 实时验证轮询已启动（每 3 秒）");
+  logger.info({ intervalMs }, "[live-verify] 实时验证轮询已启动");
 }
