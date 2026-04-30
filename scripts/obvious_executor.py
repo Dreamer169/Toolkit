@@ -42,9 +42,9 @@ HEALTH_PROMPT = """Run these commands in your sandbox and print all output:
 ```bash
 echo '=== sandbox info ==='
 uname -a && df -h /home/user && free -m | head -2
-echo '=== proxy tunnel ==='
-pgrep -a ssh | grep 'L 1080' || echo NO_SSH_TUNNEL
-curl -s --max-time 8 -x socks5h://127.0.0.1:1080 https://api.ipify.org && echo || echo PROXY_DOWN
+echo '=== proxy relay check ==='
+EXIT_IP=$(curl -s --max-time 10 --proxy 'socks5h://obv:Obv@R3layS3cr3t_2026@45.205.27.69:19857' https://api.ipify.org 2>/dev/null)
+echo "EXIT_IP=${EXIT_IP:-FAILED}"
 echo '=== playwright ==='
 python3 -c "from playwright.sync_api import sync_playwright; print('PLAYWRIGHT_OK')" 2>&1
 echo '=== credits ==='
@@ -64,7 +64,7 @@ from playwright.async_api import async_playwright
 EMAIL = "{email}"
 PASSWORD = "{password}"
 USERNAME = "{username}"
-PROXY = "socks5://127.0.0.1:1080"
+PROXY = "socks5://45.205.27.69:19857"  # VPS SOCKS5 relay → xray住宅
 
 def rand_str(n): return ''.join(random.choices(string.ascii_lowercase, k=n))
 
@@ -74,12 +74,13 @@ async def register():
         browser = await p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage",
-                  f"--proxy-server={{PROXY}}"],
+                  "--disable-blink-features=AutomationControlled"],
         )
         ctx = await browser.new_context(
             viewport={{"width": 1366, "height": 768}},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             locale="en-US", timezone_id="America/New_York",
+            proxy={"server": "socks5://45.205.27.69:19857", "username": "obv", "password": "Obv@R3layS3cr3t_2026"},
         )
 
         # Warmup: visit google first

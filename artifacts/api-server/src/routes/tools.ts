@@ -4126,17 +4126,24 @@ router.post("/tools/obvious/diagnose", async (req, res) => {
 });
 
 router.post("/tools/obvious/bridge/setup", async (req, res) => {
-  const { account = "eu-test1", port = 10857 } = req.body as { account?: string; port?: number };
   try {
     const { execFileSync } = await import("child_process");
-    const out = execFileSync(PYTHON, [
-      path.join(OBVIOUS_SCRIPTS_DIR, "obvious_ssh_bridge.py"),
-      "--setup", "--account", account, "--port", String(port),
-      "--acc-dir", OBVIOUS_ACC_DIR,
-    ], { encoding: "utf8", timeout: 240000, env: { ...process.env, PYTHONUNBUFFERED: "1" } });
-    const ok = out.includes("EXIT_IP=") && !out.includes("EXIT_IP=FAILED") && !out.includes("EXIT_IP=NO_TUNNEL");
-    const m = out.match(/EXIT_IP=([\d.]+)/);
-    res.json({ success: ok, exitIp: m ? m[1] : null, output: out.slice(-800) });
+    // 检查SOCKS5中继健康 (obvious_proxy_relay.py已作为pm2进程运行)
+    const relayOut = execFileSync(PYTHON, [
+      path.join(OBVIOUS_SCRIPTS_DIR, "obvious_proxy_relay.py"), "--health",
+    ], { encoding: "utf8", timeout: 15000, env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+    const relayOk = relayOut.includes("RELAY_STATUS=OK");
+    // 验证住宅出口IP (通过中继连接ipify)
+    let exitIp: string | null = null;
+    try {
+      const ipOut = execFileSync("curl", [
+        "-s", "--max-time", "10",
+        "--proxy", "socks5h://obv:Obv%40R3layS3cr3t_2026@127.0.0.1:19857",
+        "https://api.ipify.org",
+      ], { encoding: "utf8", timeout: 15000 });
+      exitIp = ipOut.trim().match(/^\d{1,3}(\.\d{1,3}){3}$/) ? ipOut.trim() : null;
+    } catch (_) { exitIp = null; }
+    res.json({ success: relayOk, exitIp, relay: relayOut.slice(0, 400) });
   } catch (e: unknown) { res.status(500).json({ success: false, error: String(e) }); }
 });
 

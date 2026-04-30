@@ -39,7 +39,7 @@ Report ALL print() output. Do NOT add explanations.
 import asyncio, json, time
 from playwright.async_api import async_playwright
 
-PROXY = "socks5://127.0.0.1:1080"  # SSH bridge to VPS residential
+PROXY = "socks5://45.205.27.69:19857"  # SSH bridge to VPS residential
 
 async def warmup():
     results = {}
@@ -47,7 +47,7 @@ async def warmup():
         browser = await p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage",
-                  f"--proxy-server={PROXY}"],
+                  f"--proxy-server=socks5://45.205.27.69:19857"],
         )
         ctx = await browser.new_context(
             viewport={"width": 1280, "height": 800},
