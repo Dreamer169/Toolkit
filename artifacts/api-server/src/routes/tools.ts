@@ -4090,7 +4090,7 @@ router.post("/tools/sub2api/disable/:id", async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Obvious 沙箱 — 诊断 + 池状态 + SSH桥触发 + 热身 + 注册
 // ─────────────────────────────────────────────────────────────────────────────
-const _OBV_WS = process.cwd().endsWith("/artifacts/api-server") ? path.resolve(process.cwd(), "../..") : process.cwd(); const OBVIOUS_SCRIPTS_DIR = path.resolve(_OBV_WS, "scripts");
+const PYTHON = process.env.PYTHON_BIN || 'python3'; const _OBV_WS = process.cwd().endsWith("/artifacts/api-server") ? path.resolve(process.cwd(), "../..") : process.cwd(); const OBVIOUS_SCRIPTS_DIR = path.resolve(_OBV_WS, "scripts");
 const OBVIOUS_ACC_DIR = "/root/obvious-accounts";
 
 router.get("/tools/obvious/status", async (_req, res) => {
@@ -4098,7 +4098,6 @@ router.get("/tools/obvious/status", async (_req, res) => {
     const { execFileSync } = await import("child_process");
     const out = execFileSync(PYTHON, [
       path.join(OBVIOUS_SCRIPTS_DIR, "obvious_pool.py"), "status",
-      "--acc-dir", OBVIOUS_ACC_DIR,
     ], { encoding: "utf8", timeout: 30000, env: { ...process.env, PYTHONUNBUFFERED: "1" } });
     res.json({ success: true, output: out });
   } catch (e: unknown) {
@@ -4115,7 +4114,7 @@ router.post("/tools/obvious/diagnose", async (req, res) => {
       "--mode", mode, "--acc-dir", OBVIOUS_ACC_DIR];
     if (jobId) args.push(jobId);
     if (tail > 0) args.push("--tail", String(tail));
-    const child = spawn(PYTHON, args, { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+    const { spawn: _spawnObv } = await import("child_process"); const child = _spawnObv(PYTHON, args, { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
     jobQueue.setChild(created.jobId, child);
     child.stdout?.on("data", (d: Buffer) => {
       d.toString().split("\n").filter(Boolean).forEach(l =>
@@ -4147,7 +4146,7 @@ router.post("/tools/obvious/warmup", async (req, res) => {
     const created = await jobQueue.create("obvious_warmup_" + Date.now());
     const args = [path.join(OBVIOUS_SCRIPTS_DIR, "obvious_warmup.py"),
       "--account", account, "--acc-dir", OBVIOUS_ACC_DIR];
-    const child = spawn(PYTHON, args, { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+    const { spawn: _spawnObv } = await import("child_process"); const child = _spawnObv(PYTHON, args, { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
     jobQueue.setChild(created.jobId, child);
     child.stdout?.on("data", (d: Buffer) => {
       d.toString().split("\n").filter(Boolean).forEach(l =>
@@ -4165,7 +4164,7 @@ router.post("/tools/obvious/register", async (req, res) => {
     const created = await jobQueue.create("obvious_reg_" + Date.now());
     const args = [path.join(OBVIOUS_SCRIPTS_DIR, "obvious_executor.py"),
       "--register", "--email", email, "--account", account, "--acc-dir", OBVIOUS_ACC_DIR];
-    const child = spawn(PYTHON, args, { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+    const { spawn: _spawnObv } = await import("child_process"); const child = _spawnObv(PYTHON, args, { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
     jobQueue.setChild(created.jobId, child);
     child.stdout?.on("data", (d: Buffer) => {
       d.toString().split("\n").filter(Boolean).forEach(l =>
