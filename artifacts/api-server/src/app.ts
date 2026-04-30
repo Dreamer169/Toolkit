@@ -1,6 +1,7 @@
 import express, { type Express, type ErrorRequestHandler } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
+import { createProxyMiddleware } from "http-proxy-middleware";
 import router from "./routes";
 import tunnelRouter from "./routes/tunnel";
 import { logger } from "./lib/logger";
@@ -44,34 +45,27 @@ app.get("/v1/models", (_req, res) => {
   });
 });
 
+// v8.83 — frontend 反代: 所有未被上面路由消费的请求转发到本机前端 dev server (:3000)
+// 这样 api-server (:8081) 单一公网入口同时承载 API + 前端，省一条 frp 隧道
+const FRONTEND_TARGET = process.env["FRONTEND_PROXY_TARGET"] ?? "http://127.0.0.1:3000";
+const _frontendProxy = createProxyMiddleware({
+  target: FRONTEND_TARGET,
+  changeOrigin: true,
+  ws: true,
+  xfwd: true,
+  on: {
+    error: (err, _req, res) => {
+      logger.warn({ err: String(err) }, "[frontend-proxy] upstream :3000 unavailable");
+      const r = res as unknown as { headersSent?: boolean; writeHead?: (s: number, h: Record<string, string>) => void; end?: (b: string) => void };
+      if (r.writeHead && !r.headersSent) {
+        r.writeHead(502, { "content-type": "text/plain; charset=utf-8" });
+        r.end?.("frontend dev server (:3000) is not running");
+      }
+    },
+  },
+});
+app.use(_frontendProxy);
 
-  app.get("/", (_req, res) => {
-    res.setHeader("Content-Type", "text/html");
-    res.send([
-      '<!DOCTYPE html><html lang="zh">',
-      '<head><meta charset="UTF-8"><title>AI Proxy Gateway</title>',
-      '<style>',
-      'body{background:#0f172a;color:#e2e8f0;font-family:sans-serif;padding:40px;max-width:700px;margin:0 auto}',
-      'h1{color:#a78bfa;margin-bottom:4px}',
-      'code{background:#1e293b;border:1px solid #334155;border-radius:6px;padding:2px 8px;color:#818cf8}',
-      '.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:20px;margin:16px 0}',
-      '.g{color:#34d399}.m{color:#94a3b8;margin:0}',
-      '</style></head><body>',
-      '<h1>&#9889; AI Proxy Gateway</h1>',
-      '<p class="m">OpenAI Compatible · Sub-Node Connection Interface</p>',
-      '<div class="card">',
-      '<p class="g">&#10003; Service Running</p>',
-      '<p><code>GET  /health</code></p>',
-      '<p><code>GET  /v1/models</code></p>',
-      '<p><code>POST /v1/chat/completions</code></p>',
-      '<p><code>GET  /api/healthz</code></p>',
-      '<p><code>GET  /api/gateway/nodes/status</code></p>',
-      '</div>',
-      '<div class="card">Base URL: <code>https://strive-phoney-vocalize.ngrok-free.dev</code></div>',
-      '</body></html>',
-    ].join(""));
-  });
-  
 const jsonErrorHandler: ErrorRequestHandler = (err, _req, res, next) => {
   if (err.type === "entity.parse.failed") {
     res.status(400).json({ error: "Invalid JSON body" });
