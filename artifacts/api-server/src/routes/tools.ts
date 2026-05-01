@@ -4201,6 +4201,46 @@ router.post('/tools/obvious/sandbox/exec', async (req, res) => {
   } catch (e: unknown) { res.status(500).json({ success: false, error: String(e) }); }
 });
 
+// POST /tools/obvious/sandbox/install — pip install packages into the obvious sandbox on demand
+// Body: { account?, packages }   packages: string | string[]
+// Returns: { success, jobId } — poll /api/tools/obvious/job/:jobId for stdout/status
+router.post('/tools/obvious/sandbox/install', async (req, res) => {
+  const { account = 'eu-test1', packages } =
+    req.body as { account?: string; packages?: string | string[] };
+  if (!packages || (Array.isArray(packages) && packages.length === 0)) {
+    res.status(400).json({ success: false, error: 'packages required (string or string[])' }); return;
+  }
+  const pkgList = (Array.isArray(packages) ? packages : String(packages).split(/[\s,]+/))
+    .map((p: string) => p.trim()).filter(Boolean);
+  const invalid = pkgList.filter((p: string) => !/^[A-Za-z0-9._\-\[\]>=<!~^,]+$/.test(p));
+  if (invalid.length > 0) {
+    res.status(400).json({ success: false, error: 'invalid package name(s): ' + invalid.join(', ') }); return;
+  }
+  const safeList = pkgList.map((p: string) => JSON.stringify(p));
+  try {
+    const created = await jobQueue.create('obvious_pip_' + Date.now());
+    const wrapperCode = `
+import sys, pathlib
+sys.path.insert(0, ${JSON.stringify(OBVIOUS_SCRIPTS_DIR)})
+from obvious_sandbox import ObviousSandbox
+sb = ObviousSandbox.from_account(${JSON.stringify(account)}, acc_dir=pathlib.Path(${JSON.stringify(OBVIOUS_ACC_DIR)}))
+pkgs = [${safeList.join(', ')}]
+print("[sandbox]", repr(sb), "installing:", pkgs, file=sys.stderr)
+out = sb.shell("pip install --quiet " + " ".join(pkgs))
+print(out)
+pkg0 = pkgs[0].split(">=")[0].split("<=")[0].split("==")[0].split("!=")[0].split("[")[0].replace("-","_")
+try:
+    __import__(pkg0)
+    print("[install] import OK:", pkg0)
+except ImportError:
+    print("[install] note: module name may differ from package name:", pkg0)
+`.trim();
+    _spawnObviousJob(created.jobId, ['-c', wrapperCode]);
+    res.json({ success: true, jobId: created.jobId, packages: pkgList,
+               message: 'pip install started — poll /api/tools/obvious/job/' + created.jobId });
+  } catch (e: unknown) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
 // POST /tools/obvious/register — obvious沙箱内注册Replit账号
 // Body: { email, account?, proxy? }
 router.post('/tools/obvious/register', async (req, res) => {
