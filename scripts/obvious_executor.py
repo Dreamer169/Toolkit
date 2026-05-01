@@ -212,7 +212,7 @@ def _collect_failed_jobs(n: int) -> list[str]:
     return ids
 
 
-def _ask_account(acc_dir: Path, prompt: str, mode: str = "fast", timeout: float = 300) -> str:
+def _ask_account(acc_dir: Path, prompt: str, mode: str = "auto", timeout: float = 300) -> str:
     m = json.loads((acc_dir / "manifest.json").read_text())
     client = ObviousClient.from_storage_state(
         str(acc_dir / "storage_state.json"),

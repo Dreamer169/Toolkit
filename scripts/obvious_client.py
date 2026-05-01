@@ -111,20 +111,75 @@ class ObviousClient:
         return json.loads(b)["messages"]
 
     def get_agent_status(self) -> str | None:
+        import json as _json
         s, b = self._request("GET", f"/hydrate/project/{self.project_id}")
         if s != 200:
             return None
-        # body is a sequence of newline-separated JSON or single doc;
-        # quick string scan is sufficient
+        # hydrate returns newline-separated JSON objects (SSE-like stream)
+        for line in b.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = _json.loads(line)
+                data = obj.get("data") or {}
+                status = data.get("agentStatus")
+                if status:
+                    return status
+            except Exception:
+                pass
+        # fallback string scan
         idx = b.find('"agentStatus"')
         if idx < 0:
             return None
-        # parse value
         chunk = b[idx:idx + 80]
-        for sentinel in ('"running"', '"completed"', '"idle"', '"error"', '"failed"'):
-            if sentinel in chunk:
-                return sentinel.strip('"')
+        for sentinel in ("running", "completed", "idle", "error", "failed"):
+            if f'"' + sentinel + '"' in chunk:
+                return sentinel
         return None
+
+    def get_sandbox_paused(self) -> bool | None:
+        """Check if the e2b sandbox is paused via project metadata API."""
+        import json as _json
+        s, b = self._request("GET", f"/projects/{self.project_id}")
+        if s != 200:
+            return None
+        try:
+            j = _json.loads(b)
+            return j.get("metadata", {}).get("sandbox", {}).get("isPaused")
+        except Exception:
+            return None
+
+    def wake_sandbox(self, ping_timeout: float = 90.0) -> bool:
+        """Wake paused sandbox by sending a ping message and waiting for completion."""
+        import time as _time
+        paused = self.get_sandbox_paused()
+        if paused is False:
+            return True
+        try:
+            baseline = len(self.get_messages())
+            body = {
+                "message": "ping",
+                "messageId": __import__("uuid").uuid4().hex,
+                "projectId": self.project_id,
+                "fileIds": [],
+                "modeId": self.mode,
+                "timezone": self.timezone,
+            }
+            s, _ = self._request("POST", f"/api/v2/agent/chat/{self.thread_id}", body)
+            if s != 200:
+                return False
+            deadline = _time.time() + ping_timeout
+            while _time.time() < deadline:
+                _time.sleep(3.0)
+                status = self.get_agent_status()
+                if status in ("completed", "idle"):
+                    return True
+                if status in ("error", "failed"):
+                    return False
+        except Exception:
+            pass
+        return False
 
     # ---- chat workflow --------------------------------------------------
 
@@ -184,7 +239,14 @@ class ObviousClient:
                 elif c.get("type") == "tool-result":
                     cid = c.get("toolCallId")
                     out = c.get("output") or c.get("result") or {}
-                    val = (out.get("value") or {}).get("data") or {}
+                    # error-text: run-shell unavailable (fast mode or paused sandbox)
+                    if out.get("type") == "error-text":
+                        if cid in calls:
+                            calls[cid]["stderr"] = str(out.get("value", "tool unavailable"))
+                            calls[cid]["exitCode"] = -2
+                        continue
+                    val_wrap = out.get("value") or {}
+                    val = (val_wrap.get("data") if isinstance(val_wrap, dict) else {}) or {}
                     if cid in calls:
                         calls[cid]["stdout"] = val.get("stdout", "")
                         calls[cid]["stderr"] = val.get("stderr", "")

@@ -84,7 +84,7 @@ class Account:
     def write_health(self, h: dict) -> None:
         _atomic_write(self.health_path, json.dumps(h, indent=2))
 
-    def _make_client(self, mode: str = "fast") -> ObviousClient:
+    def _make_client(self, mode: str = "auto") -> ObviousClient:
         m = self.manifest
         return ObviousClient.from_storage_state(
             str(self.storage_path),
@@ -204,7 +204,7 @@ class ObviousPool:
         return [a for a, _ in out]
 
     @contextlib.contextmanager
-    def acquire(self, min_credits: float = 0.5, mode: str = "fast",
+    def acquire(self, min_credits: float = 0.5, mode: str = "auto",
                 wait_seconds: float = 30.0):
         """Acquire least-loaded healthy account; lock its thread; yield client."""
         deadline = time.time() + wait_seconds
@@ -224,7 +224,7 @@ class ObviousPool:
         raise RuntimeError(f"acquire timeout: {last_err}")
 
     def dispatch_batch(self, prompts: list[str], max_concurrent: int = 3,
-                       mode: str = "fast", min_credits: float = 0.5,
+                       mode: str = "auto", min_credits: float = 0.5,
                        wait_per_acquire: float = 60.0) -> list[dict]:
         """Run N prompts across the pool concurrently. Returns list of
         {prompt, label, ok, text|error, durationMs} in input order."""
@@ -318,10 +318,10 @@ def main(argv):
     sub.add_parser("status", help="print health table (uses cached health if fresh)")
     sub.add_parser("refresh", help="force re-probe all accounts")
     p_ask = sub.add_parser("ask", help="single ask via best healthy account")
-    p_ask.add_argument("prompt"); p_ask.add_argument("--mode", default="fast")
+    p_ask.add_argument("prompt"); p_ask.add_argument("--mode", default="auto")
     p_ask.add_argument("--min-credits", type=float, default=0.5)
     p_batch = sub.add_parser("batch", help="run prompts from file (one/line) concurrently")
-    p_batch.add_argument("file"); p_batch.add_argument("--mode", default="fast")
+    p_batch.add_argument("file"); p_batch.add_argument("--mode", default="auto")
     p_batch.add_argument("--concurrent", type=int, default=3)
     p_maint = sub.add_parser("maintain", help="provision new accounts up to target")
     p_maint.add_argument("--target", type=int, default=3)
