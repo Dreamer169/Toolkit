@@ -24,6 +24,7 @@ async def repair(label: str, headless: bool):
         print(f'[repair] ERROR: no storage_state for {label}'); return
 
     mf = json.loads(mf_path.read_text()) if mf_path.exists() else {}
+    email_addr = mf.get('email', '')
     proxy_url = mf.get('proxy')
     print(f'[repair] {label}  proxy={proxy_url}  headless={headless}')
 
@@ -56,6 +57,38 @@ async def repair(label: str, headless: bool):
         print('[repair] navigating to app.obvious.ai ...')
         await page.goto('https://app.obvious.ai', wait_until='load', timeout=60000)
         await page.screenshot(path=str(shots_dir/'repair_01_home.png'))
+
+        # -- 1b. re-login if session expired --
+        cur_url = page.url
+        if '/login' in cur_url or '/signin' in cur_url or 'app.obvious.ai' not in cur_url:
+            print(f'[repair] session expired url={cur_url}  re-login...')
+            pwd = mf.get('password', '')
+            if not email_addr or not pwd:
+                print('[repair] ERROR: no creds in manifest'); await browser.close(); return
+            await page.goto('https://app.obvious.ai/login', wait_until='domcontentloaded', timeout=30000)
+            await asyncio.sleep(3)
+            inputs = await page.query_selector_all('input')
+            for el in inputs:
+                ph = (await el.get_attribute('placeholder') or '').lower()
+                typ = (await el.get_attribute('type') or 'text').lower()
+                if typ == 'email' or 'email' in ph:
+                    await el.click(); await el.type(email_addr, delay=20)
+                elif typ == 'password' or 'password' in ph:
+                    await el.click(); await el.type(pwd, delay=20)
+            clicked = await page.evaluate(
+                "() => { for(const b of document.querySelectorAll('button')){ "
+                "const t=(b.innerText||'').trim().toLowerCase(); "
+                "if(['sign in','log in','login','signin','continue'].includes(t)){b.click();return t;} } return null; }")
+            print(f'[repair] login btn={clicked}')
+            await asyncio.sleep(8)
+            await page.screenshot(path=str(shots_dir/'repair_01b_login.png'))
+            cur2 = page.url
+            print(f'[repair] after-login url={cur2}')
+            if '/login' in cur2 or '/signin' in cur2:
+                print('[repair] ERROR: still on login page'); await browser.close(); return
+            import json as _json
+            ss_path.write_text(_json.dumps(await ctx.storage_state()))
+            print('[repair] session refreshed')
 
         # ── 2. 找或点击「New project / + 」按钮 ──
         new_btn = None
