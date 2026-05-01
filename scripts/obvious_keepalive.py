@@ -2,16 +2,15 @@
 """
 obvious_keepalive.py — Sandbox keepalive daemon for obvious.ai e2b sandboxes.
 
-Strategy:
-  Every PING_INTERVAL seconds:
-    1. GET https://49999-{sandboxId}.e2b.app/health
-       → 200 "OK"  : sandbox alive → also POST a lightweight execute to warm kernel
-       → non-200   : sandbox dead  → wake via obvious AI chat, poll for new sandboxId,
-                                     update index.json + manifest.json
-  Keeps ALL accounts in index.json alive simultaneously.
+Every PING_INTERVAL seconds for every account in index.json:
+  - If sandbox health 200: execute no-op to warm Jupyter kernel too  → ✓ alive
+  - If sandbox dead/missing: send "run: print(1)" to obvious AI chat,
+    poll until sandboxId appears and is not paused, then persist new ID  → revived
 
-Run: python3 obvious_keepalive.py
-PM2: pm2 start obvious_keepalive.py --name obvious-keepalive --interpreter python3
+Env vars:
+  OBVIOUS_ACC_DIR        default /root/obvious-accounts
+  OBVIOUS_PING_INTERVAL  default 120 (seconds between ticks)
+  OBVIOUS_WAKE_TIMEOUT   default 150 (seconds to wait for sandbox after ping)
 """
 from __future__ import annotations
 
@@ -21,15 +20,16 @@ import os
 import sys
 import time
 import uuid
+import urllib.request
+import urllib.error
 from pathlib import Path
 
-# ── config ────────────────────────────────────────────────────────────────────
-ACC_DIR     = Path(os.environ.get("OBVIOUS_ACC_DIR", "/root/obvious-accounts"))
-PING_INTERVAL = int(os.environ.get("OBVIOUS_PING_INTERVAL", "120"))   # seconds
-WAKE_TIMEOUT  = int(os.environ.get("OBVIOUS_WAKE_TIMEOUT",  "120"))   # seconds
-API_BASE    = "https://api.app.obvious.ai/prepare"
+# ── config ─────────────────────────────────────────────────────────────────────
+ACC_DIR       = Path(os.environ.get("OBVIOUS_ACC_DIR", "/root/obvious-accounts"))
+PING_INTERVAL = int(os.environ.get("OBVIOUS_PING_INTERVAL", "120"))
+WAKE_TIMEOUT  = int(os.environ.get("OBVIOUS_WAKE_TIMEOUT",  "150"))
+API_BASE      = "https://api.app.obvious.ai/prepare"
 
-# ── logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [keepalive] %(levelname)s %(message)s",
@@ -38,9 +38,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── HTTP helper (stdlib-only) ─────────────────────────────────────────────────
-import urllib.request
-import urllib.error
+# ── HTTP (stdlib) ───────────────────────────────────────────────────────────────
 
 def _http(method: str, url: str, body: dict | None = None,
           headers: dict | None = None, timeout: float = 15.0) -> tuple[int, str]:
@@ -57,15 +55,28 @@ def _http(method: str, url: str, body: dict | None = None,
     except Exception as e:
         return -1, str(e)
 
-# ── account helpers ───────────────────────────────────────────────────────────
+# ── index helpers ───────────────────────────────────────────────────────────────
 
 def load_index() -> list[dict]:
     p = ACC_DIR / "index.json"
     return json.loads(p.read_text()) if p.exists() else []
 
 def save_index(accounts: list[dict]) -> None:
-    p = ACC_DIR / "index.json"
-    p.write_text(json.dumps(accounts, indent=2, ensure_ascii=False))
+    (ACC_DIR / "index.json").write_text(json.dumps(accounts, indent=2, ensure_ascii=False))
+
+def _persist_sandbox(label: str, sandbox_id: str) -> None:
+    """Write new sandboxId into both index.json and manifest.json."""
+    mp = ACC_DIR / label / "manifest.json"
+    if mp.exists():
+        m = json.loads(mp.read_text())
+        m["sandboxId"] = sandbox_id
+        mp.write_text(json.dumps(m, indent=2))
+    accs = load_index()
+    for a in accs:
+        if a["label"] == label:
+            a["sandboxId"] = sandbox_id
+            break
+    save_index(accs)
 
 def _cookies(label: str) -> str:
     state = json.loads((ACC_DIR / label / "storage_state.json").read_text())
@@ -77,22 +88,7 @@ def _cookies(label: str) -> str:
 def _manifest(label: str) -> dict:
     return json.loads((ACC_DIR / label / "manifest.json").read_text())
 
-def _save_sandbox_id(label: str, sandbox_id: str) -> None:
-    """Persist sandboxId into both index.json and manifest.json."""
-    # manifest
-    mp = ACC_DIR / label / "manifest.json"
-    m  = json.loads(mp.read_text())
-    m["sandboxId"] = sandbox_id
-    mp.write_text(json.dumps(m, indent=2))
-    # index
-    accounts = load_index()
-    for a in accounts:
-        if a["label"] == label:
-            a["sandboxId"] = sandbox_id
-            break
-    save_index(accounts)
-
-# ── sandbox health ─────────────────────────────────────────────────────────────
+# ── sandbox checks ──────────────────────────────────────────────────────────────
 
 def sandbox_alive(sandbox_id: str) -> bool:
     if not sandbox_id:
@@ -100,88 +96,91 @@ def sandbox_alive(sandbox_id: str) -> bool:
     s, _ = _http("GET", f"https://49999-{sandbox_id}.e2b.app/health", timeout=8)
     return s == 200
 
-def ping_kernel(sandbox_id: str) -> bool:
-    """Execute a no-op to keep the Jupyter kernel warm."""
-    s, _ = _http("POST", f"https://49999-{sandbox_id}.e2b.app/execute",
-                 body={"code": "1", "language": "python"}, timeout=10)
-    return s == 200
+def warm_kernel(sandbox_id: str) -> None:
+    """Fire-and-forget no-op execute to keep Jupyter kernel warm."""
+    _http("POST", f"https://49999-{sandbox_id}.e2b.app/execute",
+          body={"code": "1", "language": "python"}, timeout=10)
 
-# ── wake logic ────────────────────────────────────────────────────────────────
+# ── wake ────────────────────────────────────────────────────────────────────────
 
 def wake_sandbox(label: str) -> str | None:
-    """Send AI chat ping → poll until sandbox is live → return new sandboxId."""
+    """
+    Send a code-execution message to obvious AI to trigger sandbox allocation.
+    Polls project info every 4s until sandboxId appears and is not paused.
+    Returns new sandboxId or None on failure.
+    """
     try:
         manifest = _manifest(label)
         thread_id  = manifest.get("threadId")
         project_id = manifest.get("projectId")
     except Exception as e:
-        log.error("[%s] cannot read manifest: %s", label, e)
+        log.error("[%s] manifest error: %s", label, e)
         return None
 
     if not thread_id or not project_id:
-        log.warning("[%s] missing threadId/projectId in manifest — skipping", label)
+        log.warning("[%s] missing threadId/projectId — skipping", label)
         return None
 
     cookies = _cookies(label)
     headers = {
-        "Cookie":    cookies,
+        "Cookie":     cookies,
         "Content-Type": "application/json",
-        "Origin":    "https://app.obvious.ai",
-        "Referer":   "https://app.obvious.ai/",
+        "Origin":     "https://app.obvious.ai",
+        "Referer":    "https://app.obvious.ai/",
         "User-Agent": "Mozilla/5.0 obvious-keepalive/1.0",
     }
 
-    # send minimal chat message to trigger sandbox allocation
+    # "run: print(1)" reliably triggers code execution → sandbox allocation
     body = {
-        "message":                  "1",
-        "messageId":                uuid.uuid4().hex,
-        "projectId":                project_id,
-        "visibleRecords":           [],
-        "fileIds":                  [],
-        "modeId":                   "auto",
-        "isIntentionalModeChange":  True,
-        "timezone":                 "UTC",
-        "deliveryMode":             "queued",
+        "message":               "run: print(1)",
+        "messageId":             uuid.uuid4().hex,
+        "projectId":             project_id,
+        "visibleRecords":        [],
+        "fileIds":               [],
+        "modeId":                "auto",
+        "isIntentionalModeChange": True,
+        "timezone":              "UTC",
+        "deliveryMode":          "queued",
     }
     s, b = _http("POST", f"{API_BASE}/api/v2/agent/chat/{thread_id}", body, headers, timeout=20)
     if s != 200:
-        log.error("[%s] wake ping failed: %s %s", label, s, b[:120])
+        log.error("[%s] wake ping failed %s: %s", label, s, b[:120])
         return None
-    log.info("[%s] wake ping sent, polling for sandbox...", label)
+    log.info("[%s] wake ping sent (executionId=%s), polling...",
+             label, json.loads(b).get("executionId", "?"))
 
-    # poll project info until sandboxId appears and is not paused
     deadline = time.time() + WAKE_TIMEOUT
     while time.time() < deadline:
         time.sleep(4)
         s2, b2 = _http("GET", f"{API_BASE}/projects/{project_id}/info",
                         headers=headers, timeout=10)
         if s2 == 200:
-            meta = json.loads(b2).get("metadata", {}).get("sandbox", {})
+            meta   = json.loads(b2).get("metadata", {}).get("sandbox", {})
             sb_id  = meta.get("sandboxId")
             paused = meta.get("isPaused", True)
             if sb_id and not paused:
                 log.info("[%s] sandbox live: %s", label, sb_id)
-                _save_sandbox_id(label, sb_id)
+                _persist_sandbox(label, sb_id)
                 return sb_id
         else:
-            log.warning("[%s] project info %s", label, s2)
+            log.warning("[%s] project info returned %s", label, s2)
 
-    log.error("[%s] sandbox did not come up within %ds", label, WAKE_TIMEOUT)
+    log.error("[%s] sandbox did not appear within %ds — account may lack code-exec access",
+              label, WAKE_TIMEOUT)
     return None
 
-# ── main loop ─────────────────────────────────────────────────────────────────
+# ── main loop ───────────────────────────────────────────────────────────────────
 
 def tick() -> None:
     accounts = load_index()
     if not accounts:
-        log.warning("index.json empty or missing at %s", ACC_DIR)
+        log.warning("index.json empty or missing — nothing to keep alive")
         return
 
     for acc in accounts:
-        label     = acc.get("label", "?")
+        label      = acc.get("label", "?")
         sandbox_id = acc.get("sandboxId") or ""
 
-        # skip accounts without a project configured
         if not (ACC_DIR / label / "manifest.json").exists():
             log.debug("[%s] no manifest, skipping", label)
             continue
@@ -190,24 +189,24 @@ def tick() -> None:
             continue
 
         if sandbox_alive(sandbox_id):
-            ping_kernel(sandbox_id)
+            warm_kernel(sandbox_id)
             log.info("[%s] ✓ alive (%s)", label, sandbox_id)
         else:
-            log.warning("[%s] ✗ dead (sandbox=%s) — waking", label, sandbox_id or "none")
+            log.warning("[%s] ✗ dead (was: %s) — waking", label, sandbox_id or "none")
             new_id = wake_sandbox(label)
             if new_id:
                 log.info("[%s] ✓ revived → %s", label, new_id)
             else:
-                log.error("[%s] ✗ revive failed", label)
+                log.error("[%s] ✗ revive failed (will retry next tick)", label)
 
 def main() -> None:
-    log.info("obvious-keepalive starting (interval=%ds acc_dir=%s)", PING_INTERVAL, ACC_DIR)
+    log.info("obvious-keepalive starting  interval=%ds  acc_dir=%s", PING_INTERVAL, ACC_DIR)
     while True:
         try:
             tick()
         except Exception as e:
-            log.exception("tick() crashed: %s", e)
-        log.info("sleeping %ds", PING_INTERVAL)
+            log.exception("tick() error: %s", e)
+        log.info("sleeping %ds until next tick", PING_INTERVAL)
         time.sleep(PING_INTERVAL)
 
 if __name__ == "__main__":
