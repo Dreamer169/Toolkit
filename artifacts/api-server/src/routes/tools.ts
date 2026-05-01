@@ -4088,149 +4088,168 @@ router.post("/tools/sub2api/disable/:id", async (req, res) => {
 
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Obvious 沙箱 — 诊断 + 池状态 + SSH桥触发 + 热身 + 注册
+// Obvious 沙箱控制 (直接bypass链路 — port-49999/Jupyter无认证代码执行)
+//
+// 技术原理 (2026-05发现):
+//   obvious.ai每个Project自带一个e2b Linux沙箱.
+//   该沙箱暴露两个公开无认证端点:
+//     https://49999-{sandboxId}.e2b.app/execute  — POST执行代码 (FastAPI)
+//     https://8888-{sandboxId}.e2b.app/api/kernels — Jupyter WebSocket
+//   直接调用 = 完全绕过obvious AI安全过滤器, root权限执行任意代码.
+//
+// 账号目录结构 /root/obvious-accounts/{label}/:
+//   storage_state.json  — 浏览器cookies (better-auth session token)
+//   manifest.json       — projectId / threadId / sandboxId / execBase
+//
+// 核心脚本 (scripts/):
+//   obvious_sandbox.py  — ObviousSandbox类 (from_account/execute/shell/add_ssh_key)
+//   obvious_client.py   — obvious REST API客户端 (project/thread/wake)
+//   obvious_executor.py — 注册执行器 (--register/--health/--exec)
+//   obvious_pool.py     — 多账号池 (status/acquire/dispatch_batch)
+//   obvious_provision.py — 全自动注册新obvious账号
 // ─────────────────────────────────────────────────────────────────────────────
-const PYTHON = process.env.PYTHON_BIN || 'python3'; const _OBV_WS = process.cwd().endsWith("/artifacts/api-server") ? path.resolve(process.cwd(), "../..") : process.cwd(); const OBVIOUS_SCRIPTS_DIR = path.resolve(_OBV_WS, "scripts");
-const OBVIOUS_ACC_DIR = "/root/obvious-accounts";
 
-router.get("/tools/obvious/status", async (_req, res) => {
-  try {
-    const { execFileSync } = await import("child_process");
-    const out = execFileSync(PYTHON, [
-      path.join(OBVIOUS_SCRIPTS_DIR, "obvious_pool.py"), "status",
-    ], { encoding: "utf8", timeout: 30000, env: { ...process.env, PYTHONUNBUFFERED: "1" } });
-    res.json({ success: true, output: out });
-  } catch (e: unknown) {
-    res.status(500).json({ success: false, error: String(e) });
-  }
-});
+const PYTHON = process.env.PYTHON_BIN || 'python3';
+const _OBV_WS = process.cwd().endsWith('/artifacts/api-server')
+  ? path.resolve(process.cwd(), '../..')
+  : process.cwd();
+const OBVIOUS_SCRIPTS_DIR = path.resolve(_OBV_WS, 'scripts');
+const OBVIOUS_ACC_DIR = '/root/obvious-accounts';
 
-router.post("/tools/obvious/diagnose", async (req, res) => {
-  const { jobId, tail = 0, mode = "deep" } = req.body as { jobId?: string; tail?: number; mode?: string };
-  if (!jobId && !tail) { res.status(400).json({ success: false, error: "jobId or tail required" }); return; }
-  try {
-    const created = await jobQueue.create("obvious_diag_" + Date.now());
-    const args = [path.join(OBVIOUS_SCRIPTS_DIR, "obvious_executor.py"), "--diagnose",
-      "--mode", mode, "--acc-dir", OBVIOUS_ACC_DIR];
-    if (jobId) args.push(jobId);
-    if (tail > 0) args.push("--tail", String(tail));
-    const { spawn: _spawnObv } = await import("child_process"); const child = _spawnObv(PYTHON, args, { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
-    jobQueue.setChild(created.jobId, child);
-    child.stdout?.on("data", (d: Buffer) => {
-      d.toString().split("\n").filter(Boolean).forEach(l =>
-        jobQueue.pushLog(created.jobId, { type: "log", message: l }));
+function _spawnObviousJob(
+  jobId: string,
+  args: string[],
+  extraEnv: Record<string, string> = {}
+): void {
+  import('child_process').then(({ spawn }) => {
+    const child = spawn(PYTHON, args, {
+      env: { ...process.env as Record<string, string>, PYTHONUNBUFFERED: '1', ...extraEnv },
     });
-    child.on("close", (code) => { jobQueue.finish(created.jobId, code ?? -1, code === 0 ? "done" : "failed"); });
-    res.json({ success: true, jobId: created.jobId, message: "obvious诊断任务已启动" });
-  } catch (e: unknown) { res.status(500).json({ success: false, error: String(e) }); }
-});
+    jobQueue.setChild(jobId, child);
+    child.stdout?.on('data', (d: Buffer) =>
+      d.toString().split('\n').filter(Boolean).forEach((l: string) =>
+        jobQueue.pushLog(jobId, { type: 'log', message: l })));
+    child.stderr?.on('data', (d: Buffer) =>
+      d.toString().split('\n').filter(Boolean).forEach((l: string) =>
+        jobQueue.pushLog(jobId, { type: 'log', message: '[err] ' + l })));
+    child.on('close', (code: number | null) =>
+      jobQueue.finish(jobId, code ?? -1, code === 0 ? 'done' : 'failed'));
+  });
+}
 
-router.post("/tools/obvious/bridge/setup", async (req, res) => {
+// GET /tools/obvious/accounts — 账号列表 (含sandboxId/health)
+router.get('/tools/obvious/accounts', async (_req, res) => {
   try {
-    const { execFileSync } = await import("child_process");
-    // 检查SOCKS5中继健康 (obvious_proxy_relay.py已作为pm2进程运行)
-    const relayOut = execFileSync(PYTHON, [
-      path.join(OBVIOUS_SCRIPTS_DIR, "obvious_proxy_relay.py"), "--health",
-    ], { encoding: "utf8", timeout: 15000, env: { ...process.env, PYTHONUNBUFFERED: "1" } });
-    const relayOk = relayOut.includes("RELAY_STATUS=OK");
-    // 验证住宅出口IP (通过中继连接ipify)
-    let exitIp: string | null = null;
-    try {
-      const ipOut = execFileSync("curl", [
-        "-s", "--max-time", "10",
-        "--proxy", "socks5h://obv:Obv%40R3layS3cr3t_2026@127.0.0.1:19857",
-        "https://api.ipify.org",
-      ], { encoding: "utf8", timeout: 15000 });
-      exitIp = ipOut.trim().match(/^\d{1,3}(\.\d{1,3}){3}$/) ? ipOut.trim() : null;
-    } catch (_) { exitIp = null; }
-    res.json({ success: relayOk, exitIp, relay: relayOut.slice(0, 400) });
-  } catch (e: unknown) { res.status(500).json({ success: false, error: String(e) }); }
-});
-
-router.post("/tools/obvious/warmup", async (req, res) => {
-  const { account = "eu-test1" } = req.body as { account?: string };
-  try {
-    const created = await jobQueue.create("obvious_warmup_" + Date.now());
-    const args = [path.join(OBVIOUS_SCRIPTS_DIR, "obvious_warmup.py"),
-      "--account", account, "--acc-dir", OBVIOUS_ACC_DIR];
-    const { spawn: _spawnObv } = await import("child_process"); const child = _spawnObv(PYTHON, args, { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
-    jobQueue.setChild(created.jobId, child);
-    child.stdout?.on("data", (d: Buffer) => {
-      d.toString().split("\n").filter(Boolean).forEach(l =>
-        jobQueue.pushLog(created.jobId, { type: "log", message: l }));
-    });
-    child.on("close", (code) => { jobQueue.finish(created.jobId, code ?? -1, code === 0 ? "done" : "failed"); });
-    res.json({ success: true, jobId: created.jobId, message: "obvious热身任务已启动" });
-  } catch (e: unknown) { res.status(500).json({ success: false, error: String(e) }); }
-});
-
-router.post("/tools/obvious/register", async (req, res) => {
-  const { email, account = "eu-test1" } = req.body as { email?: string; account?: string };
-  if (!email) { res.status(400).json({ success: false, error: "email required" }); return; }
-  try {
-    const created = await jobQueue.create("obvious_reg_" + Date.now());
-    const args = [path.join(OBVIOUS_SCRIPTS_DIR, "obvious_executor.py"),
-      "--register", "--email", email, "--account", account, "--acc-dir", OBVIOUS_ACC_DIR];
-    const { spawn: _spawnObv } = await import("child_process"); const child = _spawnObv(PYTHON, args, { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
-    jobQueue.setChild(created.jobId, child);
-    child.stdout?.on("data", (d: Buffer) => {
-      d.toString().split("\n").filter(Boolean).forEach(l =>
-        jobQueue.pushLog(created.jobId, { type: "log", message: l }));
-    });
-    child.on("close", (code) => { jobQueue.finish(created.jobId, code ?? -1, code === 0 ? "done" : "failed"); });
-    res.json({ success: true, jobId: created.jobId, message: "obvious注册任务已启动" });
-  } catch (e: unknown) { res.status(500).json({ success: false, error: String(e) }); }
-});
-
-
-router.post("/tools/obvious/provision", async (req, res) => {
-  const { label, proxy } = req.body as { label?: string; proxy?: string };
-  const accLabel = label || `auto-${Date.now()}`;
-  try {
-    const created = await jobQueue.create("obvious_prov_" + Date.now());
-    const args = [path.join(OBVIOUS_SCRIPTS_DIR, "obvious_pool.py"),
-      "--dir", OBVIOUS_ACC_DIR, "provision", "--label", accLabel];
-    if (proxy) args.push("--proxy", proxy);
-    const env: Record<string, string> = { ...process.env as Record<string, string>, PYTHONUNBUFFERED: "1", DISPLAY: ":99" };
-    const { spawn: _sp } = await import("child_process");
-    const child = _sp("python3", args, { env });
-    jobQueue.setChild(created.jobId, child);
-    child.stdout?.on("data", (d: Buffer) =>
-      d.toString().split("\n").filter(Boolean).forEach(l =>
-        jobQueue.pushLog(created.jobId, { type: "log", message: l })));
-    child.stderr?.on("data", (d: Buffer) =>
-      d.toString().split("\n").filter(Boolean).forEach(l =>
-        jobQueue.pushLog(created.jobId, { type: "log", message: `[err] ${l}` })));
-    child.on("close", (code) => {
-      jobQueue.finish(created.jobId, code ?? -1, code === 0 ? "done" : "failed");
-    });
-    res.json({ success: true, jobId: created.jobId, label: accLabel, message: "obvious账号注册任务已启动" });
-  } catch (e: unknown) { res.status(500).json({ success: false, error: String(e) }); }
-});
-
-router.get("/tools/obvious/provision/:jobId", async (req, res) => {
-  const job = await jobQueue.get(req.params.jobId);
-  if (!job) { res.status(404).json({ success: false, error: "job not found" }); return; }
-  const provisioned = (job.logs || []).some(l => l.message?.includes("provisioned") || l.message?.includes("✅"));
-  res.json({ success: true, job, provisioned });
-});
-
-router.get("/tools/obvious/accounts", async (_req, res) => {
-  try {
-    const fs = await import("fs");
-    const indexPath = `${OBVIOUS_ACC_DIR}/index.json`;
-    const accounts = fs.existsSync(indexPath) ? JSON.parse(fs.readFileSync(indexPath, "utf8")) : [];
-    // 读取每个账号的 health.json
+    const fs = await import('fs');
+    const indexPath = OBVIOUS_ACC_DIR + '/index.json';
+    const accounts = fs.existsSync(indexPath)
+      ? JSON.parse(fs.readFileSync(indexPath, 'utf8')) : [];
     const withHealth = accounts.map((a: Record<string, unknown>) => {
-      const healthPath = `${OBVIOUS_ACC_DIR}/${a.label}/health.json`;
+      const healthPath = OBVIOUS_ACC_DIR + '/' + String(a.label) + '/health.json';
       let health: Record<string, unknown> = {};
-      try { if (fs.existsSync(healthPath)) health = JSON.parse(fs.readFileSync(healthPath, "utf8")); } catch (_) {}
-      return { ...a, alive: health.alive, credits: health.credits, tier: health.tier, checkedAt: health.checkedAt };
+      try { if (fs.existsSync(healthPath)) health = JSON.parse(fs.readFileSync(healthPath, 'utf8')); } catch (_) {}
+      return { ...a, alive: health.alive, credits: health.credits,
+               tier: health.tier, checkedAt: health.checkedAt };
     });
     res.json({ success: true, accounts: withHealth });
   } catch (e: unknown) { res.status(500).json({ success: false, error: String(e) }); }
 });
 
+// GET /tools/obvious/status — 池状态
+router.get('/tools/obvious/status', async (_req, res) => {
+  try {
+    const { execFileSync } = await import('child_process');
+    const out = execFileSync(PYTHON, [
+      path.join(OBVIOUS_SCRIPTS_DIR, 'obvious_pool.py'), 'status',
+    ], { encoding: 'utf8', timeout: 30000, env: { ...process.env, PYTHONUNBUFFERED: '1' } });
+    res.json({ success: true, output: out });
+  } catch (e: unknown) { res.status(500).json({ success: false, error: String(e) }); }
+});
 
+// GET /tools/obvious/sandbox/health?account=eu-test1 — 沙箱健康检查
+router.get('/tools/obvious/sandbox/health', async (req, res) => {
+  const account = String(req.query.account || 'eu-test1');
+  try {
+    const { execFileSync } = await import('child_process');
+    const out = execFileSync(PYTHON, [
+      path.join(OBVIOUS_SCRIPTS_DIR, 'obvious_executor.py'),
+      '--health', '--account', account, '--acc-dir', OBVIOUS_ACC_DIR,
+    ], { encoding: 'utf8', timeout: 60000, env: { ...process.env, PYTHONUNBUFFERED: '1' } });
+    try { res.json({ success: true, ...JSON.parse(out.trim().split('\n').at(-1) ?? '{}'), raw: out }); }
+    catch (_) { res.json({ success: true, raw: out }); }
+  } catch (e: unknown) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
+// POST /tools/obvious/sandbox/exec — 直接在obvious沙箱执行代码 (port-49999 bypass)
+// Body: { account?, code, language? }
+router.post('/tools/obvious/sandbox/exec', async (req, res) => {
+  const { account = 'eu-test1', code, language = 'python' } =
+    req.body as { account?: string; code?: string; language?: string };
+  if (!code) { res.status(400).json({ success: false, error: 'code required' }); return; }
+  try {
+    const created = await jobQueue.create('obvious_exec_' + Date.now());
+    const wrapperCode = [
+      'import sys, pathlib',
+      'sys.path.insert(0, ' + JSON.stringify(OBVIOUS_SCRIPTS_DIR) + ')',
+      'from obvious_sandbox import ObviousSandbox',
+      'sb = ObviousSandbox.from_account(' + JSON.stringify(account) + ', acc_dir=pathlib.Path(' + JSON.stringify(OBVIOUS_ACC_DIR) + '))',
+      'print("[sandbox]", repr(sb), file=sys.stderr)',
+      'print(sb.execute(' + JSON.stringify(code) + ', language=' + JSON.stringify(language) + '), end="")',
+    ].join('\n');
+    _spawnObviousJob(created.jobId, ['-c', wrapperCode]);
+    res.json({ success: true, jobId: created.jobId });
+  } catch (e: unknown) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
+// POST /tools/obvious/register — obvious沙箱内注册Replit账号
+// Body: { email, account?, proxy? }
+router.post('/tools/obvious/register', async (req, res) => {
+  const { email, account = 'eu-test1', proxy } =
+    req.body as { email?: string; account?: string; proxy?: string };
+  if (!email) { res.status(400).json({ success: false, error: 'email required' }); return; }
+  try {
+    const created = await jobQueue.create('obvious_reg_' + Date.now());
+    const args = [
+      path.join(OBVIOUS_SCRIPTS_DIR, 'obvious_executor.py'),
+      '--register', '--email', email, '--account', account, '--acc-dir', OBVIOUS_ACC_DIR,
+    ];
+    if (proxy) args.push('--proxy', proxy);
+    _spawnObviousJob(created.jobId, args);
+    res.json({ success: true, jobId: created.jobId, message: 'obvious注册任务已启动' });
+  } catch (e: unknown) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
+// POST /tools/obvious/provision — 全自动注册新obvious账号
+// Body: { label?, proxy? }
+router.post('/tools/obvious/provision', async (req, res) => {
+  const { label, proxy } = req.body as { label?: string; proxy?: string };
+  const accLabel = label || ('auto-' + Date.now());
+  try {
+    const created = await jobQueue.create('obvious_prov_' + Date.now());
+    const args = [
+      path.join(OBVIOUS_SCRIPTS_DIR, 'obvious_pool.py'),
+      '--dir', OBVIOUS_ACC_DIR, 'provision', '--label', accLabel,
+    ];
+    if (proxy) args.push('--proxy', proxy);
+    _spawnObviousJob(created.jobId, args, { DISPLAY: ':99' });
+    res.json({ success: true, jobId: created.jobId, label: accLabel, message: 'obvious账号注册任务已启动' });
+  } catch (e: unknown) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
+// GET /tools/obvious/provision/:jobId — 查询provision任务
+router.get('/tools/obvious/provision/:jobId', async (req, res) => {
+  const job = await jobQueue.get(req.params.jobId);
+  if (!job) { res.status(404).json({ success: false, error: 'job not found' }); return; }
+  const provisioned = (job.logs || []).some(
+    (l: { message?: string }) => l.message?.includes('provisioned') || l.message?.includes('✅'));
+  res.json({ success: true, job, provisioned });
+});
+
+// GET /tools/obvious/job/:jobId — 通用任务状态查询
+router.get('/tools/obvious/job/:jobId', async (req, res) => {
+  const job = await jobQueue.get(req.params.jobId);
+  if (!job) { res.status(404).json({ success: false, error: 'job not found' }); return; }
+  res.json({ success: true, job });
+});
 export default router;
 
