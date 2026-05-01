@@ -4291,5 +4291,22 @@ router.get('/tools/obvious/job/:jobId', async (req, res) => {
   if (!job) { res.status(404).json({ success: false, error: 'job not found' }); return; }
   res.json({ success: true, job });
 });
+
+// POST /tools/obvious/repair — 修复账号 null projectId/threadId/sandboxId
+// Body: { label: string, headless?: boolean }
+router.post("/tools/obvious/repair", async (req, res) => {
+  const { label, headless } = req.body as { label: string; headless?: boolean };
+  if (!label) { res.status(400).json({ success: false, error: "label is required" }); return; }
+  try {
+    const created = await jobQueue.create("obvious_repair_" + Date.now());
+    const args = [
+      path.join(OBVIOUS_SCRIPTS_DIR, "repair_account.py"),
+      "--label", label,
+    ];
+    if (headless) args.push("--headless");
+    _spawnObviousJob(created.jobId, args, { DISPLAY: ":99" });
+    res.json({ success: true, jobId: created.jobId, label, message: "repair 任务已启动，poll /api/tools/obvious/job/" + created.jobId });
+  } catch (e: unknown) { res.status(500).json({ success: false, error: String(e) }); }
+});
 export default router;
 
