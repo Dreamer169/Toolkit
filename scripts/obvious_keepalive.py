@@ -159,8 +159,25 @@ def _get_session(label: str) -> requests.Session:
 # Credit management
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _check_credits_remaining(label: str, session: requests.Session) -> float:
+    """Return actual remaining creditBalance from /workspaces API (NOT usage counter).
+    This is the REAL money left in the account, not the display counter.
+    """
+    hdr = _headers(label)
+    s, b = _http("GET", _BASE + "/workspaces", headers=hdr, session=session)
+    if s != 200:
+        return -1.0
+    try:
+        wks_list = json.loads(b).get("workspaces", [])
+        if not wks_list:
+            return -1.0
+        return float(wks_list[0].get("creditBalance") or 0.0)
+    except Exception:
+        return -1.0
+
+
 def _check_credits(label: str, session: requests.Session) -> float:
-    """Return totalCredits consumed for this account's workspace."""
+    """Return totalCredits consumed (usage counter) — kept for backward compat."""
     mf  = _load_manifest(label)
     wid = mf.get("workspaceId", "")
     if not wid:
@@ -221,30 +238,55 @@ def _reset_credits(label: str, session: requests.Session) -> int:
 
 def _auto_reset_credits(label: str, session: requests.Session,
                         threshold: float = CREDIT_RESET_THRESHOLD) -> None:
-    """Check credits and reset if >= threshold. Updates manifest after reset."""
-    credits = _check_credits(label, session)
-    if credits < threshold:
-        log.info("[%s] credits=%.2f (ok, below %.1f)", label, credits, threshold)
+    """Check REAL remaining creditBalance and act:
+
+      remaining < 3.0               → mark dead (truly out of money, reset won't help)
+      remaining >= 3.0              → account healthy, log and continue
+      remaining >= 5.0 AND          → optionally clean up usage counter
+        consumed >= 10.0
+
+    Bug fixed: old code read totalCredits-CONSUMED from /usage API which resets to 0
+    after project deletion, making depleted accounts look healthy.  Now we read the
+    actual billing creditBalance from /workspaces which never resets artificially.
+    """
+    remaining = _check_credits_remaining(label, session)
+    if remaining < 0:
+        log.warning("[%s] credit check failed (proxy/cookie/API error)", label)
         return
-    log.warning("[%s] credits=%.2f >= threshold %.1f — resetting ...",
-                label, credits, threshold)
-    n = _reset_credits(label, session)
-    credits_after = _check_credits(label, session)
-    log.info("[%s] reset done: deleted %d projects, credits %.2f → %.2f",
-             label, n, credits, credits_after)
-    # After reset the project/thread are gone — update manifest to reflect this
-    mf = _load_manifest(label)
-    mf["creditResetAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    mf["creditResetFrom"] = round(credits, 4)
-    # Clear project/thread/sandbox since they're deleted
-    # (they'll be recreated on next from_account() call)
-    mf["projectId"]   = None
-    mf["threadId"]    = None
-    mf["sandboxId"]   = None
-    mf["execBase"]    = None
-    mf["jupyterBase"] = None
-    (ACC_DIR / label / "manifest.json").write_text(
-        json.dumps(mf, indent=2, ensure_ascii=False))
+
+    # Genuinely out of money — mark dead so autoprovision replaces this account
+    if remaining < 3.0:
+        log.warning("[%s] remaining=%.2f < 3.0 — marking dead (credits truly depleted)",
+                    label, remaining)
+        mf = _load_manifest(label)
+        if mf.get("status") != "dead":
+            mf["status"]     = "dead"
+            mf["deadReason"] = "credit_depleted"
+            mf["deadAt"]     = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            (ACC_DIR / label / "manifest.json").write_text(
+                json.dumps(mf, indent=2, ensure_ascii=False))
+        return
+
+    log.info("[%s] credits=%.2f remaining (healthy)", label, remaining)
+
+    # Cosmetic: reset usage counter when it gets large AND we still have headroom.
+    # This keeps dashboard clean and avoids confusion — but does NOT restore balance.
+    consumed = _check_credits(label, session)
+    if consumed >= 10.0 and remaining >= 5.0:
+        log.info("[%s] consumed=%.2f >= 10 & remaining=%.2f >= 5 — cleaning counter",
+                 label, consumed, remaining)
+        n = _reset_credits(label, session)
+        log.info("[%s] counter reset: deleted %d projects", label, n)
+        mf = _load_manifest(label)
+        mf["creditResetAt"]   = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        mf["creditResetFrom"] = round(consumed, 4)
+        mf["projectId"]       = None
+        mf["threadId"]        = None
+        mf["sandboxId"]       = None
+        mf["execBase"]        = None
+        mf["jupyterBase"]     = None
+        (ACC_DIR / label / "manifest.json").write_text(
+            json.dumps(mf, indent=2, ensure_ascii=False))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
