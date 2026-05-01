@@ -346,6 +346,77 @@ def _chat_wake(label: str, session: requests.Session) -> str | None:
     return None
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sandbox resource initialization (run once after wake)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SANDBOX_INIT_CODE = r"""
+import subprocess, os
+
+results = {}
+
+# 1. 提升文件描述符上限 (default 4096 → 65536)
+try:
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = min(65536, hard if hard != resource.RLIM_INFINITY else 65536)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    results['nofile'] = f"{soft} → {target}"
+except Exception as e:
+    results['nofile'] = f"err:{e}"
+
+# 2. 扩展 /tmp tmpfs (default 4GB → 7GB)
+try:
+    r = subprocess.run(
+        ["mount", "-o", "remount,size=7G", "/tmp"],
+        capture_output=True, text=True, timeout=10
+    )
+    if r.returncode == 0:
+        df = subprocess.run(["df", "-h", "/tmp"], capture_output=True, text=True)
+        results['tmp'] = df.stdout.strip().splitlines()[-1]
+    else:
+        results['tmp'] = f"remount_err:{r.stderr.strip()[:80]}"
+except Exception as e:
+    results['tmp'] = f"err:{e}"
+
+# 3. /dev/shm 确认无限制 (已验证，仅记录)
+try:
+    df2 = subprocess.run(["df", "-h", "/dev/shm"], capture_output=True, text=True)
+    results['shm'] = df2.stdout.strip().splitlines()[-1]
+except Exception as e:
+    results['shm'] = f"err:{e}"
+
+print(__import__('json').dumps(results))
+"""
+
+
+def _init_sandbox(sb_id: str) -> dict:
+    """Run resource-expansion init on a freshly-woken sandbox.
+    Sends Python code to port-49999 exec server (no proxy, direct).
+    Returns dict of applied changes.
+    """
+    import urllib.request, urllib.error
+    url = "https://49999-" + sb_id + ".e2b.app/execute"
+    body = json.dumps({"code": SANDBOX_INIT_CODE, "language": "python"}).encode()
+    req = urllib.request.Request(url, data=body,
+                                  headers={"Content-Type": "application/json"},
+                                  method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            raw = r.read().decode()
+    except Exception as e:
+        return {"error": str(e)}
+    # Parse streaming JSON lines from exec server
+    for line in raw.strip().splitlines():
+        try:
+            ev = json.loads(line)
+            if ev.get("type") == "stdout":
+                return json.loads(ev.get("text", "{}"))
+        except Exception:
+            pass
+    return {"raw": raw[:200]}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main tick
 # ─────────────────────────────────────────────────────────────────────────────
@@ -394,7 +465,8 @@ def _tick() -> None:
                      label, mf.get("proxy", "NONE"))
             new_sb = _chat_wake(label, sess)
             if new_sb:
-                log.info("[%s] ready sb=%s", label, new_sb[:8])
+                init_result = _init_sandbox(new_sb)
+                log.info("[%s] ready sb=%s init=%s", label, new_sb[:8], init_result)
             else:
                 log.warning("[%s] unavailable after wake attempt", label)
 
