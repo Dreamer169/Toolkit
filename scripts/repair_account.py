@@ -18,7 +18,7 @@ async def repair(label: str, headless: bool):
     mf_path  = ACC_DIR / label / 'manifest.json'
     ss_path  = ACC_DIR / label / 'storage_state.json'
     shots_dir = ACC_DIR / label / 'shots'
-    shots_dir.mkdir(exist_ok=True)
+    shots_dir.mkdir(parents=True, exist_ok=True)
 
     if not ss_path.exists():
         print(f'[repair] ERROR: no storage_state for {label}'); return
@@ -113,9 +113,9 @@ async def repair(label: str, headless: bool):
             await asyncio.sleep(1.5)
             # URL 里找 project slug
             url_now = page.url
-            m = re.search(r'/p/[a-z0-9-]*/([A-Za-z0-9]{4,})', url_now)
+            m = re.search(r'/p/([a-z0-9-]+-)?([A-Za-z0-9]{6,})', url_now)
             if m:
-                project_id = 'prj_' + m.group(1)
+                project_id = 'prj_' + m.group(2)
             # api_calls 里找 thread_id
             for c in api_calls:
                 m2 = (re.search(r'/threads/(th_[A-Za-z0-9]+)/', c['u'])
