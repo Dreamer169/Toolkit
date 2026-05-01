@@ -83,3 +83,21 @@
   WARP 走 replit.com (解 CF), Google 子请求走 SOCKS 池 (抬 reCAPTCHA score).
   v7.76 sticky-per-context 保证同 ctx 内 Google 请求**永远同一出口 IP** (避免 score 归零).
   
+## obvious.ai 沙箱池
+
+persistent e2b Debian 13 / 2vCPU / 8GB 沙箱，用于跑 Playwright / Python 脚本（诊断、cookie预热等）。
+
+| 文件/目录 | 作用 |
+|-----------|------|
+| `scripts/obvious_provision.py` | 一键注册新 obvious.ai 账号 + 捕获 manifest |
+| `scripts/obvious_client.py` | 单账号 HTTP 接口（cookie auth，mode=auto 有 run-shell）|
+| `scripts/obvious_pool.py` | 多账号池：健康检查 / 并发分发 / 自动补号 |
+| `scripts/obvious_executor.py` | 高层封装：register / diagnose / health 命令 |
+| `scripts/obvious_ssh_bridge.py` | 在沙箱内建 SSH 隧道引入住宅代理 |
+| `scripts/obvious_warmup.py` | 用沙箱做 Playwright cookie 预热 |
+| `scripts/e2b_direct.py` | 沙箱诊断 + e2b envd 直连探测 |
+| `/root/obvious-accounts/` | 账号数据（cookie / manifest），不入 git |
+| `docs/obvious-provisioning.md` | **完整操作手册，新人从这里开始** |
+| `docs/obvious-findings.md` | API 研究记录（mode 对比 / tool 列表 / 响应格式）|
+
+⚠️ 关键：`mode=fast` 无 `run-shell` 工具，执行命令必须用 `mode=auto` 或 `mode=deep`。
