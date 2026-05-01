@@ -30,7 +30,6 @@ async def repair(label: str, headless: bool):
 
     pw_proxy = None
     if proxy_url:
-        # socks5://127.0.0.1:10821 → playwright format
         pw_proxy = {'server': proxy_url.replace('socks5://', 'socks5://')}
 
     api_calls: list[dict] = []
@@ -48,7 +47,6 @@ async def repair(label: str, headless: bool):
         )
         page = await ctx.new_page()
 
-        # intercept API to capture thread/project IDs
         async def on_request(req):
             api_calls.append({'u': req.url, 'm': req.method})
         page.on('request', on_request)
@@ -58,15 +56,23 @@ async def repair(label: str, headless: bool):
         await page.goto('https://app.obvious.ai', wait_until='load', timeout=60000)
         await page.screenshot(path=str(shots_dir/'repair_01_home.png'))
 
-        # -- 1b. re-login if session expired --
-        cur_url = page.url
-        if '/login' in cur_url or '/signin' in cur_url or 'app.obvious.ai' not in cur_url:
-            print(f'[repair] session expired url={cur_url}  re-login...')
+        # ── 1b. 检测 session 是否过期（obvious.ai 不重定向，在原 URL 显示登录框）──
+        has_login = await page.evaluate(
+            "() => { const ins=document.querySelectorAll('input');"
+            " let e=false,p=false;"
+            " for(const i of ins){ const t=(i.getAttribute('type')||'').toLowerCase();"
+            " const h=(i.getAttribute('placeholder')||'').toLowerCase();"
+            " if(t==='email'||h.includes('email'))e=true;"
+            " if(t==='password'||h.includes('password'))p=true; }"
+            " return e&&p; }"
+        )
+        print(f'[repair] has_login_form={has_login}')
+        if has_login:
             pwd = mf.get('password', '')
             if not email_addr or not pwd:
-                print('[repair] ERROR: no creds in manifest'); await browser.close(); return
-            await page.goto('https://app.obvious.ai/login', wait_until='domcontentloaded', timeout=30000)
-            await asyncio.sleep(3)
+                print('[repair] ERROR: no email/password in manifest for re-login')
+                await browser.close(); return
+            print(f'[repair] session expired — re-login as {email_addr}')
             inputs = await page.query_selector_all('input')
             for el in inputs:
                 ph = (await el.get_attribute('placeholder') or '').lower()
@@ -76,19 +82,21 @@ async def repair(label: str, headless: bool):
                 elif typ == 'password' or 'password' in ph:
                     await el.click(); await el.type(pwd, delay=20)
             clicked = await page.evaluate(
-                "() => { for(const b of document.querySelectorAll('button')){ "
-                "const t=(b.innerText||'').trim().toLowerCase(); "
-                "if(['sign in','log in','login','signin','continue'].includes(t)){b.click();return t;} } return null; }")
-            print(f'[repair] login btn={clicked}')
+                "() => { for(const b of document.querySelectorAll('button')){"
+                " const t=(b.innerText||'').trim().toLowerCase();"
+                " if(['sign in','log in','login','signin','continue'].includes(t)){b.click();return t;}}"
+                " return null; }")
+            print(f'[repair] login btn clicked={clicked}')
             await asyncio.sleep(8)
-            await page.screenshot(path=str(shots_dir/'repair_01b_login.png'))
-            cur2 = page.url
-            print(f'[repair] after-login url={cur2}')
-            if '/login' in cur2 or '/signin' in cur2:
-                print('[repair] ERROR: still on login page'); await browser.close(); return
-            import json as _json
-            ss_path.write_text(_json.dumps(await ctx.storage_state()))
-            print('[repair] session refreshed')
+            await page.screenshot(path=str(shots_dir/'repair_01b_after_login.png'))
+            still_login = await page.evaluate(
+                "() => document.querySelectorAll('input[type=password]').length > 0")
+            if still_login:
+                print('[repair] ERROR: still showing login form after re-login attempt')
+                await browser.close(); return
+            ss_path.write_text(json.dumps(await ctx.storage_state()))
+            print('[repair] session refreshed and saved')
+            await page.wait_for_load_state('networkidle', timeout=15000)
 
         # ── 2. 找或点击「New project / + 」按钮 ──
         new_btn = None
@@ -110,7 +118,6 @@ async def repair(label: str, headless: bool):
             await new_btn.click()
             await page.wait_for_load_state('networkidle', timeout=15000)
         else:
-            # 直接导航到 /new 路径
             print('[repair] no button found, trying /new route')
             await page.goto('https://app.obvious.ai/new', wait_until='load', timeout=30000)
 
@@ -144,12 +151,10 @@ async def repair(label: str, headless: bool):
         project_id = None; thread_id = None
         for _ in range(40):
             await asyncio.sleep(1.5)
-            # URL 里找 project slug
             url_now = page.url
             m = re.search(r'/p/([a-z0-9-]+-)?([A-Za-z0-9]{6,})', url_now)
             if m:
                 project_id = 'prj_' + m.group(2)
-            # api_calls 里找 thread_id
             for c in api_calls:
                 m2 = (re.search(r'/threads/(th_[A-Za-z0-9]+)/', c['u'])
                       or re.search(r'/agent/chat/(th_[A-Za-z0-9]+)', c['u']))
@@ -180,13 +185,12 @@ async def repair(label: str, headless: bool):
 
         print(f'[repair] sandboxId={sandbox_id}')
 
-        # ── 6. 保存更新后的 storage_state ──
         state = await ctx.storage_state()
         ss_path.write_text(json.dumps(state))
 
         await browser.close()
 
-    # ── 7. 写回 manifest ──
+    # ── 6. 写回 manifest ──
     if project_id and thread_id:
         mf['projectId'] = project_id
         mf['threadId']  = thread_id
@@ -194,14 +198,13 @@ async def repair(label: str, headless: bool):
             mf['sandboxId'] = sandbox_id
         mf['repairedAt'] = datetime.now(timezone.utc).isoformat()
         if 'deadReason' in mf and mf.get('deadReason') == 'credit_depleted':
-            pass  # don't clear dead if genuinely depleted
+            pass
         elif mf.get('status') == 'dead' and mf.get('deadReason') not in ('credit_depleted',):
             mf['status'] = 'active'
             mf['deadReason'] = None
         mf_path.write_text(json.dumps(mf, indent=2))
         print(f'[repair] ✅ manifest updated: pid={project_id} tid={thread_id} sb={sandbox_id}')
 
-        # 同步 index.json
         idx_path = ACC_DIR / 'index.json'
         if idx_path.exists():
             accs = json.loads(idx_path.read_text())
