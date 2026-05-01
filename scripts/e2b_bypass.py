@@ -59,16 +59,25 @@ class BypassShell:
             s = json.loads(self.state_file.read_text())
         else:
             s = {}
-        self.clean_threads = s.get("clean_threads", [])
-        self.used_threads  = s.get("used_threads", [])
-        self.project_ids   = s.get("project_ids", [self.pid])
+        # clean_threads: list of {tid, pid} dicts (backward compat: str -> {tid:str, pid:self.pid})
+        raw_ct = s.get("clean_threads", [])
+        self.clean_threads = [
+            t if isinstance(t, dict) else {"tid": t, "pid": self.pid}
+            for t in raw_ct
+        ]
+        raw_ut = s.get("used_threads", [])
+        self.used_threads = [
+            t if isinstance(t, dict) else {"tid": t, "pid": self.pid}
+            for t in raw_ut
+        ]
+        self.project_ids = s.get("project_ids", [self.pid])
 
     def _save_state(self):
         self.state_file.write_text(json.dumps({
             "clean_threads": self.clean_threads,
             "used_threads":  self.used_threads,
             "project_ids":   self.project_ids,
-        }, indent=2))
+        }, indent=2, ensure_ascii=False))
 
     def _api(self, method, path, body=None):
         data = json.dumps(body).encode() if body else None
@@ -94,11 +103,12 @@ class BypassShell:
         if s != 200:
             return
         threads = json.loads(b) if isinstance(json.loads(b), list) else []
-        known = set(self.clean_threads + self.used_threads)
+        known_tids = {x["tid"] if isinstance(x, dict) else x
+                      for x in self.clean_threads + self.used_threads}
         for t in threads:
             tid = t["id"]
-            if tid not in known:
-                self.clean_threads.append(tid)
+            if tid not in known_tids:
+                self.clean_threads.append({"tid": tid, "pid": pid})
         self._save_state()
         print(f"[refresh] {len(self.clean_threads)} clean threads available", file=sys.stderr)
 
@@ -121,7 +131,7 @@ class BypassShell:
 
     def _try_thread(self, thread_id: str, project_id: str, cmd: str):
         """Send one command to a thread. Returns (success, output) or (False, reason)."""
-        c = ObviousClient.from_storage_state(self.mf["storageState"], thread_id, project_id)
+        c = ObviousClient.from_storage_state(self.st_path, thread_id, project_id)
         msgs = c.ask(cmd)
         for msg in msgs:
             role = msg.get("role", "?")
@@ -151,28 +161,23 @@ class BypassShell:
 
         attempts = 0
         while self.clean_threads and attempts < 8:
-            tid = self.clean_threads[0]
-            # Find project for this thread
-            pid = self.pid
-            for ppid in self.project_ids:
-                # quick guess: use most recent project for new threads
-                pass
+            entry = self.clean_threads[0]
+            tid = entry["tid"] if isinstance(entry, dict) else entry
+            pid = entry["pid"] if isinstance(entry, dict) else self.pid
 
             if verbose:
-                print(f"[exec] trying {tid}...", file=sys.stderr)
+                print(f"[exec] trying thread={tid} project={pid}...", file=sys.stderr)
 
             ok, out = self._try_thread(tid, pid, cmd)
             if ok:
                 if verbose:
                     print(f"[exec] success on {tid}", file=sys.stderr)
-                # Don't immediately mark as used; thread might still be usable
                 return out
             else:
                 if verbose:
                     print(f"[exec] {tid} refused ({out}), rotating...", file=sys.stderr)
-                # Mark as used/poisoned
                 self.clean_threads.pop(0)
-                self.used_threads.append(tid)
+                self.used_threads.append(entry)
                 self._save_state()
                 attempts += 1
 

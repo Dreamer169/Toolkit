@@ -171,6 +171,46 @@ class ObviousSandbox:
     # ── factory ──────────────────────────────────────────────────────────────
 
     @classmethod
+    def from_account_fast(cls, label: str, acc_dir: Path = DEFAULT_ACC_DIR) -> "ObviousSandbox":
+        """Fast load from manifest (uses stored sandboxId, no API lookup).
+        Auto-wakes if exec_server is down."""
+        import uuid, time
+        acc_path = Path(acc_dir) / label
+        m = json.loads((acc_path / "manifest.json").read_text())
+        state = json.loads((acc_path / "storage_state.json").read_text())
+        cookies = "; ".join(
+            f"{c['name']}={c['value']}" for c in state["cookies"]
+            if "obvious.ai" in c.get("domain", "")
+        )
+        proxy = m.get("proxy")
+        sb = cls(account_label=label, project_id=m["projectId"],
+                 sandbox_id=m["sandboxId"], cookie_header=cookies, proxy_url=proxy)
+        # Health check; wake if needed
+        h = sb.health()
+        if not h.get("exec_server"):
+            proxies = {"https": proxy.replace("socks5://", "socks5h://")} if proxy else {}
+            hdrs = {"Cookie": cookies, "Content-Type": "application/json",
+                    "Origin": "https://app.obvious.ai", "User-Agent": "bypass/1.0"}
+            body = {"message": "ping", "messageId": uuid.uuid4().hex,
+                    "projectId": m["projectId"], "fileIds": [],
+                    "modeId": "auto", "timezone": "UTC"}
+            try:
+                _session = _make_session(proxy)
+                _session.post(
+                    f"https://api.app.obvious.ai/prepare/api/v2/agent/chat/{m['threadId']}",
+                    json=body, headers=hdrs, timeout=15)
+                print(f"[from_account_fast] waking {label}...", flush=True)
+            except Exception as e:
+                print(f"[from_account_fast] wake ping error: {e}", flush=True)
+            for _ in range(25):
+                time.sleep(5)
+                h = sb.health()
+                if h.get("exec_server"):
+                    print(f"[from_account_fast] {label} is alive", flush=True)
+                    break
+        return sb
+
+    @classmethod
     def from_account(cls, label: str, acc_dir: Path = DEFAULT_ACC_DIR,
                      create_project: bool = False) -> "ObviousSandbox":
         """Load from saved account directory, optionally creating a fresh project."""
