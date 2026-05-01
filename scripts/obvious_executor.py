@@ -229,6 +229,220 @@ def cmd_exec(account: str, code: str, lang: str, acc_dir: Path) -> int:
     return 0
 
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# cmd_env  —  dump sandbox env vars (rev-bypass for masked values)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def cmd_env(account: str, acc_dir: Path,
+            keys: list | None = None,
+            raw: bool = False,
+            sensitive: bool = False,
+            save: bool = False) -> int:
+    """Dump env vars for a single account via env|rev bypass.
+
+    Args:
+        account:   account label (directory under acc_dir)
+        keys:      specific var names; None = all (or all SENSITIVE_KEYS if sensitive=True)
+        raw:       output as KEY=VALUE lines instead of pretty-print
+        sensitive: only return SENSITIVE_KEYS (+ any explicit keys)
+        save:      persist captured vars to manifest["env_snapshot"]
+    """
+    sb = ObviousSandbox.from_account(account, acc_dir=acc_dir)
+    if save or sensitive:
+        env = sb.env_snapshot(save=save, extra_keys=keys, sensitive_only=sensitive)
+    else:
+        env = sb.get_env_vars(keys=set(keys) if keys else None)
+
+    _print_env(env, raw=raw, label=account)
+    return 0
+
+
+def _print_env(env: dict, raw: bool = False, label: str = "") -> None:
+    prefix = f"[{label}] " if label else ""
+    if raw:
+        for k, v in sorted(env.items()):
+            print(f"{k}={v}")
+    else:
+        import pprint
+        print(f"{prefix}--- {len(env)} vars ---")
+        pprint.pprint(dict(sorted(env.items())))
+
+
+def cmd_env_all(acc_dir: Path,
+                keys: list | None = None,
+                raw: bool = False,
+                sensitive: bool = True,
+                save: bool = False,
+                account_filter: str | None = None) -> int:
+    """Sweep all accounts: wake sandbox if needed, collect env vars, optionally save.
+
+    This is the automated path — iterates every account in index.json,
+    wakes the sandbox if paused, runs env|rev bypass, and collects vars.
+
+    Args:
+        keys:           specific extra var names to capture
+        sensitive:      include all SENSITIVE_KEYS (default True)
+        save:           persist results to each account's manifest["env_snapshot"]
+        account_filter: if set, only process this one account label
+    """
+    from obvious_sandbox import load_index, SENSITIVE_KEYS
+    accounts = load_index(acc_dir)
+    if account_filter:
+        accounts = [a for a in accounts if a["label"] == account_filter]
+    if not accounts:
+        print("[env-all] no accounts found", file=sys.stderr)
+        return 1
+
+    summary: list[dict] = []
+    exit_code = 0
+
+    for acc in accounts:
+        label = acc["label"]
+        mp = acc_dir / label / "manifest.json"
+        ss = acc_dir / label / "storage_state.json"
+        if not mp.exists() or not ss.exists():
+            print(f"[env-all] [{label}] skipped — missing manifest or cookies")
+            continue
+
+        print(f"[env-all] [{label}] connecting ...", flush=True)
+        try:
+            sb = ObviousSandbox.from_account(label, acc_dir=acc_dir)
+        except Exception as e:
+            print(f"[env-all] [{label}] CONNECT ERROR: {e}", file=sys.stderr)
+            summary.append({"label": label, "ok": False, "error": str(e)})
+            exit_code = 1
+            continue
+
+        try:
+            env = sb.env_snapshot(save=save, extra_keys=keys, sensitive_only=sensitive)
+            _print_env(env, raw=raw, label=label)
+            summary.append({
+                "label": label,
+                "ok": True,
+                "sandbox_id": sb.sandbox_id,
+                "vars_captured": len(env),
+                "has_api_token": "API_TOKEN" in env,
+                "saved": save,
+            })
+        except Exception as e:
+            print(f"[env-all] [{label}] EXEC ERROR: {e}", file=sys.stderr)
+            summary.append({"label": label, "ok": False, "error": str(e)})
+            exit_code = 1
+
+    # Print summary table
+    print()
+    print(f"{'ACCOUNT':<20} {'OK':<5} {'SB_ID':<12} {'VARS':<6} {'API_TOKEN':<10} {'SAVED'}")
+    print("-" * 70)
+    for r in summary:
+        if r["ok"]:
+            sb_id = r.get("sandbox_id", "")[:8]
+            print(f"{r['label']:<20} {'✓':<5} {sb_id:<12} {r.get('vars_captured',0):<6} {str(r.get('has_api_token','')):<10} {r.get('saved','')}")
+        else:
+            print(f"{r['label']:<20} {'✗':<5} {'—':<12} {'—':<6} {'—':<10} {r.get('error','')[:30]}")
+    return exit_code
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# cmd_sniff_token  —  decode the live API_TOKEN JWT from sandbox
+# ─────────────────────────────────────────────────────────────────────────────
+
+def cmd_sniff_token(account: str, acc_dir: Path) -> int:
+    sb = ObviousSandbox.from_account(account, acc_dir=acc_dir)
+    tok = sb.get_api_token()
+    if not tok:
+        print("[sniff-token] API_TOKEN not present (sandbox may be idle or token expired)")
+        return 1
+    ttl = int(tok.get("exp", 0) - time.time())
+    print(f"[sniff-token] userId        = {tok.get('userId')}")
+    print(f"[sniff-token] tokenType     = {tok.get('tokenType')}")
+    print(f"[sniff-token] toolPerms     = {tok.get('toolPermissions')}")
+    print(f"[sniff-token] sandboxId     = {tok.get('sandboxId')}")
+    print(f"[sniff-token] threadId      = {tok.get('threadId')}")
+    print(f"[sniff-token] exp TTL       = {ttl}s ({'expired' if ttl < 0 else 'valid'})")
+    print(f"[sniff-token] raw JWT       = {tok.get('_raw', '')[:80]}...")
+    return 0
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# cmd_credits  —  check / reset credit balance
+# ─────────────────────────────────────────────────────────────────────────────
+
+def cmd_credits(account: str, acc_dir: Path, reset: bool = False,
+                threshold: float = 0.0, dry_run: bool = False) -> int:
+    """Check or reset credits for a single account."""
+    sb = ObviousSandbox.from_account(account, acc_dir=acc_dir)
+    if reset:
+        r = sb.reset_credits(threshold=threshold, dry_run=dry_run)
+        print(json.dumps(r, indent=2))
+    else:
+        c = sb.check_credits()
+        print(json.dumps(c, indent=2))
+    return 0
+
+
+def cmd_credits_all(acc_dir: Path, reset: bool = False,
+                    threshold: float = 0.0, dry_run: bool = False) -> int:
+    """Check (and optionally reset) credits for ALL accounts in index.json."""
+    from obvious_sandbox import load_index
+    accounts = load_index(acc_dir)
+    if not accounts:
+        print("[credits-all] no accounts found", file=sys.stderr)
+        return 1
+
+    rows = []
+    for acc in accounts:
+        label = acc["label"]
+        mp = acc_dir / label / "manifest.json"
+        if not mp.exists():
+            continue
+        m = json.loads(mp.read_text())
+        if m.get("status") == "dead":
+            rows.append({"label": label, "status": "dead (skipped)"})
+            continue
+        try:
+            sb = ObviousSandbox.from_account(label, acc_dir=acc_dir)
+            c  = sb.check_credits()
+            row = {"label": label, **c}
+            if reset:
+                r = sb.reset_credits(threshold=threshold, dry_run=dry_run)
+                row["reset"]    = r["reset"]
+                row["deleted"]  = r["projects_deleted"]
+                row["after"]    = round(r["credits_after"], 4)
+            rows.append(row)
+        except Exception as e:
+            rows.append({"label": label, "error": str(e)[:60]})
+
+    # Summary table
+    print()
+    hdr = "{:<20} {:>10} {:>10} {:>10} {:>10} {:>10}".format(
+        "ACCOUNT", "USED", "BALANCE", "MSGS", "CACHE%", "HIT_RATIO")
+    print(hdr)
+    print("-" * 75)
+    for r in rows:
+        if "error" in r:
+            print("{:<20}  {}".format(r["label"], r.get("error", "")))
+        elif "status" in r:
+            print("{:<20}  {}".format(r["label"], r["status"]))
+        else:
+            reset_note = ""
+            if reset and r.get("reset"):
+                reset_note = "  → reset (" + str(r.get("deleted", 0)) + " proj deleted)"
+            elif reset and not r.get("reset"):
+                reset_note = "  → skipped (below threshold)"
+            print("{:<20} {:>10.3f} {:>10.3f} {:>10} {:>9.1f}%{}".format(
+                r["label"],
+                r.get("totalCredits", 0),
+                r.get("balance", 0),
+                r.get("totalMessages", 0),
+                r.get("cacheHitPct", 0),
+                reset_note,
+            ))
+    return 0
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
@@ -247,6 +461,28 @@ def _main(argv: list[str]) -> int:
     ap.add_argument("--all", action="store_true", help="--health时检查所有账号")
     ap.add_argument("--exec", metavar="CODE", help="在沙箱内执行Python代码")
     ap.add_argument("--lang", default="python", help="--exec的语言")
+    ap.add_argument("--get-env", nargs="*", metavar="VAR",
+                    help="env|rev bypass读沙箱env变量; 可指定变量名; 不指定=所有")
+    ap.add_argument("--env-all", action="store_true",
+                    help="扫描所有账号的env变量 (自动唤醒沙箱)")
+    ap.add_argument("--sensitive", action="store_true",
+                    help="--get-env/--env-all只返回敏感变量(API_TOKEN等)")
+    ap.add_argument("--save", action="store_true",
+                    help="将采集结果持久化到manifest[env_snapshot]")
+    ap.add_argument("--raw-env", action="store_true",
+                    help="输出为KEY=VALUE格式 (适合shell eval)")
+    ap.add_argument("--sniff-token", action="store_true",
+                    help="解码沙箱API_TOKEN JWT (含TTL/权限/sandboxId)")
+    ap.add_argument("--credits", action="store_true",
+                    help="查看当前账号的credit使用量和缓存命中率")
+    ap.add_argument("--credits-all", action="store_true",
+                    help="查看所有账号的credit使用量汇总表")
+    ap.add_argument("--reset-credits", action="store_true",
+                    help="删除所有项目，将credit计数归零 (绕过25 credits上限)")
+    ap.add_argument("--reset-threshold", type=float, default=0.0,
+                    help="只在credits >= 此值时才执行reset (0=总是reset)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="--reset-credits时只模拟，不实际删除")
     args = ap.parse_args(argv)
 
     acc_dir = Path(args.acc_dir)
@@ -256,6 +492,44 @@ def _main(argv: list[str]) -> int:
 
     if args.exec:
         return cmd_exec(args.account, args.exec, args.lang, acc_dir)
+
+    if args.env_all:
+        return cmd_env_all(
+            acc_dir=acc_dir,
+            keys=args.get_env or None,
+            raw=args.raw_env,
+            sensitive=args.sensitive,
+            save=args.save,
+        )
+
+    if args.get_env is not None:
+        return cmd_env(
+            account=args.account,
+            acc_dir=acc_dir,
+            keys=args.get_env or None,
+            raw=args.raw_env,
+            sensitive=args.sensitive,
+            save=args.save,
+        )
+
+    if args.sniff_token:
+        return cmd_sniff_token(args.account, acc_dir)
+    if args.credits or args.reset_credits:
+        return cmd_credits(
+            account=args.account, acc_dir=acc_dir,
+            reset=args.reset_credits,
+            threshold=args.reset_threshold,
+            dry_run=args.dry_run,
+        )
+
+    if args.credits_all or (args.reset_credits and args.all):
+        return cmd_credits_all(
+            acc_dir=acc_dir,
+            reset=args.reset_credits,
+            threshold=args.reset_threshold,
+            dry_run=args.dry_run,
+        )
+
 
     if args.register:
         if not args.email:
