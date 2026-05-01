@@ -314,5 +314,44 @@ module.exports = {
       "watch": false,
       "autorestart": true
     }
+    ,{
+      "name": "obvious-keepalive",
+      "script": "/root/Toolkit/scripts/obvious_keepalive.py",
+      "interpreter": "python3",
+      "cwd": "/root/Toolkit/scripts",
+      "env": {
+        "SB_ACC_DIR": "/root/obvious-accounts",
+        "SB_MIN_POOL": "10",
+        "SB_PING_MIN": "90",
+        "SB_PING_MAX": "180",
+        "SB_WAKE_TIMEOUT": "150",
+        "SB_CREDIT_RESET_THRESHOLD": "20.0",
+        "PYTHONUNBUFFERED": "1"
+      },
+      "restart_delay": 10000,
+      "max_restarts": 999,
+      "watch": false,
+      "autorestart": true
+    },
+    {
+      "name": "autoprovision",
+      "script": "/root/Toolkit/scripts/obvious_autoprovision.py",
+      "interpreter": "python3",
+      "cwd": "/root/Toolkit/scripts",
+      "args": "--watch --min-active 10",
+      "env": {
+        "SB_ACC_DIR": "/root/obvious-accounts",
+        "SB_MIN_POOL": "10",
+        "SB_CHECK_INTERVAL": "600",
+        "SB_PORT_START": "10820",
+        "SB_PORT_END": "10835",
+        "DISPLAY": ":99",
+        "PYTHONUNBUFFERED": "1"
+      },
+      "restart_delay": 10000,
+      "max_restarts": 999,
+      "watch": false,
+      "autorestart": true
+    }
   ]
 };
