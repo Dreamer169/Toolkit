@@ -271,8 +271,10 @@ class ObviousPool:
         env = os.environ.copy(); env.setdefault("DISPLAY", ":99")
         cmd = ["python3", str(PROVISION_SCRIPT), "--proxy", proxy,
                "--label", label, "--check-ip"]
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=420, env=env)
-        ok = "✅ provisioned" in (out.stdout or "")
+        if headless:
+            cmd.append("--headless")
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=480, env=env)
+        ok = "\u2705 provisioned" in (out.stdout or "")
         return {"label": label, "proxy": proxy, "ok": ok,
                 "stdout_tail": (out.stdout or "")[-1500:],
                 "stderr_tail": (out.stderr or "")[-400:]}

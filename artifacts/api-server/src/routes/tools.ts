@@ -4183,5 +4183,54 @@ router.post("/tools/obvious/register", async (req, res) => {
 });
 
 
+router.post("/tools/obvious/provision", async (req, res) => {
+  const { label, proxy } = req.body as { label?: string; proxy?: string };
+  const accLabel = label || `auto-${Date.now()}`;
+  try {
+    const created = await jobQueue.create("obvious_prov_" + Date.now());
+    const args = [path.join(OBVIOUS_SCRIPTS_DIR, "obvious_pool.py"),
+      "--dir", OBVIOUS_ACC_DIR, "provision", "--label", accLabel];
+    if (proxy) args.push("--proxy", proxy);
+    const env: Record<string, string> = { ...process.env as Record<string, string>, PYTHONUNBUFFERED: "1", DISPLAY: ":99" };
+    const { spawn: _sp } = await import("child_process");
+    const child = _sp("python3", args, { env });
+    jobQueue.setChild(created.jobId, child);
+    child.stdout?.on("data", (d: Buffer) =>
+      d.toString().split("\n").filter(Boolean).forEach(l =>
+        jobQueue.pushLog(created.jobId, { type: "log", message: l })));
+    child.stderr?.on("data", (d: Buffer) =>
+      d.toString().split("\n").filter(Boolean).forEach(l =>
+        jobQueue.pushLog(created.jobId, { type: "log", message: `[err] ${l}` })));
+    child.on("close", (code) => {
+      jobQueue.finish(created.jobId, code ?? -1, code === 0 ? "done" : "failed");
+    });
+    res.json({ success: true, jobId: created.jobId, label: accLabel, message: "obvious账号注册任务已启动" });
+  } catch (e: unknown) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
+router.get("/tools/obvious/provision/:jobId", async (req, res) => {
+  const job = await jobQueue.get(req.params.jobId);
+  if (!job) { res.status(404).json({ success: false, error: "job not found" }); return; }
+  const provisioned = (job.logs || []).some(l => l.message?.includes("provisioned") || l.message?.includes("✅"));
+  res.json({ success: true, job, provisioned });
+});
+
+router.get("/tools/obvious/accounts", async (_req, res) => {
+  try {
+    const fs = await import("fs");
+    const indexPath = `${OBVIOUS_ACC_DIR}/index.json`;
+    const accounts = fs.existsSync(indexPath) ? JSON.parse(fs.readFileSync(indexPath, "utf8")) : [];
+    // 读取每个账号的 health.json
+    const withHealth = accounts.map((a: Record<string, unknown>) => {
+      const healthPath = `${OBVIOUS_ACC_DIR}/${a.label}/health.json`;
+      let health: Record<string, unknown> = {};
+      try { if (fs.existsSync(healthPath)) health = JSON.parse(fs.readFileSync(healthPath, "utf8")); } catch (_) {}
+      return { ...a, alive: health.alive, credits: health.credits, tier: health.tier, checkedAt: health.checkedAt };
+    });
+    res.json({ success: true, accounts: withHealth });
+  } catch (e: unknown) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
+
 export default router;
 
