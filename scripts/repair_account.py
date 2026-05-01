@@ -30,7 +30,7 @@ async def repair(label: str, headless: bool):
 
     pw_proxy = None
     if proxy_url:
-        pw_proxy = {'server': proxy_url.replace('socks5://', 'socks5://')}
+        pw_proxy = {'server': proxy_url}
 
     api_calls: list[dict] = []
 
@@ -53,19 +53,22 @@ async def repair(label: str, headless: bool):
 
         # ── 1. 打开 app，session 自动带入 ──
         print('[repair] navigating to app.obvious.ai ...')
-        await page.goto('https://app.obvious.ai', wait_until='load', timeout=60000)
+        await page.goto('https://app.obvious.ai', wait_until='domcontentloaded', timeout=60000)
+        await asyncio.sleep(5)
         await page.screenshot(path=str(shots_dir/'repair_01_home.png'))
 
         # ── 1b. 检测 session 是否过期（obvious.ai 不重定向，在原 URL 显示登录框）──
-        has_login = await page.evaluate(
-            "() => { const ins=document.querySelectorAll('input');"
-            " let e=false,p=false;"
-            " for(const i of ins){ const t=(i.getAttribute('type')||'').toLowerCase();"
-            " const h=(i.getAttribute('placeholder')||'').toLowerCase();"
-            " if(t==='email'||h.includes('email'))e=true;"
-            " if(t==='password'||h.includes('password'))p=true; }"
-            " return e&&p; }"
-        )
+        has_login = await page.evaluate("""() => {
+            const ins = document.querySelectorAll('input');
+            let e = false, p = false;
+            for (const i of ins) {
+                const t = (i.getAttribute('type') || '').toLowerCase();
+                const h = (i.getAttribute('placeholder') || '').toLowerCase();
+                if (t === 'email' || h.includes('email')) e = true;
+                if (t === 'password' || h.includes('password')) p = true;
+            }
+            return e && p;
+        }""")
         print(f'[repair] has_login_form={has_login}')
         if has_login:
             pwd = mf.get('password', '')
@@ -81,11 +84,15 @@ async def repair(label: str, headless: bool):
                     await el.click(); await el.type(email_addr, delay=20)
                 elif typ == 'password' or 'password' in ph:
                     await el.click(); await el.type(pwd, delay=20)
-            clicked = await page.evaluate(
-                "() => { for(const b of document.querySelectorAll('button')){"
-                " const t=(b.innerText||'').trim().toLowerCase();"
-                " if(['sign in','log in','login','signin','continue'].includes(t)){b.click();return t;}}"
-                " return null; }")
+            clicked = await page.evaluate("""() => {
+                for (const b of document.querySelectorAll('button')) {
+                    const t = (b.innerText || '').trim().toLowerCase();
+                    if (['sign in','log in','login','signin','continue'].includes(t)) {
+                        b.click(); return t;
+                    }
+                }
+                return null;
+            }""")
             print(f'[repair] login btn clicked={clicked}')
             await asyncio.sleep(8)
             await page.screenshot(path=str(shots_dir/'repair_01b_after_login.png'))
@@ -96,48 +103,74 @@ async def repair(label: str, headless: bool):
                 await browser.close(); return
             ss_path.write_text(json.dumps(await ctx.storage_state()))
             print('[repair] session refreshed and saved')
-            await page.wait_for_load_state('networkidle', timeout=15000)
+            await asyncio.sleep(5)
 
-        # ── 2. 找或点击「New project / + 」按钮 ──
-        new_btn = None
-        for sel in ['button:has-text("New project")',
-                    'button:has-text("New Project")',
-                    '[data-testid="new-project"]',
-                    'a:has-text("New project")',
-                    'button[aria-label*="new"]',
-                    'button:has-text("+")']:
-            try:
-                el = page.locator(sel).first
-                if await el.is_visible(timeout=2000):
-                    new_btn = el; break
-            except Exception:
-                pass
-
-        if new_btn:
-            print('[repair] clicking New Project button')
-            await new_btn.click()
-            await page.wait_for_load_state('networkidle', timeout=15000)
-        else:
-            print('[repair] no button found, trying /new route')
-            await page.goto('https://app.obvious.ai/new', wait_until='load', timeout=30000)
-
-        await page.screenshot(path=str(shots_dir/'repair_02_newproject.png'))
-        await asyncio.sleep(2)
-
-        # ── 3. 找 chat 输入框，发一条消息 ──
+        # ── 2. 找 chat 输入框（obvious.ai 用 ProseMirror/tiptap contenteditable div）──
+        # obvious.ai chat input: div[contenteditable="true"].tiptap.ProseMirror
+        # 先尝试直接在主页找到 chat input，无需点 New Project
+        CI_SELS = [
+            'div.tiptap.ProseMirror[contenteditable="true"]',
+            'div.ProseMirror[contenteditable="true"]',
+            '.tiptap[contenteditable="true"]',
+            '[contenteditable="true"]',
+            'textarea',
+        ]
         ci = None
-        for sel in ['[contenteditable="true"]', 'textarea', 'input[type="text"]']:
+        for sel in CI_SELS:
             try:
                 el = page.locator(sel).first
                 if await el.is_visible(timeout=3000):
-                    ci = el; break
+                    ci = el
+                    print(f'[repair] found chat input with sel={sel}')
+                    break
             except Exception:
                 pass
+
+        # ── 2b. 如果主页没找到，尝试点 New Project 按钮 ──
+        if not ci:
+            print('[repair] no chat input on main page, looking for New Project button...')
+            new_btn = None
+            for sel in ['button:has-text("New project")',
+                        'button:has-text("New Project")',
+                        '[data-testid="new-project"]',
+                        'a:has-text("New project")',
+                        'button[aria-label*="new"]',
+                        'button:has-text("+")']:
+                try:
+                    el = page.locator(sel).first
+                    if await el.is_visible(timeout=2000):
+                        new_btn = el; break
+                except Exception:
+                    pass
+
+            if new_btn:
+                print('[repair] clicking New Project button')
+                await new_btn.click()
+                await asyncio.sleep(4)
+            else:
+                print('[repair] no button, navigating to /new')
+                await page.goto('https://app.obvious.ai/new',
+                                wait_until='domcontentloaded', timeout=30000)
+                await asyncio.sleep(5)
+
+            await page.screenshot(path=str(shots_dir/'repair_02_newproject.png'))
+
+            for sel in CI_SELS:
+                try:
+                    el = page.locator(sel).first
+                    if await el.is_visible(timeout=4000):
+                        ci = el
+                        print(f'[repair] found chat input after nav, sel={sel}')
+                        break
+                except Exception:
+                    pass
 
         if not ci:
             print('[repair] ERROR: cannot find chat input')
             await browser.close(); return
 
+        # ── 3. 发一条消息启动新 thread ──
+        await page.screenshot(path=str(shots_dir/'repair_02_before_type.png'))
         await ci.click()
         await asyncio.sleep(0.5)
         msg = 'Sandbox health check — please run: echo alive && uname -n && date -u'
