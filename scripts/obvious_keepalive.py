@@ -344,8 +344,14 @@ def _e2b_exec_ping(sb_id: str) -> bool:
         return False
     url = "https://49999-" + sb_id + ".e2b.app/execute"
     body = {"code": "print(1)", "language": "python"}
-    s, _resp = _http("POST", url, body, timeout=10)
-    return 200 <= s < 300
+    s, resp = _http("POST", url, body, timeout=10)
+    if not (200 <= s < 300):
+        return False
+    # Verify real execution: response must contain stdout output
+    # (guards against 200-without-running that would not reset idle timer)
+    if isinstance(resp, str):
+        return "stdout" in resp or "end_of_execution" in resp
+    return True
 
 
 def _chat_wake(label: str, session: requests.Session) -> str | None:
