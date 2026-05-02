@@ -348,7 +348,9 @@ module.exports = {
         "DISPLAY": ":99",
         "PYTHONUNBUFFERED": "1"
       },
-      "restart_delay": 10000,
+      "kill_signal": "SIGTERM",
+      "kill_timeout": 8000,
+      "restart_delay": 30000,
       "max_restarts": 999,
       "watch": false,
       "autorestart": true
