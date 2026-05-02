@@ -239,8 +239,26 @@ async def retoken_account(account: dict, headless: bool, proxy: str = "") -> boo
         except Exception as _xre:
             log(f"  ⚠ XrayRelay 启动异常: {_xre} — 退化为 VPS 直连")
             xray_relay_inst = None
-    elif not saved_exit_ip:
-        log(f"  ⚠ 无 saved_exit_ip (老账号), 用 VPS 直连 — IP 不一致风险高")
+    elif not saved_exit_ip and not proxy:
+        # v8.94: 老账号无 saved_exit_ip → 从 CF pool 随机取低延迟 IP，避免 VPS 直连被 MS 拒
+        try:
+            import random as _rand, json as _json2
+            _ps = _json2.load(open('/tmp/cf_pool_state.json'))
+            _avail = [x['ip'] for x in _ps.get('available', []) if isinstance(x, dict) and x.get('ip')]
+            if _avail:
+                _fallback_ip = _rand.choice(_avail[:20])  # 前20个低延迟中随机
+                from xray_relay import XrayRelay as _XrayRelay
+                xray_relay_inst = _XrayRelay(_fallback_ip)
+                if xray_relay_inst.start(timeout=8.0):
+                    proxy = xray_relay_inst.socks5_url
+                    log(f"  🌐 CF pool fallback: 老账号无 exit_ip → 随机 CF {_fallback_ip} SOCKS5:{xray_relay_inst.socks_port}")
+                else:
+                    xray_relay_inst = None
+                    log(f"  ⚠ CF pool fallback xray 启动失败 → VPS 直连")
+            else:
+                log(f"  ⚠ CF pool 为空 → VPS 直连")
+        except Exception as _cfe:
+            log(f"  ⚠ CF pool fallback 异常: {_cfe} → VPS 直连")
 
     # 在后台线程中轮询 token（与浏览器操作并行）
     token_result: list[dict | None] = [None]
@@ -352,12 +370,51 @@ async def retoken_account(account: dict, headless: bool, proxy: str = "") -> boo
             except Exception:
                 _email_visible = False
             if _email_visible:
-                await email_input.fill(email)
-                log(f"  📧 输入邮箱: {email}")
-                await asyncio.sleep(1)
-                next_btn2 = page.locator('input[type="submit"], button[type="submit"]').first
-                await next_btn2.click()
-                await asyncio.sleep(3)
+                # v8.94 FIX: React-safe fill — nativeInputValueSetter + dispatchEvent
+                # Fluent UI live.com input ignores fill()/press_sequentially() because
+                # React tracks value via its own fiber; native setter forces onChange.
+                await page.evaluate(r"""(email) => {
+                    const inp = document.querySelector('input[name="loginfmt"],input[type="email"]');
+                    if (!inp) return;
+                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                    setter.call(inp, email);
+                    inp.dispatchEvent(new Event('input',  {bubbles:true}));
+                    inp.dispatchEvent(new Event('change', {bubbles:true}));
+                }""", email)
+                await asyncio.sleep(0.4)
+                log(f"  📧 输入邮箱(React-safe): {email}")
+                # primaryButton first (Fluent UI React), then classic submit
+                _submitted = False
+                for _ebtn_sel in [
+                    'button[data-testid="primaryButton"]',
+                    'input[id="idSIButton9"]',
+                    'input[type="submit"]',
+                    'button[type="submit"]',
+                ]:
+                    try:
+                        _ebtn = page.locator(_ebtn_sel).first
+                        if await _ebtn.is_visible(timeout=1500):
+                            await _ebtn.click()
+                            _submitted = True
+                            log(f"  📤 邮箱提交: {_ebtn_sel}")
+                            break
+                    except Exception:
+                        continue
+                if not _submitted:
+                    await email_input.press('Enter')
+                    log(f"  📤 邮箱提交: Enter键")
+                try:
+                    await page.wait_for_load_state('networkidle', timeout=10000)
+                except Exception:
+                    await asyncio.sleep(4)
+                # v8.94: still on email form after submit → IP被MS拒 (不是React问题)
+                _still_email = False
+                try:
+                    _still_email = await page.locator('input[name="loginfmt"],input[type="email"]').first.is_visible(timeout=2000)
+                except Exception:
+                    pass
+                if _still_email:
+                    log(f"  ⚠ 邮箱提交后页面未跳转，可能IP被拒 URL={page.url[:100]}")
 
             # ── 邮箱提交后检测封号 ──
             if await check_locked(page):
