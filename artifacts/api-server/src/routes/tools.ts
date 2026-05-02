@@ -4332,5 +4332,55 @@ router.post("/tools/obvious/repair", async (req, res) => {
     res.json({ success: true, jobId: created.jobId, label, message: "repair 任务已启动，poll /api/tools/obvious/job/" + created.jobId });
   } catch (e: unknown) { res.status(500).json({ success: false, error: String(e) }); }
 });
+
+// ═══ captcha-recognition 模块 (port 8765) ════════════════════════════════════
+const CAPTCHA_API = `http://localhost:${process.env.CAPTCHA_API_PORT || "8765"}`;
+
+// GET /tools/captcha/health — 模型状态
+router.get("/tools/captcha/health", async (_req, res) => {
+  try {
+    const r = await fetch(`${CAPTCHA_API}/health`, { signal: AbortSignal.timeout(5_000) });
+    const data = await r.json();
+    res.json(data);
+  } catch (e) { res.status(502).json({ ok: false, error: String(e) }); }
+});
+
+// POST /tools/captcha/recognize — 识别验证码图片
+// Body: { base64: "<base64_png>" } | { image_path: "/abs/path" }
+router.post("/tools/captcha/recognize", async (req, res) => {
+  try {
+    const r = await fetch(`${CAPTCHA_API}/recognize`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req.body),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const data = await r.json();
+    res.status(r.ok ? 200 : 500).json(data);
+  } catch (e) { res.status(502).json({ error: String(e) }); }
+});
+
+// GET /tools/captcha/train/status — 训练任务状态
+router.get("/tools/captcha/train/status", async (_req, res) => {
+  try {
+    const r = await fetch(`${CAPTCHA_API}/train/status`, { signal: AbortSignal.timeout(5_000) });
+    res.json(await r.json());
+  } catch (e) { res.status(502).json({ error: String(e) }); }
+});
+
+// POST /tools/captcha/train/start — 启动训练
+// Body: { skip_gen?: boolean }
+router.post("/tools/captcha/train/start", async (req, res) => {
+  try {
+    const r = await fetch(`${CAPTCHA_API}/train/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req.body),
+      signal: AbortSignal.timeout(10_000),
+    });
+    res.json(await r.json());
+  } catch (e) { res.status(502).json({ error: String(e) }); }
+});
+
 export default router;
 

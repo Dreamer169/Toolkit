@@ -368,5 +368,16 @@ module.exports = {
       "watch": false,
       "autorestart": true
     }
+    ,{
+      "name": "captcha-api",
+      "script": "/root/Toolkit/scripts/captcha_recognition/captcha_api.py",
+      "interpreter": "python3",
+      "cwd": "/root/Toolkit/scripts/captcha_recognition",
+      "env": { "CAPTCHA_API_PORT": "8765", "PYTHONUNBUFFERED": "1" },
+      "restart_delay": 5000,
+      "max_restarts": 20,
+      "watch": false,
+      "autorestart": true
+    }
   ]
 };
