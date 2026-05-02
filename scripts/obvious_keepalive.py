@@ -285,8 +285,10 @@ def _auto_reset_credits(label: str, session: requests.Session,
         mf["sandboxId"]       = None
         mf["execBase"]        = None
         mf["jupyterBase"]     = None
+        mf["needsRepair"]     = True
         (ACC_DIR / label / "manifest.json").write_text(
             json.dumps(mf, indent=2, ensure_ascii=False))
+        log.info("[%s] needsRepair flag set — repair_account will be triggered", label)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -451,6 +453,34 @@ def _tick() -> None:
         mf = _load_manifest(label)
         sb = mf.get("sandboxId") or acc.get("sandboxId") or ""
         tid = mf.get("threadId")
+
+        # Auto-repair: if needsRepair flag is set, trigger Playwright repair
+        if mf.get("needsRepair") and not (mf.get("projectId") and mf.get("threadId")):
+            log.info("[%s] needsRepair=True — running repair_account.py", label)
+            import subprocess as _sp, os as _os
+            repair_py = str(Path(__file__).parent / "repair_account.py")
+            env = dict(_os.environ, DISPLAY=_os.environ.get("DISPLAY", ":99"))
+            try:
+                result = _sp.run(
+                    ["python3", repair_py, "--label", label, "--headless"],
+                    timeout=180, env=env, capture_output=True, text=True
+                )
+                log.info("[%s] repair exit=%d stdout=%s",
+                         label, result.returncode, result.stdout[-200:] if result.stdout else "")
+                # Re-read manifest after repair
+                mf = _load_manifest(label)
+                if mf.get("projectId") and mf.get("threadId"):
+                    mf["needsRepair"] = False
+                    (ACC_DIR / label / "manifest.json").write_text(
+                        json.dumps(mf, indent=2, ensure_ascii=False))
+                    log.info("[%s] repair succeeded, needsRepair cleared", label)
+                else:
+                    log.warning("[%s] repair ran but still missing IDs", label)
+            except Exception as _e:
+                log.warning("[%s] repair_account error: %s", label, _e)
+            mf = _load_manifest(label)
+            sb = mf.get("sandboxId") or ""
+            tid = mf.get("threadId")
 
         if _alive(sb):
             if tid:

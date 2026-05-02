@@ -185,13 +185,22 @@ async def repair(label: str, headless: bool):
         for _ in range(40):
             await asyncio.sleep(1.5)
             url_now = page.url
+            # New URL format: /p/slug-shortId?thread=th_xxx
             m = re.search(r'/p/([a-z0-9-]+-)?([A-Za-z0-9]{6,})', url_now)
             if m:
                 project_id = 'prj_' + m.group(2)
+            # Also try thread from URL query param (new format)
+            mt = re.search(r'[?&]thread=(th_[A-Za-z0-9]+)', url_now)
+            if mt:
+                thread_id = mt.group(1)
             for c in api_calls:
-                m2 = (re.search(r'/threads/(th_[A-Za-z0-9]+)/', c['u'])
+                # Extract threadId from chat/thread API calls (with or without trailing slash)
+                m2 = (re.search(r'/threads/(th_[A-Za-z0-9]+)(?:/|$)', c['u'])
                       or re.search(r'/agent/chat/(th_[A-Za-z0-9]+)', c['u']))
-                if m2: thread_id = m2.group(1)
+                if m2 and not thread_id: thread_id = m2.group(1)
+                # Extract projectId from hydrate API calls
+                m3 = re.search(r'/hydrate/project/(prj_[A-Za-z0-9]+)', c['u'])
+                if m3 and not project_id: project_id = m3.group(1)
             if project_id and thread_id:
                 break
 
