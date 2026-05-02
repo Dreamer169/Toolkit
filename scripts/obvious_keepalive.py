@@ -302,6 +302,14 @@ def _alive(sb_id: str) -> bool:
     return s == 200
 
 
+def _e2b_recycled(sb_id: str) -> bool:
+    """Return True if e2b explicitly returns 502 (sandbox recycled, not just paused)."""
+    if not sb_id:
+        return True
+    s, _ = _http("GET", "https://49999-" + sb_id + ".e2b.app/health", timeout=8)
+    return s == 502
+
+
 def _shell_keep_warm(label: str, tid: str, session: requests.Session) -> bool:
     s, _ = _http("POST", _BASE + "/threads/" + tid + "/shell/wake",
                  {}, _headers(label), timeout=15, session=session)
@@ -503,6 +511,15 @@ def _tick() -> None:
                 log.info("[%s] ready sb=%s init=%s", label, new_sb[:8], init_result)
             else:
                 log.warning("[%s] unavailable after wake attempt", label)
+                # If e2b returns 502, sandbox was recycled — trigger Playwright repair
+                if _e2b_recycled(sb):
+                    log.warning("[%s] e2b 502 — sandbox recycled, setting needsRepair=True", label)
+                    mf2 = _load_manifest(label)
+                    mf2["sandboxId"]   = None
+                    mf2["execBase"]    = None
+                    mf2["needsRepair"] = True
+                    (ACC_DIR / label / "manifest.json").write_text(
+                        json.dumps(mf2, indent=2, ensure_ascii=False))
 
 
 def main() -> None:
