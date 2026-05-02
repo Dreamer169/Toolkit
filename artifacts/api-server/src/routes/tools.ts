@@ -4424,5 +4424,149 @@ router.post("/tools/waf/scrape", async (req, res) => {
   } catch (e) { res.status(502).json({ success: false, error: String(e) }); }
 });
 
+
+// ═══ novproxy 自动化模块 ════════════════════════════════════════════════════
+// 注册: pydoll + ddddocr (隐蔽绕 CF + 自动解图片验证码)
+// 登录: 纯 HTTP 直调 api.novproxy.com (无浏览器，学自 Outlook 工作流思路)
+
+// POST /tools/novproxy/register — 启动批量注册 job
+router.post("/tools/novproxy/register", async (req, res) => {
+  const { accounts = [], delay = 3 } = req.body as { accounts?: [string, string][]; delay?: number };
+  if (!accounts.length) { res.status(400).json({ success: false, error: "需要账号列表" }); return; }
+
+  const jobId = `np_reg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const job   = await jobQueue.create(jobId);
+  job.logs.push({ type: "start", message: `pydoll 注册任务启动: ${accounts.length} 个账号 (ddddocr 自动解验证码)` });
+  res.json({ success: true, jobId });
+
+  const { spawn } = await import("child_process");
+  const scriptPath = "/root/Toolkit/scripts/novproxy_register_worker.py";
+  const child = spawn("python3", [
+    scriptPath,
+    "--accounts", JSON.stringify(accounts),
+    "--delay",    String(delay),
+  ], { env: { ...process.env as Record<string, string>, PYTHONUNBUFFERED: "1" } });
+  jobQueue.setChild(jobId, child);
+
+  child.stdout.on("data", (chunk: Buffer) => {
+    for (const line of chunk.toString().split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      if (t.startsWith("[OK]")) {
+        const parts = t.slice(5).split("|");
+        if (parts.length >= 2) {
+          job.accounts.push({ email: parts[0].trim(), password: parts[1].trim() });
+          job.logs.push({ type: "success", message: `✅ 注册成功: ${parts[0].trim()}` });
+        }
+      } else if (t.startsWith("[FAIL]")) {
+        const parts = t.slice(7).split("|");
+        job.logs.push({ type: "error", message: `❌ 失败: ${parts.join(" — ")}` });
+      } else if (t.startsWith("[LOG]")) {
+        const msg = t.slice(6).trim();
+        if (msg) job.logs.push({ type: "log", message: msg });
+      } else if (t.startsWith("[DONE]")) {
+        job.logs.push({ type: "done", message: `🏁 注册完成 ${t.slice(7)}` });
+      }
+    }
+  });
+  child.stderr.on("data", (chunk: Buffer) => {
+    for (const l of chunk.toString().split("\n")) {
+      const lt = l.trim();
+      if (lt && lt.length > 5 && !lt.includes("DeprecationWarning") && !lt.includes("UserWarning") && !lt.includes("show_ad"))
+        job.logs.push({ type: "log", message: `[sys] ${lt.slice(0, 200)}` });
+    }
+  });
+  child.on("close", (code: number) => {
+    job.status = "done";
+    job.logs.push({ type: "done", message: `进程退出 code=${code}，共成功 ${job.accounts.length} 个` });
+  });
+});
+
+// GET /tools/novproxy/register/:jobId
+router.get("/tools/novproxy/register/:jobId", async (req, res) => {
+  const since = parseInt(String(req.query.since ?? "0"), 10);
+  const job   = await jobQueue.get(req.params.jobId);
+  if (!job) { res.status(404).json({ success: false, error: "job not found" }); return; }
+  res.json({ success: true, status: job.status, logs: job.logs.slice(since), accounts: job.accounts, nextSince: job.logs.length });
+});
+
+// DELETE /tools/novproxy/register/:jobId
+router.delete("/tools/novproxy/register/:jobId", (req, res) => {
+  const stopped = jobQueue.stop(req.params.jobId);
+  if (!stopped) { res.status(404).json({ success: false }); return; }
+  res.json({ success: true });
+});
+
+// POST /tools/novproxy/login — 批量登录 job (纯 HTTP，零浏览器)
+// 隐蔽思路：通过网络拦截发现 API 端点 → 直接调用，完全绕过浏览器检测
+router.post("/tools/novproxy/login", async (req, res) => {
+  const { accounts = [], delay = 0.5 } = req.body as { accounts?: [string, string][]; delay?: number };
+  if (!accounts.length) { res.status(400).json({ success: false, error: "需要账号列表" }); return; }
+
+  const jobId = `np_login_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const job   = await jobQueue.create(jobId);
+  job.logs.push({ type: "start", message: `HTTP 直调登录: ${accounts.length} 个账号 (无浏览器)` });
+  res.json({ success: true, jobId });
+
+  const { spawn } = await import("child_process");
+  const scriptPath = "/root/Toolkit/scripts/novproxy_login_worker.py";
+  const child = spawn("python3", [
+    scriptPath,
+    "--accounts", JSON.stringify(accounts),
+    "--delay",    String(delay),
+  ], { env: { ...process.env as Record<string, string>, PYTHONUNBUFFERED: "1" } });
+  jobQueue.setChild(jobId, child);
+
+  child.stdout.on("data", (chunk: Buffer) => {
+    for (const line of chunk.toString().split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      if (t.startsWith("[OK]")) {
+        const parts = t.slice(5).split("|");
+        // parts: email|password|token|access_key
+        if (parts.length >= 3) {
+          job.accounts.push({ email: parts[0].trim(), password: parts[1].trim(), token: parts[2].trim(), username: parts[3]?.trim() || "" });
+          job.logs.push({ type: "success", message: `✅ 登录成功: ${parts[0].trim()} | token=${parts[2].trim().slice(0, 16)}...` });
+        }
+      } else if (t.startsWith("[FAIL]")) {
+        const parts = t.slice(7).split("|");
+        job.logs.push({ type: "error", message: `❌ 登录失败: ${parts.join(" — ")}` });
+      } else if (t.startsWith("[LOG]")) {
+        const msg = t.slice(6).trim();
+        if (msg) job.logs.push({ type: "log", message: msg });
+      } else if (t.startsWith("[DONE]")) {
+        job.logs.push({ type: "done", message: `🏁 登录完成 ${t.slice(7)}` });
+      }
+    }
+  });
+  child.stderr.on("data", (chunk: Buffer) => {
+    for (const l of chunk.toString().split("\n")) {
+      const lt = l.trim();
+      if (lt && lt.length > 5 && !lt.includes("DeprecationWarning") && !lt.includes("UserWarning"))
+        job.logs.push({ type: "log", message: `[sys] ${lt.slice(0, 200)}` });
+    }
+  });
+  child.on("close", (code: number) => {
+    job.status = "done";
+    job.logs.push({ type: "done", message: `进程退出 code=${code}，共成功 ${job.accounts.length} 个` });
+  });
+});
+
+// GET /tools/novproxy/login/:jobId
+router.get("/tools/novproxy/login/:jobId", async (req, res) => {
+  const since = parseInt(String(req.query.since ?? "0"), 10);
+  const job   = await jobQueue.get(req.params.jobId);
+  if (!job) { res.status(404).json({ success: false, error: "job not found" }); return; }
+  res.json({ success: true, status: job.status, logs: job.logs.slice(since), accounts: job.accounts, nextSince: job.logs.length });
+});
+
+// DELETE /tools/novproxy/login/:jobId
+router.delete("/tools/novproxy/login/:jobId", (req, res) => {
+  const stopped = jobQueue.stop(req.params.jobId);
+  if (!stopped) { res.status(404).json({ success: false }); return; }
+  res.json({ success: true });
+});
+
+
 export default router;
 
