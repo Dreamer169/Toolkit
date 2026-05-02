@@ -230,7 +230,7 @@ export async function initDatabase(): Promise<void> {
         OR archives.status        IS DISTINCT FROM EXCLUDED.status
   `);
   if (_bf.rowCount > 0) {
-    process.stderr.write(`[db.init] v8.82 archives upsert backfill: ${_bf.rowCount} rows synced/created (outlook+replit) from accounts → archives\n`);
+    console.log(`[db.init] v8.82 archives upsert backfill: ${_bf.rowCount} rows synced/created (outlook+replit) from accounts → archives\n`);
   }
 
   // v8.81 Bug Q ROOT-FIX: 6 处 DELETE FROM accounts 路径全部漏写 DELETE FROM archives → 历史 orphan
@@ -260,6 +260,6 @@ export async function initDatabase(): Promise<void> {
        AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.platform = ar.platform AND a.email = ar.email)
   `);
   if (_orphan.rowCount > 0) {
-    process.stderr.write(`[db.init] v8.82 orphan cleanup: removed ${_orphan.rowCount} orphaned archives rows (outlook+replit)\n`);
+    console.log(`[db.init] v8.82 orphan cleanup: removed ${_orphan.rowCount} orphaned archives rows (outlook+replit)\n`);
   }
 }

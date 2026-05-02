@@ -197,7 +197,7 @@ async function runCheck() {
          AND password IS NOT NULL AND password != ''
          AND updated_at < NOW() - INTERVAL '1 hour'
        ORDER BY updated_at ASC
-       LIMIT 2`,
+       LIMIT 5`,
       []
     );
     if (manualRetryRows.length > 0) {
