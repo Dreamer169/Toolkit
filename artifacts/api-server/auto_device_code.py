@@ -1,15 +1,22 @@
 """
 自动完成 Microsoft 设备码授权流程
-v8.95 修复:
-  - React-safe 邮箱填写: nativeInputValueSetter + dispatchEvent (同 outlook_retoken v8.94)
-  - 邮箱提交后检测页面是否真的跳转（卡住=IP被拒，打印警告）
-  - 自动 CF IP 代理：无 proxy 参数时从 /tmp/cf_pool_state.json 随机取一个 CF IP
-  - 密码框未出现时等待更长时间再重试
-  - 增加 wait_for_selector 代替固定 sleep 提高稳定性
+v8.96 修复:
+  - [根因修复] token 兑换 + DB 写入移进 Python 同一 CF proxy 环境。
+    之前 close handler 在 Node.js（VPS 直连 45.205.27.69）兑换 token，
+    MS 检测到 auth IP != token IP → 触发「New app(s) connected」安全邮件。
+    现在浏览器授权 + token POST + DB INSERT 全在同一个 CF proxy 出口 IP 上。
+  - 兑换逻辑: httpx AsyncClient + socks5 proxy → MS /oauth2/v2.0/token
+  - DB 写入: psycopg2 写 localhost PostgreSQL（DB 在本地，无需走代理）
+  - payload 每项新增可选字段 deviceCode / dbUrl（不传则跳过 token 兑换）
+  - React-safe 邮箱填写: nativeInputValueSetter + dispatchEvent
+  - 自动 CF IP 代理: 无 proxy 参数时从 /tmp/cf_pool_state.json 随机取
 """
 import asyncio, json, sys, os, random
 
 MAX_CONCURRENCY = 8
+CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+TOKEN_ENDPOINT = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
+DB_URL = "postgresql://postgres:postgres@localhost/toolkit"
 
 SKIP_SELECTORS = [
     'button:has-text("Skip for now")',
@@ -27,7 +34,6 @@ SKIP_SELECTORS = [
 
 
 def _pick_cf_proxy() -> str:
-    """从 cf_pool_state.json 随机取一个 CF IP，启动 XrayRelay，返回 socks5 URL；失败返回 ""。"""
     try:
         import json as _j
         _ps = _j.load(open('/tmp/cf_pool_state.json'))
@@ -49,6 +55,112 @@ def _pick_cf_proxy() -> str:
 
 
 _ACTIVE_RELAYS: list = []
+
+
+async def _exchange_token_and_save(
+    device_code: str,
+    account_id: int,
+    email: str,
+    proxy: str,
+    db_url: str = DB_URL,
+    remove_tag: str = "",
+) -> bool:
+    """
+    v8.96: 通过同一个 CF proxy 向 MS 兑换 access_token，再写入本地 DB。
+    返回 True 表示成功入库。
+    """
+    import httpx
+
+    # 构造 proxy_url (httpx 格式)
+    proxy_url = proxy if proxy else None
+
+    access_token = ""
+    refresh_token_str = ""
+    last_err = ""
+    deadline = asyncio.get_event_loop().time() + 120  # 最多等 120s
+
+    print(f"[{email}] v8.96 token exchange via proxy={proxy_url or 'DIRECT'}", flush=True)
+
+    transport_kwargs: dict = {}
+    if proxy_url:
+        try:
+            transport_kwargs["transport"] = httpx.AsyncHTTPTransport(
+                proxy=proxy_url
+            )
+        except Exception:
+            # httpx 旧版 API
+            transport_kwargs["proxies"] = {"all://": proxy_url}
+
+    async with httpx.AsyncClient(timeout=20, **transport_kwargs) as client:
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                resp = await client.post(
+                    TOKEN_ENDPOINT,
+                    data={
+                        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                        "client_id": CLIENT_ID,
+                        "device_code": device_code,
+                    },
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+                data = resp.json()
+                if data.get("access_token"):
+                    access_token = data["access_token"]
+                    refresh_token_str = data.get("refresh_token", "")
+                    print(f"[{email}] ✅ token 兑换成功 (via CF proxy) access={len(access_token)}B", flush=True)
+                    break
+                err = data.get("error", "no_token")
+                last_err = f"{err}: {data.get('error_description','')[:80]}"
+                if err not in ("authorization_pending", "slow_down"):
+                    print(f"[{email}] ❌ token 兑换终止: {last_err}", flush=True)
+                    return False
+            except Exception as e:
+                last_err = str(e)[:100]
+            await asyncio.sleep(2)
+
+    if not access_token:
+        print(f"[{email}] ❌ token 120s 内未拿到: {last_err}", flush=True)
+        return False
+
+    # 写入 DB（本地 psycopg2，无需走代理）
+    try:
+        import psycopg2  # type: ignore
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+
+        if remove_tag:
+            cur.execute(
+                """UPDATE accounts
+                      SET token=%s, refresh_token=%s, status='active', updated_at=NOW(),
+                          tags = NULLIF(TRIM(BOTH ',' FROM
+                            REGEXP_REPLACE(COALESCE(tags,''), '(^|,?)" + remove_tag + "(,|$)', ',', 'g')
+                          ), ',')
+                    WHERE id=%s""",
+                (access_token, refresh_token_str, account_id),
+            )
+        else:
+            cur.execute(
+                """UPDATE accounts
+                      SET token=%s, refresh_token=%s, status='active', updated_at=NOW()
+                    WHERE id=%s""",
+                (access_token, refresh_token_str, account_id),
+            )
+
+        # 同步写 archives
+        cur.execute(
+            """UPDATE archives
+                  SET token=%s, refresh_token=%s, status='active', updated_at=NOW()
+                WHERE platform='outlook' AND email=%s""",
+            (access_token, refresh_token_str, email),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        print(f"[{email}] ✅ token 已写入 DB (id={account_id})", flush=True)
+        return True
+    except Exception as e:
+        print(f"[{email}] ⚠ DB 写入失败: {e}", flush=True)
+        return False
 
 
 async def _safe_shot(page, email: str, step: str):
@@ -104,10 +216,6 @@ async def _poll_real_done(page, email: str, max_wait: int = 30) -> bool:
 
 
 async def _react_safe_fill_email(page, email: str) -> bool:
-    """
-    v8.95: Fluent UI React input — nativeInputValueSetter + dispatchEvent forces React onChange.
-    Returns True if input found and filled.
-    """
     try:
         filled = await page.evaluate(r"""(email) => {
             const inp = document.querySelector('input[name="loginfmt"], input[type="email"]');
@@ -124,11 +232,12 @@ async def _react_safe_fill_email(page, email: str) -> bool:
 
 
 async def authorize_one(email: str, password: str, user_code: str, account_id: int,
-                        proxy: str = "", sem=None):
+                        proxy: str = "", sem=None,
+                        device_code: str = "", db_url: str = DB_URL,
+                        remove_tag: str = ""):
     from patchright.async_api import async_playwright
     result = {"accountId": account_id, "email": email, "status": "error", "msg": ""}
 
-    # v8.95: 无 proxy 参数时自动从 CF pool 取一个 IP
     _auto_proxy = ""
     if not proxy:
         _auto_proxy = _pick_cf_proxy()
@@ -161,7 +270,7 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
             await _safe_shot(page, email, "01_start")
             print(f"[{email}] 01 url={page.url[:100]}", flush=True)
 
-            # ── Step 1: 输入 user_code ──
+            # Step 1: 输入 user_code
             code_input = await page.query_selector(
                 'input[name="otc"], input[placeholder*="code" i], '
                 'input[id*="code" i], input[type="text"]'
@@ -181,7 +290,7 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
             await asyncio.sleep(3)
             await _safe_shot(page, email, "02_code")
 
-            # v8.90: detect expired/invalid user_code immediately
+            # v8.90: detect expired/invalid user_code
             try:
                 _body02 = await page.inner_text("body")
                 _bad = ["That code didn work", "code didn work",
@@ -194,7 +303,7 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
             except Exception:
                 pass
 
-            # ── Step 2: 填入邮箱 (v8.95 React-safe) ──
+            # Step 2: 填入邮箱 (React-safe)
             _email_el = await page.query_selector('input[type="email"], input[name="loginfmt"]')
             if _email_el:
                 _cur_val = ""
@@ -203,15 +312,12 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                 except Exception:
                     pass
                 if not _cur_val:
-                    # 先用 React-safe 方式设置值
                     _filled = await _react_safe_fill_email(page, email)
                     if not _filled:
-                        # fallback: plain fill
                         await _email_el.fill(email)
                     await asyncio.sleep(0.4)
                     print(f"[{email}] 📧 填入邮箱(React-safe={_filled}): {email}", flush=True)
 
-                # 点击提交按钮（优先 primaryButton → submit → Enter）
                 _submitted = False
                 for _sel in [
                     'button[data-testid="primaryButton"]',
@@ -232,13 +338,11 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                     await _email_el.press('Enter')
                     print(f"[{email}] 📤 邮箱提交: Enter键", flush=True)
 
-                # 等待页面跳转（最多12s）
                 try:
                     await page.wait_for_load_state('networkidle', timeout=12000)
                 except Exception:
                     await asyncio.sleep(5)
 
-                # v8.95: 检测邮箱表单是否还在 → IP被拒
                 try:
                     _still_email = await page.locator(
                         'input[name="loginfmt"], input[type="email"]'
@@ -248,7 +352,6 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
 
                 if _still_email:
                     print(f"[{email}] ⚠ 邮箱提交后页面未跳转 URL={page.url[:100]} — 可能IP被MS拒", flush=True)
-                    # 尝试再次 React-safe fill + 提交（有时第一次需要激活 React fiber）
                     await _react_safe_fill_email(page, email)
                     await asyncio.sleep(0.3)
                     for _sel2 in ['button[data-testid="primaryButton"]', 'input[type="submit"]',
@@ -268,7 +371,7 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
 
             await _safe_shot(page, email, "03_email")
 
-            # ── Step 3: 密码 ──
+            # Step 3: 密码
             for _pw in range(3):
                 pw_input = await page.query_selector(
                     'input[type="password"], input[name="passwd"]')
@@ -285,14 +388,13 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                         await asyncio.sleep(6)
                     break
                 elif _pw < 2:
-                    # 密码框未出现，多等一下
                     await asyncio.sleep(4)
                     await _skip_if_security_page(page, email)
 
             await _safe_shot(page, email, "04_password")
             print(f"[{email}] 04 url={page.url[:120]}", flush=True)
 
-            # ── Step 4: Skip 安全页 / KMSI ──
+            # Step 4: Skip 安全页 / KMSI
             for _ in range(4):
                 if not await _skip_if_security_page(page, email):
                     break
@@ -327,7 +429,7 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                 if not await _skip_if_security_page(page, email):
                     break
 
-            # ── Step 5: Device-confirm ──
+            # Step 5: Device-confirm
             for _dc_i in range(3):
                 try:
                     _dc_body = (await page.inner_text("body")).lower()
@@ -360,7 +462,7 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                 except Exception:
                     break
 
-            # ── Step 6: Consent / Continue ──
+            # Step 6: Consent / Continue
             consent_sels = [
                 'input[type="submit"][value="Continue"]',
                 'input[type="submit"][value="Accept"]',
@@ -411,7 +513,6 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                                     _consent_clicked = True
                                     _clicked = True
                                     await _safe_shot(page, email, f"06_consent_{_retry}")
-                                    # After consent, live.com may show password
                                     for _pwstep in range(3):
                                         _pw2 = await page.query_selector(
                                             'input[type="password"], input[name="passwd"]')
@@ -524,14 +625,26 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
             elif _real_suspended_body:
                 result["status"] = "suspended"
                 result["msg"] = f"suspended: {final_url[:100]}"
-            elif _real_done:
+            elif _real_done or _consent_clicked:
                 result["status"] = "done"
-                result["msg"] = "authorized (real_done)"
-                print(f"[{email}] done real_done=True", flush=True)
-            elif _consent_clicked:
-                result["status"] = "done"
-                result["msg"] = "consent clicked (optimistic, poll will verify)"
-                print(f"[{email}] done optimistic consent", flush=True)
+                result["msg"] = "authorized"
+                print(f"[{email}] 浏览器授权完成，开始 token 兑换 (同 CF proxy)...", flush=True)
+
+                # v8.96 核心修复: token 兑换在同一 CF proxy 出口 IP 进行
+                if device_code:
+                    _tok_saved = await _exchange_token_and_save(
+                        device_code=device_code,
+                        account_id=account_id,
+                        email=email,
+                        proxy=proxy,
+                        db_url=db_url or DB_URL,
+                        remove_tag=remove_tag,
+                    )
+                    result["token_saved"] = _tok_saved
+                    if not _tok_saved:
+                        result["msg"] += " (token exchange failed, see log)"
+                else:
+                    print(f"[{email}] ⚠ 无 deviceCode，跳过 token 兑换（由 Node.js 兑换）", flush=True)
             else:
                 result["status"] = "error"
                 result["msg"] = f"no consent reached: {final_url[:120]}"
@@ -551,11 +664,15 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
 async def main():
     accounts = json.loads(sys.argv[1])
     proxy = sys.argv[2] if len(sys.argv) > 2 else ""
+    db_url = sys.argv[3] if len(sys.argv) > 3 else DB_URL
     sem = asyncio.Semaphore(MAX_CONCURRENCY)
     tasks = [
         authorize_one(
             a["email"], a["password"], a["userCode"],
-            a.get("accountId", 0), proxy, sem
+            a.get("accountId", 0), proxy, sem,
+            device_code=a.get("deviceCode", ""),
+            db_url=a.get("dbUrl", db_url),
+            remove_tag=a.get("removeTag", ""),
         )
         for a in accounts
     ]

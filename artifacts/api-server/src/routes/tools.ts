@@ -1675,7 +1675,9 @@ router.post("/tools/outlook/register", async (req, res) => {
                 .filter((s: BatchOAuthSession) => s.status === "pending")
                 .map((s: BatchOAuthSession) => {
                   const row = pendingOAuthRows.find(r => r.email === s.email);
-                  return { accountId: s.accountId, email: s.email, password: row?.password || '', userCode: s.userCode };
+                  // v8.96: pass deviceCode+dbUrl so Python exchanges token via same CF proxy
+                  return { accountId: s.accountId, email: s.email, password: row?.password || '', userCode: s.userCode,
+                    deviceCode: s.deviceCode, dbUrl: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost/toolkit' };
                 })
                 .filter((x: { password: string }) => x.password);
               if (autoPayload.length > 0) {
@@ -1724,55 +1726,9 @@ router.post("/tools/outlook/register", async (req, res) => {
                     }
                   }
                 });
-                autoProc.on('close', async (code: number | null) => {
-                  job.logs.push({ type: code === 0 ? 'success' : 'warn', message: `🤖 自动授权脚本退出 (code=${code})` });
-                  const { execute: dbAuto } = await import('../db.js');
-                  const CLIENT_ID = '9e5f94bc-e8a4-4e73-b8be-63364c29d753';
-                  const ps = batchOAuthSessions.get(sessionId) || [];
-                  // v8.79 Bug L 全套修复:
-                  //  1) 跳过 Python 已标记 suspended/error 的账号 (poll 必 timeout, 浪费 60s)
-                  //  2) 60s → 120s 给 MS 端 consent → token endpoint 同步更多缓冲
-                  //  3) 3s → 2s 间隔, 60→20 次 poll 提升到 60 次
-                  for (const s2 of ps.filter((x2: BatchOAuthSession) => x2.status === 'pending')) {
-                    const _pyResult = _autoResults.get(s2.email);
-                    if (_pyResult && _pyResult.status !== 'done') {
-                      job.logs.push({ type: 'warn', message: `⏭ [auto-auth] ${s2.email} 跳过 token poll (Python consent 未成功: ${_pyResult.status} - ${_pyResult.msg.slice(0,80)})` });
-                      continue;
-                    }
-                    let _saved = false;
-                    let _lastErr = '';
-                    let _pollCount = 0;
-                    const _deadline = Date.now() + 120000;  // v8.79: 60s → 120s
-                    while (Date.now() < _deadline && !_saved) {
-                      _pollCount++;
-                      try {
-                        const r2 = await microsoftFetch('https://login.microsoftonline.com/consumers/oauth2/v2.0/token', {
-                          method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                          body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:device_code', client_id: CLIENT_ID, device_code: s2.deviceCode }).toString(),
-                        });
-                        const td = await r2.json() as { access_token?: string; refresh_token?: string; error?: string; error_description?: string };
-                        if (td.access_token) {
-                          s2.status = 'done'; s2.accessToken = td.access_token; s2.refreshToken = td.refresh_token ?? '';
-                          await dbAuto('UPDATE accounts SET token=$1, refresh_token=$2, status=\'active\', updated_at=NOW() WHERE id=$3', [td.access_token, td.refresh_token ?? '', s2.accountId]);
-                          await dbAuto('UPDATE archives SET token=$1, refresh_token=$2, status=\'active\', updated_at=NOW() WHERE platform=\'outlook\' AND email=$3', [td.access_token, td.refresh_token ?? '', s2.email]);
-                          job.logs.push({ type: 'success', message: `✅ [auto-auth] ${s2.email} token 已入库 (poll#${_pollCount}, access=${td.access_token.length}B refresh=${(td.refresh_token||'').length}B)` });
-                          _saved = true;
-                          break;
-                        }
-                        _lastErr = `${td.error || 'no_token'}: ${(td.error_description || '').slice(0, 80)}`;
-                        if (td.error && !['authorization_pending', 'slow_down'].includes(td.error)) {
-                          job.logs.push({ type: 'warn', message: `⚠ [auto-auth] ${s2.email} 终止错误 (poll#${_pollCount}) ${td.error}: ${(td.error_description||'').slice(0,120)}` });
-                          break;
-                        }
-                      } catch (e) {
-                        _lastErr = String(e).slice(0, 120);
-                      }
-                      await new Promise(r => setTimeout(r, 2000));  // v8.79: 3s → 2s
-                    }
-                    if (!_saved) {
-                      job.logs.push({ type: 'warn', message: `⚠ [auto-auth] ${s2.email} 120s/${_pollCount}次 poll 内未拿到 token, 最后错误: ${_lastErr}` });
-                    }
-                  }
+                // v8.96: token exchange done inside Python via same CF proxy
+                autoProc.on('close', (code: number | null) => {
+                  job.logs.push({ type: code === 0 ? 'success' : 'warn', message: '\u{1F916} \u81EA\u52A8\u6388\u6743\u5B8C\u6210 (code=' + code + ') \u2014 token \u5DF2\u7531 Python \u5728 CF proxy \u5185\u5151\u6362\u5165\u5E93' });
                 });
               }
             } catch (autoErr) {
