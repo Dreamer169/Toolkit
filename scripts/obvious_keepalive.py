@@ -34,8 +34,8 @@ except ImportError:
     _AUTOPROVISION_AVAILABLE = False
 
 ACC_DIR                = Path(os.environ.get("SB_ACC_DIR",               "/root/obvious-accounts"))
-PING_MIN               = int(os.environ.get("SB_PING_MIN",               "90"))
-PING_MAX               = int(os.environ.get("SB_PING_MAX",               "180"))
+PING_MIN               = int(os.environ.get("SB_PING_MIN",               "45"))
+PING_MAX               = int(os.environ.get("SB_PING_MAX",               "75"))
 WAKE_TIMEOUT           = int(os.environ.get("SB_WAKE_TIMEOUT",           "150"))
 CREDIT_RESET_THRESHOLD = float(os.environ.get("SB_CREDIT_RESET_THRESHOLD", "20.0"))
 _BASE                  = "https://api.app.obvious.ai/prepare"
@@ -323,6 +323,22 @@ def _shell_keep_warm(label: str, tid: str, session: requests.Session) -> bool:
     return s == 200
 
 
+def _e2b_exec_ping(sb_id: str) -> bool:
+    """Directly execute a noop in the e2b sandbox to reset its idle timer.
+
+    /health is passive and does NOT reset e2b idle counter.
+    Only actual code execution resets the timer, so we POST a trivial
+    print(1) to the sandbox exec server (port 49999, no proxy needed).
+    Returns True if the sandbox responded with execution output.
+    """
+    if not sb_id:
+        return False
+    url = "https://49999-" + sb_id + ".e2b.app/execute"
+    body = {"code": "print(1)", "language": "python"}
+    s, _resp = _http("POST", url, body, timeout=10)
+    return 200 <= s < 300
+
+
 def _chat_wake(label: str, session: requests.Session) -> str | None:
     mf = _load_manifest(label)
     tid, pid = mf.get("threadId"), mf.get("projectId")
@@ -442,98 +458,103 @@ def _init_sandbox(sb_id: str) -> dict:
 # Main tick
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _tick() -> None:
-    for acc in _load_index():
-        label = acc.get("label", "?")
-        sb    = acc.get("sandboxId") or ""
+def _tick_one(acc: dict) -> None:
+    """Process a single account: credit check, auto-repair, exec-ping + wake."""
+    label = acc.get("label", "?")
 
-        # Skip missing files
-        if not (ACC_DIR / label / "manifest.json").exists():
-            continue
-        if not (ACC_DIR / label / "storage_state.json").exists():
-            continue
+    if not (ACC_DIR / label / "manifest.json").exists():
+        return
+    if not (ACC_DIR / label / "storage_state.json").exists():
+        return
 
-        # Skip dead accounts
-        mf = _load_manifest(label)
-        if mf.get("status") == "dead":
-            log.info("[%s] dead — skipped", label)
-            continue
+    mf = _load_manifest(label)
+    if mf.get("status") == "dead":
+        log.info("[%s] dead -- skipped", label)
+        return
 
-        # Build per-account proxy session
-        sess = _get_session(label)
+    sess = _get_session(label)
 
-        # Credit auto-reset (every tick, before keepalive)
+    try:
+        _auto_reset_credits(label, sess, CREDIT_RESET_THRESHOLD)
+    except KeyboardInterrupt:
+        raise
+    except Exception as e:
+        log.warning("[%s] credit check error: %s", label, e)
+
+    mf = _load_manifest(label)
+    sb = mf.get("sandboxId") or acc.get("sandboxId") or ""
+    tid = mf.get("threadId")
+
+    # Auto-repair: trigger on ANY needsRepair=True (v2)
+    if mf.get("needsRepair"):
+        log.info("[%s] needsRepair=True -- running repair_account.py", label)
+        import subprocess as _sp, os as _os
+        repair_py = str(Path(__file__).parent / "repair_account.py")
+        env = dict(_os.environ, DISPLAY=_os.environ.get("DISPLAY", ":99"))
         try:
-            _auto_reset_credits(label, sess, CREDIT_RESET_THRESHOLD)
+            result = _sp.run(
+                ["python3", repair_py, "--label", label, "--headless"],
+                timeout=180, env=env, capture_output=True, text=True
+            )
+            log.info("[%s] repair exit=%d stdout=%s",
+                     label, result.returncode, result.stdout[-200:] if result.stdout else "")
+            mf = _load_manifest(label)
+            if mf.get("projectId") and mf.get("threadId"):
+                mf["needsRepair"] = False
+                (ACC_DIR / label / "manifest.json").write_text(
+                    json.dumps(mf, indent=2, ensure_ascii=False))
+                log.info("[%s] repair succeeded, needsRepair cleared", label)
+            else:
+                log.warning("[%s] repair ran but still missing IDs", label)
         except KeyboardInterrupt:
             raise
-        except Exception as e:
-            log.warning("[%s] credit check error: %s", label, e)
-
-        # Re-read manifest in case credit reset cleared project/sandbox
+        except Exception as _e:
+            log.warning("[%s] repair_account error: %s", label, _e)
         mf = _load_manifest(label)
-        sb = mf.get("sandboxId") or acc.get("sandboxId") or ""
+        sb = mf.get("sandboxId") or ""
         tid = mf.get("threadId")
 
-        # Auto-repair: if needsRepair flag is set, trigger Playwright repair
-        # v2: trigger on ANY needsRepair=True (not just when pid/tid missing)
-        # This handles 502-recycled sandboxes which still have old pid/tid
-        if mf.get("needsRepair"):
-            log.info("[%s] needsRepair=True — running repair_account.py", label)
-            import subprocess as _sp, os as _os
-            repair_py = str(Path(__file__).parent / "repair_account.py")
-            env = dict(_os.environ, DISPLAY=_os.environ.get("DISPLAY", ":99"))
+    if _alive(sb):
+        # v3: direct e2b exec-ping resets idle timer;
+        # /health and shell/wake do NOT reset e2b idle counter
+        exec_ok = _e2b_exec_ping(sb)
+        warm_ok = _shell_keep_warm(label, tid, sess) if tid else False
+        log.info("[%s] ok sb=%s exec_ping=%s warm=%s proxy=%s",
+                 label, sb[:8], exec_ok, warm_ok, mf.get("proxy", "NONE"))
+    else:
+        log.info("[%s] paused, waking via chat (proxy=%s)",
+                 label, mf.get("proxy", "NONE"))
+        new_sb = _chat_wake(label, sess)
+        if new_sb:
+            init_result = _init_sandbox(new_sb)
+            log.info("[%s] ready sb=%s init=%s", label, new_sb[:8], init_result)
+        else:
+            log.warning("[%s] unavailable after wake attempt", label)
+            if _e2b_recycled(sb):
+                log.warning("[%s] e2b 502 -- sandbox recycled, setting needsRepair=True", label)
+                mf2 = _load_manifest(label)
+                mf2["sandboxId"]   = None
+                mf2["execBase"]    = None
+                mf2["needsRepair"] = True
+                (ACC_DIR / label / "manifest.json").write_text(
+                    json.dumps(mf2, indent=2, ensure_ascii=False))
+
+
+def _tick() -> None:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    accounts = _load_index()
+    # Parallel: prevents sequential starvation where accounts at the tail
+    # only get pinged every 3-5 min while early ones hog the loop
+    with ThreadPoolExecutor(max_workers=min(len(accounts), 14)) as pool:
+        futs = {pool.submit(_tick_one, acc): acc.get("label", "?") for acc in accounts}
+        for fut in as_completed(futs):
+            lbl = futs[fut]
             try:
-                result = _sp.run(
-                    ["python3", repair_py, "--label", label, "--headless"],
-                    timeout=180, env=env, capture_output=True, text=True
-                )
-                log.info("[%s] repair exit=%d stdout=%s",
-                         label, result.returncode, result.stdout[-200:] if result.stdout else "")
-                # Re-read manifest after repair
-                mf = _load_manifest(label)
-                if mf.get("projectId") and mf.get("threadId"):
-                    mf["needsRepair"] = False
-                    (ACC_DIR / label / "manifest.json").write_text(
-                        json.dumps(mf, indent=2, ensure_ascii=False))
-                    log.info("[%s] repair succeeded, needsRepair cleared", label)
-                else:
-                    log.warning("[%s] repair ran but still missing IDs", label)
+                fut.result()
             except KeyboardInterrupt:
                 raise
-            except Exception as _e:
-                log.warning("[%s] repair_account error: %s", label, _e)
-            mf = _load_manifest(label)
-            sb = mf.get("sandboxId") or ""
-            tid = mf.get("threadId")
-
-        if _alive(sb):
-            if tid:
-                ok = _shell_keep_warm(label, tid, sess)
-                log.info("[%s] ok sb=%s warm=%s proxy=%s",
-                         label, sb[:8], ok, mf.get("proxy", "NONE"))
-            else:
-                log.info("[%s] ok sb=%s (no tid) proxy=%s",
-                         label, sb[:8], mf.get("proxy", "NONE"))
-        else:
-            log.info("[%s] paused, waking via chat (proxy=%s)",
-                     label, mf.get("proxy", "NONE"))
-            new_sb = _chat_wake(label, sess)
-            if new_sb:
-                init_result = _init_sandbox(new_sb)
-                log.info("[%s] ready sb=%s init=%s", label, new_sb[:8], init_result)
-            else:
-                log.warning("[%s] unavailable after wake attempt", label)
-                # If e2b returns 502, sandbox was recycled — trigger Playwright repair
-                if _e2b_recycled(sb):
-                    log.warning("[%s] e2b 502 — sandbox recycled, setting needsRepair=True", label)
-                    mf2 = _load_manifest(label)
-                    mf2["sandboxId"]   = None
-                    mf2["execBase"]    = None
-                    mf2["needsRepair"] = True
-                    (ACC_DIR / label / "manifest.json").write_text(
-                        json.dumps(mf2, indent=2, ensure_ascii=False))
-
+            except Exception as e:
+                log.exception("[%s] tick_one error: %s", lbl, e)
 
 def main() -> None:
     log.info("probe starting  acc_dir=%s  credit_threshold=%.1f  min_pool=%d",
