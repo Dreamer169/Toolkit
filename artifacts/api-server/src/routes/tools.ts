@@ -1196,7 +1196,7 @@ router.post("/tools/outlook/batch-oauth/auto-complete", async (req, res) => {
     const acScript = new URL("../auto_device_code.py", import.meta.url).pathname;
     const acProc = spawnAc(
       "python3", [acScript, JSON.stringify(autoPayload), "http://127.0.0.1:10809"],
-      { detached: true, stdio: ["ignore", "pipe", "pipe"], env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: "1" } }
+      { detached: true, stdio: "ignore", env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: "1" } }
     );
     acProc.unref();
     res.json({ success: true, sessionId, accounts: autoPayload.map((x: {accountId:number;email:string;userCode:string}) => ({ accountId: x.accountId, email: x.email, userCode: x.userCode })) });
@@ -1289,7 +1289,7 @@ router.post("/tools/outlook/batch-oauth/reauth-manual", async (req, res) => {
     const rmScript = new URL("../auto_device_code.py", import.meta.url).pathname;
     const rmProc = spawnRm(
       "python3", [rmScript, JSON.stringify(autoPayload), "http://127.0.0.1:10809"],
-      { detached: true, stdio: ["ignore", "pipe", "pipe"], env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: "1" } }
+      { detached: true, stdio: "ignore", env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: "1" } }
     );
     rmProc.unref();
 
@@ -1708,7 +1708,7 @@ router.post("/tools/outlook/register", async (req, res) => {
                 job.logs.push({ type: 'log', message: `🌐 自动授权代理: ${_autoProxy} [${_proxyTag}]` });
                 const autoProc = spawnAuto(
                   'python3', [autoScript, JSON.stringify(autoPayload), _autoProxy],
-                  { detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: '1' } }
+                  { detached: true, stdio: "ignore", env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: '1' } }
                 );
                 job.logs.push({ type: 'log', message: `🤖 自动完成 ${autoPayload.length} 个账号的设备码授权…` });
                 // v8.79 Bug L: 解析 Python 的 RESULTS: 行 → 跳过 error/suspended (它们 poll 必 timeout)
@@ -3440,7 +3440,7 @@ router.post("/tools/outlook/auto-retoken", async (req, res) => {
     // detached=true: child joins own process group, survives parent restart
     const child = spawn("python3", [scriptPath, ...args], {
       env: { ...process.env },
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: "ignore",
       detached: true,
     });
     if (child.pid) fs.writeFileSync(pidPath, String(child.pid));
