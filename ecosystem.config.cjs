@@ -9,8 +9,8 @@ module.exports = {
       "env": {
         "DATABASE_URL": "postgresql://postgres:postgres@localhost/toolkit",
         "PORT": "8081",
-        "REMOTE_GATEWAY_BASE_URL": "http://localhost:9090",
-        "SUB2API_ADMIN_BASE_URL": "http://localhost:9090",
+        "REMOTE_GATEWAY_BASE_URL": "http://localhost:8080",
+        "SUB2API_ADMIN_BASE_URL": "http://localhost:8080",
         "SUB2API_ADMIN_EMAIL": "admin@proxy.local",
         "SUB2API_ADMIN_PASSWORD": "Proxy2024",
         "NODE_ENV": "production",
@@ -349,6 +349,21 @@ module.exports = {
         "PYTHONUNBUFFERED": "1"
       },
       "restart_delay": 10000,
+      "max_restarts": 999,
+      "watch": false,
+      "autorestart": true
+    }
+    ,{
+      "name": "obvious-proxy",
+      "script": "/root/Toolkit/scripts/obvious_proxy.py",
+      "interpreter": "python3",
+      "cwd": "/root/Toolkit/scripts",
+      "env": {
+        "OBVIOUS_PROXY_PORT": "8083",
+        "OBVIOUS_POLL_TIMEOUT": "60",
+        "PYTHONUNBUFFERED": "1"
+      },
+      "restart_delay": 5000,
       "max_restarts": 999,
       "watch": false,
       "autorestart": true
