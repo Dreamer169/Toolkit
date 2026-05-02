@@ -378,6 +378,19 @@ module.exports = {
       "max_restarts": 20,
       "watch": false,
       "autorestart": true
+    },{
+      "name": "pydoll-bypass",
+      "script": "/root/pydoll-service/pydoll_service.py",
+      "interpreter": "python3",
+      "cwd": "/root/pydoll-service",
+      "env": {
+        "PYDOLL_PORT": "8766",
+        "PYTHONUNBUFFERED": "1"
+      },
+      "restart_delay": 5000,
+      "max_restarts": 20,
+      "watch": false,
+      "autorestart": true
     }
   ]
 };
