@@ -56,6 +56,48 @@ def _pick_cf_proxy() -> str:
 
 _ACTIVE_RELAYS: list = []
 
+# v8.97: 设备码申请也通过同一 CF proxy，确保 申请IP == 授权IP == 兑换IP
+DEVICE_CODE_SCOPE = (
+    "https://graph.microsoft.com/Mail.Read "
+    "https://graph.microsoft.com/Mail.ReadWrite "
+    "https://graph.microsoft.com/Mail.Send "
+    "https://graph.microsoft.com/User.Read "
+    "offline_access"
+)
+DEVICE_CODE_ENDPOINT = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode"
+
+
+async def _request_device_code_via_proxy(proxy: str) -> dict:
+    """
+    v8.97: 通过 CF proxy 申请设备码，确保与后续浏览器授权/token兑换用同一出口 IP。
+    返回 {"user_code": ..., "device_code": ..., "verification_uri": ...} 或空 dict。
+    """
+    import httpx
+    transport_kwargs: dict = {}
+    if proxy:
+        try:
+            transport_kwargs["transport"] = httpx.AsyncHTTPTransport(proxy=proxy)
+        except Exception:
+            transport_kwargs["proxies"] = {"all://": proxy}
+    try:
+        async with httpx.AsyncClient(timeout=20, **transport_kwargs) as client:
+            resp = await client.post(
+                DEVICE_CODE_ENDPOINT,
+                data={"client_id": CLIENT_ID, "scope": DEVICE_CODE_SCOPE},
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            d = resp.json()
+            if d.get("user_code") and d.get("device_code"):
+                return {
+                    "user_code": d["user_code"],
+                    "device_code": d["device_code"],
+                    "verification_uri": d.get("verification_uri", "https://microsoft.com/devicelogin"),
+                }
+            print(f"[proxy-dc] 设备码申请失败: {d.get('error','unknown')} {d.get('error_description','')[:80]}", flush=True)
+    except Exception as e:
+        print(f"[proxy-dc] 设备码申请异常: {e}", flush=True)
+    return {}
+
 
 async def _exchange_token_and_save(
     device_code: str,
@@ -248,6 +290,13 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
         else:
             print(f"[{email}] ⚠ 无 CF proxy，VPS 直连（风险高）", flush=True)
 
+    # v8.98: user_code 可为空 → 在浏览器上下文内部申请设备码（ctx.request.fetch），
+    #        保证申请IP == 授权IP == 兑换IP（共享同一代理连接池）
+    # consumers 端点返回 verification_uri = https://www.microsoft.com/link (→ login.live.com)
+    # 而非 https://microsoft.com/devicelogin (→ common/deviceauth) — 必须用正确 URL！
+    _need_self_dc = not user_code
+    _verification_uri = "https://www.microsoft.com/link"  # 消费者 MSA 账号默认页
+
     launch_opts = {
         "headless": True,
         "args": ["--no-sandbox", "--disable-dev-shm-usage",
@@ -263,9 +312,43 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
         async with async_playwright() as p:
             browser = await p.chromium.launch(**launch_opts)
             ctx = await browser.new_context(**ctx_opts)
+
+            # v8.98: 在浏览器上下文内部申请设备码，保证 申请IP == 授权IP（共享代理连接）
+            if _need_self_dc:
+                print(f"[{email}] v8.98 浏览器内部申请设备码 proxy={proxy or 'DIRECT'}", flush=True)
+                _scope_enc = DEVICE_CODE_SCOPE.replace(" ", "+")
+                _dc_body = f"client_id={CLIENT_ID}&scope={_scope_enc}"
+                try:
+                    _dc_resp = await ctx.request.fetch(
+                        DEVICE_CODE_ENDPOINT,
+                        method="POST",
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                        data=_dc_body,
+                    )
+                    _dc_json = await _dc_resp.json()
+                    if _dc_json.get("user_code") and _dc_json.get("device_code"):
+                        user_code = _dc_json["user_code"]
+                        device_code = _dc_json["device_code"]
+                        _verification_uri = _dc_json.get("verification_uri", "https://www.microsoft.com/link")
+                        print(f"[{email}] ✅ 浏览器内设备码 user_code={user_code} uri={_verification_uri}", flush=True)
+                    else:
+                        _err = _dc_json.get("error_description") or _dc_json.get("error") or "unknown"
+                        print(f"[{email}] ❌ 浏览器内设备码申请失败: {_err[:100]}", flush=True)
+                        result["msg"] = f"browser_dc_failed:{_err[:80]}"
+                        await browser.close()
+                        return result
+                except Exception as _dce:
+                    print(f"[{email}] ❌ 浏览器内设备码异常: {_dce}", flush=True)
+                    result["msg"] = f"browser_dc_exception:{str(_dce)[:80]}"
+                    await browser.close()
+                    return result
+
             page = await ctx.new_page()
 
-            await page.goto("https://microsoft.com/devicelogin",
+            # v8.98: 使用 consumers 端点返回的 verification_uri（login.live.com），
+            #        而非 microsoft.com/devicelogin（common/deviceauth，不认 consumers 设备码）
+            print(f"[{email}] 导航到 verification_uri={_verification_uri}", flush=True)
+            await page.goto(_verification_uri,
                             timeout=45000, wait_until="domcontentloaded")
             await asyncio.sleep(3)
             await _safe_shot(page, email, "01_start")
@@ -669,7 +752,8 @@ async def main():
     sem = asyncio.Semaphore(MAX_CONCURRENCY)
     tasks = [
         authorize_one(
-            a["email"], a["password"], a["userCode"],
+            a["email"], a["password"],
+            a.get("userCode", ""),   # v8.97: 可为空，由 authorize_one 自申请
             a.get("accountId", 0), proxy, sem,
             device_code=a.get("deviceCode", ""),
             db_url=a.get("dbUrl", db_url),
