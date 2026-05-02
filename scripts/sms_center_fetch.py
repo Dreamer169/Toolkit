@@ -45,19 +45,25 @@ def fetch_numbers(country='all'):
         html = fetch_url(f'https://jiemahao.com/{c}/')
         if not html:
             continue
+        # Primary pattern: explicit class="article-title center"
         matches = re.findall(
-            r'href="https://jiemahao\.com/sms/\?phone=(\d+)"[^>]*class="article-title[^"]*">([^<]+)</a>',
+            r'sms/\?phone=(\d+)"[^>]*>([+\d\s()]+)<',
             html
         )
+        # Fallback: any link containing a phone-like number
         if not matches:
             matches = re.findall(
-                r'sms/\?phone=(\d+)[^>]*>([+\d\s]+)<',
+                r'sms/\?phone=(\d+)[^>]*>([^<]{5,30})<',
                 html
             )
+        seen = set()
         for phone_id, phone_num in matches:
             phone_num = phone_num.strip()
             if not phone_num or not re.search(r'\d{7,}', phone_num):
                 continue
+            if phone_id in seen:
+                continue
+            seen.add(phone_id)
             results.append({
                 'id': int(phone_id),
                 'number': phone_num,
@@ -109,8 +115,8 @@ async def fetch_messages_pydoll(phone_id: int):
             except Exception:
                 pass
 
-            # Wait for Turnstile auto-solve (up to 20s)
-            for _ in range(20):
+            # Wait for Turnstile auto-solve (up to 25s)
+            for _ in range(25):
                 await asyncio.sleep(1)
                 solved = await tab.execute_script(
                     '(function(){ var r=document.querySelector("[name=\'cf-turnstile-response\']"); return r&&r.value?r.value.substring(0,10):""; })()'
@@ -124,8 +130,8 @@ async def fetch_messages_pydoll(phone_id: int):
                 '(function(){ var b=document.querySelector("button[name=submit]#submit")||document.querySelector(".sms-submit"); if(b)b.click(); })()'
             )
 
-            # Wait for messages
-            for _ in range(12):
+            # Wait for messages to appear
+            for _ in range(15):
                 await asyncio.sleep(1.5)
                 cnt = await tab.execute_script(
                     '(function(){ return document.querySelectorAll(".direct-chat-msg").length; })()'
@@ -133,7 +139,7 @@ async def fetch_messages_pydoll(phone_id: int):
                 if (cnt.get('result', {}).get('result', {}).get('value', 0) or 0) > 0:
                     break
 
-            # Extract messages
+            # Extract messages with sender info
             raw = await tab.execute_script(
                 '(function(){'
                 '  var items=document.querySelectorAll(".direct-chat-msg");'
@@ -141,7 +147,12 @@ async def fetch_messages_pydoll(phone_id: int):
                 '  items.forEach(function(item){'
                 '    var info=item.querySelector(".direct-chat-info");'
                 '    var text=item.querySelector(".direct-chat-text");'
-                '    if(text){ out.push({ info: info?info.textContent.trim():"", body: text.textContent.trim() }); }'
+                '    if(text){'
+                '      out.push({'
+                '        info: info?info.textContent.trim():"",'
+                '        body: text.textContent.trim()'
+                '      });'
+                '    }'
                 '  });'
                 '  return JSON.stringify(out);'
                 '})()'
