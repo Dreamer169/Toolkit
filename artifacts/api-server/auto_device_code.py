@@ -120,6 +120,19 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
             await asyncio.sleep(3)
             await _safe_shot(page, email, "02_code")
 
+            # v8.90: detect expired/invalid user_code immediately
+            try:
+                _body02 = await page.inner_text("body")
+                _bad = ["That code didn	 work", "code didn	 work",
+                        "Check the code and try again", "该代码无效", "此代码无效"]
+                if any(x in _body02 for x in _bad):
+                    print(f"[{email}] code_invalid user_code={user_code}", flush=True)
+                    result["msg"] = "code_invalid_or_expired"
+                    await browser.close()
+                    return result
+            except Exception:
+                pass
+
             email_input = await page.query_selector(
                 'input[type="email"], input[name="loginfmt"]')
             if email_input:

@@ -2457,6 +2457,39 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
                 print(f"[oauth] 捕获异常: {_oe}", flush=True)
                 result["access_token"]  = ""
                 result["refresh_token"] = ""
+            # ── v8.90 post-reg login verify: 无 token 时确认账号真实存在 ──
+            if not result.get("access_token") and not result.get("refresh_token"):
+                try:
+                    import time as _time
+                    _vpage = context.new_page()
+                    _vpage.goto("https://login.live.com", timeout=20000, wait_until="domcontentloaded")
+                    _time.sleep(1.5)
+                    _vei = _vpage.query_selector("input[type=email],input[name=loginfmt]")
+                    if _vei:
+                        _vei.fill(f"{actual_email}@outlook.com")
+                        _vbtn = _vpage.query_selector("input[type=submit],#idSIButton9,button[type=submit]")
+                        if _vbtn:
+                            _vbtn.click()
+                        _time.sleep(3)
+                        _vbody = _vpage.inner_text("body")
+                        if any(x in _vbody for x in [
+                            "We couldnt find a Microsoft account,
+                            找不到此 Microsoft 帐户,
+                            couldnt find",
+                            "no account found",
+                        ]):
+                            print(f"[register] ❌ 登录验证: 账号 {actual_email}@outlook.com 在微软系统中不存在，撤销成功标记", flush=True)
+                            result["success"] = False
+                            result["error"] = "account_not_propagated_login_verify_failed"
+                            ok = False
+                        else:
+                            print(f"[register] ✅ 登录验证通过: 账号存在，等待设备码授权", flush=True)
+                    try:
+                        _vpage.close()
+                    except Exception:
+                        pass
+                except Exception as _ve:
+                    print(f"[register] ⚠ 登录验证异常(忽略): {_ve}", flush=True)
             # ───────────────────────────────────────────────────────────
             try:
                 page.screenshot(path=f"/tmp/outlook_ok_{actual_email}.png")
