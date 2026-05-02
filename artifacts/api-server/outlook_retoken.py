@@ -26,7 +26,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@lo
 
 CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
 TENANT    = "consumers"
-SCOPE     = "offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read"
+SCOPE     = "offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read"
 
 # URL 关键词 → 账号已被 Microsoft 封锁/冻结
 LOCKED_URL_KEYWORDS = (
