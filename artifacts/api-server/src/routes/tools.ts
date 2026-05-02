@@ -4640,5 +4640,77 @@ router.delete("/tools/novproxy/login/:jobId", (req, res) => {
 });
 
 
+// ─── CDK 批量兑换（去重防重复）────────────────────────────────────────────────
+// POST /tools/novproxy/redeem-cdk
+// body: { codes: string[], email: string, token: string }
+router.post("/tools/novproxy/redeem-cdk", async (req, res) => {
+  const { codes, email, token } = req.body as { codes: string[]; email: string; token: string };
+  if (!Array.isArray(codes) || codes.length === 0 || !token) {
+    res.status(400).json({ success: false, error: "codes[], email, token 必填" }); return;
+  }
+  const cleanCodes = [...new Set(codes.map((c: string) => c.trim().toUpperCase()).filter(Boolean))];
+  const results: { code: string; result: string; msg: string; skipped: boolean }[] = [];
+
+  for (const cdk of cleanCodes) {
+    // ① 去重：查 DB 是否已成功兑换过
+    const existing = await query<{ result: string; msg: string }>(
+      "SELECT result, msg FROM novproxy_cdks WHERE code = $1 LIMIT 1", [cdk]
+    ).catch(() => [] as { result: string; msg: string }[]);
+    if (existing.length > 0) {
+      const prev = existing[0];
+      results.push({ code: cdk, result: prev.result, msg: `[已跳过] 本地记录: ${prev.result} — ${prev.msg}`, skipped: true });
+      continue;
+    }
+
+    // ② 调用 novproxy CDK 兑换接口
+    let apiResult = "error", apiMsg = "";
+    try {
+      const params = new URLSearchParams({ token, cdkey: cdk });
+      const resp = await fetch("https://api.novproxy.com/v1/cdkeyUse", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", "Origin": "https://dash.novproxy.com" },
+        body: params.toString(),
+        signal: AbortSignal.timeout(10000),
+      });
+      const data = await resp.json() as { code: number; msg: string; data?: { traffic?: number } };
+      apiMsg = data.msg ?? "";
+      if (data.code === 0) {
+        apiResult = "success";
+      } else if (apiMsg.toLowerCase().includes("has been used") || apiMsg.toLowerCase().includes("already")) {
+        apiResult = "used";
+      } else if (apiMsg.toLowerCase().includes("does not exist") || apiMsg.toLowerCase().includes("invalid")) {
+        apiResult = "invalid";
+      } else {
+        apiResult = "error";
+      }
+    } catch (e) {
+      apiMsg = String(e).slice(0, 120);
+      apiResult = "error";
+    }
+
+    // ③ 写入 DB（幂等）
+    await execute(
+      `INSERT INTO novproxy_cdks (code, account_email, result, msg, attempted_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (code) DO UPDATE SET result=$3, msg=$4, attempted_at=NOW()`,
+      [cdk, email || null, apiResult, apiMsg]
+    ).catch(() => {});
+
+    results.push({ code: cdk, result: apiResult, msg: apiMsg, skipped: false });
+  }
+
+  const succeeded = results.filter(r => r.result === "success").length;
+  res.json({ success: true, total: cleanCodes.length, succeeded, results });
+});
+
+// GET /tools/novproxy/cdk-records — 查询已记录的 CDK 兑换历史
+router.get("/tools/novproxy/cdk-records", async (_req, res) => {
+  const rows = await query(
+    "SELECT code, account_email, result, msg, attempted_at FROM novproxy_cdks ORDER BY attempted_at DESC LIMIT 200"
+  ).catch(() => []);
+  res.json({ success: true, records: rows });
+});
+
+
 export default router;
 
