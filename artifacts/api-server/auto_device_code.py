@@ -1,12 +1,13 @@
 """
 自动完成 Microsoft 设备码授权流程
-v8.89 修复:
-  - 删除 v8.88 错误的 _consent_clicked_once 成功判定
-  - consent 点击后最多等 30s 轮询真正完成 URL
-  - 增加跳过安全设置页（Skip for now / Maybe later）
-  - 每步截图到 /tmp/dc_{email}_{step}.png
+v8.95 修复:
+  - React-safe 邮箱填写: nativeInputValueSetter + dispatchEvent (同 outlook_retoken v8.94)
+  - 邮箱提交后检测页面是否真的跳转（卡住=IP被拒，打印警告）
+  - 自动 CF IP 代理：无 proxy 参数时从 /tmp/cf_pool_state.json 随机取一个 CF IP
+  - 密码框未出现时等待更长时间再重试
+  - 增加 wait_for_selector 代替固定 sleep 提高稳定性
 """
-import asyncio, json, sys
+import asyncio, json, sys, os, random
 
 MAX_CONCURRENCY = 3
 
@@ -23,6 +24,31 @@ SKIP_SELECTORS = [
     'button:has-text("Set up later")',
     'a:has-text("Skip setup")',
 ]
+
+
+def _pick_cf_proxy() -> str:
+    """从 cf_pool_state.json 随机取一个 CF IP，启动 XrayRelay，返回 socks5 URL；失败返回 ""。"""
+    try:
+        import json as _j
+        _ps = _j.load(open('/tmp/cf_pool_state.json'))
+        _avail = [x['ip'] for x in _ps.get('available', []) if isinstance(x, dict) and x.get('ip')]
+        if not _avail:
+            return ""
+        _ip = random.choice(_avail[:30])
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from xray_relay import XrayRelay as _XR
+        _relay = _XR(_ip)
+        if _relay.start(timeout=8.0):
+            _ACTIVE_RELAYS.append(_relay)
+            print(f"[cf-proxy] CF IP={_ip} SOCKS5 port={_relay.socks_port}", flush=True)
+            return _relay.socks5_url
+        _relay.stop()
+    except Exception as _e:
+        print(f"[cf-proxy] 启动失败: {_e}", flush=True)
+    return ""
+
+
+_ACTIVE_RELAYS: list = []
 
 
 async def _safe_shot(page, email: str, step: str):
@@ -77,10 +103,40 @@ async def _poll_real_done(page, email: str, max_wait: int = 30) -> bool:
     return False
 
 
+async def _react_safe_fill_email(page, email: str) -> bool:
+    """
+    v8.95: Fluent UI React input — nativeInputValueSetter + dispatchEvent forces React onChange.
+    Returns True if input found and filled.
+    """
+    try:
+        filled = await page.evaluate(r"""(email) => {
+            const inp = document.querySelector('input[name="loginfmt"], input[type="email"]');
+            if (!inp) return false;
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            setter.call(inp, email);
+            inp.dispatchEvent(new Event('input',  {bubbles: true}));
+            inp.dispatchEvent(new Event('change', {bubbles: true}));
+            return true;
+        }""", email)
+        return bool(filled)
+    except Exception:
+        return False
+
+
 async def authorize_one(email: str, password: str, user_code: str, account_id: int,
                         proxy: str = "", sem=None):
     from patchright.async_api import async_playwright
     result = {"accountId": account_id, "email": email, "status": "error", "msg": ""}
+
+    # v8.95: 无 proxy 参数时自动从 CF pool 取一个 IP
+    _auto_proxy = ""
+    if not proxy:
+        _auto_proxy = _pick_cf_proxy()
+        if _auto_proxy:
+            proxy = _auto_proxy
+            print(f"[{email}] 使用 CF pool 代理: {_auto_proxy}", flush=True)
+        else:
+            print(f"[{email}] ⚠ 无 CF proxy，VPS 直连（风险高）", flush=True)
 
     launch_opts = {
         "headless": True,
@@ -105,6 +161,7 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
             await _safe_shot(page, email, "01_start")
             print(f"[{email}] 01 url={page.url[:100]}", flush=True)
 
+            # ── Step 1: 输入 user_code ──
             code_input = await page.query_selector(
                 'input[name="otc"], input[placeholder*="code" i], '
                 'input[id*="code" i], input[type="text"]'
@@ -127,7 +184,7 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
             # v8.90: detect expired/invalid user_code immediately
             try:
                 _body02 = await page.inner_text("body")
-                _bad = ["That code didn	 work", "code didn	 work",
+                _bad = ["That code didn work", "code didn work",
                         "Check the code and try again", "该代码无效", "此代码无效"]
                 if any(x in _body02 for x in _bad):
                     print(f"[{email}] code_invalid user_code={user_code}", flush=True)
@@ -137,35 +194,105 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
             except Exception:
                 pass
 
-            email_input = await page.query_selector(
-                'input[type="email"], input[name="loginfmt"]')
-            if email_input:
-                val = await email_input.input_value()
-                if not val:
-                    await email_input.fill(email)
-                btn = await page.query_selector(
-                    'input[type="submit"], button[type="submit"]')
-                if btn:
-                    await btn.click()
-                await asyncio.sleep(4)
+            # ── Step 2: 填入邮箱 (v8.95 React-safe) ──
+            _email_el = await page.query_selector('input[type="email"], input[name="loginfmt"]')
+            if _email_el:
+                _cur_val = ""
+                try:
+                    _cur_val = await _email_el.input_value()
+                except Exception:
+                    pass
+                if not _cur_val:
+                    # 先用 React-safe 方式设置值
+                    _filled = await _react_safe_fill_email(page, email)
+                    if not _filled:
+                        # fallback: plain fill
+                        await _email_el.fill(email)
+                    await asyncio.sleep(0.4)
+                    print(f"[{email}] 📧 填入邮箱(React-safe={_filled}): {email}", flush=True)
+
+                # 点击提交按钮（优先 primaryButton → submit → Enter）
+                _submitted = False
+                for _sel in [
+                    'button[data-testid="primaryButton"]',
+                    'input[id="idSIButton9"]',
+                    'input[type="submit"]',
+                    'button[type="submit"]',
+                ]:
+                    try:
+                        _b = await page.query_selector(_sel)
+                        if _b and await _b.is_visible():
+                            await _b.click()
+                            _submitted = True
+                            print(f"[{email}] 📤 邮箱提交: {_sel}", flush=True)
+                            break
+                    except Exception:
+                        continue
+                if not _submitted:
+                    await _email_el.press('Enter')
+                    print(f"[{email}] 📤 邮箱提交: Enter键", flush=True)
+
+                # 等待页面跳转（最多12s）
+                try:
+                    await page.wait_for_load_state('networkidle', timeout=12000)
+                except Exception:
+                    await asyncio.sleep(5)
+
+                # v8.95: 检测邮箱表单是否还在 → IP被拒
+                try:
+                    _still_email = await page.locator(
+                        'input[name="loginfmt"], input[type="email"]'
+                    ).first.is_visible(timeout=2000)
+                except Exception:
+                    _still_email = False
+
+                if _still_email:
+                    print(f"[{email}] ⚠ 邮箱提交后页面未跳转 URL={page.url[:100]} — 可能IP被MS拒", flush=True)
+                    # 尝试再次 React-safe fill + 提交（有时第一次需要激活 React fiber）
+                    await _react_safe_fill_email(page, email)
+                    await asyncio.sleep(0.3)
+                    for _sel2 in ['button[data-testid="primaryButton"]', 'input[type="submit"]',
+                                  'button[type="submit"]']:
+                        try:
+                            _b2 = await page.query_selector(_sel2)
+                            if _b2 and await _b2.is_visible():
+                                await _b2.click()
+                                print(f"[{email}] 📤 邮箱二次提交: {_sel2}", flush=True)
+                                break
+                        except Exception:
+                            continue
+                    try:
+                        await page.wait_for_load_state('networkidle', timeout=12000)
+                    except Exception:
+                        await asyncio.sleep(5)
+
             await _safe_shot(page, email, "03_email")
 
-            for _pw in range(2):
+            # ── Step 3: 密码 ──
+            for _pw in range(3):
                 pw_input = await page.query_selector(
                     'input[type="password"], input[name="passwd"]')
-                if pw_input:
+                if pw_input and await pw_input.is_visible():
                     await pw_input.fill(password)
-                    print(f"[{email}] password attempt {_pw+1}", flush=True)
+                    print(f"[{email}] 🔒 密码 attempt {_pw+1}", flush=True)
                     btn = await page.query_selector(
                         'input[type="submit"], button[type="submit"]')
                     if btn:
                         await btn.click()
-                    await asyncio.sleep(6)
-                else:
+                    try:
+                        await page.wait_for_load_state('networkidle', timeout=12000)
+                    except Exception:
+                        await asyncio.sleep(6)
                     break
+                elif _pw < 2:
+                    # 密码框未出现，多等一下
+                    await asyncio.sleep(4)
+                    await _skip_if_security_page(page, email)
+
             await _safe_shot(page, email, "04_password")
             print(f"[{email}] 04 url={page.url[:120]}", flush=True)
 
+            # ── Step 4: Skip 安全页 / KMSI ──
             for _ in range(4):
                 if not await _skip_if_security_page(page, email):
                     break
@@ -181,10 +308,16 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                 try:
                     btn = await page.query_selector(sel)
                     if btn and await btn.is_visible():
-                        await btn.click()
-                        print(f"[{email}] KMSI {sel}", flush=True)
-                        await asyncio.sleep(3)
-                        break
+                        _txt = ""
+                        try:
+                            _txt = (await btn.inner_text() or "").lower()
+                        except Exception:
+                            pass
+                        if "password" not in _txt and "forgot" not in _txt:
+                            await btn.click()
+                            print(f"[{email}] KMSI {sel}", flush=True)
+                            await asyncio.sleep(3)
+                            break
                 except Exception:
                     continue
             await _safe_shot(page, email, "05_kmsi")
@@ -194,8 +327,7 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                 if not await _skip_if_security_page(page, email):
                     break
 
-            # Device-confirmation step: after KMSI, deviceauth may show
-            # You are signing in to App on another device - click confirm button
+            # ── Step 5: Device-confirm ──
             for _dc_i in range(3):
                 try:
                     _dc_body = (await page.inner_text("body")).lower()
@@ -228,6 +360,7 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                 except Exception:
                     break
 
+            # ── Step 6: Consent / Continue ──
             consent_sels = [
                 'input[type="submit"][value="Continue"]',
                 'input[type="submit"][value="Accept"]',
@@ -278,8 +411,7 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                                     _consent_clicked = True
                                     _clicked = True
                                     await _safe_shot(page, email, f"06_consent_{_retry}")
-                                    # After code-verify Continue click,
-                                    # live.com may show password entry
+                                    # After consent, live.com may show password
                                     for _pwstep in range(3):
                                         _pw2 = await page.query_selector(
                                             'input[type="password"], input[name="passwd"]')
@@ -293,7 +425,6 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                                                 await page.wait_for_load_state("networkidle", timeout=10000)
                                             except Exception:
                                                 await asyncio.sleep(6)
-                                            # KMSI after password
                                             for _ksel in ['#idSIButton9', 'input[type="submit"][value="Yes"]',
                                                           '[data-testid="primaryButton"]']:
                                                 try:
@@ -305,7 +436,8 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                                                             print(f"[{email}] kmsi2 {_ksel}", flush=True)
                                                             await asyncio.sleep(4)
                                                             break
-                                                except Exception: pass
+                                                except Exception:
+                                                    pass
                                         else:
                                             break
                                     break
@@ -361,8 +493,6 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                 or "account has been locked" in _body_low
                 or "your account has been blocked" in _body_low
             )
-            # v8.90 Bug1 fix: Abuse page + "Press and hold" is a CAPTCHA challenge,
-            # NOT a real suspension. Attempt press-hold; if fails mark error (retryable).
             if _on_abuse_page and not _real_suspended_body:
                 _captcha_handled = False
                 try:
@@ -399,8 +529,6 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                 result["msg"] = "authorized (real_done)"
                 print(f"[{email}] done real_done=True", flush=True)
             elif _consent_clicked:
-                # v8.89: clicked consent on correct page but no completion URL detected
-                # → optimistic done, let pollForToken verify
                 result["status"] = "done"
                 result["msg"] = "consent clicked (optimistic, poll will verify)"
                 print(f"[{email}] done optimistic consent", flush=True)
