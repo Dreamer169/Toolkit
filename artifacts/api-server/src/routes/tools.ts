@@ -2094,7 +2094,7 @@ router.get("/tools/ip-check", async (req, res) => {
   }
 });
 
-const REMOTE_GATEWAY_BASE_URL = (process.env["REMOTE_GATEWAY_BASE_URL"] || "http://45.205.27.69:9090").replace(/\/$/, "");
+const REMOTE_GATEWAY_BASE_URL = (process.env["REMOTE_GATEWAY_BASE_URL"] || "http://localhost:8080").replace(/\/$/, "");
 const REMOTE_EXEC_BASE_URL = (process.env["REMOTE_EXEC_BASE_URL"] || "http://45.205.27.69:9999").replace(/\/$/, "");
 const REMOTE_EXEC_TOKEN = process.env["REMOTE_EXEC_TOKEN"] || "zencoder-exec-2026";
 
@@ -2113,8 +2113,8 @@ async function fetchJsonWithTimeout(url: string, options: RequestInit = {}, time
 }
 
 router.get("/tools/gateway/status", async (_req, res) => {
-  const gateway = await fetchJsonWithTimeout(`${REMOTE_GATEWAY_BASE_URL}/`, { method: "GET" }, 8000)
-    .then((r) => ({ reachable: true, status: r.status, baseUrl: REMOTE_GATEWAY_BASE_URL }))
+  const gateway = await fetchJsonWithTimeout(`${REMOTE_GATEWAY_BASE_URL}/v1/models`, { method: "GET", headers: { "Authorization": "Bearer sk-06cf1c8b3d804a5abf90f71c36fe1b08" } }, 8000)
+    .then((r) => ({ reachable: r.status < 500, status: r.status, baseUrl: REMOTE_GATEWAY_BASE_URL }))
     .catch((e: unknown) => ({ reachable: false, baseUrl: REMOTE_GATEWAY_BASE_URL, error: String(e) }));
 
   const exec = await fetchJsonWithTimeout(`${REMOTE_EXEC_BASE_URL}/health`, {

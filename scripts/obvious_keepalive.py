@@ -336,7 +336,11 @@ def _chat_wake(label: str, session: requests.Session) -> str | None:
 
     deadline = time.time() + WAKE_TIMEOUT
     while time.time() < deadline:
-        time.sleep(random.uniform(4, 8))
+        try:
+            time.sleep(random.uniform(4, 8))
+        except KeyboardInterrupt:
+            log.info("keepalive shutdown during chat-wake")
+            sys.exit(0)
         s2, b2 = _http("GET", _BASE + "/projects/" + pid + "/info",
                        headers=hdr, timeout=10, session=session)
         if s2 == 200:
@@ -507,6 +511,9 @@ def main() -> None:
     while True:
         try:
             _tick()
+        except KeyboardInterrupt:
+            log.info("keepalive shutdown (SIGTERM)")
+            sys.exit(0)
         except Exception as e:
             log.exception("tick error: %s", e)
 
@@ -527,7 +534,11 @@ def main() -> None:
 
         interval = random.randint(PING_MIN, PING_MAX)
         log.info("next check in %ds", interval)
-        time.sleep(interval)
+        try:
+            time.sleep(interval)
+        except KeyboardInterrupt:
+            log.info("keepalive shutdown (SIGTERM/KeyboardInterrupt)")
+            sys.exit(0)
 
 
 if __name__ == "__main__":

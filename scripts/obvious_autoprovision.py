@@ -41,6 +41,7 @@ import os
 import re
 import subprocess
 import sys
+import sys
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -327,10 +328,17 @@ def watchdog(min_active: int = MIN_POOL,
             n = check_and_replenish(min_active=min_active, headless=headless)
             if n:
                 log.info("watchdog provisioned %d new account(s) this cycle", n)
+        except KeyboardInterrupt:
+            log.info("autoprovision watchdog shutdown")
+            sys.exit(0)
         except Exception as e:
             log.exception("watchdog cycle error: %s", e)
         log.info("watchdog sleeping %ds …", check_interval)
-        time.sleep(check_interval)
+        try:
+            time.sleep(check_interval)
+        except KeyboardInterrupt:
+            log.info("autoprovision watchdog shutdown (SIGTERM)")
+            sys.exit(0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
