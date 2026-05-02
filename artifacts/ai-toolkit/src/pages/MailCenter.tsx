@@ -134,6 +134,8 @@ export default function MailCenter() {
   const [batchOAuthBusy, setBatchOAuthBusy] = useState(false);
   const [autoCompleteBusy, setAutoCompleteBusy] = useState(false);
   const [autoCompleteMsg, setAutoCompleteMsg] = useState("");
+  const [reauthManualBusy, setReauthManualBusy] = useState(false);
+  const [reauthManualMsg, setReauthManualMsg] = useState("");
   const pollRef                           = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoRefreshRef                    = useRef<ReturnType<typeof setInterval> | null>(null);
   const cdTimerRef                        = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -316,22 +318,6 @@ export default function MailCenter() {
     }
   };
 
-  // ── 批量一键授权全部未授权账号 ────────────────────────────────────────────
-  const autoAuthAll = async () => {
-    setAuthBusy("all"); setBatchResults([]);
-    const d = await fetch(`${API}/tools/outlook/auto-auth-all`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    }).then(r => r.json()).catch(() => ({ success: false, error: "网络错误" }));
-    setAuthBusy(null);
-    if (d.success) {
-      setBatchResults(d.results ?? []);
-      await loadAccounts();
-      // 对需要设备码授权的账号，不自动触发（批量时由用户手动点击）
-    } else {
-      setBatchResults([{ email: "全部", ok: false, error: d.error }]);
-    }
-  };
 
   // ── 批量验证账号 ────────────────────────────────────────────────────
   const verifyAll = async () => {
@@ -560,6 +546,29 @@ export default function MailCenter() {
     }
   };
 
+  const startReauthManual = async (ids?: number[]) => {
+    setReauthManualBusy(true); setReauthManualMsg("");
+    const body: Record<string, unknown> = {};
+    if (ids?.length) body.accountIds = ids;
+    const d = await fetch(`${API}/tools/outlook/batch-oauth/reauth-manual`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(r => r.json()).catch(() => ({ success: false, error: "网络错误" }));
+    setReauthManualBusy(false);
+    if (d.success) {
+      const list = (d.accounts ?? []) as Array<{ email: string; userCode: string }>;
+      setReauthManualMsg(
+        list.length
+          ? `已为 ${list.length} 个账号启动重授权，用户码：` + list.map(a => `${a.email}→${a.userCode}`).join(" | ")
+          : "没有 needs_oauth_manual 账号需要处理"
+      );
+      await loadAccounts();
+    } else {
+      setReauthManualMsg("失败：" + (d.error ?? "未知错误"));
+    }
+  };
+
   const startBatchOAuth = async (ids?: number[]) => {
     setBatchOAuthBusy(true);
     if (batchPollRef.current) { clearInterval(batchPollRef.current); batchPollRef.current = null; }
@@ -770,6 +779,22 @@ export default function MailCenter() {
               {autoCompleteMsg}
             </div>
           )}
+          {/* 🔄 重授权 needs_oauth_manual 账号 */}
+          {accounts.some(a => tagsOf(a).includes("needs_oauth_manual")) && (
+            <button
+              onClick={() => startReauthManual()}
+              disabled={reauthManualBusy}
+              className="w-full py-1.5 bg-violet-700/60 hover:bg-violet-700/80 disabled:opacity-50 rounded text-xs text-white font-medium transition-colors"
+              title="为所有 needs_oauth_manual 标签账号清零旧 token 并重新发起设备码 OAuth 授权"
+            >
+              {reauthManualBusy ? "重授权中…" : "🔄 重授权 Manual 账号"}
+            </button>
+          )}
+          {reauthManualMsg && (
+            <div className="text-[10px] px-1 py-0.5 rounded bg-[#21262d] text-violet-300 break-all">
+              {reauthManualMsg}
+            </div>
+          )}
           {batchResults.length > 0 && (
             <div className="space-y-0.5 max-h-24 overflow-y-auto">
               {batchResults.map((r, i) => (
@@ -868,6 +893,19 @@ export default function MailCenter() {
                       className="text-[10px] px-2 py-0.5 bg-[#30363d] hover:bg-[#3d444d] text-gray-300 rounded transition-colors"
                     >取消</button>
                   </div>
+                )}
+                {accTags.includes("needs_oauth_manual") && !isConfirmDel && (
+                  <button
+                    onClick={e => { e.stopPropagation(); startReauthManual([acc.id]); }}
+                    disabled={reauthManualBusy}
+                    className="w-full text-left px-3 pb-1.5 flex items-center gap-1.5 hover:opacity-80 disabled:opacity-40"
+                    title="清零旧 token 并重新发起设备码授权"
+                  >
+                    <span className="text-[10px] text-violet-400">🔄</span>
+                    <span className="text-[10px] text-violet-300 font-medium">
+                      {reauthManualBusy ? "重授权中…" : "一键重授权"}
+                    </span>
+                  </button>
                 )}
                 {acc.password && !isConfirmDel && (
                   <button
