@@ -458,6 +458,8 @@ def _tick() -> None:
         # Credit auto-reset (every tick, before keepalive)
         try:
             _auto_reset_credits(label, sess, CREDIT_RESET_THRESHOLD)
+        except KeyboardInterrupt:
+            raise
         except Exception as e:
             log.warning("[%s] credit check error: %s", label, e)
 
@@ -488,6 +490,8 @@ def _tick() -> None:
                     log.info("[%s] repair succeeded, needsRepair cleared", label)
                 else:
                     log.warning("[%s] repair ran but still missing IDs", label)
+            except KeyboardInterrupt:
+                raise
             except Exception as _e:
                 log.warning("[%s] repair_account error: %s", label, _e)
             mf = _load_manifest(label)
