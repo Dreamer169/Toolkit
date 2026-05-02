@@ -5,6 +5,7 @@ import { Router, type IRouter } from "express";
 import { createHash, randomBytes, randomUUID } from "crypto";
 import { execute, query, queryOne } from "../db.js";
 import { existsSync } from "fs";
+import { execFile as _execFile } from "child_process";
 import { Socket } from "net";
 import path from "path";
 
@@ -4437,7 +4438,8 @@ router.post("/tools/novproxy/register", async (req, res) => {
     proxies: proxiesInput = "",   // 逗号/换行分隔代理列表 → 每账号轮换 IP
     proxy:   proxyInput   = "",
     autoProxy = false,
-  } = req.body as { accounts?: [string,string][]; delay?: number; proxies?: string; proxy?: string; autoProxy?: boolean };
+    graphTokenJson = "{}",
+  } = req.body as { accounts?: [string,string][]; delay?: number; proxies?: string; proxy?: string; autoProxy?: boolean; graphTokenJson?: string };
   if (!accounts.length) { res.status(400).json({ success: false, error: "需要账号列表" }); return; }
 
   // 解析代理列表
@@ -4470,6 +4472,24 @@ router.post("/tools/novproxy/register", async (req, res) => {
   const args = [scriptPath, "--accounts", JSON.stringify(accounts), "--delay", String(delay)];
   if (proxyList.length > 1) args.push("--proxies", proxyList.join(","));
   else if (proxyList.length === 1) args.push("--proxy", proxyList[0]);
+  // Auto-load Outlook refresh_tokens from DB so register worker can read email verification codes
+  let graphMap: Record<string, string> = {};
+  try { graphMap = JSON.parse(graphTokenJson); } catch {}
+  if (Object.keys(graphMap).length === 0) {
+    try {
+      const emailList = accounts.map((a) => a[0]);
+      const rows = (await query(
+        "SELECT email, token as rt FROM accounts WHERE platform='outlook' AND email = ANY($1::text[])",
+        [emailList]
+      ).catch(() => [])) as { email: string; rt: string }[];
+      for (const row of rows) { if (row.rt) graphMap[row.email] = row.rt; }
+      if (Object.keys(graphMap).length > 0)
+        job.logs.push({ type: "log", message: `[Graph] Loaded ${Object.keys(graphMap).length} Outlook token(s) for email code reading` });
+      else
+        job.logs.push({ type: "warn", message: "[Graph] No Outlook tokens found in DB. Register will NOT fill mailbox-captcha -> secure_email will be empty -> free trial may not be granted." });
+    } catch {}
+  }
+  args.push("--graph-token-json", JSON.stringify(graphMap));
   const child = spawn("python3", args, { env: { ...process.env as Record<string, string>, PYTHONUNBUFFERED: "1" } });
   jobQueue.setChild(jobId, child);
 
@@ -4709,6 +4729,114 @@ router.get("/tools/novproxy/cdk-records", async (_req, res) => {
     "SELECT code, account_email, result, msg, attempted_at FROM novproxy_cdks ORDER BY attempted_at DESC LIMIT 200"
   ).catch(() => []);
   res.json({ success: true, records: rows });
+});
+
+
+// POST /tools/novproxy/diagnose -- free-trial root-cause analysis
+router.post("/tools/novproxy/diagnose", async (req, res) => {
+  const { email, password, token: existingToken } = req.body as { email: string; password?: string; token?: string };
+  if (!email) { res.status(400).json({ success: false, error: "email required" }); return; }
+
+  const SCRIPT = "/root/Toolkit/scripts/novproxy_diagnose.py";
+  const payload = existingToken
+    ? JSON.stringify({ email, token: existingToken })
+    : JSON.stringify({ email, pwd: password ?? "" });
+
+  const pyResult = await new Promise<Record<string, unknown>>((resolve, reject) => {
+    _execFile("python3", [SCRIPT, payload], { timeout: 25_000, maxBuffer: 1024 * 512 }, (err, stdout, stderr) => {
+      if (err && !stdout.trim()) { reject(new Error(`python exit: ${stderr.slice(0, 200)}`)); return; }
+      try { resolve(JSON.parse(stdout.trim()) as Record<string, unknown>); }
+      catch { reject(new Error(`json parse failed: ${stdout.slice(0, 200)} | ${stderr.slice(0, 200)}`)); }
+    });
+  }).catch((e: unknown) => ({ error: String(e) }) as Record<string, unknown>);
+
+  if (pyResult["error"]) {
+    const errMsg = String(pyResult["error"]);
+    if (errMsg.includes("login_failed")) {
+      res.json({ success: false, error: "Login failed -- no token", detail: pyResult["signin"] }); return;
+    }
+    res.status(500).json({ success: false, error: errMsg }); return;
+  }
+
+  try {
+    const memberR    = (pyResult["member"]      ?? {}) as Record<string, unknown>;
+    const trafficR   = (pyResult["trafficInfo"] ?? {}) as Record<string, unknown>;
+    const priceR     = (pyResult["priceList"]   ?? {}) as Record<string, unknown>;
+
+    const member      = (memberR?.data ?? {})  as Record<string, unknown>;
+    const trafficInfo = (trafficR?.data ?? {}) as Record<string, unknown>;
+    const priceData   = (priceR?.data  ?? {})  as { trafficList?: unknown[] };
+
+    const issues: { level: string; code: string; title: string; desc: string; fix: string }[] = [];
+
+    if (!member.secure_email) {
+      issues.push({ level: "error", code: "no_email_verify",
+        title: "Email not verified (secure_email empty)",
+        desc: "Account was created via /v1/signup without email verification. The mailbox-captcha field was never filled. secure_email is empty.",
+        fix: "Re-register and fill the email verification code (mailbox-captcha field); or contact novproxy support to manually activate." });
+    }
+    if (trafficInfo.flow_open === "off") {
+      issues.push({ level: "error", code: "flow_off",
+        title: "Proxy service is OFF (flow_open: off)",
+        desc: "Traffic proxy service is disabled. No requests can be routed through this account.",
+        fix: "Complete email verification -- service may activate automatically. Or top up traffic balance." });
+    }
+    const alltraffic = parseFloat(String(trafficInfo.alltraffic ?? 0)) || 0;
+    if (alltraffic <= 0) {
+      issues.push({ level: "error", code: "no_traffic",
+        title: "Traffic balance: 0 MB",
+        desc: "No usable traffic. Proxy cannot route any requests.",
+        fix: "Top up a traffic package ($0.5/GB minimum) or redeem a valid CDK code." });
+    }
+    const isOutlook = /\@(outlook|hotmail|live)\.com$/i.test(email);
+    if (isOutlook) {
+      issues.push({ level: "warn", code: "email_not_deliverable",
+        title: "novproxy emails do NOT reach Outlook",
+        desc: "Confirmed: /v1/mailCode returns Success but ZERO emails arrive at Outlook (Inbox + JunkEmail + all folders checked = 0 novproxy emails). Cannot get verification code.",
+        fix: "Register novproxy accounts with Gmail. Gmail successfully receives novproxy verification emails." });
+    }
+    const hasFreeTier = (priceData.trafficList?.length ?? 0) > 0;
+    if (!hasFreeTier) {
+      issues.push({ level: "warn", code: "no_free_tier",
+        title: "priceList is empty (no free tier product)",
+        desc: "/v2/priceList returns empty arrays. No free trial product is attached to this account in the system.",
+        fix: "Free 500MB is granted after email-verified registration. Contact novproxy support or top up manually." });
+    }
+
+    let diagnoseMsg: string;
+    if (alltraffic > 0) {
+      diagnoseMsg = `Account has ${alltraffic}MB traffic. Proxy is usable.`;
+    } else if (isOutlook && !member.secure_email) {
+      diagnoseMsg = [
+        "ROOT CAUSE (5 layers confirmed):",
+        "1. Register worker used /v1/signup (no email verification) -> secure_email is empty",
+        "2. mailbox-captcha field was never filled (worker did not request nor read email code)",
+        "3. novproxy emails DO NOT reach Outlook (confirmed: /v1/mailCode says Success, 0 emails in all folders)",
+        "4. flow_open: off + alltraffic: 0 (proxy service not activated)",
+        "5. priceList: [] (no free-tier product attached to account)",
+        "",
+        "SOLUTION: Register novproxy accounts with Gmail (receives verification emails).",
+        "This fixes the email delivery blocker. The updated register worker",
+        "now clicks Get code, waits for email, fills mailbox-captcha automatically.",
+        "For existing account: contact novproxy support to manually activate or top up."
+      ].join("\n");
+    } else if (!member.secure_email) {
+      diagnoseMsg = "Email not verified (secure_email empty). Re-register with email verification completed.";
+    } else {
+      diagnoseMsg = "Email verified but no free traffic granted. Contact novproxy support or top up balance.";
+    }
+
+    res.json({
+      success: true, email,
+      member: { secure_email: member.secure_email ?? "", disable: member.disable, can_set_pwd: member.can_set_pwd },
+      trafficInfo: { flow_open: trafficInfo.flow_open, alltraffic: trafficInfo.alltraffic, flow_num: trafficInfo.flow_num },
+      issues,
+      freeTrial: { available: alltraffic > 0, diagnoseMsg },
+      priceListEmpty: !hasFreeTier,
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
 });
 
 
