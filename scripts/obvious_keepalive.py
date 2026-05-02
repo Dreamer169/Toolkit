@@ -56,6 +56,10 @@ _SHUTDOWN = threading.Event()
 _repair_lock: threading.Lock = threading.Lock()
 _repairs_running: set[str]   = set()
 
+# Tracks labels currently running async wake to prevent double-start
+_wake_lock: threading.Lock = threading.Lock()
+_wakes_running: set[str]   = set()
+
 def _sigterm_handler(signum, frame):  # noqa
     log.info("keepalive shutdown (SIGTERM/SIGINT)")
     _SHUTDOWN.set()
@@ -549,22 +553,41 @@ def _tick_one(acc: dict) -> None:
         log.info("[%s] ok sb=%s exec_ping=%s warm=%s proxy=%s",
                  label, sb[:8], exec_ok, warm_ok, mf.get("proxy", "NONE"))
     else:
-        log.info("[%s] paused, waking via chat (proxy=%s)",
-                 label, mf.get("proxy", "NONE"))
-        new_sb = _chat_wake(label, sess)
-        if new_sb:
-            init_result = _init_sandbox(new_sb)
-            log.info("[%s] ready sb=%s init=%s", label, new_sb[:8], init_result)
+        # Async wake: do NOT block the ThreadPoolExecutor worker.
+        # Synchronous wake calls took 5-30s, starving other sandboxes of
+        # exec_ping during wake-storms and causing cascading pauses.
+        with _wake_lock:
+            already_waking = label in _wakes_running
+            if not already_waking:
+                _wakes_running.add(label)
+        if already_waking:
+            log.info("[%s] wake already in progress, skip", label)
         else:
-            log.warning("[%s] unavailable after wake attempt", label)
-            if _e2b_recycled(sb):
-                log.warning("[%s] e2b 502 -- sandbox recycled, setting needsRepair=True", label)
-                mf2 = _load_manifest(label)
-                mf2["sandboxId"]   = None
-                mf2["execBase"]    = None
-                mf2["needsRepair"] = True
-                (ACC_DIR / label / "manifest.json").write_text(
-                    json.dumps(mf2, indent=2, ensure_ascii=False))
+            log.info("[%s] paused, waking via chat (proxy=%s)",
+                     label, mf.get("proxy", "NONE"))
+            _lbl, _sb, _sess = label, sb, sess
+            def _run_wake(lbl=_lbl, sandbox=_sb, session=_sess):
+                try:
+                    new_sb = _chat_wake(lbl, session)
+                    if new_sb:
+                        init_result = _init_sandbox(new_sb)
+                        log.info("[%s] ready sb=%s init=%s", lbl, new_sb[:8], init_result)
+                    else:
+                        log.warning("[%s] unavailable after wake attempt", lbl)
+                        if _e2b_recycled(sandbox):
+                            log.warning("[%s] e2b 502 -- sandbox recycled, setting needsRepair=True", lbl)
+                            mf2 = _load_manifest(lbl)
+                            mf2["sandboxId"]   = None
+                            mf2["execBase"]    = None
+                            mf2["needsRepair"] = True
+                            (ACC_DIR / lbl / "manifest.json").write_text(
+                                json.dumps(mf2, indent=2, ensure_ascii=False))
+                except Exception as _we:
+                    log.warning("[%s] bg_wake error: %s", lbl, _we)
+                finally:
+                    with _wake_lock:
+                        _wakes_running.discard(lbl)
+            threading.Thread(target=_run_wake, daemon=True).start()
 
 
 def _tick() -> None:
