@@ -86,20 +86,25 @@ function fmtDate(iso: string) {
 
 
 const TAG_LABELS: Record<string, string> = {
-  replit_used: "replit_used",
-  abuse_mode: "API封禁",
-  token_invalid: "token过期",
-  inbox_error: "收件箱错误",
-  needs_oauth_manual: "需手动授权",
-  inbox_verified: "收件箱✓",
+  // ── 账号状态标签（规范化，不重复）──────────────────────────────────────
+  inbox_verified:    "收件箱✓",        // 账号曾成功读取收件箱（仅 active 账号有效）
+  replit_used:       "已用于Replit",   // 已为 Replit 账号注册使用过
+  needs_oauth_manual:"需重新授权",     // 无 refresh_token，需要设备码重新授权
+  abuse_mode:        "微软封禁",       // Microsoft 判定 abuse，账号已死（不可恢复）
+  token_invalid:     "token失效",      // refresh_token 已失效，需重新授权
+  inbox_error:       "收件箱异常",     // 读取收件箱时发生错误
+  authcode_failed:   "授权码失败",     // 设备码/授权码流程曾失败
+  replit_avail:      "可用于Replit",   // 尚未注册 Replit，可用
 };
 const TAG_CLASSES: Record<string, string> = {
-  replit_used: "text-blue-300 bg-blue-950/40 border-blue-800/40",
-  abuse_mode: "text-red-300 bg-red-950/40 border-red-800/40",
-  token_invalid: "text-red-300 bg-red-950/40 border-red-800/40",
-  inbox_error: "text-amber-300 bg-amber-950/40 border-amber-800/40",
-  needs_oauth_manual: "text-violet-300 bg-violet-950/40 border-violet-800/40",
-  inbox_verified: "text-emerald-300 bg-emerald-950/40 border-emerald-800/40",
+  inbox_verified:    "text-emerald-300 bg-emerald-950/40 border-emerald-800/40",
+  replit_used:       "text-blue-300 bg-blue-950/40 border-blue-800/40",
+  needs_oauth_manual:"text-violet-300 bg-violet-950/40 border-violet-800/40",
+  abuse_mode:        "text-red-400 bg-red-950/60 border-red-800/60",
+  token_invalid:     "text-orange-300 bg-orange-950/40 border-orange-800/40",
+  inbox_error:       "text-amber-300 bg-amber-950/40 border-amber-800/40",
+  authcode_failed:   "text-orange-300 bg-orange-950/40 border-orange-800/40",
+  replit_avail:      "text-cyan-300 bg-cyan-950/40 border-cyan-800/40",
 };
 function tagsOf(acc: Account): string[] {
   return Array.from(new Set((acc.tags ?? "").split(",").map(t => t.trim()).filter(Boolean)));

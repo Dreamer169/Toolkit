@@ -2714,15 +2714,16 @@ router.post("/tools/outlook/verify-accounts", async (req, res) => {
   const { ids } = req.body as { ids?: number[] };
   try {
     const { query: dbQ, execute: dbE } = await import("../db.js");
-    const rows = await dbQ<{ id: number; email: string; password: string | null; token: string | null; refresh_token: string | null }>(
+    const rows = await dbQ<{ id: number; email: string; password: string | null; token: string | null; refresh_token: string | null; tags: string | null; status: string }>(
       ids?.length
-        ? `SELECT id, email, password, token, refresh_token FROM accounts WHERE platform='outlook' AND id = ANY($1::int[])`
-        : `SELECT id, email, password, token, refresh_token FROM accounts WHERE platform='outlook'`,
+        ? `SELECT id, email, password, token, refresh_token, tags, status FROM accounts WHERE platform='outlook' AND id = ANY($1::int[])`
+        : `SELECT id, email, password, token, refresh_token, tags, status FROM accounts WHERE platform='outlook'`,
       ids?.length ? [ids] : []
     );
     const results: Array<{ id: number; email: string; status: string; via?: string; error?: string }> = [];
     for (const acc of rows) {
       let accessToken = "";   // 不直接使用可能过期的 DB token
+      const acctProxy = pickProxyForAccount(acc.id);
 
       // 1. 有 refresh_token → 先用 /common/ 刷新（优先级最高）
       let refreshError = "";
@@ -2736,7 +2737,7 @@ router.post("/tools/outlook/verify-accounts", async (req, res) => {
             refresh_token: acc.refresh_token,
             scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read offline_access",
           }).toString(),
-        });
+        }, acctProxy);
         const td = await r.json() as { access_token?: string; refresh_token?: string; error?: string; error_description?: string };
         if (td.access_token) {
           accessToken = td.access_token;
@@ -2755,7 +2756,7 @@ router.post("/tools/outlook/verify-accounts", async (req, res) => {
       if (accessToken) {
         const gr = await microsoftFetch("https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName", {
           headers: { Authorization: `Bearer ${accessToken}` },
-        });
+        }, acctProxy);
         if (gr.ok) {
           await dbE("UPDATE accounts SET status='active', updated_at=NOW() WHERE id=$1", [acc.id]);
           results.push({ id: acc.id, email: acc.email, status: "valid", via: "graph" });
@@ -2775,7 +2776,15 @@ router.post("/tools/outlook/verify-accounts", async (req, res) => {
         continue;
       }
 
-      // 4. 无 refresh_token 且无 token → Basic Auth（仅无 OAuth 账号走此路径）
+      // 4. 无 refresh_token 且无有效 token
+      //    - 有 needs_oauth_manual 标签或 status=needs_oauth → 直接报 needs_oauth（勿走 IMAP，微软已封 Basic Auth）
+      //    - 无密码 → 报 no_password
+      //    - 有密码但无 OAuth → IMAP Basic Auth（仅极少数未迁移账号）
+      const acTags = (acc as unknown as { tags?: string | null } & typeof acc).tags ?? "";
+      if (acTags.includes("needs_oauth_manual") || acc.status === "needs_oauth") {
+        results.push({ id: acc.id, email: acc.email, status: "needs_oauth", error: "账号需要设备码重新授权（needs_oauth_manual）" });
+        continue;
+      }
       if (!acc.password) {
         results.push({ id: acc.id, email: acc.email, status: "no_password", error: "数据库无密码且无 OAuth token" });
         continue;
