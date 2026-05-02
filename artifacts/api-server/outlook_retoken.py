@@ -338,9 +338,12 @@ async def retoken_account(account: dict, headless: bool, proxy: str = "") -> boo
             log(f"  ✍️  输入用户码: {user_code}")
             await asyncio.sleep(1)
 
-            next_btn = page.locator('input[type="submit"], button[type="submit"]').first
+            next_btn = page.locator('input[id="idSIButton9"], button[type="submit"][data-testid="primaryButton"], input[type="submit"], button[type="submit"]').first
             await next_btn.click()
-            await asyncio.sleep(3)
+            try:
+                await page.wait_for_load_state('networkidle', timeout=10000)
+            except Exception:
+                await asyncio.sleep(4)
 
             # 5. 输入 email
             email_input = page.locator('input[type="email"], input[name="loginfmt"]').first
@@ -391,6 +394,12 @@ async def retoken_account(account: dict, headless: bool, proxy: str = "") -> boo
                 # v8.70 fix Bug5: device-consent page stuck -> click visible advance button
                 _consent_advanced = False
                 for _sel in [
+                    # idSIButton9 = MS standard primary action on oauth20_remoteconnect.srf
+                    # (appears when injected cookies bypass pw step, "Sign in to continue")
+                    'input[id="idSIButton9"]',
+                    '[data-testid="primaryButton"]',
+                    'input[type="submit"][value="Next"]',
+                    'input[value="Sign in"]',
                     'button:has-text("Continue")', 'button:has-text("继续")',
                     'button:has-text("Yes")', 'button:has-text("是")',
                     'input[type="submit"][value*="Continue"]',
@@ -400,36 +409,150 @@ async def retoken_account(account: dict, headless: bool, proxy: str = "") -> boo
                 ]:
                     try:
                         _b = page.locator(_sel).first
-                        if await _b.is_visible(timeout=1200):
-                            await _b.click()
-                            log(f"  ✅ device-consent 推进: {_sel}")
+                        if await _b.is_visible(timeout=2000):
+                            # v8.93: check if email input is visible FIRST
+                            _email_prefilled = False
+                            try:
+                                _email_inp = page.locator('input[type="email"], input[name="loginfmt"]').first
+                                if await _email_inp.is_visible(timeout=3000):
+                                    await _email_inp.click(click_count=3)
+                                    await _email_inp.press_sequentially(email, delay=30)
+                                    log(f'  📧 live.com 再次填入邮筱: {email}')
+                                    # click the Fluent UI primaryButton to submit React form
+                                    _sub_btn = page.locator('button[type="submit"][data-testid="primaryButton"], button[data-testid="primaryButton"]').first
+                                    await _sub_btn.click()
+                                    _email_prefilled = True
+                                    try:
+                                        await page.wait_for_load_state('networkidle', timeout=10000)
+                                    except Exception:
+                                        await asyncio.sleep(5)
+                            except Exception:
+                                pass
+                            if not _email_prefilled:
+                                # No email input: click the advance button directly
+                                await _b.click()
+                                log(f'  ✅ device-consent 推进: {_sel}')
+                                try:
+                                    await page.wait_for_load_state('networkidle', timeout=8000)
+                                except Exception:
+                                    await asyncio.sleep(5)
+                            else:
+                                log(f'  ✅ device-consent 推进 (邮筱已Enter): {_sel}')
                             _consent_advanced = True
-                            await asyncio.sleep(3)
+                            # v8.93: after email+Enter OR button click, check for password
+                            try:
+                                _pw_after = page.locator('input[type="password"], input[name="passwd"]').first
+                                if await _pw_after.is_visible(timeout=15000):
+                                    await _pw_after.fill(password)
+                                    log('  🔑 密码框出现，已输入密码')
+                                    await page.locator('input[type="submit"], button[type="submit"]').first.click()
+                                    try:
+                                        await page.wait_for_load_state('networkidle', timeout=8000)
+                                    except Exception:
+                                        await asyncio.sleep(5)
+                            except Exception:
+                                pass
                             break
                     except Exception:
                         continue
-                if not _consent_advanced and ("oauth20_remoteconnect" in page.url or "login.live" in page.url):
+                # v8.91b: after _consent_advanced click, MS may show password on same URL
+                # (account recognized from cookies but password still required)
+                if _consent_advanced:
+                    try:
+                        _pw2 = page.locator('input[type="password"], input[name="passwd"]').first
+                        if await _pw2.is_visible(timeout=6000):
+                            await _pw2.fill(password)
+                            log('  🔑 _consent_advanced 后弹出密码框，已输入密码')
+                            await page.locator('input[type="submit"], button[type="submit"]').first.click()
+                            await asyncio.sleep(5)
+                    except Exception:
+                        pass
+                if "oauth20_remoteconnect" in page.url or ("login.live" in page.url and not _consent_advanced):
                     try:
                         await context.clear_cookies()
                         log("  ♻️  清理 cookies, 重新走 device flow")
-                        await page.goto(verification_uri, wait_until="domcontentloaded", timeout=30000)
+                        # v8.93: request NEW device code (old OTC already consumed)
+                        try:
+                            _dc2 = request_device_code()
+                            _uc2 = _dc2['user_code']
+                            _dv2 = _dc2['device_code']
+                            _vi2 = _dc2.get('verification_uri', verification_uri)
+                            _iv2 = _dc2.get('interval', interval)
+                            _ex2 = _dc2.get('expires_in', 900)
+                            log(f'  🔑 新设备码: {_uc2}')
+                            # cancel old poll_task, start new one
+                            poll_task.cancel()
+                            _dv2_cap, _iv2_cap, _ex2_cap = _dv2, _iv2, _ex2
+                            async def _poll_bg2():
+                                _loop2 = asyncio.get_event_loop()
+                                _res2 = await _loop2.run_in_executor(None, poll_token, _dv2_cap, _iv2_cap, _ex2_cap)
+                                token_result[0] = _res2
+                                token_done.set()
+                            poll_task = asyncio.create_task(_poll_bg2())
+                        except Exception as _dc2e:
+                            log(f'  ⚠️  新设备码失败: {_dc2e}, 使用旧码')
+                            _uc2, _vi2 = user_code, verification_uri
+                        await page.goto(_vi2, wait_until='domcontentloaded', timeout=30000)
                         await asyncio.sleep(2)
                         _ci = page.locator('input[name="otc"], input[id="otc"], input[type="text"]').first
                         await _ci.wait_for(timeout=8000)
-                        await _ci.fill(user_code)
+                        await _ci.fill(_uc2)
                         await page.locator('input[type="submit"], button[type="submit"]').first.click()
-                        await asyncio.sleep(3)
+                        try:
+                            await page.wait_for_load_state('networkidle', timeout=10000)
+                        except Exception:
+                            await asyncio.sleep(4)
+                        # Step A: OTC+email entry (same page - live.com Fluent UI)
+                        _ci2 = page.locator('input[name="otc"], input[id="otc"]').first
+                        if await _ci2.is_visible(timeout=5000):
+                            # fresh-flow starts at OTC page again
+                            await _ci2.fill(_uc2)
+                            _otc2_btn = page.locator('input[id="idSIButton9"], button[type="submit"][data-testid="primaryButton"], input[type="submit"], button[type="submit"]').first
+                            await _otc2_btn.click()
+                            try:
+                                await page.wait_for_load_state('networkidle', timeout=10000)
+                            except Exception:
+                                await asyncio.sleep(5)
+                        # Step A2: email entry (Fluent UI press_sequentially)
                         _ei = page.locator('input[type="email"], input[name="loginfmt"]').first
                         if await _ei.is_visible(timeout=5000):
-                            await _ei.fill(email)
-                            await page.locator('input[type="submit"], button[type="submit"]').first.click()
-                            await asyncio.sleep(3)
+                            await _ei.click(click_count=3)
+                            await _ei.press_sequentially(email, delay=30)
+                            _ei_btn = page.locator('button[type="submit"][data-testid="primaryButton"], button[data-testid="primaryButton"], input[type="submit"]').first
+                            await _ei_btn.click()
+                            try:
+                                await page.wait_for_load_state('networkidle', timeout=10000)
+                            except Exception:
+                                await asyncio.sleep(4)
+                        # Step B: live.com may show email AGAIN — fill up to 2 times
+                        for _live_step in range(2):
+                            _ei2 = page.locator('input[type="email"], input[name="loginfmt"]').first
+                            if await _ei2.is_visible(timeout=4000):
+                                await _ei2.click(click_count=3)
+                                await _ei2.press_sequentially(email, delay=30)
+                                log(f'  📧 live.com再次填入邮筱[{_live_step}]: {email}')
+                                # Fluent UI React form: must click button to trigger onChange→submit
+                                _sub2 = page.locator('button[type="submit"][data-testid="primaryButton"], button[data-testid="primaryButton"]').first
+                                if await _sub2.is_visible(timeout=2000):
+                                    await _sub2.click()
+                                else:
+                                    await _ei2.press('Enter')
+                                try:
+                                    await page.wait_for_load_state('networkidle', timeout=10000)
+                                except Exception:
+                                    await asyncio.sleep(5)
+                            else:
+                                break
+                        # Step C: password
                         _pw = page.locator('input[type="password"], input[name="passwd"]').first
-                        if await _pw.is_visible(timeout=8000):
+                        if await _pw.is_visible(timeout=15000):
                             await _pw.fill(password)
                             log("  🔑 重试: 输入密码")
-                            await page.locator('input[type="submit"], button[type="submit"]').first.click()
-                            await asyncio.sleep(4)
+                            await _pw.press('Enter')
+                            try:
+                                await page.wait_for_load_state('networkidle', timeout=10000)
+                            except Exception:
+                                await asyncio.sleep(5)
                     except Exception as _re:
                         log(f"  ⚠️  device-flow 重试失败: {_re}")
 
@@ -464,11 +587,28 @@ async def retoken_account(account: dict, headless: bool, proxy: str = "") -> boo
                 return False
 
             try:
+                # v8.91: when cookies bypass pw step, page stays on oauth20_remoteconnect.srf
+                # (shows 'Sign in to continue'). Click idSIButton9 to advance to OAuth consent.
+                if 'oauth20_remoteconnect' in page.url or 'remoteconnect.srf' in page.url:
+                    for _remote_sel in [
+                        'input[id="idSIButton9"]',
+                        '[data-testid="primaryButton"]',
+                        'input[type="submit"]',
+                    ]:
+                        try:
+                            _si_btn = page.locator(_remote_sel).first
+                            if await _si_btn.is_visible(timeout=4000):
+                                await _si_btn.click()
+                                log(f'  ✅ oauth20_remoteconnect: clicked {_remote_sel} -> consent page')
+                                await asyncio.sleep(4)
+                                break
+                        except Exception:
+                            continue
                 await page.locator('[data-testid="appConsentPrimaryButton"]').click(timeout=12000)
                 log("  ✅ 点击 appConsentPrimaryButton 同意授权")
                 await asyncio.sleep(3)
             except Exception:
-                log(f"  ℹ️  未检测到同意按钮，URL: {page.url[:80]}")
+                log(f"  ℹ️ 未检测到同意按鈕，URL: {page.url[:80]}")
 
             # 9. 旧版 error div 兼容检测
             error_div = page.locator('[id*="error"], .alert-error, [aria-live="assertive"]').first
