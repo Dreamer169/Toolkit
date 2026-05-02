@@ -322,8 +322,8 @@ module.exports = {
       "env": {
         "SB_ACC_DIR": "/root/obvious-accounts",
         "SB_MIN_POOL": "10",
-        "SB_PING_MIN": "90",
-        "SB_PING_MAX": "180",
+        "SB_PING_MIN": "45",
+        "SB_PING_MAX": "60",
         "SB_WAKE_TIMEOUT": "150",
         "SB_CREDIT_RESET_THRESHOLD": "20.0",
         "PYTHONUNBUFFERED": "1"
@@ -343,8 +343,8 @@ module.exports = {
       "env": {
         "SB_ACC_DIR": "/root/obvious-accounts",
         "SB_MIN_POOL": "10",
-        "SB_PING_MIN": "90",
-        "SB_PING_MAX": "180",
+        "SB_PING_MIN": "45",
+        "SB_PING_MAX": "60",
         "SB_WAKE_TIMEOUT": "150",
         "SB_CREDIT_RESET_THRESHOLD": "20.0",
         "PYTHONUNBUFFERED": "1"

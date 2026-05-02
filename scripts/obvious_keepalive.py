@@ -52,6 +52,10 @@ log = logging.getLogger(__name__)
 # Graceful SIGTERM/SIGINT shutdown; _SHUTDOWN wakes worker threads cleanly
 _SHUTDOWN = threading.Event()
 
+# Tracks labels currently running async repair to prevent double-start
+_repair_lock: threading.Lock = threading.Lock()
+_repairs_running: set[str]   = set()
+
 def _sigterm_handler(signum, frame):  # noqa
     log.info("keepalive shutdown (SIGTERM/SIGINT)")
     _SHUTDOWN.set()
@@ -490,34 +494,46 @@ def _tick_one(acc: dict) -> None:
     sb = mf.get("sandboxId") or acc.get("sandboxId") or ""
     tid = mf.get("threadId")
 
-    # Auto-repair: trigger on ANY needsRepair=True (v2)
+    # Auto-repair: trigger on ANY needsRepair=True (v3 — async, non-blocking)
+    # repair_account.py takes up to 180s; running it synchronously blocked the
+    # entire ThreadPoolExecutor tick, starving other sandboxes of exec_ping and
+    # causing free-tier sandboxes (~2 min idle timeout) to pause.
     if mf.get("needsRepair"):
-        log.info("[%s] needsRepair=True -- running repair_account.py", label)
-        import subprocess as _sp, os as _os
-        repair_py = str(Path(__file__).parent / "repair_account.py")
-        env = dict(_os.environ, DISPLAY=_os.environ.get("DISPLAY", ":99"))
-        try:
-            result = _sp.run(
-                ["python3", repair_py, "--label", label, "--headless"],
-                timeout=180, env=env, capture_output=True, text=True
-            )
-            log.info("[%s] repair exit=%d stdout=%s",
-                     label, result.returncode, result.stdout[-200:] if result.stdout else "")
-            mf = _load_manifest(label)
-            if mf.get("projectId") and mf.get("threadId"):
-                mf["needsRepair"] = False
-                (ACC_DIR / label / "manifest.json").write_text(
-                    json.dumps(mf, indent=2, ensure_ascii=False))
-                log.info("[%s] repair succeeded, needsRepair cleared", label)
-            else:
-                log.warning("[%s] repair ran but still missing IDs", label)
-        except KeyboardInterrupt:
-            raise
-        except Exception as _e:
-            log.warning("[%s] repair_account error: %s", label, _e)
-        mf = _load_manifest(label)
-        sb = mf.get("sandboxId") or ""
-        tid = mf.get("threadId")
+        with _repair_lock:
+            already = label in _repairs_running
+            if not already:
+                _repairs_running.add(label)
+        if already:
+            log.info("[%s] repair in-progress, skipping this tick", label)
+        else:
+            log.info("[%s] needsRepair=True -- launching async repair", label)
+            import subprocess as _sp, os as _os
+            repair_py = str(Path(__file__).parent / "repair_account.py")
+            _env = dict(_os.environ, DISPLAY=_os.environ.get("DISPLAY", ":99"))
+            def _run_repair(lbl=label, rpy=repair_py, env=_env):
+                try:
+                    res = _sp.run(["python3", rpy, "--label", lbl, "--headless"],
+                                  timeout=180, env=env, capture_output=True, text=True)
+                    log.info("[%s] repair exit=%d stdout=%s",
+                             lbl, res.returncode, res.stdout[-200:] if res.stdout else "")
+                    mf2 = _load_manifest(lbl)
+                    if mf2.get("projectId") and mf2.get("threadId"):
+                        mf2["needsRepair"] = False
+                        (ACC_DIR / lbl / "manifest.json").write_text(
+                            json.dumps(mf2, indent=2, ensure_ascii=False))
+                        log.info("[%s] repair succeeded, needsRepair cleared", lbl)
+                    else:
+                        log.warning("[%s] repair ran but still missing IDs", lbl)
+                except Exception as _e2:
+                    log.warning("[%s] repair_account error: %s", lbl, _e2)
+                finally:
+                    with _repair_lock:
+                        _repairs_running.discard(lbl)
+            threading.Thread(target=_run_repair, daemon=True).start()
+        # Still exec-ping current sandbox while repair runs (if sandboxId known)
+        if sb and _alive(sb):
+            _e2b_exec_ping(sb)
+        return
 
     if _alive(sb):
         # v3: direct e2b exec-ping resets idle timer;
