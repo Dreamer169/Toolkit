@@ -8,7 +8,7 @@ v8.89 修复:
 """
 import asyncio, json, sys
 
-MAX_CONCURRENCY = 1
+MAX_CONCURRENCY = 3
 
 SKIP_SELECTORS = [
     'button:has-text("Skip for now")',
@@ -50,11 +50,15 @@ async def _skip_if_security_page(page, email: str) -> bool:
 def _is_real_done(_u: str, _c: str) -> bool:
     if "action=remoteconnectcomplete" in _u: return True
     if "/devicelogin/complete" in _u: return True
+    if "remoteconnect.srf" in _u and "remoteconnectcomplete" in _u: return True
     if any(t in _c for t in [
         "device login is complete", "you have signed in",
-        "you can now close this window", "you can close this window"
+        "you can now close this window", "you can close this window",
+        "you are now signed in", "signed in to", "you signed in to",
+        "access was granted", "authorization complete",
     ]): return True
-    if any(t in _c for t in ["可以关闭此窗口", "已经登录", "登录成功", "授权已完成"]): return True
+    if any(t in _c for t in ["可以关闭此窗口", "已经登录", "登录成功", "授权已完成",
+        "你已登录", "已授权", "登录成功"]): return True
     return False
 
 
@@ -95,7 +99,7 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
             ctx = await browser.new_context(**ctx_opts)
             page = await ctx.new_page()
 
-            await page.goto("https://www.microsoft.com/link",
+            await page.goto("https://microsoft.com/devicelogin",
                             timeout=45000, wait_until="domcontentloaded")
             await asyncio.sleep(3)
             await _safe_shot(page, email, "01_start")
@@ -190,6 +194,40 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                 if not await _skip_if_security_page(page, email):
                     break
 
+            # Device-confirmation step: after KMSI, deviceauth may show
+            # You are signing in to App on another device - click confirm button
+            for _dc_i in range(3):
+                try:
+                    _dc_body = (await page.inner_text("body")).lower()
+                    _dc_url = (page.url or "").lower()
+                    _is_dc = (
+                        ("signing in to" in _dc_body or "on another device" in _dc_body
+                         or "signing in on" in _dc_body)
+                        and "deviceauth" in _dc_url
+                    )
+                    if not _is_dc:
+                        break
+                    _confirmed = False
+                    for _cs in [
+                        'input[type="submit"]', 'button[type="submit"]',
+                        '#idSIButton9', '[data-testid="primaryButton"]',
+                        'form button',
+                    ]:
+                        try:
+                            _cb = await page.query_selector(_cs)
+                            if _cb and await _cb.is_visible():
+                                await _cb.click()
+                                print(f"[{email}] device-confirm {_cs}", flush=True)
+                                await asyncio.sleep(5)
+                                _confirmed = True
+                                break
+                        except Exception:
+                            continue
+                    if not _confirmed:
+                        break
+                except Exception:
+                    break
+
             consent_sels = [
                 'input[type="submit"][value="Continue"]',
                 'input[type="submit"][value="Accept"]',
@@ -221,7 +259,7 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                     print(f"[{email}] consent r={_retry} url={cur_url[:100]}", flush=True)
 
                     _on_device = any(x in cur_url.lower() for x in [
-                        "remoteconnect", "deviceauth", "microsoft.com/link",
+                        "remoteconnect", "deviceauth", "microsoft.com/link", "microsoft.com/devicelogin",
                         "login.microsoftonline.com",
                     ]) or cur_url == ""
 
@@ -233,17 +271,50 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                                 if btn and await btn.is_visible():
                                     await btn.click()
                                     print(f"[{email}] consent click r={_retry} {sel}", flush=True)
-                                    await asyncio.sleep(6)
+                                    try:
+                                        await page.wait_for_load_state("networkidle", timeout=12000)
+                                    except Exception:
+                                        await asyncio.sleep(10)
                                     _consent_clicked = True
                                     _clicked = True
                                     await _safe_shot(page, email, f"06_consent_{_retry}")
+                                    # After code-verify Continue click,
+                                    # live.com may show password entry
+                                    for _pwstep in range(3):
+                                        _pw2 = await page.query_selector(
+                                            'input[type="password"], input[name="passwd"]')
+                                        if _pw2 and await _pw2.is_visible():
+                                            await _pw2.fill(password)
+                                            print(f"[{email}] pw after consent", flush=True)
+                                            _sbtn = await page.query_selector(
+                                                'input[type="submit"], button[type="submit"]')
+                                            if _sbtn: await _sbtn.click()
+                                            try:
+                                                await page.wait_for_load_state("networkidle", timeout=10000)
+                                            except Exception:
+                                                await asyncio.sleep(6)
+                                            # KMSI after password
+                                            for _ksel in ['#idSIButton9', 'input[type="submit"][value="Yes"]',
+                                                          '[data-testid="primaryButton"]']:
+                                                try:
+                                                    _kb = await page.query_selector(_ksel)
+                                                    if _kb and await _kb.is_visible():
+                                                        _kbt = (await _kb.inner_text())[:30]
+                                                        if 'password' not in _kbt.lower() and 'forgot' not in _kbt.lower():
+                                                            await _kb.click()
+                                                            print(f"[{email}] kmsi2 {_ksel}", flush=True)
+                                                            await asyncio.sleep(4)
+                                                            break
+                                                except Exception: pass
+                                        else:
+                                            break
                                     break
                             except Exception:
                                 continue
                     else:
                         print(f"[{email}] not device url skip consent", flush=True)
 
-                    _real_done = await _poll_real_done(page, email, max_wait=20)
+                    _real_done = await _poll_real_done(page, email, max_wait=40)
                     if _real_done:
                         break
 
