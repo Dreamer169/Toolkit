@@ -277,7 +277,7 @@ async def _react_safe_fill_email(page, email: str) -> bool:
 async def authorize_one(email: str, password: str, user_code: str, account_id: int,
                         proxy: str = "", sem=None,
                         device_code: str = "", db_url: str = DB_URL,
-                        remove_tag: str = ""):
+                        remove_tag: str = "", verification_uri: str = ""):
     from patchright.async_api import async_playwright
     result = {"accountId": account_id, "email": email, "status": "error", "msg": ""}
 
@@ -295,7 +295,8 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
     # consumers 端点返回 verification_uri = https://www.microsoft.com/link (→ login.live.com)
     # 而非 https://microsoft.com/devicelogin (→ common/deviceauth) — 必须用正确 URL！
     _need_self_dc = not user_code
-    _verification_uri = "https://www.microsoft.com/link"  # 消费者 MSA 账号默认页
+    # v8.99: 优先使用调用方传入的 verification_uri，保证与设备码请求 IP 匹配
+    _verification_uri = verification_uri or "https://www.microsoft.com/link"
 
     launch_opts = {
         "headless": True,
@@ -758,6 +759,7 @@ async def main():
             device_code=a.get("deviceCode", ""),
             db_url=a.get("dbUrl", db_url),
             remove_tag=a.get("removeTag", ""),
+            verification_uri=a.get("verificationUri", ""),  # v8.99: 从调用方透传
         )
         for a in accounts
     ]

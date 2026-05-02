@@ -79,10 +79,11 @@ async function autoOAuth(acc: { id: number; email: string; password: string }): 
 
   const scriptPath = path.resolve(__dirname, "../auto_device_code.py");
   const payload    = JSON.stringify([{
-    email:     acc.email,
-    password:  acc.password,
-    userCode:  dc.userCode,
-    accountId: acc.id,
+    email:           acc.email,
+    password:        acc.password,
+    userCode:        dc.userCode,
+    verificationUri: dc.verificationUri,
+    accountId:       acc.id,
   }]);
 
   // patchright 完成浏览器端授权
