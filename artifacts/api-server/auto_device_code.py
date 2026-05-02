@@ -9,7 +9,7 @@ v8.95 修复:
 """
 import asyncio, json, sys, os, random
 
-MAX_CONCURRENCY = 3
+MAX_CONCURRENCY = 8
 
 SKIP_SELECTORS = [
     'button:has-text("Skip for now")',
