@@ -476,7 +476,9 @@ def _tick() -> None:
         tid = mf.get("threadId")
 
         # Auto-repair: if needsRepair flag is set, trigger Playwright repair
-        if mf.get("needsRepair") and not (mf.get("projectId") and mf.get("threadId")):
+        # v2: trigger on ANY needsRepair=True (not just when pid/tid missing)
+        # This handles 502-recycled sandboxes which still have old pid/tid
+        if mf.get("needsRepair"):
             log.info("[%s] needsRepair=True — running repair_account.py", label)
             import subprocess as _sp, os as _os
             repair_py = str(Path(__file__).parent / "repair_account.py")
