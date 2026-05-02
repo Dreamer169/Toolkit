@@ -1255,7 +1255,7 @@ router.post("/tools/outlook/batch-oauth/reauth-manual", async (req, res) => {
       .filter((s: BatchOAuthSession) => s.status === "pending")
       .map((s: BatchOAuthSession) => {
         const row = rows.find(r => r.id === s.accountId);
-        return { accountId: s.accountId, email: s.email, password: row?.password || "", userCode: s.userCode, deviceCode: s.deviceCode, dbUrl: process.env.DATABASE_URL || "postgresql://postgres:postgres@localhost/toolkit" };
+        return { accountId: s.accountId, email: s.email, password: row?.password || "", userCode: s.userCode, deviceCode: s.deviceCode, dbUrl: process.env.DATABASE_URL || "postgresql://postgres:postgres@localhost/toolkit", removeTag: "needs_oauth_manual" };
       })
       .filter((x: { password: string }) => x.password);
 

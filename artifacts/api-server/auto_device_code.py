@@ -129,13 +129,14 @@ async def _exchange_token_and_save(
         cur = conn.cursor()
 
         if remove_tag:
-            cur.execute(
-                """UPDATE accounts
-                      SET token=%s, refresh_token=%s, status='active', updated_at=NOW(),
-                          tags = NULLIF(TRIM(BOTH ',' FROM
-                            REGEXP_REPLACE(COALESCE(tags,''), '(^|,?)" + remove_tag + "(,|$)', ',', 'g')
-                          ), ',')
-                    WHERE id=%s""",
+            _sql_rm = (
+                "UPDATE accounts "
+                "SET token=%s, refresh_token=%s, status='active', updated_at=NOW(), "
+                "tags = NULLIF(TRIM(BOTH ',' FROM "
+                + f"REGEXP_REPLACE(COALESCE(tags,''), '(^|,?){remove_tag}(,|$)', ',', 'g')"
+                + "), ',') WHERE id=%s"
+            )
+            cur.execute(_sql_rm,
                 (access_token, refresh_token_str, account_id),
             )
         else:

@@ -132,6 +132,8 @@ export default function MailCenter() {
   const [purgeStats, setPurgeStats]       = useState<{ valid: number; purged: number; kept: number } | null>(null);
   const [batchOAuth, setBatchOAuth]       = useState<BatchOAuthState | null>(null);
   const [batchOAuthBusy, setBatchOAuthBusy] = useState(false);
+  const [autoCompleteBusy, setAutoCompleteBusy] = useState(false);
+  const [autoCompleteMsg, setAutoCompleteMsg] = useState("");
   const pollRef                           = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoRefreshRef                    = useRef<ReturnType<typeof setInterval> | null>(null);
   const cdTimerRef                        = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -535,6 +537,29 @@ export default function MailCenter() {
   // 成功后调 /save-token（已有接口）。不依赖服务端 session，服务器重启不影响。
   const CLIENT_ID_BATCH = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
 
+  const startAutoComplete = async (ids?: number[]) => {
+    setAutoCompleteBusy(true); setAutoCompleteMsg("");
+    const body: Record<string, unknown> = {};
+    if (ids?.length) body.accountIds = ids;
+    const d = await fetch(`${API}/tools/outlook/batch-oauth/auto-complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(r => r.json()).catch(() => ({ success: false, error: "网络错误" }));
+    setAutoCompleteBusy(false);
+    if (d.success) {
+      const list = (d.accounts ?? []) as Array<{ email: string; userCode: string }>;
+      setAutoCompleteMsg(
+        list.length
+          ? `已为 ${list.length} 个账号启动自动授权，用户码：` + list.map(a => `${a.email}→${a.userCode}`).join(" | ")
+          : "无需授权的账号"
+      );
+      await loadAccounts();
+    } else {
+      setAutoCompleteMsg("失败：" + (d.error ?? "未知错误"));
+    }
+  };
+
   const startBatchOAuth = async (ids?: number[]) => {
     setBatchOAuthBusy(true);
     if (batchPollRef.current) { clearInterval(batchPollRef.current); batchPollRef.current = null; }
@@ -728,6 +753,22 @@ export default function MailCenter() {
             >
               {batchOAuthBusy ? "发起中…" : "🔑 批量 OAuth 授权"}
             </button>
+          )}
+          {/* 🤖 自动完成授权按钮（调用 Python 自动输入设备码） */}
+          {accounts.some(a => !hasOAuth(a)) && (
+            <button
+              onClick={() => startAutoComplete()}
+              disabled={autoCompleteBusy}
+              className="w-full py-1.5 bg-blue-700/60 hover:bg-blue-700/80 disabled:opacity-50 rounded text-xs text-white font-medium transition-colors"
+              title="用 Python 自动打开浏览器完成设备码 OAuth，无需手动输入验证码"
+            >
+              {autoCompleteBusy ? "自动授权中…" : "🤖 自动完成授权"}
+            </button>
+          )}
+          {autoCompleteMsg && (
+            <div className="text-[10px] px-1 py-0.5 rounded bg-[#21262d] text-blue-300 break-all">
+              {autoCompleteMsg}
+            </div>
           )}
           {batchResults.length > 0 && (
             <div className="space-y-0.5 max-h-24 overflow-y-auto">
