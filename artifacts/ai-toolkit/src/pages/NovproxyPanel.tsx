@@ -3,7 +3,7 @@ import { useState, useRef, useEffect } from "react";
 interface LogEntry   { type: string; message: string }
 interface NvAccount  { email: string; password: string; token?: string; access_key?: string; proxy_user?: string }
 interface CdkRecord  { code: string; account_email: string | null; result: string; msg: string; attempted_at: string }
-type Step      = 1 | 2 | 3 | 4;
+type Step      = 1 | 2 | 3 | 4 | 5;
 type JobStatus = "idle" | "running" | "done" | "stopped";
 
 const STEPS = [
@@ -11,6 +11,7 @@ const STEPS = [
   { n: 2, label: "批量注册",   icon: "🤖", badge: "pydoll" },
   { n: 3, label: "批量登录",   icon: "⚡", badge: "HTTP直调" },
   { n: 4, label: "CDK 兑换",  icon: "🎟️", badge: "去重" },
+  { n: 5, label: "Diagnose",     icon: "X", badge: "root-cause" },
 ] as const;
 
 const LOG_CLS: Record<string, string> = {
@@ -83,6 +84,22 @@ export default function NovproxyPanel() {
   const [cdkSummary,  setCdkSummary]  = useState<{ total: number; succeeded: number } | null>(null);
   const [cdkRecordsLoading, setCdkRecordsLoading] = useState(false);
 
+  // Step 5 -- Diagnosis
+  type DiagIssue = { level: string; code: string; title: string; desc: string; fix: string };
+  type DiagResult = {
+    success: boolean; email: string; error?: string;
+    member?: { secure_email: string; disable: unknown; can_set_pwd: unknown };
+    trafficInfo?: { flow_open: string; alltraffic: unknown; flow_num: unknown };
+    issues?: DiagIssue[];
+    freeTrial?: { available: boolean; diagnoseMsg: string };
+    priceListEmpty?: boolean;
+  };
+  const [diagLoading,  setDiagLoading]  = useState(false);
+  const [diagResult,   setDiagResult]   = useState<DiagResult | null>(null);
+  const [diagEmail,    setDiagEmail]    = useState("");
+  const [diagPassword, setDiagPassword] = useState("");
+  const [diagToken,    setDiagToken]    = useState("");
+
   useEffect(() => { regLogEnd.current?.scrollIntoView({ behavior: "smooth" }); }, [regLogs]);
   useEffect(() => { loginLogEnd.current?.scrollIntoView({ behavior: "smooth" }); }, [loginLogs]);
   useEffect(() => () => { clearInterval(regPollRef.current!); clearInterval(loginPollRef.current!); }, []);
@@ -95,6 +112,25 @@ export default function NovproxyPanel() {
       if (first.token)  setCdkToken(first.token);
     }
   }, [loginAccounts]);
+
+  const runDiagnose = async () => {
+    const email    = diagEmail    || parsedAccounts[0]?.[0] || "";
+    const password = diagPassword || parsedAccounts[0]?.[1] || "";
+    const token    = diagToken    || loginAccounts[0]?.token || "";
+    if (!email) return;
+    setDiagLoading(true); setDiagResult(null);
+    try {
+      const d = await (await fetch("/api/tools/novproxy/diagnose", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password, token }),
+      })).json() as DiagResult;
+      setDiagResult(d);
+      if (!diagEmail) setDiagEmail(email);
+    } catch (e) {
+      setDiagResult({ success: false, email: diagEmail, error: String(e) });
+    }
+    setDiagLoading(false);
+  };
 
   const stopRegPoll   = () => { if (regPollRef.current)   { clearInterval(regPollRef.current);   regPollRef.current   = null; } };
   const stopLoginPoll = () => { if (loginPollRef.current) { clearInterval(loginPollRef.current); loginPollRef.current = null; } };
@@ -488,7 +524,102 @@ export default function NovproxyPanel() {
         </div>
       )}
 
-      {/* ── Step 4: CDK 兑换 ─────────────────────────────────── */}
+            {/* -- Step 5: Diagnosis ----------------------------------------------- */}
+      {step === 5 && (
+        <div className="space-y-4">
+          <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-gray-300">Account Health Diagnosis</h2>
+              <span className="text-[10px] bg-violet-500/20 text-violet-400 border border-violet-500/30 px-2 py-0.5 rounded-full">Free Trial Root Cause</span>
+            </div>
+            <p className="text-[10px] text-gray-600">Diagnose why the novproxy free 500MB trial is unavailable. Checks secure_email / flow_open / alltraffic / priceList in one click.</p>
+            <div className="space-y-2">
+              <input type="text" value={diagEmail} onChange={e => setDiagEmail(e.target.value)}
+                placeholder={parsedAccounts[0]?.[0] || "email@outlook.com"}
+                className="w-full bg-[#0d1117] border border-[#21262d] rounded-lg px-3 py-1.5 text-xs font-mono text-gray-300 focus:outline-none focus:border-violet-500/50" />
+              <div className="flex gap-2">
+                <input type="password" value={diagPassword} onChange={e => setDiagPassword(e.target.value)}
+                  placeholder={parsedAccounts[0]?.[1] ? "(auto-use config password)" : "password"}
+                  className="flex-1 bg-[#0d1117] border border-[#21262d] rounded-lg px-3 py-1.5 text-xs font-mono text-gray-300 focus:outline-none focus:border-violet-500/50" />
+                {loginAccounts[0]?.token && !diagToken && (
+                  <button onClick={() => { setDiagToken(loginAccounts[0].token!); setDiagEmail(loginAccounts[0].email); }}
+                    className="text-[10px] px-2 py-1 bg-indigo-500/20 border border-indigo-500/30 rounded text-indigo-400 hover:bg-indigo-500/30 shrink-0">
+                    Use Login Token
+                  </button>
+                )}
+              </div>
+            </div>
+            <button onClick={runDiagnose} disabled={diagLoading || (!diagEmail && parsedAccounts.length === 0)}
+              className="w-full py-2.5 rounded-lg text-xs font-semibold bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-all">
+              {diagLoading ? "Diagnosing..." : "Run Deep Diagnosis"}
+            </button>
+          </div>
+
+          {diagResult && (
+            <>
+              <div className={`rounded-xl border p-4 space-y-2 ${diagResult.freeTrial?.available ? "bg-emerald-500/10 border-emerald-500/30" : "bg-red-500/10 border-red-500/30"}`}>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold px-2 py-0.5 rounded">{diagResult.freeTrial?.available ? "OK" : "FAIL"}</span>
+                  <h3 className={`text-sm font-bold ${diagResult.freeTrial?.available ? "text-emerald-300" : "text-red-300"}`}>
+                    {diagResult.freeTrial?.available ? "Proxy is usable" : "Free 500MB trial NOT available"}
+                  </h3>
+                </div>
+                <p className={`text-[10px] leading-relaxed whitespace-pre-line font-mono ${diagResult.freeTrial?.available ? "text-emerald-400" : "text-red-300"}`}>
+                  {diagResult.error || diagResult.freeTrial?.diagnoseMsg}
+                </p>
+              </div>
+
+              {(diagResult.issues?.length ?? 0) > 0 && (
+                <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4 space-y-2">
+                  <h3 className="text-sm font-semibold text-gray-300">{diagResult.issues!.length} Issues Found</h3>
+                  <div className="space-y-2">
+                    {diagResult.issues!.map((issue, i) => (
+                      <div key={i} className={`rounded-lg border p-3 space-y-1.5 ${issue.level === "error" ? "bg-red-500/10 border-red-500/20" : "bg-yellow-500/10 border-yellow-500/20"}`}>
+                        <div className="flex items-center gap-1.5">
+                          <span className={`text-[10px] font-bold px-1 rounded ${issue.level === "error" ? "text-red-400" : "text-yellow-400"}`}>{issue.level.toUpperCase()}</span>
+                          <span className={`text-[11px] font-semibold ${issue.level === "error" ? "text-red-300" : "text-yellow-300"}`}>{issue.title}</span>
+                        </div>
+                        <p className="text-[10px] text-gray-400 leading-relaxed">{issue.desc}</p>
+                        <div className="flex items-start gap-1.5">
+                          <span className="text-[9px] text-emerald-400 shrink-0 mt-0.5 font-bold">FIX:</span>
+                          <span className="text-[10px] text-emerald-400 leading-relaxed">{issue.fix}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4 space-y-2">
+                <h3 className="text-xs font-semibold text-gray-400">Raw Account Data</h3>
+                <div className="space-y-1 font-mono">
+                  {([
+                    ["email",        diagResult.email],
+                    ["secure_email", diagResult.member?.secure_email || "(empty - not verified)"],
+                    ["flow_open",    String(diagResult.trafficInfo?.flow_open ?? "--")],
+                    ["alltraffic",   String(diagResult.trafficInfo?.alltraffic ?? "--") + " MB"],
+                    ["flow_num",     String(diagResult.trafficInfo?.flow_num ?? "--")],
+                    ["priceList",    diagResult.priceListEmpty ? "[] empty (no free tier)" : "has plans"],
+                  ] as [string, string][]).map(([k, v]) => (
+                    <div key={k} className="flex items-center gap-2 bg-[#0d1117] rounded px-2 py-1">
+                      <span className="text-[10px] text-gray-500 w-28 shrink-0">{k}</span>
+                      <span className={`text-[10px] flex-1 ${
+                        (v.includes("empty") || v === "off" || v === "0 MB")
+                          ? "text-red-400"
+                          : (v === "on" || (k === "alltraffic" && parseFloat(v) > 0))
+                            ? "text-emerald-400"
+                            : "text-gray-300"
+                      }`}>{v}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+{/* ── Step 4: CDK 兑换 ─────────────────────────────────── */}
       {step === 4 && (
         <div className="space-y-4">
           {/* CDK 输入区 */}
