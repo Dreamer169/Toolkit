@@ -3584,6 +3584,70 @@ router.delete("/tools/outlook/message/:accountId/:messageId", async (req, res) =
 });
 
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Send email via Graph API /me/sendMail
+// POST /tools/outlook/send-message  { accountId, to, subject, body?, bodyType? }
+// ─────────────────────────────────────────────────────────────────────────────
+router.post("/tools/outlook/send-message", async (req, res) => {
+  const { accountId, to, subject, body = "", bodyType = "Text" } = req.body as {
+    accountId: number; to: string | string[]; subject: string;
+    body?: string; bodyType?: "Text" | "HTML";
+  };
+  if (!accountId || !to || !subject) {
+    res.status(400).json({ success: false, error: "accountId / to / subject 必填" });
+    return;
+  }
+  const recipients = (Array.isArray(to) ? to : [to])
+    .map((addr: string) => ({ emailAddress: { address: addr.trim() } }));
+  try {
+    const { query, execute } = await import("../db.js");
+    const rows = await query<{ token: string | null; refresh_token: string | null }>(
+      "SELECT token, refresh_token FROM accounts WHERE id=$1 AND platform='outlook'", [accountId]
+    );
+    if (!rows[0]) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
+    let token = rows[0].token ?? "";
+    if (rows[0].refresh_token) {
+      const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token", client_id: OAUTH_CLIENT_ID,
+          refresh_token: rows[0].refresh_token,
+          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access",
+        }).toString(),
+      });
+      const td = await r.json() as { access_token?: string; refresh_token?: string };
+      if (td.access_token) {
+        token = td.access_token;
+        await execute("UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
+          [token, td.refresh_token ?? rows[0].refresh_token, accountId]);
+      }
+    }
+    if (!token) { res.status(400).json({ success: false, error: "无可用 token，请先授权" }); return; }
+    const gr = await microsoftFetch("https://graph.microsoft.com/v1.0/me/sendMail", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: {
+          subject,
+          body: { contentType: bodyType === "HTML" ? "HTML" : "Text", content: body },
+          toRecipients: recipients,
+        },
+        saveToSentItems: true,
+      }),
+    });
+    if (gr.status === 202 || gr.status === 200 || gr.status === 204) {
+      res.json({ success: true, to: recipients.map((r: { emailAddress: { address: string } }) => r.emailAddress.address) });
+      return;
+    }
+    const err = await gr.json() as { error?: { message?: string; code?: string } };
+    res.status(gr.status).json({ success: false, error: err?.error?.message ?? "Graph sendMail 失败", code: err?.error?.code });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
 // ── 一键点击邮件中的验证链接（Graph API 拉取正文 + patchright 访问）──────────
 router.post("/tools/outlook/click-verify-link", async (req, res) => {
   const { accountId, messageId, verifyUrl } = req.body as {

@@ -136,6 +136,13 @@ export default function MailCenter() {
   const [autoCompleteMsg, setAutoCompleteMsg] = useState("");
   const [reauthManualBusy, setReauthManualBusy] = useState(false);
   const [reauthManualMsg, setReauthManualMsg] = useState("");
+  // compose state
+  const [showCompose, setShowCompose] = useState(false);
+  const [composeTo, setComposeTo] = useState("");
+  const [composeSubject, setComposeSubject] = useState("");
+  const [composeBody, setComposeBody] = useState("");
+  const [sendBusy, setSendBusy] = useState(false);
+  const [sendResult, setSendResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const pollRef                           = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoRefreshRef                    = useRef<ReturnType<typeof setInterval> | null>(null);
   const cdTimerRef                        = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -543,6 +550,30 @@ export default function MailCenter() {
       await loadAccounts();
     } else {
       setAutoCompleteMsg("失败：" + (d.error ?? "未知错误"));
+    }
+  };
+
+  const sendMessage = async () => {
+    if (!selAccount || !composeTo.trim() || !composeSubject.trim()) return;
+    setSendBusy(true); setSendResult(null);
+    const d = await fetch(`${API}/tools/outlook/send-message`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        accountId: selAccount.id,
+        to: composeTo.trim(),
+        subject: composeSubject.trim(),
+        body: composeBody,
+        bodyType: "Text",
+      }),
+    }).then(r => r.json()).catch(() => ({ success: false, error: "网络错误" }));
+    setSendBusy(false);
+    if (d.success) {
+      setSendResult({ ok: true, msg: "✅ 发送成功！" });
+      setComposeTo(""); setComposeSubject(""); setComposeBody("");
+      setTimeout(() => { setShowCompose(false); setSendResult(null); }, 2500);
+    } else {
+      setSendResult({ ok: false, msg: "❌ " + (d.error ?? "发送失败") });
     }
   };
 
@@ -955,6 +986,18 @@ export default function MailCenter() {
             className="px-2 py-1 bg-[#21262d] hover:bg-[#30363d] border border-[#30363d] rounded text-gray-400 text-xs disabled:opacity-40 transition-colors">
             {busy ? "…" : "搜"}
           </button>
+          <button
+            onClick={() => { setShowCompose(s => !s); setSendResult(null); }}
+            disabled={!selAccount}
+            className={`px-2 py-1 border rounded text-xs transition-colors disabled:opacity-40 ${
+              showCompose
+                ? "bg-emerald-600/30 border-emerald-500/50 text-emerald-300 hover:bg-emerald-600/50"
+                : "bg-[#21262d] hover:bg-[#30363d] border-[#30363d] text-gray-400 hover:text-white"
+            }`}
+            title={showCompose ? "关闭写信" : "写新邮件"}
+          >
+            {showCompose ? "✕" : "✉"}
+          </button>
         </div>
         {/* ── 批量按主题删除栏 ── */}
         {selAccount && (
@@ -1161,12 +1204,71 @@ export default function MailCenter() {
 
       {/* ─── 右列：邮件详情 ─────────────────────────────────────────── */}
       <main className="flex-1 flex flex-col bg-[#0d1117] overflow-hidden">
-        {!selMsg && (
-          <div className="flex-1 flex items-center justify-center">
-            <p className="text-xs text-gray-600">← 选择邮件查看内容</p>
+        {showCompose && selAccount ? (
+          <div className="flex-1 flex flex-col p-5 gap-3 overflow-y-auto">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-white">✉ 新建邮件</h2>
+              <span className="text-[11px] text-gray-500">从 {selAccount.email}</span>
+            </div>
+            <div className="space-y-2">
+              <div>
+                <label className="text-[11px] text-gray-500 block mb-1">收件人</label>
+                <input
+                  value={composeTo}
+                  onChange={e => setComposeTo(e.target.value)}
+                  placeholder="example@outlook.com（多个用逗号分隔）"
+                  className="w-full bg-[#161b22] border border-[#30363d] focus:border-blue-500 rounded px-3 py-2 text-xs text-gray-200 placeholder-gray-600 outline-none"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] text-gray-500 block mb-1">主题</label>
+                <input
+                  value={composeSubject}
+                  onChange={e => setComposeSubject(e.target.value)}
+                  placeholder="邮件主题"
+                  className="w-full bg-[#161b22] border border-[#30363d] focus:border-blue-500 rounded px-3 py-2 text-xs text-gray-200 placeholder-gray-600 outline-none"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] text-gray-500 block mb-1">正文</label>
+                <textarea
+                  value={composeBody}
+                  onChange={e => setComposeBody(e.target.value)}
+                  placeholder="输入邮件内容…"
+                  rows={10}
+                  className="w-full bg-[#161b22] border border-[#30363d] focus:border-blue-500 rounded px-3 py-2 text-xs text-gray-200 placeholder-gray-600 outline-none resize-none"
+                />
+              </div>
+            </div>
+            {sendResult && (
+              <p className={`text-[11px] ${sendResult.ok ? "text-emerald-400" : "text-red-400"}`}>
+                {sendResult.msg}
+              </p>
+            )}
+            <div className="flex gap-2">
+              <button
+                onClick={sendMessage}
+                disabled={sendBusy || !composeTo.trim() || !composeSubject.trim()}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-xs text-white font-semibold transition-colors"
+              >
+                {sendBusy ? "发送中…" : "发送"}
+              </button>
+              <button
+                onClick={() => { setShowCompose(false); setSendResult(null); }}
+                className="px-3 py-2 bg-[#21262d] hover:bg-[#30363d] rounded text-xs text-gray-400 transition-colors"
+              >
+                取消
+              </button>
+            </div>
           </div>
-        )}
-        {selMsg && (
+        ) : !selMsg ? (
+          <div className="flex-1 flex items-center justify-center">
+            <p className="text-xs text-gray-600">
+              {selAccount ? "← 选择邮件查看 · 或点击 ✉ 写邮件" : "← 选择左侧账号"}
+            </p>
+          </div>
+        ) : null}
+        {!showCompose && selMsg && (
           <>
             <div className="px-5 py-4 border-b border-[#21262d] space-y-1.5 shrink-0">
               <div className="flex items-start justify-between gap-3">
