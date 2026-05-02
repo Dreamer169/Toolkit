@@ -748,6 +748,7 @@ router.post("/tools/outlook/messages", async (req, res) => {
       resolvedAccountId = account.id;
       accountEmail = account.email;
       accessToken = account.token || "";
+      const acctProxy = pickProxyForAccount(resolvedAccountId);
       if (account.refresh_token) {
         const tr = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
           method: "POST",
@@ -758,7 +759,7 @@ router.post("/tools/outlook/messages", async (req, res) => {
             refresh_token: account.refresh_token,
             scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
           }).toString(),
-        });
+        }, acctProxy);
         const td = await tr.json() as { access_token?: string; refresh_token?: string; error?: string; error_description?: string };
         if (tr.ok && td.access_token) {
           accessToken = td.access_token;
@@ -778,9 +779,10 @@ router.post("/tools/outlook/messages", async (req, res) => {
     }
     let url = `https://graph.microsoft.com/v1.0/me/mailFolders/${mailFolder}/messages?$top=${limit}&$select=id,subject,from,receivedDateTime,bodyPreview,isRead&$orderby=receivedDateTime desc`;
     if (search) url += `&$search="${encodeURIComponent(search)}"`;
-    const r = await fetch(url, {
+    const _msgsProxy = typeof acctProxy !== "undefined" ? acctProxy : undefined;
+    const r = await microsoftFetch(url, {
       headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-    });
+    }, _msgsProxy);
     const data = await r.json() as {
       value?: Array<{
         id: string; subject: string;
@@ -2817,6 +2819,7 @@ router.post("/tools/outlook/auto-auth", async (req, res) => {
     if (!acc) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
 
     // 已有 refresh_token → 直接刷新 access_token，无需用户操作
+    const acctProxy = pickProxyForAccount(accountId);
     if (acc.refresh_token) {
       const { execute } = await import("../db.js");
       const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
@@ -2828,7 +2831,7 @@ router.post("/tools/outlook/auto-auth", async (req, res) => {
           refresh_token: acc.refresh_token,
           scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
         }).toString(),
-      });
+      }, acctProxy);
       const td = await r.json() as { access_token?: string; refresh_token?: string; error_description?: string };
       if (td.access_token) {
         await execute("UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
@@ -2868,6 +2871,7 @@ router.post("/tools/outlook/auto-auth-all", async (req, res) => {
     const results: Array<{ id: number; email: string; ok: boolean; needsDeviceFlow?: boolean; error?: string }> = [];
     for (const acc of rows) {
       // 优先用 refresh_token 刷新
+      const acctProxy = pickProxyForAccount(acc.id);
       if (acc.refresh_token) {
         try {
           const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
@@ -2879,7 +2883,7 @@ router.post("/tools/outlook/auto-auth-all", async (req, res) => {
               refresh_token: acc.refresh_token,
               scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
             }).toString(),
-          });
+          }, acctProxy);
           const td = await r.json() as { access_token?: string; refresh_token?: string; error_description?: string };
           if (td.access_token) {
             await execute("UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
@@ -2950,7 +2954,7 @@ function mapGraphMessages(value: GraphMailMessage[] | undefined) {
   }));
 }
 
-async function fetchGraphMessages(accessToken: string, mailFolder: string, limit: number, search: string | undefined, global = false) {
+async function fetchGraphMessages(accessToken: string, mailFolder: string, limit: number, search: string | undefined, global = false, proxy?: string) {
   const select = "id,subject,from,receivedDateTime,bodyPreview,isRead,body,parentFolderId";
   const q = (search ?? "").replace(/["\\]/g, " ").trim();
   let url = global
@@ -2961,7 +2965,7 @@ async function fetchGraphMessages(accessToken: string, mailFolder: string, limit
   } else {
     url += "&$orderby=receivedDateTime desc";
   }
-  const r = await microsoftFetch(url, { headers: { Authorization: `Bearer ${accessToken}`, ConsistencyLevel: "eventual" } });
+  const r = await microsoftFetch(url, { headers: { Authorization: `Bearer ${accessToken}`, ConsistencyLevel: "eventual" } }, proxy);
   const data = await r.json() as { value?: GraphMailMessage[]; error?: { message?: string; code?: string } };
   return { ok: r.ok, status: r.status, error: data.error, messages: r.ok ? mapGraphMessages(data.value) : [] };
 }
@@ -3221,6 +3225,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
     const limit = Math.min(250, Math.max(1, top ?? 50));
 
     let accessToken = acc.token ?? "";
+    const acctProxy = pickProxyForAccount(accountId);
 
     // 有 refresh_token → 先用 /common/ 刷新（不直接信任 DB 里可能过期的 token）
     if (acc.refresh_token) {
@@ -3233,7 +3238,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
           refresh_token: acc.refresh_token,
           scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
         }).toString(),
-      });
+      }, acctProxy);
       const td = await r.json() as { access_token?: string; refresh_token?: string; error_description?: string; error?: string };
       if (td.access_token) {
         accessToken = td.access_token;
@@ -3261,14 +3266,14 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
     if (accessToken) {
       // "全部邮件"：直接走全局 /me/messages，跨所有文件夹（含垃圾邮件、归档等）
       if (isAllFolder) {
-        const allRes = await fetchGraphMessages(accessToken, mailFolder, limit, search, true);
+        const allRes = await fetchGraphMessages(accessToken, mailFolder, limit, search, true, acctProxy);
         if (allRes.ok) {
           if (allRes.messages.length > 0) { try { await addAccountTags(accountId, ["inbox_verified"]); } catch {} }
           res.json({ success: true, messages: allRes.messages, count: allRes.messages.length, email: acc.email, via: "graph_all" });
           return;
         }
       }
-      const primary = await fetchGraphMessages(accessToken, mailFolder, limit, search, false);
+      const primary = await fetchGraphMessages(accessToken, mailFolder, limit, search, false, acctProxy);
       if (primary.ok) {
         if (primary.messages.length > 0 || mailFolder !== "inbox") {
           if (primary.messages.length > 0) { try { await addAccountTags(accountId, ["inbox_verified"]); } catch {} }
@@ -3277,7 +3282,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
         }
         // 收件箱为空时再查整个邮箱。历史邮件可能已被微软规则、自动验证或用户操作移动到归档/垃圾/已删除，
         // 只查 mailFolders/inbox 会误显示为“空邮箱”。
-        const globalResult = await fetchGraphMessages(accessToken, mailFolder, limit, search, true);
+        const globalResult = await fetchGraphMessages(accessToken, mailFolder, limit, search, true, acctProxy);
         if (globalResult.ok && globalResult.messages.length > 0) {
           try { await addAccountTags(accountId, ["inbox_verified"]); } catch {}
           res.json({ success: true, messages: globalResult.messages, count: globalResult.messages.length, email: acc.email, via: "graph_all", folderFallback: true });
@@ -3670,6 +3675,7 @@ router.post("/tools/outlook/click-verify-link", async (req, res) => {
 
     // 刷新 token
     let accessToken = acc.token || "";
+    const acctProxy = pickProxyForAccount(acc.id);
     if (acc.refresh_token) {
       const tr = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
         method: "POST",
@@ -3680,7 +3686,7 @@ router.post("/tools/outlook/click-verify-link", async (req, res) => {
           refresh_token: acc.refresh_token,
           scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read offline_access",
         }).toString(),
-      });
+      }, acctProxy);
       const td = await tr.json() as { access_token?: string; refresh_token?: string };
       if (tr.ok && td.access_token) {
         accessToken = td.access_token;
@@ -3734,6 +3740,7 @@ router.post("/tools/outlook/auto-verify-emails", async (req, res) => {
     for (const acc of rows) {
       try {
         let accessToken = acc.token || "";
+        const acctProxy = pickProxyForAccount(acc.id);
         if (acc.refresh_token) {
           const tr = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
             method: "POST",
@@ -3744,7 +3751,7 @@ router.post("/tools/outlook/auto-verify-emails", async (req, res) => {
               refresh_token: acc.refresh_token,
               scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read offline_access",
             }).toString(),
-          });
+          }, acctProxy);
           const td = await tr.json() as { access_token?: string; refresh_token?: string };
           if (tr.ok && td.access_token) accessToken = td.access_token;
         }
@@ -3752,7 +3759,7 @@ router.post("/tools/outlook/auto-verify-emails", async (req, res) => {
 
         // 搜索匹配主题的未读邮件
         const searchUrl = `https://graph.microsoft.com/v1.0/me/messages?$search="subject:${subjectFilter}"&$select=id,subject,isRead&$top=50`;
-        const gr = await fetch(searchUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
+        const gr = await microsoftFetch(searchUrl, { headers: { Authorization: `Bearer ${accessToken}` } }, acctProxy);
         if (!gr.ok) { results.push({ accountId: acc.id, email: acc.email, status: "skip", error: "Graph API 失败" }); continue; }
         const gd = await gr.json() as { value?: Array<{ id: string; subject: string; isRead: boolean }> };
         const msgs = (gd.value ?? []).filter(m => m.subject.toLowerCase().includes(subjectFilter.toLowerCase()));
@@ -3822,6 +3829,7 @@ router.post("/tools/outlook/account/:id/batch-delete-by-subject", async (req, re
     if (!rows[0]) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
 
     let token = rows[0].token ?? "";
+    const acctProxy = pickProxyForAccount(accountId);
     if (rows[0].refresh_token) {
       const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
         method: "POST",
@@ -3831,7 +3839,7 @@ router.post("/tools/outlook/account/:id/batch-delete-by-subject", async (req, re
           refresh_token: rows[0].refresh_token,
           scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite offline_access",
         }).toString(),
-      });
+      }, acctProxy);
       const td = await r.json() as { access_token?: string; refresh_token?: string };
       if (td.access_token) {
         token = td.access_token;
@@ -3844,7 +3852,7 @@ router.post("/tools/outlook/account/:id/batch-delete-by-subject", async (req, re
     // 搜索包含关键词的邮件（搜索所有文件夹）
     const kw = keyword.trim();
     const searchUrl = `https://graph.microsoft.com/v1.0/me/messages?$search="subject:${kw}"&$select=id,subject&$top=50`;
-    const gr = await fetch(searchUrl, { headers: { Authorization: `Bearer ${token}` } });
+    const gr = await microsoftFetch(searchUrl, { headers: { Authorization: `Bearer ${token}` } }, acctProxy);
     if (!gr.ok) {
       const gd = await gr.json() as { error?: { message?: string } };
       res.status(400).json({ success: false, error: gd.error?.message ?? "Graph API 错误" }); return;
@@ -3857,7 +3865,7 @@ router.post("/tools/outlook/account/:id/batch-delete-by-subject", async (req, re
       const dr = await microsoftFetch(`https://graph.microsoft.com/v1.0/me/messages/${msg.id}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
-      });
+      }, acctProxy);
       if (dr.ok || dr.status === 204) deleted++;
     }
     res.json({ success: true, deleted, total: msgs.length });
