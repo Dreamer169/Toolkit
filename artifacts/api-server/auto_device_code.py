@@ -253,14 +253,14 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                 pass
 
             if not _real_done:
-                for _retry in range(5):
+                for _retry in range(3):
                     await _skip_if_security_page(page, email)
                     cur_url = page.url or ""
                     print(f"[{email}] consent r={_retry} url={cur_url[:100]}", flush=True)
 
                     _on_device = any(x in cur_url.lower() for x in [
                         "remoteconnect", "deviceauth", "microsoft.com/link", "microsoft.com/devicelogin",
-                        "login.microsoftonline.com",
+                        "login.microsoftonline.com", "account.live.com/abuse",
                     ]) or cur_url == ""
 
                     _clicked = False
@@ -314,7 +314,7 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                     else:
                         print(f"[{email}] not device url skip consent", flush=True)
 
-                    _real_done = await _poll_real_done(page, email, max_wait=40)
+                    _real_done = await _poll_real_done(page, email, max_wait=20)
                     if _real_done:
                         break
 
@@ -352,10 +352,46 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                 content = await page.content()
             except Exception:
                 content = ""
-            if ("account.live.com/Abuse" in final_url or "/Abuse" in final_url
-                    or "account has been suspended" in content.lower()
-                    or "account is suspended" in content.lower()
-                    or "account is temporarily locked" in content.lower()):
+            _on_abuse_page = ("account.live.com/Abuse" in final_url or "/Abuse" in final_url)
+            _body_low = content.lower()
+            _real_suspended_body = (
+                "account has been suspended" in _body_low
+                or "account is suspended" in _body_low
+                or "account is temporarily locked" in _body_low
+                or "account has been locked" in _body_low
+                or "your account has been blocked" in _body_low
+            )
+            # v8.90 Bug1 fix: Abuse page + "Press and hold" is a CAPTCHA challenge,
+            # NOT a real suspension. Attempt press-hold; if fails mark error (retryable).
+            if _on_abuse_page and not _real_suspended_body:
+                _captcha_handled = False
+                try:
+                    _hold_btn = await page.query_selector(
+                        "#hold-button, .px-captcha-button, [id*=hold], button[class*=captcha]"
+                    )
+                    if _hold_btn and await _hold_btn.is_visible():
+                        print(f"[{email}] abuse_captcha: attempting press-hold", flush=True)
+                        _box = await _hold_btn.bounding_box()
+                        if _box:
+                            _cx = _box["x"] + _box["width"] / 2
+                            _cy = _box["y"] + _box["height"] / 2
+                            await page.mouse.move(_cx, _cy)
+                            await page.mouse.down()
+                            await asyncio.sleep(3.5)
+                            await page.mouse.up()
+                            await asyncio.sleep(4)
+                            _after_url = page.url
+                            print(f"[{email}] after press-hold url={_after_url[:100]}", flush=True)
+                            if "/Abuse" not in _after_url and "account.live.com/Abuse" not in _after_url:
+                                _captcha_handled = True
+                                _real_done = await _poll_real_done(page, email, max_wait=20)
+                except Exception as _ce:
+                    print(f"[{email}] abuse_captcha press-hold failed: {_ce}", flush=True)
+                if not _captcha_handled:
+                    result["status"] = "error"
+                    result["msg"] = f"abuse_captcha_required (retryable): {final_url[:100]}"
+                    print(f"[{email}] Abuse page=CAPTCHA not suspension -> error(retryable)", flush=True)
+            elif _real_suspended_body:
                 result["status"] = "suspended"
                 result["msg"] = f"suspended: {final_url[:100]}"
             elif _real_done:
