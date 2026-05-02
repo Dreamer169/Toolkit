@@ -133,8 +133,10 @@ class Handler(BaseHTTPRequestHandler):
                 for m in MODELS
             ]}
             self._send_json(200, data)
-        elif self.path in ("/health", "/api/gateway/health", "/v1/health"):
-            self._send_json(200, {"ok": True, "accounts": len(_clients_cache), "ts": int(time.time())})
+        elif self.path in ("/health", "/api/gateway/health", "/v1/health",
+                             "/api/stream/health", "/nodes", "/stats", "/v1/stats"):
+            self._send_json(200, {"ok": True, "accounts": len(_clients_cache),
+                                  "ts": int(time.time()), "streaming": False, "nodes": []})
         else:
             self._send_json(404, {"error": "not found"})
 
