@@ -225,9 +225,9 @@ export async function initDatabase(): Promise<void> {
                                                         'registered','unverified','exists_no_password','stale')
                                THEN EXCLUDED.status ELSE archives.status END,
           updated_at    = NOW()
-     WHERE archives.token         IS DISTINCT FROM EXCLUDED.token
-        OR archives.refresh_token IS DISTINCT FROM EXCLUDED.refresh_token
-        OR archives.status        IS DISTINCT FROM EXCLUDED.status
+     WHERE NULLIF(archives.token,'')        IS DISTINCT FROM NULLIF(EXCLUDED.token,'')
+        OR NULLIF(archives.refresh_token,'') IS DISTINCT FROM NULLIF(EXCLUDED.refresh_token,'')
+        OR archives.status                   IS DISTINCT FROM EXCLUDED.status
   `);
   if (_bf.rowCount > 0) {
     console.log(`[db.init] v8.82 archives upsert backfill: ${_bf.rowCount} rows synced/created (outlook+replit) from accounts → archives\n`);

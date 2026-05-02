@@ -4655,7 +4655,7 @@ router.post("/tools/novproxy/redeem-cdk", async (req, res) => {
     // ① 去重：查 DB 是否已成功兑换过
     const existing = await query<{ result: string; msg: string }>(
       "SELECT result, msg FROM novproxy_cdks WHERE code = $1 LIMIT 1", [cdk]
-    ).catch(() => [] as { result: string; msg: string }[]);
+    ).catch(() => [] as { result: string; msg: string }[]) ?? [];
     if (existing.length > 0) {
       const prev = existing[0];
       results.push({ code: cdk, result: prev.result, msg: `[已跳过] 本地记录: ${prev.result} — ${prev.msg}`, skipped: true });

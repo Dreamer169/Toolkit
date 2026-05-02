@@ -109,7 +109,11 @@ async function autoOAuth(acc: { id: number; email: string; password: string }): 
       }
     });
     child.on("error", (e) => resolve({ status: "error", msg: e.message }));
-    setTimeout(() => { child.kill(); resolve({ status: "timeout" }); }, 120_000);
+    setTimeout(() => {
+      try { child.kill("SIGTERM"); } catch (_e) {}
+      setTimeout(() => { try { child.kill("SIGKILL"); } catch (_e2) {} }, 3_000);
+      resolve({ status: "timeout" });
+    }, 120_000);
   });
 
   if (autoResult.status !== "done") {
