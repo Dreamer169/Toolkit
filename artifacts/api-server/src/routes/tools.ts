@@ -4840,5 +4840,41 @@ router.post("/tools/novproxy/diagnose", async (req, res) => {
 });
 
 
+
+// ── SMS Center ─────────────────────────────────────────────────────────────
+// GET /api/tools/sms/numbers?country=all|us|gb|ca|de|th|my|ph
+router.get('/tools/sms/numbers', async (req, res) => {
+  const { country = 'all' } = req.query as { country?: string };
+  const SCRIPT = '/root/Toolkit/scripts/sms_center_fetch.py';
+  const result = await new Promise<unknown>((resolve, reject) => {
+    _execFile('python3', [SCRIPT, '--action', 'numbers', '--country', country],
+      { timeout: 30_000, maxBuffer: 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err && !stdout.trim()) { reject(new Error(stderr.slice(0, 300))); return; }
+        try { resolve(JSON.parse(stdout.trim())); }
+        catch { reject(new Error('json_parse: ' + stdout.slice(0, 200))); }
+      });
+  }).catch((e: unknown) => ({ error: String(e) }));
+  res.json(result);
+});
+
+// POST /api/tools/sms/messages  body: { phoneId: number }
+router.post('/tools/sms/messages', async (req, res) => {
+  const { phoneId } = req.body as { phoneId?: number };
+  if (!phoneId) { res.status(400).json({ error: 'phoneId required' }); return; }
+  const SCRIPT = '/root/Toolkit/scripts/sms_center_fetch.py';
+  const result = await new Promise<unknown>((resolve, reject) => {
+    _execFile('python3', [SCRIPT, '--action', 'messages', '--phone-id', String(phoneId)],
+      { timeout: 90_000, maxBuffer: 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err && !stdout.trim()) { reject(new Error(stderr.slice(0, 300))); return; }
+        try { resolve(JSON.parse(stdout.trim())); }
+        catch { reject(new Error('json_parse: ' + stdout.slice(0, 200))); }
+      });
+  }).catch((e: unknown) => ({ error: String(e), messages: [] }));
+  res.json(result);
+});
+
+
 export default router;
 

@@ -117,10 +117,11 @@ import ReplitRegister from "@/pages/ReplitRegister";
 import CaptchaRecognition from "@/pages/CaptchaRecognition";
 import WafBypass from "@/pages/WafBypass";
 import NovproxyPanel from "@/pages/NovproxyPanel";
+import SmsCenter from "@/pages/SmsCenter";
 
 const queryClient = new QueryClient();
 
-type Tab = "home" | "agent" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "machine-reset" | "fingerprint" | "outlook" | "mail-center" | "cursor-register" | "replit-register" | "sub2api" | "team-register" | "openai-pool" | "data-manager" | "full-workflow" | "monitor";
+type Tab = "home" | "agent" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "machine-reset" | "fingerprint" | "outlook" | "mail-center" | "cursor-register" | "replit-register" | "sub2api" | "team-register" | "openai-pool" | "data-manager" | "full-workflow" | "monitor" | "sms-center";
 
 const tabs: { id: Tab; label: string; icon: string; badge?: string }[] = [
   { id: "home",             label: "工具导航",        icon: "🗂️" },
@@ -138,6 +139,7 @@ const tabs: { id: Tab; label: string; icon: string; badge?: string }[] = [
   { id: "captcha",          label: "验证码识别",        icon: "🔢", badge: "CNN" },
   { id: "waf-bypass",      label: "WAF 绕过",          icon: "🛡️", badge: "pydoll" },
   { id: "novproxy",         label: "Novproxy 工作流",   icon: "🔐", badge: "pydoll" },
+  { id: "sms-center",      label: "短信接收中心",       icon: "📱", badge: "免费号码" },
   { id: "sub2api",          label: "Token 转发管理",   icon: "🚀", badge: "Sub2Api" },
   { id: "keycheck",         label: "Key 验证",        icon: "🔑", badge: "多平台" },
   { id: "tokencheck",       label: "批量检测",        icon: "⚡", badge: "多平台" },
@@ -235,6 +237,7 @@ function App() {
             {tab === "captcha" && <CaptchaRecognition />}
             {tab === "waf-bypass" && <WafBypass />}
             {tab === "novproxy" && <NovproxyPanel />}
+            {tab === "sms-center" && <SmsCenter />}
             {tab === "sub2api" && <Sub2ApiManager />}
             {tab === "data-manager" && <DataManager />}
             {tab === "full-workflow" && <FullWorkflow />}
