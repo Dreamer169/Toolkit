@@ -756,7 +756,7 @@ router.post("/tools/outlook/messages", async (req, res) => {
             grant_type: "refresh_token",
             client_id: OAUTH_CLIENT_ID,
             refresh_token: account.refresh_token,
-            scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access",
+            scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
           }).toString(),
         });
         const td = await tr.json() as { access_token?: string; refresh_token?: string; error?: string; error_description?: string };
@@ -894,7 +894,7 @@ router.post("/tools/outlook/device-code", async (req, res) => {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         client_id: cid,
-        scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access",
+        scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
       }).toString(),
     });
     const data = await r.json() as {
@@ -996,7 +996,7 @@ function cleanOldBatchSessions() {
 async function createBatchOAuthSessions(rows: { id: number; email: string }[]) {
   cleanOldBatchSessions();
   const CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
-  const SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access";
+  const SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access";
   const sessionList: BatchOAuthSession[] = [];
   await Promise.allSettled(rows.map(async (acc) => {
     try {
@@ -2917,7 +2917,7 @@ router.post("/tools/outlook/auto-auth", async (req, res) => {
           grant_type: "refresh_token",
           client_id: OAUTH_CLIENT_ID,
           refresh_token: acc.refresh_token,
-          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access",
+          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
         }).toString(),
       });
       const td = await r.json() as { access_token?: string; refresh_token?: string; error_description?: string };
@@ -2968,7 +2968,7 @@ router.post("/tools/outlook/auto-auth-all", async (req, res) => {
               grant_type: "refresh_token",
               client_id: OAUTH_CLIENT_ID,
               refresh_token: acc.refresh_token,
-              scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access",
+              scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
             }).toString(),
           });
           const td = await r.json() as { access_token?: string; refresh_token?: string; error_description?: string };
@@ -3322,7 +3322,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
           grant_type: "refresh_token",
           client_id: OAUTH_CLIENT_ID,
           refresh_token: acc.refresh_token,
-          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access",
+          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
         }).toString(),
       });
       const td = await r.json() as { access_token?: string; refresh_token?: string; error_description?: string; error?: string };
