@@ -2064,6 +2064,7 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
         'offline_access',
         'https://graph.microsoft.com/Mail.Read',
         'https://graph.microsoft.com/Mail.ReadWrite',
+        'https://graph.microsoft.com/Mail.Send',
         'https://graph.microsoft.com/User.Read',
     ]
     SCOPE = ' '.join(SCOPES)
