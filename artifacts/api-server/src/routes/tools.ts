@@ -4878,3 +4878,36 @@ router.post('/tools/sms/messages', async (req, res) => {
 
 export default router;
 
+
+// ── SMS Center: smsreceivefree.xyz ─────────────────────────────────────────
+// GET /api/tools/smsrf/numbers   — scrape live number list from homepage feed
+router.get('/tools/smsrf/numbers', async (req, res) => {
+  const SCRIPT = '/root/Toolkit/scripts/smsreceivefree_fetch.py';
+  const result = await new Promise<unknown>((resolve, reject) => {
+    _execFile('python3', [SCRIPT, '--action', 'numbers'],
+      { timeout: 90_000, maxBuffer: 2 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err && !stdout.trim()) { reject(new Error(stderr.slice(0, 400))); return; }
+        try { resolve(JSON.parse(stdout.trim())); }
+        catch { reject(new Error('json_parse: ' + stdout.slice(0, 200))); }
+      });
+  }).catch((e: unknown) => ({ error: String(e) }));
+  res.json(result);
+});
+
+// POST /api/tools/smsrf/messages  body: { phone: string }
+router.post('/tools/smsrf/messages', async (req, res) => {
+  const { phone } = req.body as { phone?: string };
+  if (!phone) { res.status(400).json({ error: 'phone required' }); return; }
+  const SCRIPT = '/root/Toolkit/scripts/smsreceivefree_fetch.py';
+  const result = await new Promise<unknown>((resolve, reject) => {
+    _execFile('python3', [SCRIPT, '--action', 'messages', '--phone', phone],
+      { timeout: 120_000, maxBuffer: 2 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err && !stdout.trim()) { reject(new Error(stderr.slice(0, 400))); return; }
+        try { resolve(JSON.parse(stdout.trim())); }
+        catch { reject(new Error('json_parse: ' + stdout.slice(0, 200))); }
+      });
+  }).catch((e: unknown) => ({ error: String(e), messages: [] }));
+  res.json(result);
+});
