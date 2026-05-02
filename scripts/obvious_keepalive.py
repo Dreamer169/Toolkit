@@ -24,6 +24,7 @@ from pathlib import Path
 
 import requests
 import signal
+import threading
 
 # Optional autoprovision integration
 MIN_POOL = int(os.environ.get("SB_MIN_POOL", "2"))
@@ -48,11 +49,15 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# Graceful SIGTERM shutdown (prevents PM2 SIGINT→KBI propagation)
+# Graceful SIGTERM/SIGINT shutdown; _SHUTDOWN wakes worker threads cleanly
+_SHUTDOWN = threading.Event()
+
 def _sigterm_handler(signum, frame):  # noqa
-    log.info("keepalive shutdown (SIGTERM)")
+    log.info("keepalive shutdown (SIGTERM/SIGINT)")
+    _SHUTDOWN.set()
     sys.exit(0)
 signal.signal(signal.SIGTERM, _sigterm_handler)
+signal.signal(signal.SIGINT,  _sigterm_handler)
 
 _WAKE_MSGS = [
     "print(1+1)", "x = 42; print(x)",
@@ -367,11 +372,9 @@ def _chat_wake(label: str, session: requests.Session) -> str | None:
 
     deadline = time.time() + WAKE_TIMEOUT
     while time.time() < deadline:
-        try:
-            time.sleep(random.uniform(4, 8))
-        except KeyboardInterrupt:
-            log.info("keepalive shutdown during chat-wake")
-            sys.exit(0)
+        if _SHUTDOWN.wait(timeout=random.uniform(4, 8)):
+            log.info("[chat-wake] shutdown signaled, aborting wake")
+            return None
         s2, b2 = _http("GET", _BASE + "/projects/" + pid + "/info",
                        headers=hdr, timeout=10, session=session)
         if s2 == 200:
@@ -460,6 +463,8 @@ def _init_sandbox(sb_id: str) -> dict:
 
 def _tick_one(acc: dict) -> None:
     """Process a single account: credit check, auto-repair, exec-ping + wake."""
+    if _SHUTDOWN.is_set():
+        return
     label = acc.get("label", "?")
 
     if not (ACC_DIR / label / "manifest.json").exists():
@@ -549,10 +554,13 @@ def _tick() -> None:
         futs = {pool.submit(_tick_one, acc): acc.get("label", "?") for acc in accounts}
         for fut in as_completed(futs):
             lbl = futs[fut]
+            if _SHUTDOWN.is_set():
+                break
             try:
                 fut.result()
-            except KeyboardInterrupt:
-                raise
+            except (KeyboardInterrupt, SystemExit):
+                _SHUTDOWN.set()
+                return
             except Exception as e:
                 log.exception("[%s] tick_one error: %s", lbl, e)
 
@@ -562,8 +570,8 @@ def main() -> None:
     while True:
         try:
             _tick()
-        except KeyboardInterrupt:
-            log.info("keepalive shutdown (SIGTERM)")
+        except (KeyboardInterrupt, SystemExit):
+            log.info("keepalive shutdown")
             sys.exit(0)
         except Exception as e:
             log.exception("tick error: %s", e)
@@ -585,10 +593,8 @@ def main() -> None:
 
         interval = random.randint(PING_MIN, PING_MAX)
         log.info("next check in %ds", interval)
-        try:
-            time.sleep(interval)
-        except KeyboardInterrupt:
-            log.info("keepalive shutdown (SIGTERM/KeyboardInterrupt)")
+        if _SHUTDOWN.wait(timeout=interval):
+            log.info("keepalive shutdown (SIGTERM)")
             sys.exit(0)
 
 

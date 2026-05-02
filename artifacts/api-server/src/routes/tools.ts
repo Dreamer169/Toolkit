@@ -4429,23 +4429,48 @@ router.post("/tools/waf/scrape", async (req, res) => {
 // 注册: pydoll + ddddocr (隐蔽绕 CF + 自动解图片验证码)
 // 登录: 纯 HTTP 直调 api.novproxy.com (无浏览器，学自 Outlook 工作流思路)
 
-// POST /tools/novproxy/register — 启动批量注册 job
+// POST /tools/novproxy/register — 启动批量注册 job (支持代理轮换 → IP 一致性)
 router.post("/tools/novproxy/register", async (req, res) => {
-  const { accounts = [], delay = 3 } = req.body as { accounts?: [string, string][]; delay?: number };
+  const {
+    accounts = [],
+    delay    = 3,
+    proxies: proxiesInput = "",   // 逗号/换行分隔代理列表 → 每账号轮换 IP
+    proxy:   proxyInput   = "",
+    autoProxy = false,
+  } = req.body as { accounts?: [string,string][]; delay?: number; proxies?: string; proxy?: string; autoProxy?: boolean };
   if (!accounts.length) { res.status(400).json({ success: false, error: "需要账号列表" }); return; }
+
+  // 解析代理列表
+  let proxyList: string[] = proxiesInput
+    ? proxiesInput.split(/\n|,/).map((p: string) => p.trim()).filter(Boolean)
+    : proxyInput ? [proxyInput] : [];
 
   const jobId = `np_reg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const job   = await jobQueue.create(jobId);
-  job.logs.push({ type: "start", message: `pydoll 注册任务启动: ${accounts.length} 个账号 (ddddocr 自动解验证码)` });
+  const proxyNote = proxyList.length > 0 ? ` [${proxyList.length}个代理轮换]` : autoProxy ? " [自动CF代理]" : "";
+  job.logs.push({ type: "start", message: `pydoll 注册任务启动: ${accounts.length} 个账号 (ddddocr 自动解验证码)${proxyNote}` });
   res.json({ success: true, jobId });
+
+  // 如果 autoProxy，从 CF 代理池拉取
+  if (!proxyList.length && autoProxy) {
+    try {
+      const poolR = await fetch(`http://localhost:${process.env.PORT || "8081"}/api/tools/cf-pool/status`);
+      const pool = await poolR.json() as { pool?: {ip:string;latency:number}[]; available?: number };
+      if (pool.pool && pool.pool.length > 0) {
+        proxyList = pool.pool.slice(0, accounts.length).map((p) => `socks5://127.0.0.1:${p.ip.includes(':') ? p.ip.split(':')[1] : '10808'}`);
+        job.logs.push({ type: "log", message: `☁️ CF代理池: 选取 ${proxyList.length} 个节点` });
+      }
+    } catch (e) {
+      job.logs.push({ type: "warn", message: `⚠ CF代理池获取失败，使用直连: ${String(e).slice(0,80)}` });
+    }
+  }
 
   const { spawn } = await import("child_process");
   const scriptPath = "/root/Toolkit/scripts/novproxy_register_worker.py";
-  const child = spawn("python3", [
-    scriptPath,
-    "--accounts", JSON.stringify(accounts),
-    "--delay",    String(delay),
-  ], { env: { ...process.env as Record<string, string>, PYTHONUNBUFFERED: "1" } });
+  const args = [scriptPath, "--accounts", JSON.stringify(accounts), "--delay", String(delay)];
+  if (proxyList.length > 1) args.push("--proxies", proxyList.join(","));
+  else if (proxyList.length === 1) args.push("--proxy", proxyList[0]);
+  const child = spawn("python3", args, { env: { ...process.env as Record<string, string>, PYTHONUNBUFFERED: "1" } });
   jobQueue.setChild(jobId, child);
 
   child.stdout.on("data", (chunk: Buffer) => {
@@ -4455,8 +4480,9 @@ router.post("/tools/novproxy/register", async (req, res) => {
       if (t.startsWith("[OK]")) {
         const parts = t.slice(5).split("|");
         if (parts.length >= 2) {
-          job.accounts.push({ email: parts[0].trim(), password: parts[1].trim() });
-          job.logs.push({ type: "success", message: `✅ 注册成功: ${parts[0].trim()}` });
+          const exitIp = parts[2]?.trim() || "";
+          job.accounts.push({ email: parts[0].trim(), password: parts[1].trim(), username: exitIp });
+          job.logs.push({ type: "success", message: `✅ 注册成功: ${parts[0].trim()}${exitIp ? " (IP:"+exitIp+")" : ""}` });
         }
       } else if (t.startsWith("[FAIL]")) {
         const parts = t.slice(7).split("|");
@@ -4498,35 +4524,80 @@ router.delete("/tools/novproxy/register/:jobId", (req, res) => {
 });
 
 // POST /tools/novproxy/login — 批量登录 job (纯 HTTP，零浏览器)
-// 隐蔽思路：通过网络拦截发现 API 端点 → 直接调用，完全绕过浏览器检测
+// 隐蔽思路：直调 API + 自动拉取代理凭据 + IP白名单 + 入库保存
 router.post("/tools/novproxy/login", async (req, res) => {
-  const { accounts = [], delay = 0.5 } = req.body as { accounts?: [string, string][]; delay?: number };
+  const { accounts = [], delay = 0.5, proxy = "" } = req.body as { accounts?: [string,string][]; delay?: number; proxy?: string };
   if (!accounts.length) { res.status(400).json({ success: false, error: "需要账号列表" }); return; }
 
   const jobId = `np_login_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const job   = await jobQueue.create(jobId);
-  job.logs.push({ type: "start", message: `HTTP 直调登录: ${accounts.length} 个账号 (无浏览器)` });
+  job.logs.push({ type: "start", message: `HTTP 直调登录: ${accounts.length} 个账号 (无浏览器) → 自动提取代理凭据 + 入库` });
   res.json({ success: true, jobId });
 
   const { spawn } = await import("child_process");
   const scriptPath = "/root/Toolkit/scripts/novproxy_login_worker.py";
-  const child = spawn("python3", [
-    scriptPath,
-    "--accounts", JSON.stringify(accounts),
-    "--delay",    String(delay),
-  ], { env: { ...process.env as Record<string, string>, PYTHONUNBUFFERED: "1" } });
+  const spawnArgs = [scriptPath, "--accounts", JSON.stringify(accounts), "--delay", String(delay)];
+  if (proxy) spawnArgs.push("--proxy", proxy);
+  const child = spawn("python3", spawnArgs, { env: { ...process.env as Record<string, string>, PYTHONUNBUFFERED: "1" } });
   jobQueue.setChild(jobId, child);
 
+  // 临时缓存：jobId → { proxy_user, proxy_pass, proxy_server, proxy_port }
+  const proxyCache = new Map<string, { pu: string; pp: string; sv: string; pt: string }>();
+
   child.stdout.on("data", (chunk: Buffer) => {
+    (async () => {
     for (const line of chunk.toString().split("\n")) {
       const t = line.trim();
       if (!t) continue;
+
       if (t.startsWith("[OK]")) {
-        const parts = t.slice(5).split("|");
-        // parts: email|password|token|access_key
-        if (parts.length >= 3) {
-          job.accounts.push({ email: parts[0].trim(), password: parts[1].trim(), token: parts[2].trim(), username: parts[3]?.trim() || "" });
-          job.logs.push({ type: "success", message: `✅ 登录成功: ${parts[0].trim()} | token=${parts[2].trim().slice(0, 16)}...` });
+        // email|password|token|access_key|proxy_user|proxy_pass|alltraffic
+        const parts = t.slice(5).split("|").map((s: string) => s.trim());
+        const [email, password, token, access_key, proxy_user, proxy_pass, alltraffic] = parts;
+        if (!email || !token) continue;
+
+        const pc = proxyCache.get(email) ?? { pu: proxy_user||"", pp: proxy_pass||"", sv:"us.novproxy.io", pt:"1000" };
+        const proxyConnStr = pc.pu ? `${pc.pu}:${pc.pp}@${pc.sv}:${pc.pt}` : "";
+        const httpProxyStr = pc.pu ? `http://${pc.pu}:${pc.pp}@${pc.sv}:${pc.pt}` : "";
+        const socks5Str    = pc.pu ? `socks5h://${pc.pu}:${pc.pp}@${pc.sv}:${pc.pt}` : "";
+
+        job.accounts.push({
+          email, password, token,
+          username: proxy_user || "",   // 存代理子账号用户名
+        });
+        job.logs.push({ type: "success", message: `✅ ${email} | token=${token.slice(0,16)}... | 代理=${proxyConnStr.slice(0,40)} | 流量=${alltraffic}MB` });
+
+        // ── 入库保存（仿 Outlook 工作流入库模式）─────────────────────
+        try {
+          await execute(
+            `INSERT INTO accounts (platform, email, password, token, username, notes, status, updated_at)
+             VALUES ('novproxy', $1, $2, $3, $4, $5, 'active', NOW())
+             ON CONFLICT (platform, email) DO UPDATE SET
+               token      = EXCLUDED.token,
+               username   = EXCLUDED.username,
+               notes      = EXCLUDED.notes,
+               status     = 'active',
+               updated_at = NOW()`,
+            [email, password, token, proxy_user || "", httpProxyStr],
+          );
+          job.logs.push({ type: "log", message: `💾 入库: ${email} (代理连接串已保存)` });
+        } catch (dbErr) {
+          job.logs.push({ type: "warn", message: `⚠ 入库失败 (${email}): ${String(dbErr).slice(0, 120)}` });
+        }
+
+      } else if (t.startsWith("[PROXY]")) {
+        // proxy_user|proxy_pass|server|port|alltraffic|whitelist_ip
+        const parts = t.slice(8).split("|").map((s: string) => s.trim());
+        const [pu, pp, sv, pt, at, wl] = parts;
+        if (pu) {
+          job.logs.push({ type: "log", message: `🌐 代理凭据: ${pu}:${pp}@${sv}:${pt} | 流量=${at}MB${wl ? " | 白名单:"+wl : ""}` });
+          job.logs.push({ type: "log", message: `📋 HTTP:   http://${pu}:${pp}@${sv}:${pt}` });
+          job.logs.push({ type: "log", message: `📋 SOCKS5: socks5h://${pu}:${pp}@${sv}:${pt}` });
+          if (at !== "0" && parseFloat(at) > 0) {
+            job.logs.push({ type: "success", message: `✨ 可用流量: ${at}MB | 代理已就绪` });
+          } else {
+            job.logs.push({ type: "warn", message: `⚠ 流量余额 0MB — 需充值后方可使用代理` });
+          }
         }
       } else if (t.startsWith("[FAIL]")) {
         const parts = t.slice(7).split("|");
@@ -4538,6 +4609,7 @@ router.post("/tools/novproxy/login", async (req, res) => {
         job.logs.push({ type: "done", message: `🏁 登录完成 ${t.slice(7)}` });
       }
     }
+    })();
   });
   child.stderr.on("data", (chunk: Buffer) => {
     for (const l of chunk.toString().split("\n")) {
@@ -4548,7 +4620,7 @@ router.post("/tools/novproxy/login", async (req, res) => {
   });
   child.on("close", (code: number) => {
     job.status = "done";
-    job.logs.push({ type: "done", message: `进程退出 code=${code}，共成功 ${job.accounts.length} 个` });
+    job.logs.push({ type: "done", message: `进程退出 code=${code}，共成功 ${job.accounts.length} 个入库` });
   });
 });
 
