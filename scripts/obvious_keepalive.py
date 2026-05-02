@@ -39,6 +39,7 @@ PING_MIN               = int(os.environ.get("SB_PING_MIN",               "45"))
 PING_MAX               = int(os.environ.get("SB_PING_MAX",               "75"))
 WAKE_TIMEOUT           = int(os.environ.get("SB_WAKE_TIMEOUT",           "150"))
 CREDIT_RESET_THRESHOLD = float(os.environ.get("SB_CREDIT_RESET_THRESHOLD", "20.0"))
+SESSION_PING_INTERVAL  = int(os.environ.get("SB_SESSION_PING_INTERVAL", "840"))   # 14 min
 _BASE                  = "https://api.app.obvious.ai/prepare"
 
 logging.basicConfig(
@@ -59,6 +60,10 @@ _repairs_running: set[str]   = set()
 # Tracks labels currently running async wake to prevent double-start
 _wake_lock: threading.Lock = threading.Lock()
 _wakes_running: set[str]   = set()
+
+# Tracks when each label last received a session ping (resets 15-min e2b timer)
+_session_ping_lock: threading.Lock  = threading.Lock()
+_session_last_ping: dict[str, float] = {}
 
 def _sigterm_handler(signum, frame):  # noqa
     log.info("keepalive shutdown (SIGTERM/SIGINT)")
@@ -336,6 +341,39 @@ def _shell_keep_warm(label: str, tid: str, session: requests.Session) -> bool:
     return s == 200
 
 
+def _send_session_ping(label: str, session: requests.Session) -> None:
+    """Send a chat msg to reset the obvious.ai 15-min session timer.
+
+    Two independent e2b timers:
+      1. ~2-min activity timer -- reset by POST /execute (exec_ping)
+      2. 15-min session timer  -- reset ONLY by obvious.ai chat API
+    shell/wake does NOT reset the session timer.
+    """
+    mf = _load_manifest(label)
+    tid, pid = mf.get("threadId"), mf.get("projectId")
+    if not tid or not pid:
+        return
+    hdr = _headers(label)
+    msg = random.choice(_WAKE_MSGS)
+    body = {
+        "message":               msg,
+        "messageId":             uuid.uuid4().hex,
+        "projectId":             pid,
+        "visibleRecords":        [],
+        "fileIds":               [],
+        "modeId":                "auto",
+        "isIntentionalModeChange": True,
+        "timezone":              "America/New_York",
+        "deliveryMode":          "queued",
+    }
+    s, _ = _http("POST", _BASE + "/api/v2/agent/chat/" + tid, body, hdr,
+                 timeout=20, session=session)
+    if s == 200:
+        log.info("[%s] session ping sent (15-min timer reset)", label)
+    else:
+        log.warning("[%s] session ping failed %s", label, s)
+
+
 def _e2b_exec_ping(sb_id: str) -> bool:
     """Directly execute a noop in the e2b sandbox to reset its idle timer.
 
@@ -552,6 +590,18 @@ def _tick_one(acc: dict) -> None:
         warm_ok = _shell_keep_warm(label, tid, sess) if tid else False
         log.info("[%s] ok sb=%s exec_ping=%s warm=%s proxy=%s",
                  label, sb[:8], exec_ok, warm_ok, mf.get("proxy", "NONE"))
+        # Periodically reset the 15-min obvious.ai session timer via chat ping
+        _now = time.time()
+        with _session_ping_lock:
+            _due = _now - _session_last_ping.get(label, 0) > SESSION_PING_INTERVAL
+            if _due:
+                _session_last_ping[label] = _now
+        if _due and tid:
+            _lbl2, _sess2 = label, sess
+            threading.Thread(
+                target=lambda l=_lbl2, s=_sess2: _send_session_ping(l, s),
+                daemon=True
+            ).start()
     else:
         # Async wake: do NOT block the ThreadPoolExecutor worker.
         # Synchronous wake calls took 5-30s, starving other sandboxes of
