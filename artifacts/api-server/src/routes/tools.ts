@@ -1,6 +1,6 @@
 import { jobQueue } from "../lib/job-queue.js";
 import { setLiveVerifyEnabled, getLiveVerifyStatus } from "../lib/live-verify-poller.js";
-import { microsoftFetch, getMicrosoftProxyEnv } from "../lib/proxy-fetch.js";
+import { microsoftFetch, getMicrosoftProxyEnv, pickProxyForAccount } from "../lib/proxy-fetch.js";
 import { Router, type IRouter } from "express";
 import { createHash, randomBytes, randomUUID } from "crypto";
 import { execute, query, queryOne } from "../db.js";
@@ -3438,12 +3438,13 @@ router.patch("/tools/outlook/message/:accountId/:messageId/read", async (req, re
     const accountId = parseInt(rawId, 10);
     const { query, execute } = await import("../db.js");
 
-    const rows = await query<{ token: string | null; refresh_token: string | null }>(
-      "SELECT token, refresh_token FROM accounts WHERE id=$1 AND platform='outlook'", [accountId]
+    const rows = await query<{ token: string | null; refresh_token: string | null; exit_ip: string | null }>(
+      "SELECT token, refresh_token, exit_ip FROM accounts WHERE id=$1 AND platform='outlook'", [accountId]
     );
     if (!rows[0]) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
 
     let token = rows[0].token ?? "";
+    const acctProxy = pickProxyForAccount(accountId);
     if (rows[0].refresh_token) {
       const r = await microsoftFetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
         method: "POST",
@@ -3453,7 +3454,7 @@ router.patch("/tools/outlook/message/:accountId/:messageId/read", async (req, re
           refresh_token: rows[0].refresh_token,
           scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite offline_access",
         }).toString(),
-      });
+      }, acctProxy);
       const td = await r.json() as { access_token?: string; refresh_token?: string };
       if (td.access_token) {
         token = td.access_token;
@@ -3467,7 +3468,7 @@ router.patch("/tools/outlook/message/:accountId/:messageId/read", async (req, re
       method: "PATCH",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ isRead }),
-    });
+    }, acctProxy);
     if (!gr.ok) {
       const err = await gr.json() as { error?: { message?: string } };
       res.status(gr.status).json({ success: false, error: err?.error?.message ?? "Graph API 失败" });
@@ -3491,12 +3492,13 @@ router.post("/tools/outlook/message/:accountId/:messageId/move", async (req, res
     if (!destinationId) { res.status(400).json({ success: false, error: "destinationId 必填 (e.g. inbox, deleteditems, junkemail, archive)" }); return; }
     const { query, execute } = await import("../db.js");
 
-    const rows = await query<{ token: string | null; refresh_token: string | null }>(
-      "SELECT token, refresh_token FROM accounts WHERE id=$1 AND platform='outlook'", [accountId]
+    const rows = await query<{ token: string | null; refresh_token: string | null; exit_ip: string | null }>(
+      "SELECT token, refresh_token, exit_ip FROM accounts WHERE id=$1 AND platform='outlook'", [accountId]
     );
     if (!rows[0]) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
 
     let token = rows[0].token ?? "";
+    const acctProxy = pickProxyForAccount(accountId);
     if (rows[0].refresh_token) {
       const r = await microsoftFetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
         method: "POST",
@@ -3506,7 +3508,7 @@ router.post("/tools/outlook/message/:accountId/:messageId/move", async (req, res
           refresh_token: rows[0].refresh_token,
           scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite offline_access",
         }).toString(),
-      });
+      }, acctProxy);
       const td = await r.json() as { access_token?: string; refresh_token?: string };
       if (td.access_token) {
         token = td.access_token;
@@ -3520,7 +3522,7 @@ router.post("/tools/outlook/message/:accountId/:messageId/move", async (req, res
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ destinationId }),
-    });
+    }, acctProxy);
     if (!gr.ok) {
       const err = await gr.json() as { error?: { message?: string } };
       res.status(gr.status).json({ success: false, error: err?.error?.message ?? "Graph API 失败" });
@@ -3543,12 +3545,13 @@ router.delete("/tools/outlook/message/:accountId/:messageId", async (req, res) =
     const accountId = parseInt(rawId, 10);
     const { query, execute } = await import("../db.js");
 
-    const rows = await query<{ token: string | null; refresh_token: string | null }>(
-      "SELECT token, refresh_token FROM accounts WHERE id=$1 AND platform='outlook'", [accountId]
+    const rows = await query<{ token: string | null; refresh_token: string | null; exit_ip: string | null }>(
+      "SELECT token, refresh_token, exit_ip FROM accounts WHERE id=$1 AND platform='outlook'", [accountId]
     );
     if (!rows[0]) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
 
     let token = rows[0].token ?? "";
+    const acctProxy = pickProxyForAccount(accountId);
     if (rows[0].refresh_token) {
       const r = await microsoftFetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
         method: "POST",
@@ -3558,7 +3561,7 @@ router.delete("/tools/outlook/message/:accountId/:messageId", async (req, res) =
           refresh_token: rows[0].refresh_token,
           scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite offline_access",
         }).toString(),
-      });
+      }, acctProxy);
       const td = await r.json() as { access_token?: string; refresh_token?: string };
       if (td.access_token) {
         token = td.access_token;
@@ -3571,7 +3574,7 @@ router.delete("/tools/outlook/message/:accountId/:messageId", async (req, res) =
     const gr = await microsoftFetch(`https://graph.microsoft.com/v1.0/me/messages/${messageId}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token}` },
-    });
+    }, acctProxy);
     if (gr.status === 204) {
       res.json({ success: true, messageId, deleted: true });
     } else {
@@ -3602,11 +3605,12 @@ router.post("/tools/outlook/send-message", async (req, res) => {
     .map((addr: string) => ({ emailAddress: { address: addr.trim() } }));
   try {
     const { query, execute } = await import("../db.js");
-    const rows = await query<{ token: string | null; refresh_token: string | null }>(
-      "SELECT token, refresh_token FROM accounts WHERE id=$1 AND platform='outlook'", [accountId]
+    const rows = await query<{ token: string | null; refresh_token: string | null; exit_ip: string | null }>(
+      "SELECT token, refresh_token, exit_ip FROM accounts WHERE id=$1 AND platform='outlook'", [accountId]
     );
     if (!rows[0]) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
     let token = rows[0].token ?? "";
+    const acctProxy = pickProxyForAccount(accountId);
     if (rows[0].refresh_token) {
       const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
         method: "POST",
@@ -3616,7 +3620,7 @@ router.post("/tools/outlook/send-message", async (req, res) => {
           refresh_token: rows[0].refresh_token,
           scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access",
         }).toString(),
-      });
+      }, acctProxy);
       const td = await r.json() as { access_token?: string; refresh_token?: string };
       if (td.access_token) {
         token = td.access_token;
@@ -3636,7 +3640,7 @@ router.post("/tools/outlook/send-message", async (req, res) => {
         },
         saveToSentItems: true,
       }),
-    });
+    }, acctProxy);
     if (gr.status === 202 || gr.status === 200 || gr.status === 204) {
       res.json({ success: true, to: recipients.map((r: { emailAddress: { address: string } }) => r.emailAddress.address) });
       return;

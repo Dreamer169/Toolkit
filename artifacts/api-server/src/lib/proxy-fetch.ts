@@ -32,6 +32,9 @@ const HTTP_PROXY_ENV_KEYS = [
   "OUTLOOK_HTTP_PROXY",
   "LIVE_VERIFY_HTTP_PROXY",
 ];
+// xray SOCKS5 inbounds 10820..10829 (each routes through a different CF CDN anycast IP
+// but all connect to the same jimhacker CF Worker). These ports also accept HTTP CONNECT
+// so undici's ProxyAgent works correctly against them.
 const XRAY_LOCAL_PORTS = [10820, 10821, 10822, 10823, 10824, 10825, 10826, 10827, 10828, 10829];
 
 type RequestInitWithDispatcher = RequestInit & { dispatcher?: Dispatcher };
@@ -48,9 +51,7 @@ function withScheme(proxy: string): string {
   return /^https?:\/\//i.test(proxy) || /^socks[45]?:\/\//i.test(proxy) ? proxy : `http://${proxy}`;
 }
 
-// nc -z exit code is accurate (0=open, 1=refused/closed). Bash `</dev/tcp/...`
-// is unreliable: the trailing `exec 3>&-` always returns 0 even when connect
-// failed, so every port looked alive (root cause of the v8.35 false-positive).
+// nc -z exit code is accurate (0=open, 1=refused/closed).
 function probeTcpAlive(host: string, port: number, timeoutMs = 1500): boolean {
   try {
     execFileSync("nc", ["-z", "-w", "1", host, String(port)], { timeout: timeoutMs, stdio: "ignore" });
@@ -58,20 +59,45 @@ function probeTcpAlive(host: string, port: number, timeoutMs = 1500): boolean {
   } catch { return false; }
 }
 
+// Cache the full list of live ports (refresh every 5 min) — used by per-account selection.
+let _livePortsCache: { ports: number[]; expires: number } | null = null;
+
+function getLivePorts(): number[] {
+  const now = Date.now();
+  if (_livePortsCache && now < _livePortsCache.expires) return _livePortsCache.ports;
+  const ports = XRAY_LOCAL_PORTS.filter(p => probeTcpAlive("127.0.0.1", p));
+  _livePortsCache = { ports, expires: now + 5 * 60_000 };
+  return ports;
+}
+
+// Shared pool: random live port — used when no accountId context is available.
 let _liveProxyCache: { value: string; expires: number } | null = null;
 
 function pickLiveProxy(): string {
   const now = Date.now();
   if (_liveProxyCache && now < _liveProxyCache.expires) return _liveProxyCache.value;
-  for (const port of XRAY_LOCAL_PORTS) {
-    if (probeTcpAlive("127.0.0.1", port)) {
-      const value = `http://127.0.0.1:${port}`;
-      _liveProxyCache = { value, expires: now + 60_000 };
-      return value;
-    }
+  const ports = getLivePorts();
+  if (ports.length === 0) {
+    _liveProxyCache = { value: "", expires: now + 30_000 };
+    return "";
   }
-  _liveProxyCache = { value: "", expires: now + 30_000 };
-  return "";
+  // Randomize to spread load across the proxy pool.
+  const port = ports[Math.floor(Math.random() * ports.length)];
+  const value = `http://127.0.0.1:${port}`;
+  _liveProxyCache = { value, expires: now + 30_000 };
+  return value;
+}
+
+/**
+ * Pick a CONSISTENT proxy port for a given accountId.
+ * Maps accountId → a stable xray port via modulo, so the same account always
+ * uses the same CF Worker outbound path. Different accounts spread across the pool.
+ */
+export function pickProxyForAccount(accountId: number): string {
+  const ports = getLivePorts();
+  if (ports.length === 0) return "";
+  const port = ports[Math.abs(accountId) % ports.length];
+  return `http://127.0.0.1:${port}`;
 }
 
 function resolveProxyUrl(preferred?: string | null, envKeys: string[] = HTTP_PROXY_ENV_KEYS): string {
