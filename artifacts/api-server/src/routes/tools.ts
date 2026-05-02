@@ -1186,7 +1186,7 @@ router.post("/tools/outlook/batch-oauth/auto-complete", async (req, res) => {
       .filter((s: BatchOAuthSession) => s.status === "pending")
       .map((s: BatchOAuthSession) => {
         const row = rows.find(r => r.id === s.accountId);
-        return { accountId: s.accountId, email: s.email, password: row?.password || "", userCode: s.userCode };
+        return { accountId: s.accountId, email: s.email, password: row?.password || "", userCode: s.userCode, deviceCode: s.deviceCode, dbUrl: process.env.DATABASE_URL || "postgresql://postgres:postgres@localhost/toolkit" };
       })
       .filter((x: { password: string }) => x.password);
 
@@ -1201,30 +1201,9 @@ router.post("/tools/outlook/batch-oauth/auto-complete", async (req, res) => {
     acProc.unref();
     res.json({ success: true, sessionId, accounts: autoPayload.map((x: {accountId:number;email:string;userCode:string}) => ({ accountId: x.accountId, email: x.email, userCode: x.userCode })) });
 
-    acProc.on("close", async (exitCode: number | null) => {
-      try {
-        const { execute: dbAc } = await import("../db.js");
-        const CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
-        const ps = batchOAuthSessions.get(sessionId) || [];
-        for (const s of ps.filter((x: BatchOAuthSession) => x.status === "pending")) {
-          const r2 = await microsoftFetch("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", {
-            method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:device_code", client_id: CLIENT_ID, device_code: s.deviceCode }).toString(),
-          });
-          const td = await r2.json() as { access_token?: string; refresh_token?: string };
-          if (td.access_token) {
-            s.status = "done"; s.accessToken = td.access_token; s.refreshToken = td.refresh_token ?? "";
-            await dbAc(
-              `UPDATE accounts SET token=$1, refresh_token=$2, status='active', updated_at=NOW(),
-                   tags = CASE WHEN COALESCE(tags,'') LIKE '%needs_oauth_manual%'
-                     THEN NULLIF(TRIM(BOTH ',' FROM
-                       REGEXP_REPLACE(COALESCE(tags,''), '(^|,?)needs_oauth_manual(,|$)', ',', 'g')), ',')
-                     ELSE tags END WHERE id=$3`,
-              [td.access_token, td.refresh_token ?? "", s.accountId]);
-          }
-        }
-      } catch {}
-      console.log(`[auto-complete] sessionId=${sessionId} exit=${exitCode}`);
+    // v8.97: close handler is a no-op — Python already exchanged token via CF proxy
+    acProc.on("close", (exitCode) => {
+      console.log("[auto-complete] exit=" + exitCode + " token-by-python-cf-proxy");
     });
   } catch (e: unknown) {
     res.status(500).json({ success: false, error: String(e) });
@@ -1276,7 +1255,7 @@ router.post("/tools/outlook/batch-oauth/reauth-manual", async (req, res) => {
       .filter((s: BatchOAuthSession) => s.status === "pending")
       .map((s: BatchOAuthSession) => {
         const row = rows.find(r => r.id === s.accountId);
-        return { accountId: s.accountId, email: s.email, password: row?.password || "", userCode: s.userCode };
+        return { accountId: s.accountId, email: s.email, password: row?.password || "", userCode: s.userCode, deviceCode: s.deviceCode, dbUrl: process.env.DATABASE_URL || "postgresql://postgres:postgres@localhost/toolkit" };
       })
       .filter((x: { password: string }) => x.password);
 
@@ -1300,35 +1279,9 @@ router.post("/tools/outlook/batch-oauth/reauth-manual", async (req, res) => {
       })),
     });
 
-    // 授权完成后更新 DB + 清除 needs_oauth_manual 标签
-    rmProc.on("close", async (exitCode: number | null) => {
-      try {
-        const { execute: dbRmCb } = await import("../db.js");
-        const CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
-        const ps = batchOAuthSessions.get(sessionId) || [];
-        for (const s of ps.filter((x: BatchOAuthSession) => x.status === "pending")) {
-          const r2 = await microsoftFetch("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", {
-            method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:device_code", client_id: CLIENT_ID, device_code: s.deviceCode }).toString(),
-          });
-          const td = await r2.json() as { access_token?: string; refresh_token?: string };
-          if (td.access_token) {
-            s.status = "done"; s.accessToken = td.access_token; s.refreshToken = td.refresh_token ?? "";
-            await dbRmCb(
-              `UPDATE accounts SET token=$1, refresh_token=$2, status='active', updated_at=NOW(),
-                 tags = NULLIF(TRIM(BOTH ',' FROM
-                   REGEXP_REPLACE(COALESCE(tags,''), '(^|,?)needs_oauth_manual(,|$)', ',', 'g')
-                 ), ',')
-               WHERE id=$3`,
-              [td.access_token, td.refresh_token ?? "", s.accountId]
-            );
-          } else {
-            // 授权仍失败：恢复 needs_oauth 状态
-            await dbRmCb("UPDATE accounts SET status='needs_oauth', updated_at=NOW() WHERE id=$1", [s.accountId]);
-          }
-        }
-      } catch (e) { console.error("[reauth-manual] callback error:", e); }
-      console.log(`[reauth-manual] sessionId=${sessionId} exit=${exitCode}`);
+    // v8.97: close handler no-op - Python exchanged token via CF proxy
+    rmProc.on("close", (exitCode) => {
+      console.log("[reauth-manual] exit=" + exitCode + " token-by-python-cf-proxy");
     });
   } catch (e: unknown) {
     res.status(500).json({ success: false, error: String(e) });
