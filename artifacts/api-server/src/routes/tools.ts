@@ -4382,5 +4382,47 @@ router.post("/tools/captcha/train/start", async (req, res) => {
   } catch (e) { res.status(502).json({ error: String(e) }); }
 });
 
+
+// ═══ pydoll WAF bypass 模块 (port 8766) ══════════════════════════════════════
+const PYDOLL_API = `http://localhost:${process.env.PYDOLL_PORT || "8766"}`;
+
+// GET /tools/waf/healthz — 服务健康
+router.get("/tools/waf/healthz", async (_req, res) => {
+  try {
+    const r = await fetch(`${PYDOLL_API}/healthz`, { signal: AbortSignal.timeout(5_000) });
+    res.json(await r.json());
+  } catch (e) { res.status(502).json({ ok: false, error: String(e) }); }
+});
+
+// POST /tools/waf/bypass — CF WAF 绕过
+// Body: { url, headless?, screenshot?, timeout? }
+router.post("/tools/waf/bypass", async (req, res) => {
+  try {
+    const r = await fetch(`${PYDOLL_API}/bypass`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req.body),
+      signal: AbortSignal.timeout(90_000),
+    });
+    const data = await r.json();
+    res.status(r.ok ? 200 : 500).json(data);
+  } catch (e) { res.status(502).json({ success: false, error: String(e) }); }
+});
+
+// POST /tools/waf/scrape — 隐蔽爬取 + 数据提取
+// Body: { url, selectors, headless? }
+router.post("/tools/waf/scrape", async (req, res) => {
+  try {
+    const r = await fetch(`${PYDOLL_API}/scrape`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req.body),
+      signal: AbortSignal.timeout(90_000),
+    });
+    const data = await r.json();
+    res.status(r.ok ? 200 : 500).json(data);
+  } catch (e) { res.status(502).json({ success: false, error: String(e) }); }
+});
+
 export default router;
 

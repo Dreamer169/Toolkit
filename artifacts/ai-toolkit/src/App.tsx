@@ -115,6 +115,7 @@ import MailCenter from "@/pages/MailCenter";
 import AIAssistant from "@/pages/AIAssistant";
 import ReplitRegister from "@/pages/ReplitRegister";
 import CaptchaRecognition from "@/pages/CaptchaRecognition";
+import WafBypass from "@/pages/WafBypass";
 
 const queryClient = new QueryClient();
 
@@ -134,6 +135,7 @@ const tabs: { id: Tab; label: string; icon: string; badge?: string }[] = [
   { id: "cursor-register",  label: "Cursor 自动注册",  icon: "🖱️", badge: "自动化" },
   { id: "replit-register",  label: "Reseek 自动注册", icon: "🤖", badge: "新增" },
   { id: "captcha",          label: "验证码识别",        icon: "🔢", badge: "CNN" },
+  { id: "waf-bypass",      label: "WAF 绕过",          icon: "🛡️", badge: "pydoll" },
   { id: "sub2api",          label: "Token 转发管理",   icon: "🚀", badge: "Sub2Api" },
   { id: "keycheck",         label: "Key 验证",        icon: "🔑", badge: "多平台" },
   { id: "tokencheck",       label: "批量检测",        icon: "⚡", badge: "多平台" },
@@ -229,6 +231,7 @@ function App() {
             {tab === "cursor-register" && <CursorRegister />}
             {tab === "replit-register" && <ReplitRegister />}
             {tab === "captcha" && <CaptchaRecognition />}
+            {tab === "waf-bypass" && <WafBypass />}
             {tab === "sub2api" && <Sub2ApiManager />}
             {tab === "data-manager" && <DataManager />}
             {tab === "full-workflow" && <FullWorkflow />}
