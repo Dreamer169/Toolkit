@@ -2472,12 +2472,13 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
                             _vbtn.click()
                         _time.sleep(3)
                         _vbody = _vpage.inner_text("body")
-                        if any(x in _vbody for x in [
-                            "We couldnt find a Microsoft account,
-                            找不到此 Microsoft 帐户,
-                            couldnt find",
-                            "no account found",
-                        ]):
+                        _not_found = (
+                            "We couldn\x27t find a Microsoft account" in _vbody
+                            or "couldn\x27t find" in _vbody
+                            or "no account found" in _vbody
+                            or "找不到此 Microsoft" in _vbody
+                        )
+                        if _not_found:
                             print(f"[register] ❌ 登录验证: 账号 {actual_email}@outlook.com 在微软系统中不存在，撤销成功标记", flush=True)
                             result["success"] = False
                             result["error"] = "account_not_propagated_login_verify_failed"
