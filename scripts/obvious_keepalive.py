@@ -23,6 +23,7 @@ import uuid
 from pathlib import Path
 
 import requests
+import signal
 
 # Optional autoprovision integration
 MIN_POOL = int(os.environ.get("SB_MIN_POOL", "2"))
@@ -46,6 +47,12 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 log = logging.getLogger(__name__)
+
+# Graceful SIGTERM shutdown (prevents PM2 SIGINT→KBI propagation)
+def _sigterm_handler(signum, frame):  # noqa
+    log.info("keepalive shutdown (SIGTERM)")
+    sys.exit(0)
+signal.signal(signal.SIGTERM, _sigterm_handler)
 
 _WAKE_MSGS = [
     "print(1+1)", "x = 42; print(x)",

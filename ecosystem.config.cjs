@@ -328,6 +328,29 @@ module.exports = {
         "SB_CREDIT_RESET_THRESHOLD": "20.0",
         "PYTHONUNBUFFERED": "1"
       },
+      "kill_signal": "SIGTERM",
+      "kill_timeout": 10000,
+      "restart_delay": 10000,
+      "max_restarts": 999,
+      "watch": false,
+      "autorestart": true
+    },
+    {
+      "name": "probe",
+      "script": "/root/Toolkit/scripts/obvious_keepalive.py",
+      "interpreter": "python3",
+      "cwd": "/root/Toolkit/scripts",
+      "env": {
+        "SB_ACC_DIR": "/root/obvious-accounts",
+        "SB_MIN_POOL": "10",
+        "SB_PING_MIN": "90",
+        "SB_PING_MAX": "180",
+        "SB_WAKE_TIMEOUT": "150",
+        "SB_CREDIT_RESET_THRESHOLD": "20.0",
+        "PYTHONUNBUFFERED": "1"
+      },
+      "kill_signal": "SIGTERM",
+      "kill_timeout": 10000,
       "restart_delay": 10000,
       "max_restarts": 999,
       "watch": false,
