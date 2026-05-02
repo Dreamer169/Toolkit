@@ -1216,6 +1216,28 @@ router.post("/tools/outlook/batch-oauth/auto-complete", async (req, res) => {
   }
 });
 
+// GET /tools/outlook/batch-oauth/log?file=<path>&offset=<n>
+// 增量读取 auto-complete / reauth-manual 日志文件
+router.get("/tools/outlook/batch-oauth/log", async (req, res) => {
+  const { file, offset: offsetStr } = req.query as { file?: string; offset?: string };
+  if (!file || !file.startsWith("/tmp/dc_")) {
+    res.status(400).json({ success: false, error: "invalid file path" });
+    return;
+  }
+  const offset = parseInt(offsetStr || "0", 10) || 0;
+  try {
+    const { readFileSync, statSync } = await import("fs");
+    let size = 0;
+    try { size = statSync(file).size; } catch { res.json({ success: true, lines: [], nextOffset: 0, done: false }); return; }
+    const buf = readFileSync(file, { encoding: "utf8", flag: "r" });
+    const allLines = buf.split("\n").filter(l => l.trim().length > 0);
+    const newLines = allLines.slice(offset);
+    const done = buf.includes("RESULTS:") || buf.includes("[summary]");
+    res.json({ success: true, lines: newLines, nextOffset: allLines.length, done, size });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
 
 // POST /tools/outlook/batch-oauth/reauth-manual
 // 专门针对 needs_oauth_manual 账号重新发起 OAuth 授权（设备码 + 自动浏览器完成）

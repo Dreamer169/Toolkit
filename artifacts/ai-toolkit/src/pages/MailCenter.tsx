@@ -139,8 +139,18 @@ export default function MailCenter() {
   const [batchOAuthBusy, setBatchOAuthBusy] = useState(false);
   const [autoCompleteBusy, setAutoCompleteBusy] = useState(false);
   const [autoCompleteMsg, setAutoCompleteMsg] = useState("");
+  const [autoCompleteLog, setAutoCompleteLog] = useState<string[]>([]);
+  const [autoCompleteOpen, setAutoCompleteOpen] = useState(false);
+  const [autoCompleteLogFile, setAutoCompleteLogFile] = useState("");
+  const [autoCompleteDone, setAutoCompleteDone] = useState(false);
+  const autoCompleteLogRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [reauthManualBusy, setReauthManualBusy] = useState(false);
   const [reauthManualMsg, setReauthManualMsg] = useState("");
+  const [reauthManualLog, setReauthManualLog] = useState<string[]>([]);
+  const [reauthManualOpen, setReauthManualOpen] = useState(false);
+  const [reauthManualLogFile, setReauthManualLogFile] = useState("");
+  const [reauthManualDone, setReauthManualDone] = useState(false);
+  const reauthManualLogRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // compose state
   const [showCompose, setShowCompose] = useState(false);
   const [composeTo, setComposeTo] = useState("");
@@ -546,13 +556,30 @@ export default function MailCenter() {
     }).then(r => r.json()).catch(() => ({ success: false, error: "网络错误" }));
     setAutoCompleteBusy(false);
     if (d.success) {
-      const list = (d.accounts ?? []) as Array<{ email: string; userCode: string }>;
-      setAutoCompleteMsg(
-        list.length
-          ? `已为 ${list.length} 个账号启动自动授权，用户码：` + list.map(a => `${a.email}→${a.userCode}`).join(" | ")
-          : "无需授权的账号"
-      );
-      await loadAccounts();
+      const list = (d.accounts ?? []) as Array<{ email: string }>;
+      setAutoCompleteMsg(`已为 ${list.length} 个账号启动自动授权`);
+      setAutoCompleteLog([`🚀 启动 ${list.length} 个账号自动授权…`, ...list.map(a => `  • ${a.email}`)]);
+      setAutoCompleteLogFile(d.logFile ?? "");
+      setAutoCompleteLogOffset(0);
+      setAutoCompleteDone(false);
+      setAutoCompleteOpen(true);
+      if (autoCompleteLogRef.current) clearInterval(autoCompleteLogRef.current);
+      let _offset = 0;
+      autoCompleteLogRef.current = setInterval(async () => {
+        if (!d.logFile) return;
+        const r = await fetch(`${API}/tools/outlook/batch-oauth/log?file=${encodeURIComponent(d.logFile)}&offset=${_offset}`)
+          .then(x => x.json()).catch(() => null);
+        if (!r?.success) return;
+        if (r.lines?.length) {
+          setAutoCompleteLog(prev => [...prev, ...r.lines]);
+          _offset = r.nextOffset;
+        }
+        if (r.done) {
+          setAutoCompleteDone(true);
+          if (autoCompleteLogRef.current) { clearInterval(autoCompleteLogRef.current); autoCompleteLogRef.current = null; }
+          await loadAccounts();
+        }
+      }, 3000);
     } else {
       setAutoCompleteMsg("失败：" + (d.error ?? "未知错误"));
     }
@@ -593,13 +620,30 @@ export default function MailCenter() {
     }).then(r => r.json()).catch(() => ({ success: false, error: "网络错误" }));
     setReauthManualBusy(false);
     if (d.success) {
-      const list = (d.accounts ?? []) as Array<{ email: string; userCode: string }>;
-      setReauthManualMsg(
-        list.length
-          ? `已为 ${list.length} 个账号启动重授权，用户码：` + list.map(a => `${a.email}→${a.userCode}`).join(" | ")
-          : "没有 needs_oauth_manual 账号需要处理"
-      );
-      await loadAccounts();
+      const list = (d.accounts ?? []) as Array<{ email: string }>;
+      setReauthManualMsg(`已为 ${list.length} 个账号启动重授权`);
+      setReauthManualLog([`🔄 启动 ${list.length} 个账号重授权…`, ...list.map(a => `  • ${a.email}`)]);
+      setReauthManualLogFile(d.logFile ?? "");
+      setReauthManualLogOffset(0);
+      setReauthManualDone(false);
+      setReauthManualOpen(true);
+      if (reauthManualLogRef.current) clearInterval(reauthManualLogRef.current);
+      let _offset = 0;
+      reauthManualLogRef.current = setInterval(async () => {
+        if (!d.logFile) return;
+        const r = await fetch(`${API}/tools/outlook/batch-oauth/log?file=${encodeURIComponent(d.logFile)}&offset=${_offset}`)
+          .then(x => x.json()).catch(() => null);
+        if (!r?.success) return;
+        if (r.lines?.length) {
+          setReauthManualLog(prev => [...prev, ...r.lines]);
+          _offset = r.nextOffset;
+        }
+        if (r.done) {
+          setReauthManualDone(true);
+          if (reauthManualLogRef.current) { clearInterval(reauthManualLogRef.current); reauthManualLogRef.current = null; }
+          await loadAccounts();
+        }
+      }, 3000);
     } else {
       setReauthManualMsg("失败：" + (d.error ?? "未知错误"));
     }
@@ -1492,6 +1536,74 @@ export default function MailCenter() {
             <div className="px-5 py-3 border-b border-[#30363d] flex items-center justify-between"><h3 className="text-sm font-semibold text-white">🤖 自动 retoken 进度</h3>{!retokenBusy && (<button onClick={() => setRetokenOpen(false)} className="text-gray-500 hover:text-gray-300 text-xs">关闭</button>)}</div>
             <div className="flex-1 overflow-y-auto p-4 font-mono text-xs space-y-1">{retokenLog.length === 0 ? <p className="text-gray-600 animate-pulse">等待输出…</p> : retokenLog.map((line, i) => (<p key={i} className={line.includes("✅") ? "text-emerald-400" : line.includes("❌") ? "text-red-400" : line.includes("⚠️") ? "text-amber-400" : "text-gray-300"}>{line}</p>))}</div>
             {retokenBusy && <p className="px-5 py-2 text-[10px] text-gray-600 animate-pulse border-t border-[#30363d]">处理中，每 3 秒刷新…</p>}
+          </div>
+        </div>
+      )}
+
+      {autoCompleteOpen && (
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+          <div className="bg-[#161b22] border border-[#30363d] rounded-xl w-full max-w-2xl flex flex-col max-h-[80vh]">
+            <div className="px-5 py-3 border-b border-[#30363d] flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-white">🤖 自动完成授权 — 实时日志</h3>
+              {autoCompleteDone && (
+                <button onClick={() => { setAutoCompleteOpen(false); if (autoCompleteLogRef.current) { clearInterval(autoCompleteLogRef.current); autoCompleteLogRef.current = null; } }} className="text-gray-500 hover:text-gray-300 text-xs">关闭</button>
+              )}
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 font-mono text-xs space-y-0.5">
+              {autoCompleteLog.length === 0
+                ? <p className="text-gray-600 animate-pulse">等待输出…</p>
+                : autoCompleteLog.map((line, i) => (
+                  <p key={i} className={
+                    line.includes("✅") ? "text-emerald-400" :
+                    line.includes("❌") ? "text-red-400" :
+                    line.includes("⚠") ? "text-amber-400" :
+                    line.includes("[summary]") ? "text-blue-300 font-bold" :
+                    line.startsWith("  •") ? "text-gray-500" :
+                    "text-gray-300"
+                  }>{line}</p>
+                ))
+              }
+            </div>
+            <div className="px-5 py-2 border-t border-[#30363d] flex items-center gap-2">
+              {autoCompleteDone
+                ? <p className="text-xs text-emerald-400 font-medium">✅ 授权任务已完成</p>
+                : <p className="text-[10px] text-gray-600 animate-pulse">运行中，每 3 秒刷新… 日志：{autoCompleteLogFile}</p>
+              }
+            </div>
+          </div>
+        </div>
+      )}
+
+      {reauthManualOpen && (
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+          <div className="bg-[#161b22] border border-[#30363d] rounded-xl w-full max-w-2xl flex flex-col max-h-[80vh]">
+            <div className="px-5 py-3 border-b border-[#30363d] flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-white">🔄 重授权 needs_oauth_manual — 实时日志</h3>
+              {reauthManualDone && (
+                <button onClick={() => { setReauthManualOpen(false); if (reauthManualLogRef.current) { clearInterval(reauthManualLogRef.current); reauthManualLogRef.current = null; } }} className="text-gray-500 hover:text-gray-300 text-xs">关闭</button>
+              )}
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 font-mono text-xs space-y-0.5">
+              {reauthManualLog.length === 0
+                ? <p className="text-gray-600 animate-pulse">等待输出…</p>
+                : reauthManualLog.map((line, i) => (
+                  <p key={i} className={
+                    line.includes("✅") ? "text-emerald-400" :
+                    line.includes("❌") ? "text-red-400" :
+                    line.includes("⚠") ? "text-amber-400" :
+                    line.includes("[summary]") ? "text-violet-300 font-bold" :
+                    line.startsWith("  •") ? "text-gray-500" :
+                    "text-gray-300"
+                  }>{line}</p>
+                ))
+              }
+            </div>
+            <div className="px-5 py-2 border-t border-[#30363d] flex items-center gap-2">
+              {reauthManualDone
+                ? <p className="text-xs text-emerald-400 font-medium">✅ 重授权任务已完成</p>
+                : <p className="text-[10px] text-gray-600 animate-pulse">运行中，每 3 秒刷新… 日志：{reauthManualLogFile}</p>
+              }
+            </div>
           </div>
         </div>
       )}
