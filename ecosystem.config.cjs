@@ -20,7 +20,8 @@ module.exports = {
         "REPLIT_SUBNODES": "https://gh-cli-direct--elizabetha96.replit.app/api/gateway",
         "CONNECT_PROXY_TOKEN": "vps_direct_proxy_2024",
         "FORCE_REGISTER_PORTS": "",
-        "NO_WARP_OVERRIDE": "0"
+        "NO_WARP_OVERRIDE": "0",
+        "WEBSHARE_API_KEY": "lx7r5124cubob5mfmofbdtjvdti5bqy2lxdg06ho"
       },
       "restart_delay": 3000,
       "max_restarts": 20,
