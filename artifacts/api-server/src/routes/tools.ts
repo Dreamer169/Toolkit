@@ -4656,7 +4656,7 @@ router.get('/tools/obvious/provision/:jobId', async (req, res) => {
   const job = await jobQueue.get(req.params.jobId);
   if (!job) { res.status(404).json({ success: false, error: 'job not found' }); return; }
   const provisioned = (job.logs || []).some(
-    (l: { message?: string }) => l.message?.includes('provisioned') || l.message?.includes('✅'));
+    (l: { message?: string } | undefined | null) => typeof l?.message === 'string' && (l.message.includes('provisioned') || l.message.includes('✅')));
   res.json({ success: true, job, provisioned });
 });
 
@@ -5353,7 +5353,8 @@ router.post('/tools/webshare/register', async (req, res) => {
     email, password,
     proxy = '',
     headless = true,
-  } = req.body as { email?: string; password?: string; proxy?: string; headless?: boolean };
+    capsolverKey = '',
+  } = req.body as { email?: string; password?: string; proxy?: string; headless?: boolean; capsolverKey?: string };
 
   if (!email || !password) {
     res.status(400).json({ success: false, error: 'email 和 password 不能为空' });
@@ -5363,6 +5364,7 @@ router.post('/tools/webshare/register', async (req, res) => {
   const jobId = `ws_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const job = await jobQueue.create(jobId);
   job.logs.push({ type: 'start', message: `启动 Webshare 注册 — ${email}` });
+  if (capsolverKey) job.logs.push({ type: 'log', message: '[Capsolver] 已提供 API Key，使用自动 CAPTCHA 解决方案' });
   if (proxy) job.logs.push({ type: 'log', message: `代理: ${proxy.replace(/:([^:@]{4})[^:@]*@/, ':****@')}` });
   res.json({ success: true, jobId, message: 'Webshare 注册任务已启动' });
 
@@ -5370,10 +5372,12 @@ router.post('/tools/webshare/register', async (req, res) => {
   const scriptPath = new URL('../webshare_register.py', import.meta.url).pathname;
   const args = [scriptPath, '--email', email, '--password', password, '--headless', headless ? 'true' : 'false'];
   if (proxy) args.push('--proxy', proxy);
+  if (capsolverKey) args.push('--capsolver-key', capsolverKey);
 
-  const child = spawn('python3', args, {
-    env: { ...(process.env as Record<string, string>), PYTHONUNBUFFERED: '1' },
-  });
+  const spawnEnv: Record<string, string> = { ...(process.env as Record<string, string>), PYTHONUNBUFFERED: '1' };
+  if (capsolverKey) spawnEnv['CAPSOLVER_KEY'] = capsolverKey;
+
+  const child = spawn('python3', args, { env: spawnEnv });
   jobQueue.setChild(jobId, child);
 
   let jsonBuf = '';
@@ -5381,7 +5385,7 @@ router.post('/tools/webshare/register', async (req, res) => {
 
   child.stdout.on('data', (chunk: Buffer) => {
     const raw = chunk.toString();
-    if (raw.includes('── JSON 结果 ──') || inJson) { inJson = true; jsonBuf += raw; }
+    if (raw.includes('── 结果 ──') || raw.includes('── JSON 结果 ──') || inJson) { inJson = true; jsonBuf += raw; }
     for (const line of raw.split('\n')) {
       const t = line.trim();
       if (!t || t === '{' || t === '}' || t === '[' || t === ']') continue;
@@ -5457,7 +5461,8 @@ router.post("/tools/oxylabs/register", async (req, res) => {
     first_name = "", last_name = "", company = "", phone = "",
     proxy = "",
     headless = true,
-  } = req.body as { email?: string; password?: string; first_name?: string; last_name?: string; company?: string; phone?: string; proxy?: string; headless?: boolean };
+    capsolverKey = "",
+  } = req.body as { email?: string; password?: string; first_name?: string; last_name?: string; company?: string; phone?: string; proxy?: string; headless?: boolean; capsolverKey?: string };
 
   if (!email || !password) {
     res.status(400).json({ success: false, error: "email 和 password 不能为空" });
@@ -5467,21 +5472,24 @@ router.post("/tools/oxylabs/register", async (req, res) => {
   const jobId = `oxy_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const job = await jobQueue.create(jobId);
   job.logs.push({ type: "start", message: `启动 Oxylabs 注册 — ${email}` });
+  if (capsolverKey) job.logs.push({ type: "log", message: "[CapSolver] API Key 已提供，启用 CF Managed Challenge 自动解决" });
   if (proxy) job.logs.push({ type: "log", message: `代理: ${proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@")}` });
   res.json({ success: true, jobId, message: "Oxylabs 注册任务已启动" });
 
   const { spawn } = await import("child_process");
   const scriptPath = new URL("../oxylabs_register.py", import.meta.url).pathname;
   const args = [scriptPath, "--email", email, "--password", password, "--headless", headless ? "true" : "false"];
-  if (proxy)      args.push("--proxy",   proxy);
-  if (first_name) args.push("--first",   first_name);
-  if (last_name)  args.push("--last",    last_name);
-  if (company)    args.push("--company", company);
-  if (phone)      args.push("--phone",   phone);
+  if (proxy)        args.push("--proxy",        proxy);
+  if (first_name)   args.push("--first",        first_name);
+  if (last_name)    args.push("--last",         last_name);
+  if (company)      args.push("--company",      company);
+  if (phone)        args.push("--phone",        phone);
+  if (capsolverKey) args.push("--capsolver-key", capsolverKey);
 
-  const child = spawn("python3", args, {
-    env: { ...(process.env as Record<string, string>), PYTHONUNBUFFERED: "1" },
-  });
+  const spawnEnv: Record<string, string> = { ...(process.env as Record<string, string>), PYTHONUNBUFFERED: "1" };
+  if (capsolverKey) spawnEnv["CAPSOLVER_API_KEY"] = capsolverKey;
+
+  const child = spawn("python3", args, { env: spawnEnv });
   jobQueue.setChild(jobId, child);
 
   let jsonBuf = "";
