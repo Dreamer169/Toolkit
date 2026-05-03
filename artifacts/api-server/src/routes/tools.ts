@@ -2308,6 +2308,103 @@ router.post("/tools/proxy-request", async (req, res) => {
   }
 });
 
+// ── Webshare 代理池 ──────────────────────────────────────────────────────────
+const WEBSHARE_API_KEY = process.env["WEBSHARE_API_KEY"] || "lx7r5124cubob5mfmofbdtjvdti5bqy2lxdg06ho";
+const WEBSHARE_API_BASE = "https://proxy.webshare.io/api/v2";
+
+type WebshareProxy = {
+  id: string; username: string; password: string;
+  proxy_address: string; port: number; valid: boolean;
+  country_code: string; city_name: string; last_verification: string;
+};
+
+async function syncWebshareProxies(): Promise<{ synced: number; total: number; error?: string }> {
+  const apiKey = WEBSHARE_API_KEY;
+  if (!apiKey) return { synced: 0, total: 0, error: "WEBSHARE_API_KEY not configured" };
+  try {
+    const resp = await fetch(`${WEBSHARE_API_BASE}/proxy/list/?mode=direct&page=1&page_size=100`, {
+      headers: { "Authorization": `Token ${apiKey}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!resp.ok) return { synced: 0, total: 0, error: `API ${resp.status}: ${(await resp.text()).slice(0, 100)}` };
+    const data = await resp.json() as { count: number; results: WebshareProxy[] };
+    let synced = 0;
+    for (const p of data.results) {
+      if (!p.valid) continue;
+      const formatted = `http://${p.username}:${p.password}@${p.proxy_address}:${p.port}`;
+      await execute(
+        `INSERT INTO proxies (formatted, host, port, username, password, status, used_count, raw)
+         VALUES ($1, $2, $3, $4, $5, 'idle', 0, $6)
+         ON CONFLICT (formatted) DO UPDATE SET
+           host     = EXCLUDED.host,
+           port     = EXCLUDED.port,
+           username = EXCLUDED.username,
+           password = EXCLUDED.password,
+           raw      = EXCLUDED.raw,
+           status   = CASE WHEN proxies.status = 'banned' THEN 'idle' ELSE proxies.status END`,
+        [formatted, p.proxy_address, p.port, p.username, p.password,
+         JSON.stringify({ ws_id: p.id, country: p.country_code, city: p.city_name, last_check: p.last_verification })]
+      );
+      synced++;
+    }
+    return { synced, total: data.count };
+  } catch (e) {
+    return { synced: 0, total: 0, error: String(e) };
+  }
+}
+
+// GET /tools/webshare/status — 查看 DB 中已同步的 Webshare 代理 + 实时 API 状态
+router.get("/tools/webshare/status", async (_req, res) => {
+  try {
+    type PRow = { formatted: string; host: string; port: number; status: string; used_count: number; last_used: string | null; raw: string | null };
+    const rows = await (query as (s: string) => Promise<PRow[]>)(
+      `SELECT formatted, host, port, status, used_count, last_used, raw
+       FROM proxies WHERE username = 'nnhginhn' ORDER BY used_count ASC`
+    ).catch(() => [] as PRow[]);
+
+    let live: { count: number; proxies: Array<{ ip: string; port: number; valid: boolean; country: string; city: string; last_check: string }> } | null = null;
+    const apiKey = WEBSHARE_API_KEY;
+    if (apiKey) {
+      try {
+        const r = await fetch(`${WEBSHARE_API_BASE}/proxy/list/?mode=direct&page=1&page_size=100`, {
+          headers: { "Authorization": `Token ${apiKey}` },
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (r.ok) {
+          const d = await r.json() as { count: number; results: WebshareProxy[] };
+          live = { count: d.count, proxies: d.results.map((p) => ({ ip: p.proxy_address, port: p.port, valid: p.valid, country: p.country_code, city: p.city_name, last_check: p.last_verification })) };
+        }
+      } catch { /* silent */ }
+    }
+
+    res.json({
+      success: true,
+      db: {
+        count: rows.length,
+        proxies: rows.map((r) => {
+          let meta: Record<string, unknown> = {};
+          try { meta = JSON.parse(r.raw || "{}"); } catch { /* */ }
+          return { proxy: r.formatted, host: r.host, port: r.port, status: r.status, used_count: r.used_count, last_used: r.last_used, ...meta };
+        }),
+      },
+      live,
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+// POST /tools/webshare/sync — 从 Webshare API 全量拉取并 upsert 进 proxies 表
+router.post("/tools/webshare/sync", async (_req, res) => {
+  const result = await syncWebshareProxies();
+  if (result.error) {
+    res.status(500).json({ success: false, ...result });
+    return;
+  }
+  res.json({ success: true, ...result, message: `已同步 ${result.synced}/${result.total} 个 Webshare 代理到 proxies 表` });
+});
+
+
 // ── CF IP 代理池 ──────────────────────────────────────────────
 const CF_POOL_SCRIPT = process.env["CF_POOL_SCRIPT"]
   || [
