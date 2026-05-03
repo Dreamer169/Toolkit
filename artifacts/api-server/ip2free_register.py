@@ -37,7 +37,7 @@ def gen_ip2free_password(base: str) -> str:
     return pwd[:20]
 
 
-def fetch_verification_code(email, password, access_token="", timeout_s=CODE_WAIT_SEC):
+def fetch_verification_code(email, password, access_token="", timeout_s=CODE_WAIT_SEC, proxy=""):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     try:
         from outlook_imap import fetch_inbox_xoauth2, fetch_inbox_basic
@@ -53,9 +53,9 @@ def fetch_verification_code(email, password, access_token="", timeout_s=CODE_WAI
         attempt += 1
         try:
             if access_token:
-                result = fetch_inbox_xoauth2(email, access_token, limit=10, search="ip2free")
+                result = fetch_inbox_xoauth2(email, access_token, limit=10, search="ip2free", proxy=proxy)
             else:
-                result = fetch_inbox_basic(email, password, limit=10)
+                result = fetch_inbox_basic(email, password, limit=10, proxy=proxy)
             if not result.get("success"):
                 print(f"[imap] \u7b2c{attempt}\u6b21: \u8bfb\u53d6\u5931\u8d25 \u2014 {result.get('error','')}", flush=True)
             else:
@@ -188,8 +188,11 @@ def try_register_with_proxy(
             page.wait_for_timeout(2000)
 
             # IMAP \u8bfb\u53d6\u9a8c\u8bc1\u7801
+            # IP一致性：IMAP 使用与浏览器注册相同的代理出口
+            _imap_proxy = getattr(_imap_call_proxy_holder, "proxy", "") if hasattr(locals(), "_imap_call_proxy_holder") else ""
             code = fetch_verification_code(
-                outlook_email, outlook_password, access_token, timeout_s=CODE_WAIT_SEC
+                outlook_email, outlook_password, access_token,
+                timeout_s=CODE_WAIT_SEC, proxy=proxy
             )
             if not code:
                 return False, "\u9a8c\u8bc1\u7801\u7b49\u5f85\u8d85\u65f6", False
@@ -263,7 +266,7 @@ def try_register_with_proxy(
 def register_ip2free_adaptive(
     outlook_email, outlook_password, ip2free_password,
     manual_proxies=None, invite_code=DEFAULT_INVITE,
-    headless=True, access_token="", auto_proxy=True
+    headless=True, access_token="", auto_proxy=True, account_proxy=""
 ):
     """
     \u81ea\u9002\u5e94\u591a\u6c60\u4ee3\u7406\u94fe\u8def\u6ce8\u518c\u3002
@@ -273,10 +276,17 @@ def register_ip2free_adaptive(
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from proxy_chain import ProxyChain
 
+    # account_proxy = 该 Outlook 账号注册时使用的代理，必须排第一（IP一致性锚点）
+    # 若 IMAP 和浏览器使用同一出口 IP，微软不会触发安全警告
+    extra_proxies = []
+    if account_proxy:
+        extra_proxies.append(account_proxy)
+    if manual_proxies:
+        extra_proxies.extend([p for p in manual_proxies if p != account_proxy])
     chain = ProxyChain(
         purpose="ip2free" if auto_proxy else "generic",
         count=5 if auto_proxy else 1,
-        extra=manual_proxies or [],
+        extra=extra_proxies,
     )
 
     print(f"[ip2free] \u4ee3\u7406\u94fe\u8def\u51c6\u5907: {len(chain)} \u4e2a\u9009\u9879", flush=True)
@@ -313,7 +323,7 @@ def main():
     parser.add_argument("--ip2free-password", default="")
     parser.add_argument("--proxy",            default="",  help="\u5355\u4e2a\u624b\u52a8\u4ee3\u7406")
     parser.add_argument("--proxies",          default="",  help="\u591a\u4ee3\u7406\u9017\u53f7\u5206\u9694")
-    parser.add_argument("--no-auto-proxy",    action="store_true", help="\u7981\u7528 DB \u81ea\u9002\u5e94\u9009\u53d6")
+    parser.add_argument("--account-proxy",    default="",  help="\u8d26\u53f7\u6ce8\u518c\u65f6\u7ed1\u5b9a\u7684\u4ee3\u7406URL\uff08IMAP\u4e00\u81f4\u6027\uff09")\n    parser.add_argument("--no-auto-proxy",    action="store_true", help="\u7981\u7528 DB \u81ea\u9002\u5e94\u9009\u53d6")
     parser.add_argument("--invite-code",      default=DEFAULT_INVITE)
     parser.add_argument("--headless",         default="true")
     args = parser.parse_args()
@@ -340,6 +350,7 @@ def main():
         headless=headless,
         access_token=args.access_token,
         auto_proxy=auto_proxy,
+        account_proxy=getattr(args, "account_proxy", ""),
     )
 
     result = {

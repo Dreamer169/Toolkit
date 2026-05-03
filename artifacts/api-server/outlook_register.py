@@ -2393,7 +2393,7 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
         return {}
 
 
-def register_one(ctrl, engine_name: str, headless: bool, planned_username: str = "", planned_password: str = "", exit_ip: str = "", proxy_port: int = 0) -> dict:
+def register_one(ctrl, engine_name: str, headless: bool, planned_username: str = "", planned_password: str = "", exit_ip: str = "", proxy_port: int = 0, proxy_formatted: str = "") -> dict:
     if planned_username:
         email = planned_username.split("@")[0].strip()
     else:
@@ -2414,6 +2414,7 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
         "user_agent": "",
         "exit_ip": exit_ip,
         "proxy_port": int(proxy_port) if proxy_port else 0,
+        "proxy_formatted": proxy_formatted or "",
     }
 
     # v8.77 timing instrumentation: 给 register_one 全部 print 加 [T+s] 前缀, 用于精准时间分布分析
@@ -2763,7 +2764,7 @@ def main():
                     _epp = int(getattr(xray_relay_inst, "socks_port", 0) or 0)
             except Exception:
                 pass
-            r = register_one(ctrl, args.engine, headless, _effective_user, _effective_pass, _eip, _epp)
+            r = register_one(ctrl, args.engine, headless, _effective_user, _effective_pass, _eip, _epp, proxy_formatted=cur_proxy)
 
             # 保存本次生成的 email/password 供下次重试复用
             if not _retry_email and r.get("email"):

@@ -1490,7 +1490,7 @@ router.post("/tools/outlook/register", async (req, res) => {
     const identityMap = new Map<string, {
       access_token: string; refresh_token: string;
       cookies_json: string; fingerprint_json: string;
-      user_agent: string; exit_ip: string; proxy_port: number;
+      user_agent: string; exit_ip: string; proxy_port: number; proxy_formatted: string;
     }>();
     try {
       const jsonStart = jsonBuf.indexOf("[");
@@ -1509,6 +1509,7 @@ router.post("/tools/outlook/register", async (req, res) => {
               user_agent:       String(r.user_agent       ?? ""),
               exit_ip:          String(r.exit_ip          ?? ""),
               proxy_port:       Number(r.proxy_port       ?? 0),
+              proxy_formatted:  String(r.proxy_formatted  ?? ""),
             });
           }
         }
@@ -1532,8 +1533,8 @@ router.post("/tools/outlook/register", async (req, res) => {
             const _idn = identityMap.get(acc.email);
             accountRow = await queryOne<{ id: number }>(
               `INSERT INTO accounts (platform, email, password, status, token, refresh_token,
-                                       cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                                       cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port, proxy_formatted)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                ON CONFLICT (platform, email) DO UPDATE SET
                  password         = EXCLUDED.password,
                  status           = EXCLUDED.status,
@@ -1544,17 +1545,23 @@ router.post("/tools/outlook/register", async (req, res) => {
                  user_agent       = COALESCE(NULLIF(EXCLUDED.user_agent,''), accounts.user_agent),
                  exit_ip          = COALESCE(NULLIF(EXCLUDED.exit_ip,''), accounts.exit_ip),
                  proxy_port       = COALESCE(NULLIF(EXCLUDED.proxy_port, 0), accounts.proxy_port),
+                 proxy_formatted  = COALESCE(NULLIF(EXCLUDED.proxy_formatted,''), accounts.proxy_formatted),
                  updated_at       = NOW()
                RETURNING id`,
               [
                 "outlook", acc.email, acc.password, "active",
-                _idn?.access_token  || null,
-                _idn?.refresh_token || null,
+                _idn?.access_token    || null,
+                _idn?.refresh_token   || null,
                 _idn?.cookies_json     || null,
                 _idn?.fingerprint_json || null,
                 _idn?.user_agent       || null,
                 _idn?.exit_ip          || null,
                 _idn?.proxy_port       || null,
+                // proxy_formatted: 注册时实际使用的完整代理URL（IP一致性锚点）
+                // 优先用 proxy_formatted 字段，fallback 到 proxy_port 重建 socks5://127.0.0.1:PORT
+                (_idn?.proxy_formatted
+                  ? _idn.proxy_formatted
+                  : (_idn?.proxy_port ? `socks5://127.0.0.1:${_idn.proxy_port}` : null)),
               ],
             );
           } catch (dbErr) {
@@ -2432,10 +2439,35 @@ router.post("/tools/ip2free/register", async (req, res) => {
   const jobId = `ip2free_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const preJobLogs: Array<{ type: string; message: string }> = [];
 
+  // ── IP一致性: 优先查账号绑定代理 ───────────────────────────────────────
+  // 从 accounts 表取该 Outlook 邮箱注册时绑定的代理（proxy_formatted > proxy_port 重建）
+  // 这确保 ip2free 浏览器注册 + IMAP 验证码读取都使用与 Outlook 注册时相同的出口 IP
+  let accountProxy = "";
+  if (email) {
+    try {
+      const acctRow = await queryOne<{ proxy_formatted: string | null; proxy_port: number | null }>(
+        "SELECT proxy_formatted, proxy_port FROM accounts WHERE platform='outlook' AND email=$1 LIMIT 1",
+        [email]
+      );
+      if (acctRow?.proxy_formatted) {
+        accountProxy = acctRow.proxy_formatted;
+      } else if (acctRow?.proxy_port && acctRow.proxy_port > 0) {
+        accountProxy = `socks5://127.0.0.1:${acctRow.proxy_port}`;
+      }
+      if (accountProxy) {
+        req.log?.info?.({ accountProxy: accountProxy.replace(/:([^:@]{4})[^:@]*@/, ":****@") },
+          "ip2free: 使用账号绑定代理（IP一致性）");
+      }
+    } catch (e) {
+      req.log?.warn?.({ err: e }, "ip2free: 账号绑定代理查询失败，降级到自适应选取");
+    }
+  }
+
   // ── 自适应多池代理选取 ────────────────────────────────────────────────────
-  // ip2free 优先级: Pool-C (Webshare HTTP) → Pool-B (subnode SOCKS5) → Pool-A (local SOCKS5)
-  // proxyInput 手动指定的代理排在最前，DB 自适应选取追加在后（供 Python 链路失败时重试）
-  let proxyList: string[] = proxyInput ? [proxyInput] : [];
+  // 优先级: 账号绑定代理 > 手动指定 > DB 自适应选取（Pool-C → Pool-B → Pool-A）
+  let proxyList: string[] = [];
+  if (accountProxy) proxyList.push(accountProxy);         // IP一致性最高优先
+  if (proxyInput && !proxyList.includes(proxyInput)) proxyList.push(proxyInput);
 
   if (autoProxy) {
     try {
@@ -2475,6 +2507,8 @@ router.post("/tools/ip2free/register", async (req, res) => {
   if (outlookPassword) args.push("--outlook-password", outlookPassword);
   if (accessToken)     args.push("--access-token",     accessToken);
   if (ip2freePassword) args.push("--ip2free-password", ip2freePassword);
+  // 账号绑定代理：用于 IMAP 验证码读取时 IP 与浏览器注册一致
+  if (accountProxy)    args.push("--account-proxy",    accountProxy);
   // 传多代理列表给 Python（ip2free_register.py ProxyChain 负责逐一重试）
   if (proxyList.length > 1) {
     args.push("--proxies", proxyList.join(","));
