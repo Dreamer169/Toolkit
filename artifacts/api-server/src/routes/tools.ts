@@ -4878,9 +4878,6 @@ router.post('/tools/sms/messages', async (req, res) => {
 });
 
 
-export default router;
-
-
 // ── SMS Center: smsreceivefree.xyz ─────────────────────────────────────────
 // GET /api/tools/smsrf/numbers   — scrape live number list from homepage feed
 router.get('/tools/smsrf/numbers', async (req, res) => {
@@ -4965,3 +4962,5 @@ router.post("/tools/text-captcha/show", async (req, res) => {
     res.status(503).json({ error: String(e) });
   }
 });
+
+export default router;
