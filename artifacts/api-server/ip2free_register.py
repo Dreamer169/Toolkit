@@ -1,38 +1,31 @@
 #!/usr/bin/env python3
 """
-ip2free.com 注册脚本 v1.0
-使用 Webshare HTTP 代理 + 新注册的 Outlook 邮箱在 ip2free.com 注册账号。
-
-流程:
-  1. 打开注册页并填写邮箱 / 密码 / 邀请码
-  2. 点击"获取验证码"（触发 ip2free 向 Outlook 邮箱发验证码）
-  3. 通过 IMAP 轮询 Outlook 收件箱读取 6 位验证码
-  4. 填入验证码并提交，验证注册成功
+ip2free.com 注册脚本 v2.0 — 自适应多池代理重试
+使用 proxy_chain.ProxyChain 自动跨 Webshare HTTP / 本地 SOCKS5 / 直连 降级重试。
 
 用法:
     python3 ip2free_register.py \
         --email user@outlook.com \
         --outlook-password OutlookPwd \
-        --ip2free-password Ip2freePwd123 \
-        --proxy http://nnhginhn:ib02dddzfpev@31.59.20.176:6754 \
-        [--invite-code 7pdC4VeeYw] \
-        [--access-token OAUTH_TOKEN] \
+        [--ip2free-password Ip2freePwd123] \
+        [--proxy http://user:pass@host:port]   # 手动指定单代理
+        [--proxies p1,p2,p3]                   # 手动多代理（优先于 DB 自适应）
+        [--auto-proxy]                         # 从 DB 自适应选取（默认开启）
+        [--invite-code 7pdC4VeeYw]
+        [--access-token OAUTH_TOKEN]
         [--headless true]
 """
 
-import argparse, json, re, sys, time
+import argparse, json, os, re, sys, time
 
-REGISTER_URL    = "https://www.ip2free.com/cn/register"
-DEFAULT_INVITE  = "7pdC4VeeYw"
-CODE_WAIT_SEC   = 120   # max seconds to wait for email code
+REGISTER_URL   = "https://www.ip2free.com/cn/register"
+DEFAULT_INVITE = "7pdC4VeeYw"
+CODE_WAIT_SEC  = 120
 
-
-# ── 辅助 ──────────────────────────────────────────────────────────────────────
 
 def gen_ip2free_password(base: str) -> str:
-    """从 Outlook 密码派生出符合 ip2free 要求的密码（8-20 位，含字母和数字）。"""
     import random, string
-    pwd = re.sub(r"[^a-zA-Z0-9]", "", base)  # 只保留字母数字
+    pwd = re.sub(r"[^a-zA-Z0-9]", "", base)
     if not pwd:
         pwd = "Aa123456x"
     if len(pwd) < 8:
@@ -44,58 +37,17 @@ def gen_ip2free_password(base: str) -> str:
     return pwd[:20]
 
 
-_relay_refs: list = []
-
-
-def build_proxy_cfg(proxy: str) -> dict | None:
-    """
-    构建 Playwright 代理配置。
-    - SOCKS5 有凭据 → Socks5Relay 中转（Chromium 不支持 SOCKS5 带认证）
-    - HTTP  有凭据 → Playwright 原生 username/password（Chromium 原生支持 HTTP 代理认证）
-    - 无凭据       → 直接传给 Chromium
-    """
-    if not proxy:
-        return None
-    m = re.match(r"(socks5h?|http|https)://([^:]+):([^@]+)@([^:]+):(\d+)", proxy)
-    if m:
-        scheme, user, password, host, port = m.groups()
-        if scheme in ("socks5", "socks5h"):
-            import os
-            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            from socks5_relay import Socks5Relay
-            relay = Socks5Relay(host, int(port), user, password)
-            local_port = relay.start()
-            _relay_refs.append(relay)
-            print(f"[relay] SOCKS5 中转：127.0.0.1:{local_port} → {host}:{port}", flush=True)
-            return {"server": f"socks5://127.0.0.1:{local_port}", "bypass": "localhost"}
-        else:
-            print(f"[proxy] HTTP代理（原生认证）：{host}:{port}", flush=True)
-            return {
-                "server":   f"http://{host}:{port}",
-                "username": user,
-                "password": password,
-                "bypass":   "localhost",
-            }
-    return {"server": proxy, "bypass": "localhost"}
-
-
-def fetch_verification_code(email: str, password: str, access_token: str = "",
-                             timeout_s: int = CODE_WAIT_SEC) -> str | None:
-    """
-    轮询 Outlook IMAP 收件箱，提取 ip2free 发来的 6 位验证码。
-    优先用 OAuth2 access_token；无 token 则 Basic Auth。
-    """
-    import os
+def fetch_verification_code(email, password, access_token="", timeout_s=CODE_WAIT_SEC):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     try:
         from outlook_imap import fetch_inbox_xoauth2, fetch_inbox_basic
     except ImportError:
-        print("[imap] ⚠ outlook_imap 模块未找到，无法读取验证码", flush=True)
+        print("[imap] \u26a0 outlook_imap \u6a21\u5757\u672a\u627e\u5230", flush=True)
         return None
 
     deadline = time.time() + timeout_s
     attempt  = 0
-    print(f"[imap] 等待 ip2free 验证邮件（最多 {timeout_s}s）…", flush=True)
+    print(f"[imap] \u7b49\u5f85 ip2free \u9a8c\u8bc1\u90ae\u4ef6\uff08\u6700\u591a {timeout_s}s\uff09\u2026", flush=True)
 
     while time.time() < deadline:
         attempt += 1
@@ -105,49 +57,47 @@ def fetch_verification_code(email: str, password: str, access_token: str = "",
             else:
                 result = fetch_inbox_basic(email, password, limit=10)
             if not result.get("success"):
-                print(f"[imap] 第{attempt}次: 读取失败 — {result.get('error','')}", flush=True)
+                print(f"[imap] \u7b2c{attempt}\u6b21: \u8bfb\u53d6\u5931\u8d25 \u2014 {result.get('error','')}", flush=True)
             else:
                 msgs = result.get("messages", [])
-                print(f"[imap] 第{attempt}次: 共 {len(msgs)} 封邮件", flush=True)
+                print(f"[imap] \u7b2c{attempt}\u6b21: {len(msgs)} \u5c01\u90ae\u4ef6", flush=True)
                 for msg in msgs:
                     text = (msg.get("subject","") + " " +
                             msg.get("body_plain","") + " " +
                             msg.get("preview",""))
-                    # ip2free 邮件通常包含 6 位验证码
                     codes = re.findall(r"\b(\d{6})\b", text)
                     if codes:
-                        print(f"[imap] ✅ 找到验证码: {codes[0]}", flush=True)
+                        print(f"[imap] \u2705 \u9a8c\u8bc1\u7801: {codes[0]}", flush=True)
                         return codes[0]
         except Exception as e:
-            print(f"[imap] 第{attempt}次异常: {e}", flush=True)
+            print(f"[imap] \u5f02\u5e38: {e}", flush=True)
         time.sleep(10)
 
-    print("[imap] ⚠ 超时未收到验证码", flush=True)
+    print("[imap] \u26a0 \u8d85\u65f6\u672a\u6536\u5230\u9a8c\u8bc1\u7801", flush=True)
     return None
 
 
-# ── 主注册函数 ────────────────────────────────────────────────────────────────
+def try_register_with_proxy(
+    outlook_email, outlook_password, ip2free_password,
+    proxy, invite_code, headless, access_token
+):
+    """
+    \u5355\u6b21\u4ee3\u7406\u5c1d\u8bd5\u6ce8\u518c\u3002\u8fd4\u56de (success, message, is_proxy_error)\u3002
+    is_proxy_error=True \u8868\u793a\u662f\u4ee3\u7406\u9510\u8d25\uff0c\u5e94\u5207\u6362\u4e0b\u4e00\u4e2a\u4ee3\u7406\u91cd\u8bd5\u3002
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from proxy_chain import build_proxy_cfg
 
-def register_ip2free(
-    outlook_email:    str,
-    outlook_password: str,
-    ip2free_password: str,
-    proxy:            str  = "",
-    invite_code:      str  = DEFAULT_INVITE,
-    headless:         bool = True,
-    access_token:     str  = "",
-) -> tuple[bool, str]:
-    """
-    在 ip2free.com 注册账号。
-    返回 (success, message)。
-    """
     try:
         from patchright.sync_api import sync_playwright
     except ImportError:
-        return False, "patchright 未安装，请 pip install patchright"
+        return False, "patchright \u672a\u5b89\u88c5", False
 
     proxy_cfg = build_proxy_cfg(proxy)
+    proxy_label = (proxy[:50] + "...") if proxy and len(proxy) > 50 else (proxy or "\u76f4\u8fde")
+    print(f"[ip2free] \u5c1d\u8bd5\u4ee3\u7406: {proxy_label}", flush=True)
 
+    is_proxy_error = False
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -176,56 +126,48 @@ def register_ip2free(
             )
             page = ctx.new_page()
 
-            # ── 1. 打开注册页 ────────────────────────────────────────────
             url = f"{REGISTER_URL}?inviteCode={invite_code}"
-            print(f"[ip2free] 打开注册页: {url}", flush=True)
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            print(f"[ip2free] \u6253\u5f00: {url}", flush=True)
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=25000)
+            except Exception as e:
+                is_proxy_error = True
+                return False, f"\u4ee3\u7406\u8fde\u63a5\u5931\u8d25: {e}", is_proxy_error
+
             page.wait_for_timeout(3000)
 
-            # ── 2. 填写邮箱 ──────────────────────────────────────────────
-            email_loc = page.locator("#email")
-            email_loc.wait_for(state="visible", timeout=15000)
-            # MUI 组件带 readOnly；用 JS 解除后再 fill
-            page.evaluate("""
-                const el = document.querySelector('#email');
-                if (el) { el.removeAttribute('readonly'); el.focus(); }
-            """)
-            page.wait_for_timeout(200)
-            email_loc.fill(outlook_email)
-            print(f"[ip2free] 已填写邮箱: {outlook_email}", flush=True)
-            page.wait_for_timeout(400)
-
-            # ── 3. 填写密码 ──────────────────────────────────────────────
-            pwd_loc = page.locator("#password")
-            page.evaluate("""
-                const el = document.querySelector('#password');
-                if (el) { el.removeAttribute('readonly'); el.focus(); }
-            """)
-            page.wait_for_timeout(200)
-            pwd_loc.fill(ip2free_password)
-            print("[ip2free] 已填写密码", flush=True)
-            page.wait_for_timeout(400)
-
-            # ── 4. 填写邀请码（affId 字段） ───────────────────────────────
+            # \u68c0\u67e5\u9875\u9762\u662f\u5426\u52a0\u8f7d\u6210\u529f
             try:
-                aff_loc = page.locator("#affId")
-                if aff_loc.count() > 0:
-                    page.evaluate("""
-                        const el = document.querySelector('#affId');
-                        if (el) { el.removeAttribute('readonly'); el.focus(); }
-                    """)
-                    aff_loc.fill(invite_code)
-                    print(f"[ip2free] 已填写邀请码: {invite_code}", flush=True)
-                    page.wait_for_timeout(300)
+                page.wait_for_selector("#email", timeout=12000)
+            except Exception:
+                is_proxy_error = True
+                cur = page.url
+                try: page.screenshot(path=f"/tmp/ip2free_nopage_{int(time.time())}.png")
+                except Exception: pass
+                return False, f"\u9875\u9762\u672a\u52a0\u8f7d (#email \u672a\u51fa\u73b0), URL={cur}", is_proxy_error
+
+            # \u586b\u5199\u8868\u5355
+            for fid, val in [("#email", outlook_email), ("#password", ip2free_password)]:
+                loc = page.locator(fid)
+                page.evaluate(f"el=document.querySelector(\"{fid}\");if(el){{el.removeAttribute(\'readonly\');el.focus();}}")
+                loc.fill(val)
+                page.wait_for_timeout(300)
+
+            # \u586b\u5199\u9080\u8bf7\u7801
+            try:
+                aff = page.locator("#affId")
+                if aff.count() > 0:
+                    page.evaluate("el=document.querySelector(\"#affId\");if(el){el.removeAttribute(\'readonly\');}")
+                    aff.fill(invite_code)
+                    page.wait_for_timeout(200)
             except Exception:
                 pass
 
-            # ── 5. 点击"获取验证码"按钮 ────────────────────────────────
+            # \u70b9\u51fb\u83b7\u53d6\u9a8c\u8bc1\u7801
             code_btn = None
             for sel in [
-                'button:has-text("获取验证码")',
-                'button:has-text("发送验证码")',
-                'button:has-text("获取")',
+                'button:has-text("\u83b7\u53d6\u9a8c\u8bc1\u7801")',
+                'button:has-text("\u53d1\u9001\u9a8c\u8bc1\u7801")',
                 'button:has-text("Send Code")',
                 'button:has-text("Get Code")',
             ]:
@@ -233,103 +175,72 @@ def register_ip2free(
                     btn = page.locator(sel)
                     if btn.count() > 0:
                         code_btn = btn.first
-                        print(f"[ip2free] 找到验证码按钮: {sel}", flush=True)
                         break
                 except Exception:
                     pass
 
             if code_btn is None:
-                try:
-                    page.screenshot(path="/tmp/ip2free_no_code_btn.png")
-                except Exception:
-                    pass
-                return False, "未找到获取验证码按钮，ip2free 页面结构可能已变化"
+                try: page.screenshot(path="/tmp/ip2free_no_code_btn.png")
+                except Exception: pass
+                return False, "\u672a\u627e\u5230\u83b7\u53d6\u9a8c\u8bc1\u7801\u6309\u9215", False
 
             code_btn.click()
-            print("[ip2free] 已点击获取验证码，等待邮件…", flush=True)
             page.wait_for_timeout(2000)
 
-            # ── 6. 从 Outlook IMAP 读取验证码 ────────────────────────────
+            # IMAP \u8bfb\u53d6\u9a8c\u8bc1\u7801
             code = fetch_verification_code(
-                outlook_email, outlook_password, access_token,
-                timeout_s=CODE_WAIT_SEC
+                outlook_email, outlook_password, access_token, timeout_s=CODE_WAIT_SEC
             )
             if not code:
-                return False, "等待 ip2free 验证码超时，请检查 Outlook 是否已收到邮件"
+                return False, "\u9a8c\u8bc1\u7801\u7b49\u5f85\u8d85\u65f6", False
 
-            # ── 7. 填写验证码 ─────────────────────────────────────────────
+            # \u586b\u5199\u9a8c\u8bc1\u7801
             code_loc = page.locator("#code")
-            page.evaluate("""
-                const el = document.querySelector('#code');
-                if (el) { el.removeAttribute('readonly'); el.focus(); }
-            """)
+            page.evaluate("el=document.querySelector(\"#code\");if(el){el.removeAttribute(\'readonly\');}")
             code_loc.fill(code)
-            print(f"[ip2free] 已填写验证码: {code}", flush=True)
             page.wait_for_timeout(400)
 
-            # ── 8. 勾选服务条款（如有）────────────────────────────────────
+            # \u52fe\u9009\u670d\u52a1\u6761\u6b3e
             try:
                 cb = page.locator('input[type="checkbox"]').first
                 if cb.count() > 0 and not cb.is_checked():
                     cb.click()
-                    print("[ip2free] 已勾选服务条款", flush=True)
-                    page.wait_for_timeout(300)
+                    page.wait_for_timeout(200)
             except Exception:
                 pass
 
-            # ── 9. 点击注册提交按钮 ───────────────────────────────────────
-            submit_btn = None
-            for sel in [
-                'button[type="submit"]',
-                'button:has-text("注册")',
-                'button:has-text("立即注册")',
-                'button:has-text("Register")',
-                'button:has-text("Sign Up")',
-            ]:
+            # \u63d0\u4ea4
+            submit = None
+            for sel in ['button[type="submit"]', 'button:has-text("\u6ce8\u518c")',
+                        'button:has-text("\u7acb\u5373\u6ce8\u518c")', 'button:has-text("Register")']:
                 try:
                     btn = page.locator(sel)
                     if btn.count() > 0:
-                        submit_btn = btn.last
+                        submit = btn.last
                         break
                 except Exception:
                     pass
 
-            if submit_btn is None:
-                return False, "未找到注册提交按钮"
+            if submit is None:
+                return False, "\u672a\u627e\u5230\u63d0\u4ea4\u6309\u9215", False
 
-            print("[ip2free] 提交注册…", flush=True)
-            submit_btn.click()
+            submit.click()
             page.wait_for_timeout(4000)
 
-            # ── 10. 判断注册结果 ──────────────────────────────────────────
             cur_url = page.url
-            print(f"[ip2free] 当前 URL: {cur_url}", flush=True)
+            print(f"[ip2free] \u5f53\u524d URL: {cur_url}", flush=True)
 
-            success_url_kws = ["/dashboard", "/home", "/cn/home", "/user", "/cn/login", "/login"]
-            if any(k in cur_url for k in success_url_kws):
-                print("[ip2free] ✅ 注册成功（URL 跳转至主页/登录页）", flush=True)
-                return True, f"注册成功 | email={outlook_email} | ip2free_password={ip2free_password}"
+            ok_kws = ["/dashboard", "/home", "/cn/home", "/user", "/cn/login", "/login"]
+            if any(k in cur_url for k in ok_kws):
+                print("[ip2free] \u2705 \u6ce8\u518c\u6210\u529f\uff08URL \u8df3\u8f6c\uff09", flush=True)
+                return True, f"\u6ce8\u518c\u6210\u529f | email={outlook_email}", False
 
-            # 等待成功提示 toast
             try:
-                page.wait_for_selector(
-                    '.MuiAlert-standardSuccess, [class*="success"], [role="alert"]',
-                    timeout=6000,
-                )
-                alert_text = page.locator('[role="alert"]').first.inner_text()
-                if "success" in alert_text.lower() or "成功" in alert_text:
-                    print(f"[ip2free] ✅ 注册成功（Toast: {alert_text[:60]}）", flush=True)
-                    return True, f"注册成功 | email={outlook_email}"
-            except Exception:
-                pass
-
-            # 检查错误提示
-            try:
-                err_loc = page.locator('[role="alert"], .MuiAlert-message').first
-                if err_loc.count() > 0:
-                    err_text = err_loc.inner_text()
-                    if err_text.strip():
-                        return False, f"注册失败: {err_text[:120]}"
+                page.wait_for_selector(".MuiAlert-standardSuccess,[role=\"alert\"]", timeout=5000)
+                txt = page.locator('[role="alert"]').first.inner_text()
+                if "success" in txt.lower() or "\u6210\u529f" in txt:
+                    return True, f"\u6ce8\u518c\u6210\u529f | email={outlook_email}", False
+                return False, f"\u63d0\u793a: {txt[:100]}", False
             except Exception:
                 pass
 
@@ -337,47 +248,98 @@ def register_ip2free(
                 page.screenshot(path=f"/tmp/ip2free_result_{int(time.time())}.png")
             except Exception:
                 pass
-
-            return False, f"注册结果不确定，当前 URL: {cur_url}"
+            return False, f"\u7ed3\u679c\u4e0d\u786e\u5b9a URL={cur_url}", False
 
     except Exception as e:
         import traceback
-        print(f"[ip2free] ❌ 异常:\n{traceback.format_exc()}", flush=True)
-        return False, f"异常: {e}"
+        print(f"[ip2free] \u5f02\u5e38:\n{traceback.format_exc()}", flush=True)
+        proxy_err = any(k in str(e).lower() for k in ["proxy","connect","timeout","refused","reset"])
+        return False, f"\u5f02\u5e38: {e}", proxy_err
     finally:
-        for relay in _relay_refs:
-            try:
-                relay.stop()
-            except Exception:
-                pass
+        from proxy_chain import stop_relays
+        stop_relays()
 
 
-# ── CLI 入口 ──────────────────────────────────────────────────────────────────
+def register_ip2free_adaptive(
+    outlook_email, outlook_password, ip2free_password,
+    manual_proxies=None, invite_code=DEFAULT_INVITE,
+    headless=True, access_token="", auto_proxy=True
+):
+    """
+    \u81ea\u9002\u5e94\u591a\u6c60\u4ee3\u7406\u94fe\u8def\u6ce8\u518c\u3002
+    \u81ea\u52a8\u6309 ip2free \u7528\u9014\u4f18\u5148\u7ea7\u9009\u53d6\uff1a
+      Pool-C (Webshare HTTP) \u2192 Pool-B (subnode SOCKS5) \u2192 Pool-A (local SOCKS5) \u2192 \u76f4\u8fde
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from proxy_chain import ProxyChain
+
+    chain = ProxyChain(
+        purpose="ip2free" if auto_proxy else "generic",
+        count=5 if auto_proxy else 1,
+        extra=manual_proxies or [],
+    )
+
+    print(f"[ip2free] \u4ee3\u7406\u94fe\u8def\u51c6\u5907: {len(chain)} \u4e2a\u9009\u9879", flush=True)
+
+    for idx, proxy in enumerate(chain):
+        label = proxy[:50] if proxy else "\u76f4\u8fde\uff08\u65e0\u4ee3\u7406\uff09"
+        print(f"[ip2free] \u5c1d\u8bd5 [{idx+1}/{len(chain)}]: {label}", flush=True)
+
+        success, msg, is_proxy_err = try_register_with_proxy(
+            outlook_email, outlook_password, ip2free_password,
+            proxy, invite_code, headless, access_token
+        )
+
+        if success:
+            return True, msg
+
+        print(f"[ip2free] \u5931\u8d25: {msg}", flush=True)
+        if is_proxy_err:
+            chain.mark_failed(proxy)
+            print(f"[ip2free] \u4ee3\u7406\u9510\u8d25\uff0c\u5207\u6362\u4e0b\u4e00\u4e2a\u2026", flush=True)
+            continue
+        else:
+            # \u975e\u4ee3\u7406\u9519\u8bef\uff08\u9a8c\u8bc1\u7801/\u9875\u9762\u95ee\u9898\uff09\u2014 \u4e0d\u5fc5\u5207\u6362\u4ee3\u7406
+            return False, msg
+
+    return False, "\u6240\u6709\u4ee3\u7406\u5747\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5 Webshare \u8d26\u53f7\u72b6\u6001"
+
 
 def main():
-    parser = argparse.ArgumentParser(description="ip2free.com 注册脚本")
-    parser.add_argument("--email",            required=True,  help="Outlook 邮箱地址")
-    parser.add_argument("--outlook-password", default="",     help="Outlook 密码（IMAP 读信用）")
-    parser.add_argument("--access-token",     default="",     help="Outlook OAuth access token（优先于密码）")
-    parser.add_argument("--ip2free-password", default="",     help="ip2free 账号密码（不填则从 Outlook 密码派生）")
-    parser.add_argument("--proxy",            default="",     help="代理格式: http://user:pass@host:port")
-    parser.add_argument("--invite-code",      default=DEFAULT_INVITE, help="邀请码")
-    parser.add_argument("--headless",         default="true", help="无头模式 (true/false)")
+    parser = argparse.ArgumentParser(description="ip2free.com \u6ce8\u518c")
+    parser.add_argument("--email",            required=True)
+    parser.add_argument("--outlook-password", default="")
+    parser.add_argument("--access-token",     default="")
+    parser.add_argument("--ip2free-password", default="")
+    parser.add_argument("--proxy",            default="",  help="\u5355\u4e2a\u624b\u52a8\u4ee3\u7406")
+    parser.add_argument("--proxies",          default="",  help="\u591a\u4ee3\u7406\u9017\u53f7\u5206\u9694")
+    parser.add_argument("--no-auto-proxy",    action="store_true", help="\u7981\u7528 DB \u81ea\u9002\u5e94\u9009\u53d6")
+    parser.add_argument("--invite-code",      default=DEFAULT_INVITE)
+    parser.add_argument("--headless",         default="true")
     args = parser.parse_args()
 
     ip2free_pwd = args.ip2free_password or gen_ip2free_password(args.outlook_password or "Aa123456")
     headless    = args.headless.lower() not in ("false", "0", "no")
+    auto_proxy  = not args.no_auto_proxy
 
-    print(f"[ip2free] 开始注册 | email={args.email} | proxy={'有' if args.proxy else '无'}", flush=True)
+    # \u6574\u5408\u624b\u52a8\u4ee3\u7406\u5217\u8868
+    manual = []
+    if args.proxies:
+        manual.extend([p.strip() for p in args.proxies.split(",") if p.strip()])
+    if args.proxy:
+        manual.insert(0, args.proxy)
 
-    success, msg = register_ip2free(
+    print(f"[ip2free] \u5f00\u59cb | email={args.email} | \u624b\u52a8={len(manual)} | auto={auto_proxy}", flush=True)
+
+    success, msg = register_ip2free_adaptive(
         outlook_email=args.email,
         outlook_password=args.outlook_password,
         ip2free_password=ip2free_pwd,
-        proxy=args.proxy,
+        manual_proxies=manual,
         invite_code=args.invite_code,
         headless=headless,
         access_token=args.access_token,
+        auto_proxy=auto_proxy,
     )
 
     result = {
@@ -386,7 +348,7 @@ def main():
         "ip2free_password": ip2free_pwd if success else "",
         "message":          msg,
     }
-    print("\n── JSON 结果 ──")
+    print("\n\u2500\u2500 JSON \u7ed3\u679c \u2500\u2500")
     print(json.dumps([result], ensure_ascii=False, indent=2))
     sys.exit(0 if success else 1)
 

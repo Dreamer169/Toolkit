@@ -2430,35 +2430,37 @@ router.post("/tools/ip2free/register", async (req, res) => {
   }
 
   const jobId = `ip2free_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  let proxy = proxyInput;
   const preJobLogs: Array<{ type: string; message: string }> = [];
 
-  // 自动从 proxies 表选取 Webshare HTTP 代理
-  if (!proxy && autoProxy) {
+  // ── 自适应多池代理选取 ────────────────────────────────────────────────────
+  // ip2free 优先级: Pool-C (Webshare HTTP) → Pool-B (subnode SOCKS5) → Pool-A (local SOCKS5)
+  // proxyInput 手动指定的代理排在最前，DB 自适应选取追加在后（供 Python 链路失败时重试）
+  let proxyList: string[] = proxyInput ? [proxyInput] : [];
+
+  if (autoProxy) {
     try {
-      const row = await queryOne<{ formatted: string }>(
-        `SELECT formatted FROM proxies WHERE ${ELIGIBLE_SHARED_PROXY_SQL} AND formatted ILIKE 'http://%' ORDER BY used_count ASC, RANDOM() LIMIT 1`
-      );
-      if (row) {
-        proxy = row.formatted;
-        await execute(
-          "UPDATE proxies SET used_count = used_count + 1, last_used = NOW() WHERE formatted = $1",
-          [proxy]
-        );
-        preJobLogs.push({ type: "log", message: `🌐 自动选取 Webshare 代理: ${proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@")}` });
+      const picked = await pickAdaptiveProxy("ip2free", 5);
+      const newProxies = picked
+        .map((p) => p.formatted)
+        .filter((f) => !proxyList.includes(f));
+      proxyList.push(...newProxies);
+      if (picked.length > 0) {
+        const summary = picked.map((p) => `${p.pool}:${p.formatted.replace(/:([^:@]{4})[^:@]*@/, ":****@").slice(0, 40)}`).join(" | ");
+        preJobLogs.push({ type: "log", message: `🌐 自适应代理池: ${picked.length} 个节点 | ${summary}` });
       } else {
-        preJobLogs.push({ type: "warn", message: "⚠ proxies 表中无可用 Webshare HTTP 代理，将在无代理模式下运行" });
+        preJobLogs.push({ type: "warn", message: "⚠ 无可用代理，将以直连模式尝试" });
       }
     } catch (e) {
-      preJobLogs.push({ type: "warn", message: `⚠ 代理选取失败: ${String(e).slice(0, 100)}` });
+      preJobLogs.push({ type: "warn", message: `⚠ 自适应代理选取失败: ${String(e).slice(0, 100)}` });
     }
   }
 
-  const proxyDisplay = proxy ? proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@") : "无代理";
+  const primaryProxy    = proxyList[0] ?? "";
+  const proxyDisplay    = primaryProxy ? primaryProxy.replace(/:([^:@]{4})[^:@]*@/, ":****@") : "无代理";
   const job = await jobQueue.create(jobId);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   for (const l of preJobLogs) job.logs.push(l as any);
-  job.logs.push({ type: "start", message: `启动 ip2free 注册: ${email}${proxy ? ` [代理: ${proxyDisplay}]` : ""}` });
+  job.logs.push({ type: "start", message: `启动 ip2free 注册: ${email} [${proxyList.length} 个代理备选]` });
 
   res.json({ success: true, jobId, message: "ip2free 注册任务已启动" });
 
@@ -2473,7 +2475,16 @@ router.post("/tools/ip2free/register", async (req, res) => {
   if (outlookPassword) args.push("--outlook-password", outlookPassword);
   if (accessToken)     args.push("--access-token",     accessToken);
   if (ip2freePassword) args.push("--ip2free-password", ip2freePassword);
-  if (proxy)           args.push("--proxy",            proxy);
+  // 传多代理列表给 Python（ip2free_register.py ProxyChain 负责逐一重试）
+  if (proxyList.length > 1) {
+    args.push("--proxies", proxyList.join(","));
+    args.push("--no-auto-proxy");   // Python 侧已有完整列表，无需再查 DB
+    job.logs.push({ type: "log", message: `🔄 多代理重试模式: ${proxyList.length} 个备选` });
+  } else if (proxyList.length === 1) {
+    args.push("--proxy", proxyList[0]);
+    args.push("--no-auto-proxy");
+  }
+  // autoProxy 且无手动代理：让 Python 自己查 DB（双保险）
 
   const child = spawn("python3", args, {
     env: { ...(process.env as Record<string, string>), PYTHONUNBUFFERED: "1" },
@@ -2755,6 +2766,71 @@ async function pickSharedProxyPool(limit: number, purpose: "generic" | "outlook"
     );
   }
   return rows;
+}
+
+/**
+ * 自适应多池代理选取 — 按用途优先级从不同代理池选取代理列表。
+ *
+ * 池优先级（由 purpose 决定）:
+ *   outlook   → local_socks5 → webshare_http → external
+ *   ip2free   → webshare_http → local_socks5 → external
+ *   cursor    → webshare_http → local_socks5 → external
+ *   generic   → webshare_http → local_socks5
+ *
+ * 返回格式化 URL 列表（空列表表示无可用代理）。
+ */
+async function pickAdaptiveProxy(
+  purpose: "outlook" | "ip2free" | "cursor" | "generic",
+  count   = 3,
+): Promise<Array<{ formatted: string; pool: string }>> {
+  const poolOrder: Record<string, string[]> = {
+    outlook:  ["local_socks5", "webshare_http"],
+    ip2free:  ["webshare_http", "local_socks5"],
+    cursor:   ["webshare_http", "local_socks5"],
+    generic:  ["webshare_http", "local_socks5"],
+  };
+
+  const POOL_CASE = `
+    CASE
+      WHEN formatted ILIKE 'http://%'                               THEN 'webshare_http'
+      WHEN (host='127.0.0.1' AND port BETWEEN 10820 AND 10845)     THEN 'local_socks5'
+      WHEN (host='127.0.0.1' AND port BETWEEN 1089 AND 1199)       THEN 'subnode_bridge'
+      ELSE 'other'
+    END
+  `;
+
+  const order   = poolOrder[purpose] ?? poolOrder["generic"];
+  const results: Array<{ formatted: string; pool: string }> = [];
+  let   remain  = Math.min(10, Math.max(1, count));
+
+  for (const pool of order) {
+    if (remain <= 0) break;
+    let filter = "";
+    if (pool === "webshare_http")  filter = "AND formatted ILIKE 'http://%'";
+    if (pool === "local_socks5")   filter = `AND host='127.0.0.1' AND port BETWEEN 10820 AND 10845`;
+    if (pool === "subnode_bridge") filter = `AND host='127.0.0.1' AND port BETWEEN 1089 AND 1199`;
+    if (!filter) continue;
+
+    try {
+      const rows = await query<{ formatted: string }>(
+        `SELECT formatted FROM proxies
+         WHERE ${ELIGIBLE_SHARED_PROXY_SQL} ${filter}
+         ORDER BY used_count ASC, RANDOM()
+         LIMIT $1`,
+        [remain]
+      );
+      for (const r of rows) results.push({ formatted: r.formatted, pool });
+      remain -= rows.length;
+    } catch { /* non-fatal */ }
+  }
+
+  if (results.length > 0) {
+    await execute(
+      "UPDATE proxies SET used_count=used_count+1, last_used=NOW() WHERE formatted=ANY($1::text[])",
+      [results.map((r) => r.formatted)]
+    ).catch(() => {});
+  }
+  return results;
 }
 
 function shouldForwardCfPool(error?: Error) {
