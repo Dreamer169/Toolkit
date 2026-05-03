@@ -25,17 +25,60 @@ LOCAL_API      = "http://localhost:8081"
 
 
 def gen_ip2free_password(base: str) -> str:
+    """生成符合格式的随机密码（不使用固定前缀，避免批量特征）"""
     import random, string
-    pwd = re.sub(r"[^a-zA-Z0-9]", "", base)
-    if not pwd:
-        pwd = "Aa123456x"
-    if len(pwd) < 8:
-        pwd += "".join(random.choices(string.ascii_lowercase + string.digits, k=8 - len(pwd)))
-    if not any(c.isdigit() for c in pwd):
-        pwd = pwd[:-1] + "1"
-    if not any(c.isalpha() for c in pwd):
-        pwd = "a" + pwd[1:]
-    return pwd[:20]
+    # 完全随机：1大写 + 1数字 + 6小写 = 8位，符合大多数规则
+    upper  = random.choices(string.ascii_uppercase, k=2)
+    digits = random.choices(string.digits, k=2)
+    lower  = random.choices(string.ascii_lowercase, k=6)
+    parts  = upper + digits + lower
+    random.shuffle(parts)
+    return "".join(parts)
+
+
+# 真实 Chrome/Windows UA 池（含真实构建号，不用整数版本）
+_UA_POOL = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.85 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6723.116 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.6668.89 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.108 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6723.91 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.6613.137 Safari/537.36",
+]
+
+# 常见真实分辨率（宽×高）
+_VIEWPORT_POOL = [
+    {"width": 1920, "height": 1080},
+    {"width": 1366, "height": 768},
+    {"width": 1536, "height": 864},
+    {"width": 1440, "height": 900},
+    {"width": 1280, "height": 720},
+    {"width": 1600, "height": 900},
+]
+
+
+def _rand_ua():
+    import random
+    return random.choice(_UA_POOL)
+
+
+def _rand_viewport():
+    import random
+    vp = random.choice(_VIEWPORT_POOL).copy()
+    # 轻微抖动（±1~3px）让每次都略有不同
+    vp["width"]  += random.randint(-3, 3)
+    vp["height"] += random.randint(-2, 2)
+    return vp
+
+
+def _human_type(page, selector: str, text: str, min_ms: int = 40, max_ms: int = 120):
+    """模拟人工逐字输入，带随机延迟"""
+    import random
+    loc = page.locator(selector)
+    loc.click()
+    page.wait_for_timeout(random.randint(100, 300))
+    for ch in text:
+        loc.press_sequentially(ch, delay=random.randint(min_ms, max_ms))
 
 
 def fetch_verification_code_graph(account_id: int, timeout_s: int = CODE_WAIT_SEC) -> str | None:
@@ -110,6 +153,9 @@ def try_register_with_proxy(
     is_proxy_error = False
     try:
         with sync_playwright() as p:
+            import random as _rnd
+            _ua = _rand_ua()
+            _vp = _rand_viewport()
             browser = p.chromium.launch(
                 headless=headless,
                 args=[
@@ -118,22 +164,43 @@ def try_register_with_proxy(
                     "--disable-dev-shm-usage",
                     "--disable-blink-features=AutomationControlled",
                     "--disable-infobars",
-                    "--disable-gpu",
                     "--no-first-run",
                     "--ignore-certificate-errors",
+                    # WebRTC: 屏蔽本地 IP 泄漏
+                    "--enforce-webrtc-ip-permission-check",
+                    "--disable-webrtc-encryption",
+                    "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+                    # 去除其他自动化痕迹
+                    "--disable-background-networking",
+                    "--disable-default-apps",
+                    "--disable-extensions",
+                    "--disable-hang-monitor",
+                    "--disable-popup-blocking",
+                    "--disable-prompt-on-repost",
+                    "--disable-sync",
+                    "--metrics-recording-only",
+                    "--password-store=basic",
+                    "--use-mock-keychain",
                 ],
                 proxy=proxy_cfg,
             )
             ctx  = browser.new_context(
                 locale="zh-CN",
                 timezone_id="Asia/Shanghai",
-                viewport={"width": 1280, "height": 800},
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
-                ),
+                viewport=_vp,
+                user_agent=_ua,
+                # 额外通过 JS 让 navigator.platform / hardwareConcurrency 更真实
+                java_script_enabled=True,
             )
+            # patch navigator.platform & hardwareConcurrency
+            ctx.add_init_script("""
+                Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+                Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => """ +
+                str(_rnd.choice([4, 6, 8, 12, 16])) + """});
+                Object.defineProperty(navigator, 'deviceMemory', {get: () => """ +
+                str(_rnd.choice([4, 8, 16])) + """});
+                Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 0});
+            """)
             page = ctx.new_page()
 
             url = f"{REGISTER_URL}?inviteCode={invite_code}"
@@ -158,12 +225,12 @@ def try_register_with_proxy(
                     pass
                 return False, f"页面未加载 (#email 未出现), URL={cur}", is_proxy_error
 
-            # 填写 email 和 password
+            # 填写 email 和 password（模拟人工输入）
+            import random as _rnd2
             for fid, val in [("#email", outlook_email), ("#password", ip2free_password)]:
-                loc = page.locator(fid)
-                page.evaluate(f"el=document.querySelector(\"{fid}\");if(el){{el.removeAttribute('readonly');el.focus();}}")
-                loc.fill(val)
-                page.wait_for_timeout(300)
+                page.evaluate(f"el=document.querySelector(\"{fid}\");if(el){{el.removeAttribute('readonly');}}")
+                _human_type(page, fid, val)
+                page.wait_for_timeout(_rnd2.randint(200, 500))
 
             # 填写邀请码
             try:
