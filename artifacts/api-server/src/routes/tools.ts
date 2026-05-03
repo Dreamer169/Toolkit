@@ -5444,4 +5444,110 @@ router.delete('/tools/webshare/register/:jobId', (req, res) => {
   res.json({ success: !!stopped });
 });
 
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Oxylabs.io 注册路由
+// ═══════════════════════════════════════════════════════════════════════════
+
+// POST /tools/oxylabs/register
+router.post("/tools/oxylabs/register", async (req, res) => {
+  const {
+    email, password,
+    first_name = "", last_name = "", company = "", phone = "",
+    proxy = "",
+    headless = true,
+  } = req.body as { email?: string; password?: string; first_name?: string; last_name?: string; company?: string; phone?: string; proxy?: string; headless?: boolean };
+
+  if (!email || !password) {
+    res.status(400).json({ success: false, error: "email 和 password 不能为空" });
+    return;
+  }
+
+  const jobId = `oxy_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const job = await jobQueue.create(jobId);
+  job.logs.push({ type: "start", message: `启动 Oxylabs 注册 — ${email}` });
+  if (proxy) job.logs.push({ type: "log", message: `代理: ${proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@")}` });
+  res.json({ success: true, jobId, message: "Oxylabs 注册任务已启动" });
+
+  const { spawn } = await import("child_process");
+  const scriptPath = new URL("../oxylabs_register.py", import.meta.url).pathname;
+  const args = [scriptPath, "--email", email, "--password", password, "--headless", headless ? "true" : "false"];
+  if (proxy)      args.push("--proxy",   proxy);
+  if (first_name) args.push("--first",   first_name);
+  if (last_name)  args.push("--last",    last_name);
+  if (company)    args.push("--company", company);
+  if (phone)      args.push("--phone",   phone);
+
+  const child = spawn("python3", args, {
+    env: { ...(process.env as Record<string, string>), PYTHONUNBUFFERED: "1" },
+  });
+  jobQueue.setChild(jobId, child);
+
+  let jsonBuf = "";
+  let inJson = false;
+
+  child.stdout.on("data", (chunk: Buffer) => {
+    const raw = chunk.toString();
+    if (raw.includes("── JSON 结果 ──") || inJson) { inJson = true; jsonBuf += raw; }
+    for (const line of raw.split("\n")) {
+      const t = line.trim();
+      if (!t || t.startsWith("──") || (t.startsWith("{") && t.endsWith("}"))) continue;
+      const lvl = (t.includes("✅") || t.includes("成功")) ? "ok"
+                : (t.includes("❌") || t.includes("失败") || t.includes("错误")) ? "error"
+                : (t.includes("⚠") || t.includes("⏳")) ? "warn" : "log";
+      job.logs.push({ type: lvl, message: t });
+    }
+  });
+
+  child.stderr.on("data", (chunk: Buffer) => {
+    const t = chunk.toString().trim();
+    if (t && !t.includes("DeprecationWarning") && !t.includes("asyncio") && !t.includes("FutureWarning")) {
+      job.logs.push({ type: "warn", message: `[stderr] ${t.slice(0, 200)}` });
+    }
+  });
+
+  child.on("close", async (code: number | null) => {
+    let oxyResult: Record<string, unknown> | null = null;
+    const jsonStart = jsonBuf.indexOf("{");
+    if (jsonStart >= 0) {
+      try { oxyResult = JSON.parse(jsonBuf.slice(jsonStart).trim()); } catch {}
+    }
+    if (oxyResult) {
+      if (oxyResult["success"]) {
+        job.logs.push({ type: "ok", message: `✅ Oxylabs 注册成功: ${oxyResult["email"]}` });
+        if (oxyResult["username"]) job.logs.push({ type: "ok", message: `👤 用户名: ${oxyResult["username"]}` });
+        job.accounts.push({ email: String(oxyResult["email"] ?? ""), password: String(oxyResult["password"] ?? "") });
+      } else {
+        job.logs.push({ type: "error", message: `❌ 失败: ${oxyResult["error"]}` });
+      }
+    } else if (code !== 0) {
+      job.logs.push({ type: "error", message: `❌ 进程异常退出: ${code}` });
+    }
+    (job as any)._oxyResult = oxyResult;
+    await jobQueue.finish(jobId, code ?? -1, (oxyResult?.["success"] || code === 0) ? "done" : "failed");
+  });
+});
+
+// GET /tools/oxylabs/register/:jobId
+router.get("/tools/oxylabs/register/:jobId", async (req, res) => {
+  const job = await jobQueue.get(req.params.jobId);
+  if (!job) { res.status(404).json({ success: false, error: "任务不存在" }); return; }
+  const since = Number(req.query.since ?? 0);
+  res.json({
+    success: true,
+    status: job.status,
+    logs: job.logs.slice(since),
+    nextSince: job.logs.length,
+    result: (job as any)._oxyResult ?? null,
+    exitCode: job.exitCode,
+  });
+});
+
+// DELETE /tools/oxylabs/register/:jobId
+router.delete("/tools/oxylabs/register/:jobId", (req, res) => {
+  const stopped = jobQueue.stop(req.params.jobId);
+  res.json({ success: !!stopped });
+});
+
 export default router;
