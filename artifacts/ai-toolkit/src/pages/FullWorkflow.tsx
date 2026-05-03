@@ -125,7 +125,7 @@ export default function FullWorkflow() {
           email: data.outlook.email,
           password: data.outlook.password,
           autoProxy: !proxy && autoProxy,
-          proxyMode: !proxy && autoProxy ? "cf" : "",
+          proxyMode: !proxy && autoProxy ? "shared" : "",
           cfPort: 443,
         }),
       });

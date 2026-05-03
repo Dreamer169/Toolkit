@@ -150,9 +150,12 @@ class BaseController:
 
     def _build_proxy_cfg(self):
         """
-        Chromium 不支持带认证的 SOCKS5，因此：
-        有凭据时 → 启动本地 Socks5Relay（无认证），转发到上游带认证的代理
-        无凭据时 → 直接传给 Chromium
+        代理配置修复 (Bug Fix: Webshare HTTP 代理不能走 Socks5Relay):
+        SOCKS5 有凭据 → 启动本地 Socks5Relay（无认证），转发到上游带认证的 SOCKS5 代理
+        HTTP  有凭据 → 使用 Playwright 原生 username/password 认证（Chromium 支持 HTTP 代理认证）
+        无凭据       → 直接传给 Chromium
+        注意: Webshare 格式为 http://user:pass@host:port，属 HTTP 代理，
+              不能传给 Socks5Relay（SOCKS5 握手协议与 HTTP 代理协议不兼容，连接必失败）。
         """
         if not self.proxy:
             return None
@@ -160,14 +163,24 @@ class BaseController:
         m = re.match(r'(socks5h?|http|https)://([^:]+):([^@]+)@([^:]+):(\d+)', self.proxy)
         if m:
             _scheme, user, password, host, port = m.groups()
-            # 启动本地无认证中转代理
-            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            from socks5_relay import Socks5Relay
-            relay = Socks5Relay(host, int(port), user, password)
-            local_port = relay.start()
-            self._relay = relay  # 保持引用，防止 GC
-            print(f"[relay] 本地中转代理启动：127.0.0.1:{local_port} → {host}:{port}", flush=True)
-            return {"server": f"socks5://127.0.0.1:{local_port}", "bypass": "localhost"}
+            if _scheme in ("socks5", "socks5h"):
+                # SOCKS5：Chromium 不支持带认证 SOCKS5，需要本地无认证中转
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                from socks5_relay import Socks5Relay
+                relay = Socks5Relay(host, int(port), user, password)
+                local_port = relay.start()
+                self._relay = relay  # 保持引用，防止 GC
+                print(f"[relay] SOCKS5 中转启动：127.0.0.1:{local_port} → {host}:{port}", flush=True)
+                return {"server": f"socks5://127.0.0.1:{local_port}", "bypass": "localhost"}
+            else:
+                # HTTP/HTTPS：Playwright 原生支持用户名密码认证（无需中转）
+                print(f"[proxy] HTTP代理（原生认证）：{host}:{port}", flush=True)
+                return {
+                    "server":   f"http://{host}:{port}",
+                    "username": user,
+                    "password": password,
+                    "bypass":   "localhost",
+                }
         # 无凭据格式，直接用
         return {"server": self.proxy, "bypass": "localhost"}
 

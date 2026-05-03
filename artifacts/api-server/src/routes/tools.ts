@@ -1765,6 +1765,7 @@ function classifyToolJob(jobId: string) {
   if (jobId.startsWith("retoken_")) return { source: "tools", kind: "outlook_retoken", title: "Outlook Retoken" };
   if (jobId.startsWith("np_reg_")) return { source: "tools", kind: "novproxy_register", title: "NovProxy 注册" };
   if (jobId.startsWith("np_login_")) return { source: "tools", kind: "novproxy_login", title: "NovProxy 登录" };
+  if (jobId.startsWith("ip2free_")) return { source: "tools", kind: "ip2free_register", title: "ip2free 注册" };
   return { source: "tools", kind: "tool_job", title: "工具任务" };
 }
 
@@ -2402,6 +2403,160 @@ router.post("/tools/webshare/sync", async (_req, res) => {
     return;
   }
   res.json({ success: true, ...result, message: `已同步 ${result.synced}/${result.total} 个 Webshare 代理到 proxies 表` });
+});
+
+// ── ip2free.com 注册 ──────────────────────────────────────────────────────────
+
+// POST /tools/ip2free/register — 使用 Webshare 代理 + Outlook 邮箱在 ip2free.com 注册
+router.post("/tools/ip2free/register", async (req, res) => {
+  const {
+    email           = "",
+    outlookPassword = "",
+    accessToken     = "",
+    ip2freePassword = "",
+    proxy: proxyInput = "",
+    inviteCode      = "7pdC4VeeYw",
+    headless        = true,
+    autoProxy       = false,
+  } = req.body as {
+    email?: string; outlookPassword?: string; accessToken?: string;
+    ip2freePassword?: string; proxy?: string; inviteCode?: string;
+    headless?: boolean; autoProxy?: boolean;
+  };
+
+  if (!email) {
+    res.status(400).json({ success: false, error: "email 是必填项" });
+    return;
+  }
+
+  const jobId = `ip2free_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  let proxy = proxyInput;
+  const preJobLogs: Array<{ type: string; message: string }> = [];
+
+  // 自动从 proxies 表选取 Webshare HTTP 代理
+  if (!proxy && autoProxy) {
+    try {
+      const row = await queryOne<{ formatted: string }>(
+        `SELECT formatted FROM proxies WHERE ${ELIGIBLE_SHARED_PROXY_SQL} AND formatted ILIKE 'http://%' ORDER BY used_count ASC, RANDOM() LIMIT 1`
+      );
+      if (row) {
+        proxy = row.formatted;
+        await execute(
+          "UPDATE proxies SET used_count = used_count + 1, last_used = NOW() WHERE formatted = $1",
+          [proxy]
+        );
+        preJobLogs.push({ type: "log", message: `🌐 自动选取 Webshare 代理: ${proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@")}` });
+      } else {
+        preJobLogs.push({ type: "warn", message: "⚠ proxies 表中无可用 Webshare HTTP 代理，将在无代理模式下运行" });
+      }
+    } catch (e) {
+      preJobLogs.push({ type: "warn", message: `⚠ 代理选取失败: ${String(e).slice(0, 100)}` });
+    }
+  }
+
+  const proxyDisplay = proxy ? proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@") : "无代理";
+  const job = await jobQueue.create(jobId);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  for (const l of preJobLogs) job.logs.push(l as any);
+  job.logs.push({ type: "start", message: `启动 ip2free 注册: ${email}${proxy ? ` [代理: ${proxyDisplay}]` : ""}` });
+
+  res.json({ success: true, jobId, message: "ip2free 注册任务已启动" });
+
+  const { spawn } = await import("child_process");
+  const scriptPath = new URL("../ip2free_register.py", import.meta.url).pathname;
+  const args: string[] = [
+    scriptPath,
+    "--email",       email,
+    "--invite-code", inviteCode,
+    "--headless",    headless ? "true" : "false",
+  ];
+  if (outlookPassword) args.push("--outlook-password", outlookPassword);
+  if (accessToken)     args.push("--access-token",     accessToken);
+  if (ip2freePassword) args.push("--ip2free-password", ip2freePassword);
+  if (proxy)           args.push("--proxy",            proxy);
+
+  const child = spawn("python3", args, {
+    env: { ...(process.env as Record<string, string>), PYTHONUNBUFFERED: "1" },
+  });
+  jobQueue.setChild(jobId, child);
+
+  let jsonBuf = "";
+  let inJson  = false;
+
+  child.stdout.on("data", (chunk: Buffer) => {
+    const raw = chunk.toString();
+    if (raw.includes("── JSON 结果 ──") || inJson) { inJson = true; jsonBuf += raw; }
+    for (const line of raw.split("\n").filter(Boolean)) {
+      const t = line.trim();
+      if (!t || t === "── JSON 结果 ──" || t === "[" || t === "]") continue;
+      let type = "log";
+      if (t.includes("⚠"))       type = "warn";
+      else if (t.includes("❌")) type = "error";
+      else if (t.includes("✅")) type = "success";
+      job.logs.push({ type, message: t });
+    }
+  });
+
+  child.stderr.on("data", (chunk: Buffer) => {
+    const msg = chunk.toString().trim();
+    if (msg && !msg.includes("DeprecationWarning")) {
+      for (const l of msg.split("\n")) {
+        const lt = l.trim();
+        if (lt && lt.length > 5) job.logs.push({ type: "log", message: `[sys] ${lt.slice(0, 200)}` });
+      }
+    }
+  });
+
+  child.on("close", async (code) => {
+    let regOk      = false;
+    let ip2freePwd = "";
+    try {
+      const start = jsonBuf.indexOf("[");
+      if (start >= 0) {
+        const parsed = JSON.parse(jsonBuf.slice(start)) as Array<Record<string, unknown>>;
+        if (parsed[0]?.success) {
+          regOk      = true;
+          ip2freePwd = String(parsed[0].ip2free_password || "");
+          job.accounts.push({ email, password: ip2freePwd });
+          // 持久化到 accounts 表
+          try {
+            await execute(
+              `INSERT INTO accounts (platform, email, password, status, notes)
+               VALUES ($1,$2,$3,$4,$5)
+               ON CONFLICT (platform, email) DO UPDATE SET
+                 password=EXCLUDED.password, status=EXCLUDED.status,
+                 notes=EXCLUDED.notes, updated_at=NOW()`,
+              ["ip2free", email, ip2freePwd, "active", `ip2free注册 inv:${inviteCode}`]
+            );
+            job.logs.push({ type: "log", message: `📦 ip2free 账号已入库 (${email})` });
+          } catch (dbErr) {
+            job.logs.push({ type: "warn", message: `⚠ 数据库保存失败: ${dbErr}` });
+          }
+        }
+      }
+    } catch { /* ignore JSON parse error */ }
+
+    job.logs.push({
+      type:    "done",
+      message: `ip2free 注册${regOk ? "成功 ✅" : "失败 ❌"} · ${email}`,
+    });
+    await jobQueue.finish(jobId, code ?? -1, "done");
+  });
+});
+
+// GET /tools/ip2free/register/:jobId — 查询注册任务状态
+router.get("/tools/ip2free/register/:jobId", async (req, res) => {
+  const job = await jobQueue.get(req.params.jobId);
+  if (!job) { res.status(404).json({ success: false, error: "任务不存在" }); return; }
+  const since = Number(req.query.since ?? 0);
+  res.json({
+    success:   true,
+    status:    job.status,
+    accounts:  job.accounts,
+    logs:      job.logs.slice(since),
+    nextSince: job.logs.length,
+    exitCode:  job.exitCode,
+  });
 });
 
 
