@@ -1,13 +1,34 @@
 #!/usr/bin/env python3
-"""smsreceivefree_fetch.py -- smsreceivefree.xyz SMS fetcher
-Numbers: index.php?t=us  ->  Bootstrap card list (sms.php?p=NUMBER links)
-Messages: sms.php?p=NUMBER  ->  .card-header + .card-body HTML regex extraction
-"""
-import asyncio, re, json, argparse
+"""smsreceivefree_fetch.py — with file-based cache (5-min TTL for messages, 10-min for numbers)"""
+import asyncio, re, json, argparse, os, time, sys
 
-CHROME = '/data/cache/ms-playwright/chromium-1208/chrome-linux64/chrome'
-BASE   = 'https://smsreceivefree.xyz'
+CHROME    = '/data/cache/ms-playwright/chromium-1208/chrome-linux64/chrome'
+BASE      = 'https://smsreceivefree.xyz'
+CACHE_DIR = '/tmp/sms_cache_srf'
+TTL_MSG   = 300   # 5 min
+TTL_NUMS  = 600   # 10 min
 
+# ── file cache ───────────────────────────────────────────────────────────
+def _cache_get(key: str, ttl: int):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    path = f'{CACHE_DIR}/{key}.json'
+    if os.path.exists(path) and (time.time() - os.path.getmtime(path)) < ttl:
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return None
+
+def _cache_set(key: str, data):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    try:
+        with open(f'{CACHE_DIR}/{key}.json', 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+# ── browser helpers ──────────────────────────────────────────────────────
 def make_opts():
     from pydoll.browser.options import ChromiumOptions
     o = ChromiumOptions()
@@ -22,31 +43,41 @@ def make_opts():
     o.start_timeout = 30
     return o
 
-async def _bypass_tab():
+async def _open_browser():
     from pydoll.browser import Chrome
     browser = Chrome(options=make_opts())
     await browser.__aenter__()
     tab = await browser.start()
-    await tab.execute_script('Object.defineProperty(navigator,"webdriver",{get:()=>undefined})')
-    async with tab.expect_and_bypass_cloudflare_captcha(time_to_wait_captcha=30):
-        await tab.go_to(BASE + '/')
-    await asyncio.sleep(2)
+    try:
+        await tab.execute_script('Object.defineProperty(navigator,"webdriver",{get:()=>undefined})')
+    except Exception:
+        pass
     return browser, tab
 
-async def _get_html(tab):
-    r = await tab.execute_script('return document.body.innerHTML')
-    return r.get('result',{}).get('result',{}).get('value','')
+async def _bypass_and_go(tab, url: str):
+    async with tab.expect_and_bypass_cloudflare_captcha(time_to_wait_captcha=40):
+        await tab.go_to(url)
+    await asyncio.sleep(3)
 
-def _parse_messages(html):
-    """Parse SMS messages from sms.php?p=NUMBER page HTML.
-    Structure: .card-header (sender) + .card-body (text + footer timestamp).
-    """
+async def _get_html(tab) -> str:
+    try:
+        r = await tab.execute_script('return document.documentElement.outerHTML')
+        val = r.get('result', {}).get('result', {}).get('value', '')
+        if val:
+            return val
+    except Exception:
+        pass
+    try:
+        return await tab.page_source
+    except Exception:
+        return ''
+
+def _parse_messages(html: str):
     messages = []
-    # Match each card-header + card-body pair
     pairs = re.findall(
-        r'<div[^>]*class="card-header[^"]*"[^>]*>(.*?)</div>'
+        r'<div[^>]*class="[^"]*card-header[^"]*"[^>]*>(.*?)</div>'
         r'.*?'
-        r'<div[^>]*class="card-body[^"]*"[^>]*>(.*?)</div>',
+        r'<div[^>]*class="[^"]*card-body[^"]*"[^>]*>(.*?)</div>',
         html, re.DOTALL | re.IGNORECASE
     )
     for header_raw, body_raw in pairs:
@@ -54,54 +85,97 @@ def _parse_messages(html):
         footer_m = re.search(r'<footer[^>]*>(.*?)</footer>', body_raw, re.DOTALL | re.IGNORECASE)
         ts = re.sub(r'<[^>]+>', '', footer_m.group(1)).strip() if footer_m else ''
         body = re.sub(r'<footer.*?</footer>', '', body_raw, flags=re.DOTALL | re.IGNORECASE)
-        body = re.sub(r'<div[^>]*class="clear[^"]*"[^>]*/?>', '', body, flags=re.IGNORECASE)
+        body = re.sub(r'<div[^>]*class="[^"]*clear[^"]*"[^>]*/?>', '', body, flags=re.IGNORECASE)
         body = re.sub(r'<[^>]+>', '', body).strip()
         if body and len(body) > 2:
-            messages.append({'info': (sender + '  ' + ts).strip(), 'body': body})
+            info = (sender + ('  ' + ts if ts else '')).strip()
+            messages.append({'info': info, 'body': body})
     return messages
 
+# ── numbers scrape ───────────────────────────────────────────────────────
 async def fetch_numbers_async():
-    browser, tab = await _bypass_tab()
+    cached = _cache_get('numbers', TTL_NUMS)
+    if cached:
+        return cached
+    browser, tab = await _open_browser()
     results = []
     try:
-        await tab.go_to(BASE + '/index.php?t=us')
-        await asyncio.sleep(5)
+        await _bypass_and_go(tab, BASE + '/index.php?t=us')
+        await asyncio.sleep(4)
         html = await _get_html(tab)
-        nums_links = re.findall(r'sms\.php\?p=(\d{10,11})', html)
-        nums_text  = re.findall(r'\+1\s+(\d{10})', html)
         seen = set()
-        all_nums = []
-        for n in nums_links + nums_text:
-            if n and len(n) == 10 and n not in seen:
-                seen.add(n)
-                all_nums.append(n)
-        ts_pairs = re.findall(r'\+1\s+(\d{10})(?:[^<]*)</p>\s*<p[^>]*>([0-9 :-]+)</p>', html)
-        ts_map = {n: ts.strip() for n, ts in ts_pairs}
-        for n in all_nums:
-            results.append({'id': n, 'number': '+1 ' + n, 'lastSeen': ts_map.get(n,''), 'source': 'smsreceivefree'})
+        for n in re.findall(r'sms\.php\?p=(\d{8,11})', html) + re.findall(r'\+1[\s-]?(\d{10})', html):
+            digits = re.sub(r'\D', '', n)
+            if len(digits) == 10 and digits not in seen:
+                seen.add(digits)
+                results.append({'id': digits, 'number': '+1 ' + digits, 'source': 'smsreceivefree'})
+    except Exception as e:
+        results = [{'error': str(e)}]
     finally:
-        await browser.__aexit__(None, None, None)
+        try:
+            await browser.__aexit__(None, None, None)
+        except Exception:
+            pass
+    if results and 'error' not in results[0]:
+        _cache_set('numbers', results)
     return results
 
+# ── messages scrape ──────────────────────────────────────────────────────
 async def fetch_messages_async(phone: str):
-    browser, tab = await _bypass_tab()
+    ckey = f'msgs_{phone}'
+    cached = _cache_get(ckey, TTL_MSG)
+    if cached:
+        cached['cached'] = True
+        return cached
+
+    browser, tab = await _open_browser()
     try:
-        await tab.go_to(f'{BASE}/sms.php?p={phone}')
-        await asyncio.sleep(6)
+        await _bypass_and_go(tab, f'{BASE}/sms.php?p={phone}')
+        await asyncio.sleep(5)
         html = await _get_html(tab)
         messages = _parse_messages(html)
-        return {'phoneNumber': '+1 ' + phone, 'source': 'smsreceivefree', 'messages': messages, 'count': len(messages)}
+        # Retry if empty (sometimes needs extra wait)
+        if not messages:
+            await asyncio.sleep(4)
+            html = await _get_html(tab)
+            messages = _parse_messages(html)
+        result = {
+            'phoneNumber': '+1 ' + phone,
+            'source': 'smsreceivefree',
+            'messages': messages,
+            'count': len(messages),
+            'cached': False,
+        }
+        if messages:
+            _cache_set(ckey, result)
+        return result
     except Exception as e:
         return {'error': str(e), 'phoneNumber': '+1 ' + phone, 'source': 'smsreceivefree', 'messages': []}
     finally:
-        await browser.__aexit__(None, None, None)
+        try:
+            await browser.__aexit__(None, None, None)
+        except Exception:
+            pass
 
+# ── main ─────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
-    ap.add_argument('--action', choices=['numbers','messages'], required=True)
+    ap.add_argument('--action', choices=['numbers', 'messages'], required=True)
     ap.add_argument('--phone', default='')
+    ap.add_argument('--force', action='store_true', help='Delete cache and re-fetch')
     args = ap.parse_args()
+
     if args.action == 'numbers':
+        if args.force:
+            try: os.remove(f'{CACHE_DIR}/numbers.json')
+            except FileNotFoundError: pass
         print(json.dumps(asyncio.run(fetch_numbers_async())))
     else:
-        print(json.dumps(asyncio.run(fetch_messages_async(args.phone))))
+        if not args.phone:
+            print(json.dumps({'error': 'phone required', 'messages': []}))
+            sys.exit(1)
+        phone = args.phone.replace(' ', '')
+        if args.force:
+            try: os.remove(f'{CACHE_DIR}/msgs_{phone}.json')
+            except FileNotFoundError: pass
+        print(json.dumps(asyncio.run(fetch_messages_async(phone))))
