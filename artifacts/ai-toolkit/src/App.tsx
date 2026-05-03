@@ -119,10 +119,11 @@ import WafBypass from "@/pages/WafBypass";
 import NovproxyPanel from "@/pages/NovproxyPanel";
 import SmsCenter from "@/pages/SmsCenter";
 import WebshareRegister from "@/pages/WebshareRegister";
+import OxylabsRegister from "@/pages/OxylabsRegister";
 
 const queryClient = new QueryClient();
 
-type Tab = "home" | "agent" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "machine-reset" | "fingerprint" | "outlook" | "mail-center" | "cursor-register" | "replit-register" | "sub2api" | "team-register" | "openai-pool" | "data-manager" | "full-workflow" | "monitor" | "sms-center" | "captcha" | "waf-bypass" | "novproxy" | "webshare-register";
+type Tab = "home" | "agent" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "machine-reset" | "fingerprint" | "outlook" | "mail-center" | "cursor-register" | "replit-register" | "sub2api" | "team-register" | "openai-pool" | "data-manager" | "full-workflow" | "monitor" | "sms-center" | "captcha" | "waf-bypass" | "novproxy" | "webshare-register" | "oxylabs-register";
 
 const tabs: { id: Tab; label: string; icon: string; badge?: string }[] = [
   { id: "home",             label: "工具导航",        icon: "🗂️" },
@@ -142,6 +143,7 @@ const tabs: { id: Tab; label: string; icon: string; badge?: string }[] = [
   { id: "novproxy",         label: "Novproxy 工作流",   icon: "🔐", badge: "pydoll" },
   { id: "sms-center",      label: "短信接收中心",       icon: "📱", badge: "免费号码" },
   { id: "webshare-register", label: "Webshare 注册",    icon: "🌐", badge: "全自动" },
+  { id: "oxylabs-register",  label: "Oxylabs 注册",    icon: "🌱", badge: "全自动" },
   { id: "sub2api",          label: "Token 转发管理",   icon: "🚀", badge: "Sub2Api" },
   { id: "keycheck",         label: "Key 验证",        icon: "🔑", badge: "多平台" },
   { id: "tokencheck",       label: "批量检测",        icon: "⚡", badge: "多平台" },
@@ -241,6 +243,7 @@ function App() {
             {tab === "novproxy" && <NovproxyPanel />}
             {tab === "sms-center" && <SmsCenter />}
             {tab === "webshare-register" && <WebshareRegister />}
+            {tab === "oxylabs-register"  && <OxylabsRegister  />}
             {tab === "sub2api" && <Sub2ApiManager />}
             {tab === "data-manager" && <DataManager />}
             {tab === "full-workflow" && <FullWorkflow />}
