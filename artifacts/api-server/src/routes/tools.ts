@@ -2444,13 +2444,16 @@ router.post("/tools/ip2free/register", async (req, res) => {
   // 这确保 ip2free 浏览器注册 + IMAP 验证码读取都使用与 Outlook 注册时相同的出口 IP
   let accountProxy = "";
   let outlookAccountId = 0;
+  let outlookDbPassword = "";
   if (email) {
     try {
-      const acctRow = await queryOne<{ id: number | null; proxy_formatted: string | null; proxy_port: number | null }>(
-        "SELECT id, proxy_formatted, proxy_port FROM accounts WHERE platform='outlook' AND email=$1 LIMIT 1",
+      const acctRow = await queryOne<{ id: number | null; password: string | null; proxy_formatted: string | null; proxy_port: number | null }>(
+        "SELECT id, password, proxy_formatted, proxy_port FROM accounts WHERE platform='outlook' AND email=$1 LIMIT 1",
         [email]
       );
       if (acctRow?.id) outlookAccountId = acctRow.id;
+      // 用 Outlook DB 密码作为 ip2free 注册密码（未手动指定时自动使用）
+      if (acctRow?.password && !outlookDbPassword) outlookDbPassword = acctRow.password;
       if (acctRow?.proxy_formatted) {
         accountProxy = acctRow.proxy_formatted;
       } else if (acctRow?.proxy_port && acctRow.proxy_port > 0) {
@@ -2508,7 +2511,8 @@ router.post("/tools/ip2free/register", async (req, res) => {
   ];
   if (outlookPassword) args.push("--outlook-password", outlookPassword);
   if (accessToken)     args.push("--access-token",     accessToken);
-  if (ip2freePassword) args.push("--ip2free-password", ip2freePassword);
+  const finalIp2freePassword = ip2freePassword || outlookDbPassword;
+  if (finalIp2freePassword) args.push("--ip2free-password", finalIp2freePassword);
   // 账号 DB id：Python 侧用于 Graph API 读取验证码（替代已死的 IMAP）
   if (outlookAccountId > 0) args.push("--account-id", String(outlookAccountId));
   if (accountProxy)    args.push("--account-proxy",    accountProxy);
