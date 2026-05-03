@@ -4734,6 +4734,31 @@ router.get("/tools/novproxy/cdk-records", async (_req, res) => {
 });
 
 
+// GET /tools/novproxy/status — 查询 DB 中已保存的 novproxy 账号及代理凭据状态
+router.get("/tools/novproxy/status", async (_req, res) => {
+  try {
+    type NvRow = { email: string; password: string; token: string; username: string; notes: string; status: string; updated_at: string };
+    const rows = await (query as (sql: string) => Promise<NvRow[]>)(
+      `SELECT email, password, token, username, notes, status, updated_at
+       FROM accounts WHERE platform = 'novproxy'
+       ORDER BY updated_at DESC LIMIT 200`
+    ).catch(() => [] as NvRow[]);
+    const accounts = rows.map((r: NvRow) => ({
+      email:         r.email,
+      password:      r.password,
+      proxy_user:    r.username  || "",
+      proxy_conn:    r.notes     || "",
+      token_preview: r.token ? r.token.slice(0, 20) + "…" : "",
+      status:        r.status,
+      updated_at:    r.updated_at,
+    }));
+    res.json({ success: true, total: accounts.length, accounts });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+
 // POST /tools/novproxy/diagnose -- free-trial root-cause analysis
 router.post("/tools/novproxy/diagnose", async (req, res) => {
   const { email, password, token: existingToken } = req.body as { email: string; password?: string; token?: string };
