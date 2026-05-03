@@ -560,7 +560,6 @@ export default function MailCenter() {
       setAutoCompleteMsg(`已为 ${list.length} 个账号启动自动授权`);
       setAutoCompleteLog([`🚀 启动 ${list.length} 个账号自动授权…`, ...list.map(a => `  • ${a.email}`)]);
       setAutoCompleteLogFile(d.logFile ?? "");
-      setAutoCompleteLogOffset(0);
       setAutoCompleteDone(false);
       setAutoCompleteOpen(true);
       if (autoCompleteLogRef.current) clearInterval(autoCompleteLogRef.current);
@@ -624,7 +623,6 @@ export default function MailCenter() {
       setReauthManualMsg(`已为 ${list.length} 个账号启动重授权`);
       setReauthManualLog([`🔄 启动 ${list.length} 个账号重授权…`, ...list.map(a => `  • ${a.email}`)]);
       setReauthManualLogFile(d.logFile ?? "");
-      setReauthManualLogOffset(0);
       setReauthManualDone(false);
       setReauthManualOpen(true);
       if (reauthManualLogRef.current) clearInterval(reauthManualLogRef.current);

@@ -66,7 +66,7 @@ export default function Sub2ApiManager() {
       const d = await bridgeRequest(endpoint, {
         headers: { Authorization: `Bearer ${apiKey}`, "x-api-key": apiKey },
       });
-      if (d.success) setStats(d.data);
+      if (d.success) setStats(d.data ?? null);
       else setStats({ error: d.error ?? "无法获取统计信息，请检查 API URL 和 Key", status: d.status });
     } catch (e) {
       setStats({ error: String(e) });
