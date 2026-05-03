@@ -4913,3 +4913,55 @@ router.post('/tools/smsrf/messages', async (req, res) => {
   }).catch((e: unknown) => ({ error: String(e), messages: [] }));
   res.json(result);
 });
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 文字点选验证码识别 — Text_select_captcha (FastAPI, port 8767)
+// Source: https://github.com/MgArcher/Text_select_captcha
+// POST /tools/text-captcha/identify  { dataType: 1|2, imageSource: url|base64, imageID? }
+// POST /tools/text-captcha/show      { dataType: 1|2, imageSource: url|base64 }  → jpeg
+// GET  /tools/text-captcha/health
+// ═══════════════════════════════════════════════════════════════════════════
+const TEXT_CAPTCHA_BASE = "http://127.0.0.1:8767";
+
+async function proxyTextCaptcha(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(`${TEXT_CAPTCHA_BASE}${path}`, init);
+}
+
+router.get("/tools/text-captcha/health", async (_req, res) => {
+  try {
+    const r = await proxyTextCaptcha("/");
+    const d = await r.json() as unknown;
+    res.json({ ok: r.ok, status: r.status, data: d });
+  } catch (e) {
+    res.status(503).json({ ok: false, error: String(e) });
+  }
+});
+
+router.post("/tools/text-captcha/identify", async (req, res) => {
+  try {
+    const r = await proxyTextCaptcha("/api/v1/identify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req.body),
+    });
+    const d = await r.json() as unknown;
+    res.status(r.status).json(d);
+  } catch (e) {
+    res.status(503).json({ code: 503, msg: String(e), data: null });
+  }
+});
+
+router.post("/tools/text-captcha/show", async (req, res) => {
+  try {
+    const r = await proxyTextCaptcha("/api/v1/show", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req.body),
+    });
+    const buf = await r.arrayBuffer();
+    res.status(r.status).set("Content-Type", "image/jpeg").send(Buffer.from(buf));
+  } catch (e) {
+    res.status(503).json({ error: String(e) });
+  }
+});
