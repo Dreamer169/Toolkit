@@ -83,23 +83,14 @@ except Exception:
 # Sticky-per-context still applies: each ctx pins one and reuses for all
 # google subrequests + sign-up POST (v8.27 IP-consistency).
 DEFAULT_POOL = [
-    # v8.31 2026-05-03: HKT(10854 AS4760) + HGC(10859 AS9304) RESIDENTIAL_ASN → 首位
-    # 这两个端口之前未被测试过 (FORCE_REGISTER_PORTS 里缺失)，ASN 在 RESIDENTIAL_ASN 白名单中
-    "socks5://127.0.0.1:10854",  # ★★★★ HK AS4760 HKT Limited (住宅★ RESIDENTIAL_ASN)
-    "socks5://127.0.0.1:10859",  # ★★★★ HK AS9304 HGC Global Communications (住宅★ RESIDENTIAL_ASN)
-    "socks5://127.0.0.1:10857",  # ★★★ HK AS9269 HKBN (住宅★ RESIDENTIAL_ASN, 已测但排最低)
-    "socks5://127.0.0.1:10851",  # ★★★ IT AS197075 Active Network S.p.A. (Italian ISP)
-    "socks5://127.0.0.1:10878",  # ★★ PA AS18809 Cable Onda (Panama ISP)
-    "socks5://127.0.0.1:10853",  # ★ TR AS200239 Bogahost
-    "socks5://127.0.0.1:10900",  # DC US AS21769 Coloam (Webshare)
-    "socks5://127.0.0.1:10901",  # DC US AS55286 Server-Mania (Webshare)
-    "socks5://127.0.0.1:10902",  # DC US AS396190 Leaseweb-USA (Webshare)
-    "socks5://127.0.0.1:10903",  # DC US AS36352 Colocrossing (Webshare)
-    "socks5://127.0.0.1:10904",  # DC GB AS64080 Syn (Webshare)
-    "socks5://127.0.0.1:10905",  # DC GB AS205544 Leaseweb-UK (Webshare)
-    "socks5://127.0.0.1:10907",  # DC DE AS28753 Leaseweb-DE (Webshare)
-    "socks5://127.0.0.1:10908",  # DC JP AS134351 Leaseweb-JP (Webshare)
-    # 10850/10852/10855(RU)/10856/10858 dead or low-rep — excluded.
+    "socks5://127.0.0.1:10857",  # ★★★ Chunghwa Telecom AS3462 (TW national ISP)
+    "socks5://127.0.0.1:10853",  # ★★ Fourplex Telecom AS27284 (US small telecom)
+    "socks5://127.0.0.1:10859",  # ★ Greenhost AS47172 (NL small hosting)
+    "socks5://127.0.0.1:10854",  # Vultr AS20473 (DC, KR)
+    "socks5://127.0.0.1:10855",  # M247 AS9009 (DC, GB)
+    "socks5://127.0.0.1:10851",  # Datacamp AS60068 (DC, US)
+    # 10850/10852/10856/10858 DEAD as of probe — self-healer drops at runtime.
+    # Pool (A) 10820-10845 EXCLUDED — all map to CF AS13335 datacenter.
 ]
 
 # v8.29 ASN-blocklist for runtime self-healing. Any port whose exit ASN matches

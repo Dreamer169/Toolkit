@@ -46,6 +46,8 @@ export default function OxylabsRegister() {
   const [manualLast, setManualLast] = useState("");
   const [capsolverKey, setCapsolverKey] = useState("");
   const [showCapsolverInfo, setShowCapsolverInfo] = useState(false);
+  const [cfClearance, setCfClearance] = useState("");
+  const [showCfClearanceInfo, setShowCfClearanceInfo] = useState(false);
   const [elapsed, setElapsed] = useState("0.0");
   const [olJobId, setOlJobId] = useState<string|null>(null);
   const [wsJobId, setWsJobId] = useState<string|null>(null);
@@ -96,11 +98,13 @@ export default function OxylabsRegister() {
     addLog("log",""); addLog("start","🌱 步骤 2/2：注册 Oxylabs 账号...");
     addLog("log",`📧 邮箱: ${email}`);
     if (capsolverKey) addLog("log","🔑 CapSolver API Key 已提供 → 自动解决 CF Managed Challenge");
+    if (cfClearance)  addLog("log","🍪 手动 cf_clearance 已提供 → 跳过 CF 挑战");
     const body: Record<string,unknown> = { email, password, headless };
     if (proxy)        body.proxy        = proxy;
     if (first)        body.first_name   = first;
     if (last)         body.last_name    = last;
     if (capsolverKey) body.capsolverKey = capsolverKey;
+    if (cfClearance)  body.cfClearance  = cfClearance;
     const r = await fetch(`${API}/tools/oxylabs/register`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) });
     const d = await r.json();
     if (!d.success) throw new Error(d.error||"Oxylabs 启动失败");
@@ -258,6 +262,35 @@ export default function OxylabsRegister() {
                 <div className="mt-1 text-[9px] text-amber-500/70">
                   ⚠ 无 Key 时将尝试 CF 页面导航绕过（可能失败）
                 </div>
+              )}
+            </div>
+
+            {/* Manual cf_clearance fallback */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-[10px] text-gray-500">手动 cf_clearance（可选备用）</label>
+                <button onClick={()=>setShowCfClearanceInfo(v=>!v)} className="text-[9px] text-blue-500 hover:text-blue-400">
+                  {showCfClearanceInfo?"▲ 收起":"▼ 说明"}
+                </button>
+              </div>
+              <input
+                value={cfClearance}
+                onChange={e=>setCfClearance(e.target.value)}
+                type="password"
+                placeholder="从浏览器粘贴 cf_clearance cookie 值..."
+                className={`w-full bg-[#0d1117] border rounded-lg px-3 py-2 text-xs font-mono text-gray-300 outline-none transition-colors placeholder-gray-700 ${cfClearance?"border-blue-500/50 focus:border-blue-400":"border-[#21262d] focus:border-blue-500/30"}`}
+              />
+              {showCfClearanceInfo && (
+                <div className="mt-2 p-2 bg-blue-500/5 border border-blue-500/20 rounded-lg text-[10px] text-blue-400/80 space-y-1">
+                  <div className="font-semibold text-blue-400">🍪 手动 cf_clearance 用法</div>
+                  <div>在真实浏览器中访问 <a href="https://dashboard.oxylabs.io" target="_blank" rel="noopener" className="underline">dashboard.oxylabs.io</a></div>
+                  <div>打开 DevTools → Application → Cookies → 找到 <code className="bg-blue-900/30 px-1 rounded">cf_clearance</code></div>
+                  <div>复制其 Value 粘贴到此处，有效期约 30 分钟</div>
+                  <div className="text-gray-600 pt-1 border-t border-blue-500/20">无需 CapSolver Key，免费绕过 CF</div>
+                </div>
+              )}
+              {cfClearance && (
+                <div className="mt-1 text-[9px] text-blue-400/70">✓ cf_clearance 长度: {cfClearance.length}</div>
               )}
             </div>
 

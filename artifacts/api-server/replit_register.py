@@ -1505,7 +1505,7 @@ async def fill_step1(page) -> str | None:
             for _fr in range(1):  # v8.56: 砍掉 fast-retry, 单次 captcha 失败立即返回, 让 outer outlook-rotate 接管 (CLIProxyAPI v6.9.38 同思路)
                 try:
                     # replit per-(IP,email) rate-limit window ~30-90s. Sleep BEFORE retry submit.
-                    _bw = 35 + (_fr * 5) + _fr_extra_s
+                    _bw = 8 + _fr_extra_s  # v8.72: 35s→8s (code:1 not rate-limit, fresh execute ok fast)
                     _fr_extra_s = 0  # consume
                     log(f"[fast-retry {_fr+1}/1] 等 {_bw}s 避开 replit 429 速率窗口…")
                     await page.wait_for_timeout(_bw * 1000)
@@ -3348,7 +3348,7 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
         try:
             await page.wait_for_selector(
                 'input[name="username"], input[placeholder*="username" i], #username',
-                timeout=35000
+                timeout=12000  # v8.72: 35s→12s (after fast-retry page shows verify-email fast)
             )
             log("Step2 username 字段出现")
             step2_appeared = True

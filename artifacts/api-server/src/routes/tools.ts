@@ -5364,7 +5364,11 @@ router.post('/tools/webshare/register', async (req, res) => {
   const jobId = `ws_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const job = await jobQueue.create(jobId);
   job.logs.push({ type: 'start', message: `启动 Webshare 注册 — ${email}` });
-  if (capsolverKey) job.logs.push({ type: 'log', message: '[Capsolver] 已提供 API Key，使用自动 CAPTCHA 解决方案' });
+  if (capsolverKey) {
+    job.logs.push({ type: 'log', message: '[Capsolver] 已提供 API Key，使用自动 CAPTCHA 解决方案' });
+  } else {
+    job.logs.push({ type: 'log', message: '🆓 免费模式: Xvfb + 服务器直连 IP + 音频 CAPTCHA (不需任何付费服务)' });
+  }
   if (proxy) job.logs.push({ type: 'log', message: `代理: ${proxy.replace(/:([^:@]{4})[^:@]*@/, ':****@')}` });
   res.json({ success: true, jobId, message: 'Webshare 注册任务已启动' });
 
@@ -5462,7 +5466,8 @@ router.post("/tools/oxylabs/register", async (req, res) => {
     proxy = "",
     headless = true,
     capsolverKey = "",
-  } = req.body as { email?: string; password?: string; first_name?: string; last_name?: string; company?: string; phone?: string; proxy?: string; headless?: boolean; capsolverKey?: string };
+    cfClearance = "",
+  } = req.body as { email?: string; password?: string; first_name?: string; last_name?: string; company?: string; phone?: string; proxy?: string; headless?: boolean; capsolverKey?: string; cfClearance?: string };
 
   if (!email || !password) {
     res.status(400).json({ success: false, error: "email 和 password 不能为空" });
@@ -5473,6 +5478,7 @@ router.post("/tools/oxylabs/register", async (req, res) => {
   const job = await jobQueue.create(jobId);
   job.logs.push({ type: "start", message: `启动 Oxylabs 注册 — ${email}` });
   if (capsolverKey) job.logs.push({ type: "log", message: "[CapSolver] API Key 已提供，启用 CF Managed Challenge 自动解决" });
+  if (cfClearance)  job.logs.push({ type: "log", message: `[CF] 手动 cf_clearance 已提供 (len=${cfClearance.length})，跳过 CF 挑战` });
   if (proxy) job.logs.push({ type: "log", message: `代理: ${proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@")}` });
   res.json({ success: true, jobId, message: "Oxylabs 注册任务已启动" });
 
@@ -5485,6 +5491,7 @@ router.post("/tools/oxylabs/register", async (req, res) => {
   if (company)      args.push("--company",      company);
   if (phone)        args.push("--phone",        phone);
   if (capsolverKey) args.push("--capsolver-key", capsolverKey);
+  if (cfClearance)  args.push("--cf-clearance",   cfClearance);
 
   const spawnEnv: Record<string, string> = { ...(process.env as Record<string, string>), PYTHONUNBUFFERED: "1" };
   if (capsolverKey) spawnEnv["CAPSOLVER_API_KEY"] = capsolverKey;

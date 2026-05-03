@@ -152,7 +152,7 @@ _pick_browser_proxy() {
     local p="$1"
     [[ " $_COOLED_PORTS " == *" $p "* ]]
   }
-  for cand in 10857:Chunghwa-TW 10853:Fourplex-US 10859:Greenhost-NL 10854:Vultr-KR 10855:M247-GB 10851:Datacamp-US; do
+  for cand in 10854:HKT-HK 10859:HGC-HK 10857:HKBN-HK 10853:Fourplex-US 10855:M247-GB 10851:Datacamp-US; do
     port="${cand%%:*}"; name="${cand##*:}"
     if _is_cooled "$port"; then echo "[picker] v8.63 skip ${name}(${port}) — in cooldown" >&2; continue; fi
     ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:${port}\b" || { echo "[picker] v8.30 skip ${name}(${port}) — port not listening" >&2; continue; }
