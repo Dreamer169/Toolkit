@@ -12,8 +12,8 @@ proxy_chain.py — 统一自适应代理链路模块 v1.0
 
 按目标选池优先级:
   outlook / microsoft  → Pool-A → Pool-B → Pool-C → direct
-  ip2free / http_site  → Pool-C → Pool-B → Pool-A → direct
-  cursor               → Pool-C → Pool-B → Pool-A → direct
+  ip2free / http_site  → Pool-A → Pool-B → Pool-C → direct
+  cursor               → Pool-A → Pool-B → Pool-C → direct
   generic              → Pool-B → Pool-C → Pool-A → direct
 
 使用:
@@ -53,8 +53,8 @@ END
 PURPOSE_POOL_ORDER: dict[str, list[str]] = {
     "outlook":   ["local_socks5", "subnode_bridge", "webshare_http", "external_socks5"],
     "microsoft": ["local_socks5", "subnode_bridge", "webshare_http", "external_socks5"],
-    "ip2free":   ["webshare_http", "subnode_bridge", "local_socks5", "external_socks5"],
-    "cursor":    ["webshare_http", "subnode_bridge", "local_socks5", "external_socks5"],
+    "ip2free":   ["local_socks5", "subnode_bridge", "webshare_http", "external_socks5"],
+    "cursor":    ["local_socks5", "subnode_bridge", "webshare_http", "external_socks5"],
     "generic":   ["subnode_bridge", "webshare_http", "local_socks5", "external_socks5"],
 }
 
@@ -218,8 +218,9 @@ class ProxyChain:
                 if p and p not in self._proxies:
                     self._proxies.insert(0, p)
 
-        # 最后加一个 "" 代表无代理直连（兜底）
-        self._proxies.append("")
+        # 最后加一个 "" 代表无代理直连（兜底，ip2free/cursor 禁止直连）
+        if self.purpose not in ("ip2free", "cursor"):
+            self._proxies.append("")
 
     def __iter__(self):
         for proxy in self._proxies:
