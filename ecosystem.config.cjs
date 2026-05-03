@@ -19,7 +19,7 @@ module.exports = {
         "LOCAL_GATEWAY_BASE_URL": "https://vps-toolkit.tail98ceae.ts.net/api/gateway",
         "REPLIT_SUBNODES": "https://gh-cli-direct--elizabetha96.replit.app/api/gateway",
         "CONNECT_PROXY_TOKEN": "vps_direct_proxy_2024",
-        "FORCE_REGISTER_PORTS": "",
+        "FORCE_REGISTER_PORTS": "10854,10859,10851,10878,10857,10900,10901,10902,10903,10904,10905,10906,10907,10908,10909",
         "NO_WARP_OVERRIDE": "0",
         "WEBSHARE_API_KEY": "lx7r5124cubob5mfmofbdtjvdti5bqy2lxdg06ho"
       },
@@ -296,7 +296,7 @@ module.exports = {
       "env": {
         "CONNECT_PROXY_PORT": "8091",
         "CONNECT_PROXY_TOKEN": "vps_direct_proxy_2024",
-        "FORCE_REGISTER_PORTS": "",
+        "FORCE_REGISTER_PORTS": "10854,10859,10851,10878,10857,10900,10901,10902,10903,10904,10905,10906,10907,10908,10909",
         "NO_WARP_OVERRIDE": "0",
         "PYTHONUNBUFFERED": "1"
       },
@@ -417,6 +417,29 @@ module.exports = {
       },
       "restart_delay": 5000,
       "max_restarts": 20,
+      "watch": false,
+      "autorestart": true
+    }
+  ]
+    ,{
+      "name": "socat-854",
+      "script": "socat",
+      "args": "TCP-LISTEN:20854,bind=0.0.0.0,fork,reuseaddr TCP:127.0.0.1:10854",
+      "interpreter": "none",
+      "cwd": "/root",
+      "restart_delay": 3000,
+      "max_restarts": 999,
+      "watch": false,
+      "autorestart": true
+    }
+    ,{
+      "name": "socat-839",
+      "script": "socat",
+      "args": "TCP-LISTEN:20839,bind=0.0.0.0,fork,reuseaddr TCP:127.0.0.1:10839",
+      "interpreter": "none",
+      "cwd": "/root",
+      "restart_delay": 3000,
+      "max_restarts": 999,
       "watch": false,
       "autorestart": true
     }
