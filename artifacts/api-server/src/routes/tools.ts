@@ -5338,4 +5338,110 @@ router.post("/tools/text-captcha/show", async (req, res) => {
   }
 });
 
+
+
+
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Webshare.io 注册路由
+// ═══════════════════════════════════════════════════════════════════════════
+
+// POST /tools/webshare/register
+router.post('/tools/webshare/register', async (req, res) => {
+  const {
+    email, password,
+    proxy = '',
+    headless = true,
+  } = req.body as { email?: string; password?: string; proxy?: string; headless?: boolean };
+
+  if (!email || !password) {
+    res.status(400).json({ success: false, error: 'email 和 password 不能为空' });
+    return;
+  }
+
+  const jobId = `ws_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const job = await jobQueue.create(jobId);
+  job.logs.push({ type: 'start', message: `启动 Webshare 注册 — ${email}` });
+  if (proxy) job.logs.push({ type: 'log', message: `代理: ${proxy.replace(/:([^:@]{4})[^:@]*@/, ':****@')}` });
+  res.json({ success: true, jobId, message: 'Webshare 注册任务已启动' });
+
+  const { spawn } = await import('child_process');
+  const scriptPath = new URL('../webshare_register.py', import.meta.url).pathname;
+  const args = [scriptPath, '--email', email, '--password', password, '--headless', headless ? 'true' : 'false'];
+  if (proxy) args.push('--proxy', proxy);
+
+  const child = spawn('python3', args, {
+    env: { ...(process.env as Record<string, string>), PYTHONUNBUFFERED: '1' },
+  });
+  jobQueue.setChild(jobId, child);
+
+  let jsonBuf = '';
+  let inJson = false;
+
+  child.stdout.on('data', (chunk: Buffer) => {
+    const raw = chunk.toString();
+    if (raw.includes('── JSON 结果 ──') || inJson) { inJson = true; jsonBuf += raw; }
+    for (const line of raw.split('\n')) {
+      const t = line.trim();
+      if (!t || t === '{' || t === '}' || t === '[' || t === ']') continue;
+      if (t.startsWith('──')) continue;
+      if ((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[{') && t.endsWith('}]'))) continue;
+      const lvl = (t.includes('✅') || t.includes('成功')) ? 'ok'
+                : (t.includes('❌') || t.includes('失败') || t.includes('错误')) ? 'error'
+                : (t.includes('⚠️') || t.includes('⏳')) ? 'warn' : 'log';
+      job.logs.push({ type: lvl, message: t });
+    }
+  });
+
+  child.stderr.on('data', (chunk: Buffer) => {
+    const t = chunk.toString().trim();
+    if (t && !t.includes('DeprecationWarning') && !t.includes('asyncio') && !t.includes('FutureWarning')) {
+      job.logs.push({ type: 'warn', message: `[stderr] ${t.slice(0, 200)}` });
+    }
+  });
+
+  child.on('close', async (code: number | null) => {
+    let wsResult: Record<string, unknown> | null = null;
+    const jsonStart = jsonBuf.indexOf('{');
+    if (jsonStart >= 0) {
+      try { wsResult = JSON.parse(jsonBuf.slice(jsonStart).trim()); } catch {}
+    }
+    if (wsResult) {
+      if (wsResult['success']) {
+        job.logs.push({ type: 'ok', message: `✅ Webshare 注册成功: ${wsResult['email']}` });
+        if (wsResult['api_key']) job.logs.push({ type: 'ok', message: `🔑 API Key: ${String(wsResult['api_key']).slice(0, 20)}...` });
+        job.accounts.push({ email: String(wsResult['email'] ?? ''), password: String(wsResult['password'] ?? '') });
+      } else {
+        job.logs.push({ type: 'error', message: `❌ 失败: ${wsResult['error']}` });
+      }
+    } else if (code !== 0) {
+      job.logs.push({ type: 'error', message: `❌ 进程异常退出: ${code}` });
+    }
+    (job as any)._wsResult = wsResult;
+    await jobQueue.finish(jobId, code ?? -1, (wsResult?.['success'] || code === 0) ? 'done' : 'failed');
+  });
+});
+
+// GET /tools/webshare/register/:jobId
+router.get('/tools/webshare/register/:jobId', async (req, res) => {
+  const job = await jobQueue.get(req.params.jobId);
+  if (!job) { res.status(404).json({ success: false, error: '任务不存在' }); return; }
+  const since = Number(req.query.since ?? 0);
+  res.json({
+    success: true,
+    status: job.status,
+    logs: job.logs.slice(since),
+    nextSince: job.logs.length,
+    result: (job as any)._wsResult ?? null,
+    exitCode: job.exitCode,
+  });
+});
+
+// DELETE /tools/webshare/register/:jobId
+router.delete('/tools/webshare/register/:jobId', (req, res) => {
+  const stopped = jobQueue.stop(req.params.jobId);
+  res.json({ success: !!stopped });
+});
+
 export default router;
