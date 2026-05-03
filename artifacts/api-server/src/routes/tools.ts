@@ -1,6 +1,6 @@
 import { jobQueue } from "../lib/job-queue.js";
 import { setLiveVerifyEnabled, getLiveVerifyStatus } from "../lib/live-verify-poller.js";
-import { microsoftFetch, getMicrosoftProxyEnv, pickProxyForAccount } from "../lib/proxy-fetch.js";
+import { microsoftFetch, getMicrosoftProxyEnv, pickProxyForAccount, resolveAccountProxy } from "../lib/proxy-fetch.js";
 import { Router, type IRouter } from "express";
 import { createHash, randomBytes, randomUUID } from "crypto";
 import { execute, query, queryOne } from "../db.js";
@@ -749,7 +749,7 @@ router.post("/tools/outlook/messages", async (req, res) => {
       resolvedAccountId = account.id;
       accountEmail = account.email;
       accessToken = account.token || "";
-      const acctProxy = pickProxyForAccount(resolvedAccountId);
+      const acctProxy = await resolveAccountProxy(resolvedAccountId);
       if (account.refresh_token) {
         const tr = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
           method: "POST",
@@ -2993,26 +2993,70 @@ router.post("/tools/cf-pool/retest", async (req, res) => {
   }
 });
 
-// ── Outlook IMAP 收件箱（密码方式，无需 OAuth token）──────────────────────
+// ── Outlook IMAP 收件箱（支持 accountId 自动读 token + proxy，兼容旧 email/password 方式）──
 router.post("/tools/outlook/imap-inbox", async (req, res) => {
-  const { email, password, limit } = req.body as { email?: string; password?: string; limit?: number };
-  if (!email || !password) {
-    res.status(400).json({ success: false, error: "email 和 password 不能为空" });
-    return;
-  }
+  const { email, password, limit, accountId, folder, search } = req.body as {
+    email?: string; password?: string; limit?: number;
+    accountId?: number; folder?: string; search?: string;
+  };
+
   try {
-    const { execFileSync } = await import("child_process");
-    const scriptPath = new URL("../outlook_imap.py", import.meta.url).pathname;
-    const arg = JSON.stringify({ email, password, limit: limit ?? 25 });
-    const out = execFileSync("python3", [scriptPath, arg], { timeout: 30000, encoding: "utf8" });
-    const data = JSON.parse(out);
-    res.json(data);
-  } catch (e: unknown) {
-    const err = e as { stdout?: string; stderr?: string; message?: string };
-    if (err.stdout) {
-      try { res.json(JSON.parse(err.stdout)); return; } catch {}
+    const { query, execute } = await import("../db.js");
+
+    let resolvedEmail = email ?? "";
+    let resolvedPass  = password ?? "";
+    let accessToken   = "";
+    let acctProxy     = "";
+    let resolvedId: number | null = null;
+
+    if (accountId) {
+      // accountId 模式：从 DB 读 token + proxy_formatted，自动刷新 access_token
+      const rows = await query<{
+        id: number; email: string; password: string | null;
+        token: string | null; refresh_token: string | null; proxy_formatted: string | null;
+      }>(
+        "SELECT id, email, password, token, refresh_token, proxy_formatted FROM accounts WHERE id=$1 AND platform='outlook'",
+        [accountId]
+      );
+      if (!rows[0]) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
+      const acc = rows[0];
+      resolvedId    = acc.id;
+      resolvedEmail = acc.email;
+      resolvedPass  = acc.password ?? "";
+      accessToken   = acc.token ?? "";
+      acctProxy     = acc.proxy_formatted ?? await resolveAccountProxy(acc.id);
+
+      if (acc.refresh_token) {
+        const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            grant_type: "refresh_token", client_id: OAUTH_CLIENT_ID,
+            refresh_token: acc.refresh_token,
+            scope: "https://graph.microsoft.com/Mail.Read offline_access",
+          }).toString(),
+        }, acctProxy);
+        const td = await r.json() as { access_token?: string; refresh_token?: string };
+        if (td.access_token) {
+          accessToken = td.access_token;
+          await execute("UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
+            [accessToken, td.refresh_token ?? acc.refresh_token, acc.id]);
+        }
+      }
+    } else if (!resolvedEmail) {
+      res.status(400).json({ success: false, error: "accountId 或 email 不能同时为空" });
+      return;
     }
-    res.status(500).json({ success: false, error: err.message ?? String(e) });
+
+    const result = await fetchViaImap(
+      resolvedEmail, resolvedPass,
+      folder ?? "inbox", limit ?? 25, search ?? "",
+      accessToken || undefined, acctProxy || undefined
+    );
+    if (resolvedId) res.json({ ...result, accountId: resolvedId, email: resolvedEmail });
+    else res.json(result);
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
   }
 });
 
@@ -3118,7 +3162,7 @@ router.post("/tools/outlook/verify-accounts", async (req, res) => {
     const results: Array<{ id: number; email: string; status: string; via?: string; error?: string }> = [];
     for (const acc of rows) {
       let accessToken = "";   // 不直接使用可能过期的 DB token
-      const acctProxy = pickProxyForAccount(acc.id);
+      const acctProxy = await resolveAccountProxy(acc.id);
 
       // 1. 有 refresh_token → 先用 /common/ 刷新（优先级最高）
       let refreshError = "";
@@ -3223,7 +3267,7 @@ router.post("/tools/outlook/auto-auth", async (req, res) => {
     if (!acc) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
 
     // 已有 refresh_token → 直接刷新 access_token，无需用户操作
-    const acctProxy = pickProxyForAccount(accountId);
+    const acctProxy = await resolveAccountProxy(accountId);
     if (acc.refresh_token) {
       const { execute } = await import("../db.js");
       const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
@@ -3275,7 +3319,7 @@ router.post("/tools/outlook/auto-auth-all", async (req, res) => {
     const results: Array<{ id: number; email: string; ok: boolean; needsDeviceFlow?: boolean; error?: string }> = [];
     for (const acc of rows) {
       // 优先用 refresh_token 刷新
-      const acctProxy = pickProxyForAccount(acc.id);
+      const acctProxy = await resolveAccountProxy(acc.id);
       if (acc.refresh_token) {
         try {
           const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
@@ -3378,7 +3422,7 @@ async function fetchGraphMessages(accessToken: string, mailFolder: string, limit
 // 优先 XOAUTH2（access_token）→ Basic Auth 备用
 async function fetchViaImap(
   email: string, password: string, folder: string, limit: number, search: string,
-  accessToken?: string
+  accessToken?: string, proxy?: string
 ): Promise<{ success: boolean; messages?: unknown[]; error?: string; via?: string }> {
   const { spawn } = await import("child_process");
   const scriptPath = new URL("../outlook_imap.py", import.meta.url).pathname;
@@ -3395,6 +3439,7 @@ async function fetchViaImap(
       email, password, limit, folder: imapFolder, search: search || ""
     };
     if (accessToken) paramObj["access_token"] = accessToken;
+    if (proxy) paramObj["proxy"] = proxy;
     const params = JSON.stringify(paramObj);
     const child = spawn(process.env.PYTHON_BIN || "/usr/bin/python3", [scriptPath, params], { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
     let out = "";
@@ -3629,7 +3674,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
     const limit = Math.min(250, Math.max(1, top ?? 50));
 
     let accessToken = acc.token ?? "";
-    const acctProxy = pickProxyForAccount(accountId);
+    const acctProxy = await resolveAccountProxy(accountId);
 
     // 有 refresh_token → 先用 /common/ 刷新（不直接信任 DB 里可能过期的 token）
     if (acc.refresh_token) {
@@ -3703,7 +3748,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
     // 备用：Basic Auth IMAP（密码，微软已对个人账号封锁）
     if (accessToken) {
       // Graph API 失败但 token 有效 → 尝试 XOAUTH2 IMAP
-      const xoauthResult = await fetchViaImap(acc.email, acc.password ?? "", mailFolder, limit, search ?? "", accessToken);
+      const xoauthResult = await fetchViaImap(acc.email, acc.password ?? "", mailFolder, limit, search ?? "", accessToken, acctProxy);
       if (xoauthResult.success) {
         if ((xoauthResult.messages as unknown[]).length > 0) { try { await addAccountTags(accountId, ["inbox_verified"]); } catch {} }
         res.json({ success: true, messages: xoauthResult.messages, count: (xoauthResult.messages as unknown[]).length, email: acc.email, via: "imap_xoauth2" });
@@ -3714,7 +3759,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
       res.json({ success: false, error: "账号无密码且无 OAuth token，无法读取邮件", needsAuth: true });
       return;
     }
-    const imapResult = await fetchViaImap(acc.email, acc.password, mailFolder, limit, search ?? "");
+    const imapResult = await fetchViaImap(acc.email, acc.password, mailFolder, limit, search ?? "", undefined, acctProxy);
     if (imapResult.success) {
       if ((imapResult.messages as unknown[]).length > 0) { try { await addAccountTags(accountId, ["inbox_verified"]); } catch {} }
       res.json({ success: true, messages: imapResult.messages, count: (imapResult.messages as unknown[]).length, email: acc.email, via: "imap" });
@@ -3853,7 +3898,7 @@ router.patch("/tools/outlook/message/:accountId/:messageId/read", async (req, re
     if (!rows[0]) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
 
     let token = rows[0].token ?? "";
-    const acctProxy = pickProxyForAccount(accountId);
+    const acctProxy = await resolveAccountProxy(accountId);
     if (rows[0].refresh_token) {
       const r = await microsoftFetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
         method: "POST",
@@ -3907,7 +3952,7 @@ router.post("/tools/outlook/message/:accountId/:messageId/move", async (req, res
     if (!rows[0]) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
 
     let token = rows[0].token ?? "";
-    const acctProxy = pickProxyForAccount(accountId);
+    const acctProxy = await resolveAccountProxy(accountId);
     if (rows[0].refresh_token) {
       const r = await microsoftFetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
         method: "POST",
@@ -3960,7 +4005,7 @@ router.delete("/tools/outlook/message/:accountId/:messageId", async (req, res) =
     if (!rows[0]) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
 
     let token = rows[0].token ?? "";
-    const acctProxy = pickProxyForAccount(accountId);
+    const acctProxy = await resolveAccountProxy(accountId);
     if (rows[0].refresh_token) {
       const r = await microsoftFetch(`https://login.microsoftonline.com/common/oauth2/v2.0/token`, {
         method: "POST",
@@ -4019,7 +4064,7 @@ router.post("/tools/outlook/send-message", async (req, res) => {
     );
     if (!rows[0]) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
     let token = rows[0].token ?? "";
-    const acctProxy = pickProxyForAccount(accountId);
+    const acctProxy = await resolveAccountProxy(accountId);
     if (rows[0].refresh_token) {
       const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
         method: "POST",
@@ -4079,7 +4124,7 @@ router.post("/tools/outlook/click-verify-link", async (req, res) => {
 
     // 刷新 token
     let accessToken = acc.token || "";
-    const acctProxy = pickProxyForAccount(acc.id);
+    const acctProxy = await resolveAccountProxy(acc.id);
     if (acc.refresh_token) {
       const tr = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
         method: "POST",
@@ -4144,7 +4189,7 @@ router.post("/tools/outlook/auto-verify-emails", async (req, res) => {
     for (const acc of rows) {
       try {
         let accessToken = acc.token || "";
-        const acctProxy = pickProxyForAccount(acc.id);
+        const acctProxy = await resolveAccountProxy(acc.id);
         if (acc.refresh_token) {
           const tr = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
             method: "POST",
@@ -4233,7 +4278,7 @@ router.post("/tools/outlook/account/:id/batch-delete-by-subject", async (req, re
     if (!rows[0]) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
 
     let token = rows[0].token ?? "";
-    const acctProxy = pickProxyForAccount(accountId);
+    const acctProxy = await resolveAccountProxy(accountId);
     if (rows[0].refresh_token) {
       const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
         method: "POST",

@@ -568,116 +568,6 @@
         "auth": "noauth",
         "udp": false
       }
-    },
-    {
-      "tag": "ps-in-19",
-      "port": 10889,
-      "listen": "127.0.0.1",
-      "protocol": "socks",
-      "settings": {
-        "auth": "noauth",
-        "udp": false
-      }
-    },
-    {
-      "tag": "ps-in-20",
-      "port": 10890,
-      "listen": "127.0.0.1",
-      "protocol": "socks",
-      "settings": {
-        "auth": "noauth",
-        "udp": false
-      }
-    },
-    {
-      "tag": "ps-in-21",
-      "port": 10891,
-      "listen": "127.0.0.1",
-      "protocol": "socks",
-      "settings": {
-        "auth": "noauth",
-        "udp": false
-      }
-    },
-    {
-      "tag": "ps-in-22",
-      "port": 10892,
-      "listen": "127.0.0.1",
-      "protocol": "socks",
-      "settings": {
-        "auth": "noauth",
-        "udp": false
-      }
-    },
-    {
-      "tag": "ps-in-23",
-      "port": 10893,
-      "listen": "127.0.0.1",
-      "protocol": "socks",
-      "settings": {
-        "auth": "noauth",
-        "udp": false
-      }
-    },
-    {
-      "tag": "ps-in-24",
-      "port": 10894,
-      "listen": "127.0.0.1",
-      "protocol": "socks",
-      "settings": {
-        "auth": "noauth",
-        "udp": false
-      }
-    },
-    {
-      "tag": "ps-in-25",
-      "port": 10895,
-      "listen": "127.0.0.1",
-      "protocol": "socks",
-      "settings": {
-        "auth": "noauth",
-        "udp": false
-      }
-    },
-    {
-      "tag": "ps-in-26",
-      "port": 10896,
-      "listen": "127.0.0.1",
-      "protocol": "socks",
-      "settings": {
-        "auth": "noauth",
-        "udp": false
-      }
-    },
-    {
-      "tag": "ps-in-27",
-      "port": 10897,
-      "listen": "127.0.0.1",
-      "protocol": "socks",
-      "settings": {
-        "auth": "noauth",
-        "udp": false
-      }
-    },
-    {
-      "tag": "ps-in-28",
-      "port": 10898,
-      "listen": "127.0.0.1",
-      "protocol": "socks",
-      "settings": {
-        "auth": "noauth",
-        "udp": false
-      }
-    },
-    {
-      "tag": "ps-in-29",
-      "port": 10899,
-      "listen": "127.0.0.1",
-      "protocol": "socks",
-      "settings": {
-        "auth": "noauth",
-        "udp": false
-      }
     }
   ],
   "outbounds": [
@@ -1629,8 +1519,8 @@
       "settings": {
         "servers": [
           {
-            "address": "206.123.156.236",
-            "port": 5565
+            "address": "206.123.156.231",
+            "port": 15672
           }
         ]
       }
@@ -1641,8 +1531,8 @@
       "settings": {
         "servers": [
           {
-            "address": "206.123.156.236",
-            "port": 25156
+            "address": "206.123.156.227",
+            "port": 7029
           }
         ]
       }
@@ -1653,8 +1543,8 @@
       "settings": {
         "servers": [
           {
-            "address": "206.123.156.215",
-            "port": 6377
+            "address": "206.123.156.204",
+            "port": 4619
           }
         ]
       }
@@ -1665,8 +1555,8 @@
       "settings": {
         "servers": [
           {
-            "address": "206.123.156.204",
-            "port": 5774
+            "address": "78.63.115.20",
+            "port": 8899
           }
         ]
       }
@@ -1677,8 +1567,8 @@
       "settings": {
         "servers": [
           {
-            "address": "206.123.156.188",
-            "port": 23197
+            "address": "206.123.156.236",
+            "port": 7579
           }
         ]
       }
@@ -1690,7 +1580,7 @@
         "servers": [
           {
             "address": "206.123.156.236",
-            "port": 5025
+            "port": 34991
           }
         ]
       }
@@ -1701,8 +1591,8 @@
       "settings": {
         "servers": [
           {
-            "address": "206.123.156.231",
-            "port": 13450
+            "address": "206.123.156.236",
+            "port": 32793
           }
         ]
       }
@@ -1713,8 +1603,8 @@
       "settings": {
         "servers": [
           {
-            "address": "206.123.156.217",
-            "port": 10141
+            "address": "206.123.156.227",
+            "port": 35995
           }
         ]
       }
@@ -1725,8 +1615,8 @@
       "settings": {
         "servers": [
           {
-            "address": "206.123.156.215",
-            "port": 43668
+            "address": "206.123.156.227",
+            "port": 34100
           }
         ]
       }
@@ -1737,8 +1627,8 @@
       "settings": {
         "servers": [
           {
-            "address": "206.123.156.207",
-            "port": 4445
+            "address": "206.123.156.227",
+            "port": 30578
           }
         ]
       }
@@ -1749,8 +1639,8 @@
       "settings": {
         "servers": [
           {
-            "address": "206.123.156.207",
-            "port": 41394
+            "address": "206.123.156.215",
+            "port": 16238
           }
         ]
       }
@@ -1762,7 +1652,7 @@
         "servers": [
           {
             "address": "206.123.156.207",
-            "port": 28900
+            "port": 5541
           }
         ]
       }
@@ -1773,8 +1663,8 @@
       "settings": {
         "servers": [
           {
-            "address": "206.123.156.207",
-            "port": 27475
+            "address": "206.123.156.192",
+            "port": 4555
           }
         ]
       }
@@ -1785,8 +1675,8 @@
       "settings": {
         "servers": [
           {
-            "address": "206.123.156.207",
-            "port": 14977
+            "address": "206.123.156.231",
+            "port": 14463
           }
         ]
       }
@@ -1797,8 +1687,8 @@
       "settings": {
         "servers": [
           {
-            "address": "206.123.156.207",
-            "port": 14883
+            "address": "206.123.156.227",
+            "port": 8615
           }
         ]
       }
@@ -1809,8 +1699,8 @@
       "settings": {
         "servers": [
           {
-            "address": "206.123.156.201",
-            "port": 5723
+            "address": "206.123.156.227",
+            "port": 7874
           }
         ]
       }
@@ -1821,8 +1711,8 @@
       "settings": {
         "servers": [
           {
-            "address": "206.123.156.201",
-            "port": 10165
+            "address": "206.123.156.215",
+            "port": 6239
           }
         ]
       }
@@ -1833,8 +1723,8 @@
       "settings": {
         "servers": [
           {
-            "address": "206.123.156.192",
-            "port": 5014
+            "address": "206.123.156.213",
+            "port": 6809
           }
         ]
       }
@@ -1845,140 +1735,8 @@
       "settings": {
         "servers": [
           {
-            "address": "206.123.156.191",
-            "port": 8617
-          }
-        ]
-      }
-    },
-    {
-      "tag": "ps-out-19",
-      "protocol": "socks",
-      "settings": {
-        "servers": [
-          {
-            "address": "206.123.156.188",
-            "port": 6354
-          }
-        ]
-      }
-    },
-    {
-      "tag": "ps-out-20",
-      "protocol": "socks",
-      "settings": {
-        "servers": [
-          {
-            "address": "206.123.156.188",
-            "port": 5810
-          }
-        ]
-      }
-    },
-    {
-      "tag": "ps-out-21",
-      "protocol": "socks",
-      "settings": {
-        "servers": [
-          {
-            "address": "168.245.197.146",
-            "port": 80
-          }
-        ]
-      }
-    },
-    {
-      "tag": "ps-out-22",
-      "protocol": "socks",
-      "settings": {
-        "servers": [
-          {
-            "address": "154.90.60.61",
-            "port": 20002
-          }
-        ]
-      }
-    },
-    {
-      "tag": "ps-out-23",
-      "protocol": "socks",
-      "settings": {
-        "servers": [
-          {
-            "address": "80.92.204.47",
-            "port": 1081
-          }
-        ]
-      }
-    },
-    {
-      "tag": "ps-out-24",
-      "protocol": "socks",
-      "settings": {
-        "servers": [
-          {
-            "address": "72.18.53.189",
-            "port": 9119
-          }
-        ]
-      }
-    },
-    {
-      "tag": "ps-out-25",
-      "protocol": "socks",
-      "settings": {
-        "servers": [
-          {
-            "address": "206.123.156.236",
-            "port": 22315
-          }
-        ]
-      }
-    },
-    {
-      "tag": "ps-out-26",
-      "protocol": "socks",
-      "settings": {
-        "servers": [
-          {
-            "address": "206.123.156.234",
-            "port": 9492
-          }
-        ]
-      }
-    },
-    {
-      "tag": "ps-out-27",
-      "protocol": "socks",
-      "settings": {
-        "servers": [
-          {
-            "address": "206.123.156.231",
-            "port": 4163
-          }
-        ]
-      }
-    },
-    {
-      "tag": "ps-out-28",
-      "protocol": "socks",
-      "settings": {
-        "servers": [
-          {
-            "address": "206.123.156.227",
-            "port": 7876
-          }
-        ]
-      }
-    },
-    {
-      "tag": "ps-out-29",
-      "protocol": "socks",
-      "settings": {
-        "servers": [
-          {
-            "address": "206.123.156.215",
-            "port": 29863
+            "address": "206.123.156.187",
+            "port": 5003
           }
         ]
       }
@@ -1987,83 +1745,6 @@
   "routing": {
     "domainStrategy": "AsIs",
     "rules": [
-      {
-        "type": "field",
-        "inboundTag": [
-          "ps-in-29"
-        ],
-        "outboundTag": "ps-out-29"
-      },
-      {
-        "type": "field",
-        "inboundTag": [
-          "ps-in-28"
-        ],
-        "outboundTag": "ps-out-28"
-      },
-      {
-        "type": "field",
-        "inboundTag": [
-          "ps-in-27"
-        ],
-        "outboundTag": "ps-out-27"
-      },
-      {
-        "type": "field",
-        "inboundTag": [
-          "ps-in-26"
-        ],
-        "outboundTag": "ps-out-26"
-      },
-      {
-        "type": "field",
-        "inboundTag": [
-          "ps-in-25"
-        ],
-        "outboundTag": "ps-out-25"
-      },
-      {
-        "type": "field",
-        "inboundTag": [
-          "ps-in-24"
-        ],
-        "outboundTag": "ps-out-24"
-      },
-      {
-        "type": "field",
-        "inboundTag": [
-          "ps-in-23"
-        ],
-        "outboundTag": "ps-out-23"
-      },
-      {
-        "type": "field",
-        "inboundTag": [
-          "ps-in-22"
-        ],
-        "outboundTag": "ps-out-22"
-      },
-      {
-        "type": "field",
-        "inboundTag": [
-          "ps-in-21"
-        ],
-        "outboundTag": "ps-out-21"
-      },
-      {
-        "type": "field",
-        "inboundTag": [
-          "ps-in-20"
-        ],
-        "outboundTag": "ps-out-20"
-      },
-      {
-        "type": "field",
-        "inboundTag": [
-          "ps-in-19"
-        ],
-        "outboundTag": "ps-out-19"
-      },
       {
         "type": "field",
         "inboundTag": [

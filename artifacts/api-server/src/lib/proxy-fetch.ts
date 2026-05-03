@@ -166,3 +166,22 @@ export function getMicrosoftProxyEnv(preferred?: string | null): Record<string, 
   if (!proxy) return {};
   return { HTTP_PROXY: proxy, HTTPS_PROXY: proxy, http_proxy: proxy, https_proxy: proxy };
 }
+
+/**
+ * Async version: read proxy_formatted from DB first (account-bound IP consistency).
+ * Falls back to pickProxyForAccount (xray pool) when DB has no entry.
+ * NOTE: microsoftFetch / resolveProxyUrl already handles socks5→HTTP fallback internally,
+ * so returning a socks5:// URL here is safe for both undici and Python callers.
+ */
+export async function resolveAccountProxy(accountId: number): Promise<string> {
+  try {
+    const { query } = await import("../db.js");
+    const rows = await query<{ proxy_formatted: string | null }>(
+      "SELECT proxy_formatted FROM accounts WHERE id=$1",
+      [accountId]
+    );
+    const stored = rows[0]?.proxy_formatted?.trim();
+    if (stored) return stored;
+  } catch { /* fall through to xray pool */ }
+  return pickProxyForAccount(accountId);
+}
