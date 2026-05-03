@@ -2443,12 +2443,14 @@ router.post("/tools/ip2free/register", async (req, res) => {
   // 从 accounts 表取该 Outlook 邮箱注册时绑定的代理（proxy_formatted > proxy_port 重建）
   // 这确保 ip2free 浏览器注册 + IMAP 验证码读取都使用与 Outlook 注册时相同的出口 IP
   let accountProxy = "";
+  let outlookAccountId = 0;
   if (email) {
     try {
-      const acctRow = await queryOne<{ proxy_formatted: string | null; proxy_port: number | null }>(
-        "SELECT proxy_formatted, proxy_port FROM accounts WHERE platform='outlook' AND email=$1 LIMIT 1",
+      const acctRow = await queryOne<{ id: number | null; proxy_formatted: string | null; proxy_port: number | null }>(
+        "SELECT id, proxy_formatted, proxy_port FROM accounts WHERE platform='outlook' AND email=$1 LIMIT 1",
         [email]
       );
+      if (acctRow?.id) outlookAccountId = acctRow.id;
       if (acctRow?.proxy_formatted) {
         accountProxy = acctRow.proxy_formatted;
       } else if (acctRow?.proxy_port && acctRow.proxy_port > 0) {
@@ -2507,7 +2509,8 @@ router.post("/tools/ip2free/register", async (req, res) => {
   if (outlookPassword) args.push("--outlook-password", outlookPassword);
   if (accessToken)     args.push("--access-token",     accessToken);
   if (ip2freePassword) args.push("--ip2free-password", ip2freePassword);
-  // 账号绑定代理：用于 IMAP 验证码读取时 IP 与浏览器注册一致
+  // 账号 DB id：Python 侧用于 Graph API 读取验证码（替代已死的 IMAP）
+  if (outlookAccountId > 0) args.push("--account-id", String(outlookAccountId));
   if (accountProxy)    args.push("--account-proxy",    accountProxy);
   // 传多代理列表给 Python（ip2free_register.py ProxyChain 负责逐一重试）
   if (proxyList.length > 1) {
@@ -5260,13 +5263,15 @@ router.get('/tools/smsrf/numbers', async (req, res) => {
   res.json(result);
 });
 
-// POST /api/tools/smsrf/messages  body: { phone: string }
+// POST /api/tools/smsrf/messages  body: { phone: string, force?: boolean }
 router.post('/tools/smsrf/messages', async (req, res) => {
-  const { phone } = req.body as { phone?: string };
+  const { phone, force } = req.body as { phone?: string; force?: boolean };
   if (!phone) { res.status(400).json({ error: 'phone required' }); return; }
   const SCRIPT = '/root/Toolkit/scripts/smsreceivefree_fetch.py';
+  const pyArgs = ['python3', SCRIPT, '--action', 'messages', '--phone', phone];
+  if (force) pyArgs.push('--force');
   const result = await new Promise<unknown>((resolve, reject) => {
-    _execFile('python3', [SCRIPT, '--action', 'messages', '--phone', phone],
+    _execFile(pyArgs[0], pyArgs.slice(1),
       { timeout: 120_000, maxBuffer: 2 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (err && !stdout.trim()) { reject(new Error(stderr.slice(0, 400))); return; }

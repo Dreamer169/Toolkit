@@ -39,7 +39,7 @@ __all__ = ["build_proxy_cfg", "pick_adaptive", "ProxyChain"]
 
 POOL_TYPE_SQL = """
 CASE
-  WHEN formatted ILIKE 'http://%'            THEN 'webshare_http'
+  WHEN formatted ILIKE 'http://%%'            THEN 'webshare_http'
   WHEN (host='127.0.0.1' AND port BETWEEN 10820 AND 10845)
                                              THEN 'local_socks5'
   WHEN (host='127.0.0.1' AND port BETWEEN 1089 AND 1199)
@@ -148,11 +148,14 @@ def pick_adaptive(purpose: str, count: int = 3, db_url: str = "") -> list[str]:
         for pool_type in pool_order:
             if remaining <= 0:
                 break
+            # webshare_http 必须有凭据（formatted LIKE '%@%'），排除无认证的 CF 隧道 IP
+            cred_filter = "AND formatted LIKE '%%@%%'" if pool_type == "webshare_http" else ""
             cur.execute(f"""
                 SELECT formatted
                 FROM proxies
                 WHERE status != 'banned'
                   AND ({POOL_TYPE_SQL}) = %s
+                  {cred_filter}
                 ORDER BY used_count ASC, RANDOM()
                 LIMIT %s
             """, (pool_type, remaining))
