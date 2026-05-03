@@ -1763,6 +1763,8 @@ function classifyToolJob(jobId: string) {
   if (jobId.startsWith("curhttp_")) return { source: "tools", kind: "cursor_http_register", title: "Cursor HTTP 注册" };
   if (jobId.startsWith("cur_")) return { source: "tools", kind: "cursor_register", title: "Cursor 注册" };
   if (jobId.startsWith("retoken_")) return { source: "tools", kind: "outlook_retoken", title: "Outlook Retoken" };
+  if (jobId.startsWith("np_reg_")) return { source: "tools", kind: "novproxy_register", title: "NovProxy 注册" };
+  if (jobId.startsWith("np_login_")) return { source: "tools", kind: "novproxy_login", title: "NovProxy 登录" };
   return { source: "tools", kind: "tool_job", title: "工具任务" };
 }
 
