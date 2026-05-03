@@ -3,7 +3,7 @@ import { randomUUID } from "crypto";
 
 const router: IRouter = Router();
 
-type SkillId = "cursor" | "outlook" | "mail" | "tokens" | "data" | "monitor" | "workflow" | "pool" | "captcha" | "waf-bypass" | "novproxy" | "sms";
+type SkillId = "cursor" | "outlook" | "mail" | "tokens" | "data" | "monitor" | "workflow" | "pool" | "captcha" | "waf-bypass" | "novproxy" | "sms" | "webshare";
 type ParamType = "string" | "number" | "boolean" | "array" | "object";
 type Safety = "safe" | "requires-confirmation";
 type ToolParam = { name: string; type: ParamType; description: string; required?: boolean; default?: unknown; enum?: unknown[]; min?: number; max?: number };
@@ -89,6 +89,7 @@ const skills: Skill[] = [
   { id: "captcha", title: "验证码识别", tab: "captcha", purpose: "负责文字点选验证码(YOLO+ONNX)和数字验证码(CNN)识别。", keywords: ["验证码", "captcha", "识别", "文字点选", "cnn", "yolo", "onnx", "图片验证码", "hcaptcha"], nextSteps: ["进入验证码识别页", "选择文字点选或数字验证码模式", "上传验证码图片后点击识别"] },
   { id: "waf-bypass", title: "CF WAF 绕过", tab: "waf-bypass", purpose: "负责使用 pydoll-python 零 WebDriver 绕过 Cloudflare WAF / Turnstile / Managed Challenge。", keywords: ["waf", "cloudflare", "cf", "绕过", "bypass", "turnstile", "pydoll", "爬取", "scrape"], nextSteps: ["进入 CF WAF 绕过工具页", "确认 pydoll 服务状态 :8766", "输入目标 URL 后点击开始绕过"] },
   { id: "novproxy", title: "Novproxy 工作流", tab: "novproxy", purpose: "负责 novproxy 代理账号注册、登录、流量诊断和 pydoll 自动化注册流程。", keywords: ["novproxy", "代理", "注册", "proxy", "流量", "socks5", "pydoll注册", "登录", "诊断"], nextSteps: ["进入 Novproxy 工作流页", "先诊断已有账号状态", "注册时使用 Gmail 邮箱（Outlook 无法收验证码）"] },
+  { id: "webshare", title: "Webshare 代理池", tab: "webshare", purpose: "管理 Webshare HTTP 代理池：查看代理列表及同步状态", keywords: ["webshare","代理","proxy","http","池","同步","外部代理"], nextSteps: ["webshare.status","webshare.sync"] },
   { id: "sms", title: "短信接收中心", tab: "sms-center", purpose: "负责从 jiemahao.com / smsreceivefree.xyz 获取免费手机号码并接收短信验证码。", keywords: ["sms", "短信", "手机号", "验证码", "接收短信", "jiemahao", "smsreceivefree", "号码"], nextSteps: ["进入短信接收中心", "选择来源后点击号码", "等待 30~60 秒绕过 Cloudflare 后读取短信"] }
 ];
 
@@ -142,6 +143,8 @@ add({ name: "novproxy.register", label: "启动 Novproxy 注册任务", descript
 add({ name: "novproxy.status", label: "查看 Novproxy 账号状态", description: "从数据库读取已保存的 novproxy 账号列表及代理凭据", skillId: "novproxy", method: "GET", path: "/api/tools/novproxy/status", safety: "safe", parameters: [], tab: "novproxy", keywords: ["novproxy", "账号", "状态", "代理", "列表", "凭据"] });
 add({ name: "novproxy.diagnose", label: "诊断 Novproxy 账号", description: "诊断 novproxy 账号流量、邮件验证和代理状态（有 token 可免密）", skillId: "novproxy", method: "POST", path: "/api/tools/novproxy/diagnose", safety: "safe", parameters: [param.email, { name: "password", type: "string" as ParamType, description: "账号密码（有 token 时可省略）" }, { name: "token", type: "string" as ParamType, description: "已登录 token（有则免密）" }], tab: "novproxy", keywords: ["novproxy", "诊断", "diagnose", "流量", "激活"] });
 add({ name: "sms.numbers", label: "获取免费手机号列表", description: "从 jiemahao.com 获取可用手机号码", skillId: "sms", method: "GET", path: "/api/tools/sms/numbers", safety: "safe", parameters: [{ name: "country", type: "string" as ParamType, description: "国家代码 all|us|gb|ca", default: "all" }], tab: "sms-center", keywords: ["短信", "手机号", "号码", "列表", "sms"] });
+add({ name: "webshare.status", label: "查看 Webshare 代理状态", description: "查看 DB 中已同步的 Webshare HTTP 代理列表及实时 API 状态", skillId: "webshare", method: "GET", path: "/api/tools/webshare/status", safety: "safe", parameters: [], tab: "webshare", keywords: ["webshare", "代理", "状态", "列表", "proxy"] });
+add({ name: "webshare.sync", label: "同步 Webshare 代理到数据库", description: "从 Webshare API 拉取全量代理列表并 upsert 到 proxies 表", skillId: "webshare", method: "POST", path: "/api/tools/webshare/sync", safety: "safe", parameters: [], tab: "webshare", keywords: ["webshare", "同步", "代理", "proxy", "更新"] });
 add({ name: "sms.messages", label: "读取短信验证码", description: "读取指定手机号收到的短信（jiemahao）", skillId: "sms", method: "POST", path: "/api/tools/sms/messages", safety: "safe", parameters: [{ name: "phoneId", type: "number" as ParamType, description: "手机号数字 ID（从 sms.numbers 返回的 id 字段）", required: true, min: 1 }], tab: "sms-center", keywords: ["短信", "验证码", "读取", "消息", "sms"] });
 add({ name: "smsrf.numbers", label: "获取 smsreceivefree 号码", description: "从 smsreceivefree.xyz 获取可用手机号", skillId: "sms", method: "GET", path: "/api/tools/smsrf/numbers", safety: "safe", parameters: [], tab: "sms-center", keywords: ["短信", "号码", "smsreceivefree", "免费"] });
 add({ name: "smsrf.messages", label: "读取 smsreceivefree 短信", description: "读取 smsreceivefree.xyz 指定号码的短信", skillId: "sms", method: "POST", path: "/api/tools/smsrf/messages", safety: "safe", parameters: [{ name: "phone", type: "string" as ParamType, description: "手机号码（如 +1...）", required: true }], tab: "sms-center", keywords: ["短信", "验证码", "读取", "smsreceivefree"] });
