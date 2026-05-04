@@ -7,6 +7,21 @@ import { Router } from "express";
 
   const router = Router();
   const SESSIONS_DIR = "/root/Toolkit/.ai-sessions";
+
+  /* ─── Read .env file directly (PM2 doesn't inject these) ─── */
+  function readDotEnv(): Record<string, string> {
+    try {
+      return Object.fromEntries(
+        fs.readFileSync("/root/Toolkit/.env", "utf-8")
+          .split("\n")
+          .filter(l => l.includes("=") && !l.startsWith("#") && l.trim())
+          .map(l => {
+            const idx = l.indexOf("=");
+            return [l.slice(0, idx).trim(), l.slice(idx + 1).trim()];
+          })
+      );
+    } catch { return {}; }
+  }
   const HISTORY_FILE  = "/root/Toolkit/.ai-sessions/exec-history.json";
   const REPO_DIR      = "/root/Toolkit";
   const GH_REPO       = "Dreamer169/Toolkit";
@@ -169,7 +184,7 @@ Edit    → 精确修改代码
 Glob    → 文件搜索
 Grep    → 内容搜索
 LS      → 目录列表
-WebFetch/WebSearch → 任意网络访问
+WebFetch/WebSearch → 任意网络访问（Web搜索通过 /api/claude-code/web-search 端点或直接 curl DuckDuckGo/Google）
 
 ═══════════════════════════════════════════
   服务架构与操作命令
