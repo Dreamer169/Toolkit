@@ -261,11 +261,26 @@ import { Router } from "express";
     环境变量:        /root/Toolkit/.env
     跨会话记忆:      /root/Toolkit/.ai-sessions/memory.json
 
+  【流量路由（v9.17 架构）】
+    全局代理路由（最高优先级到最低）:
+      /api/v1/*  → sub2api:8080 (pathRewrite: /api/v1→/v1)  ← OpenAI兼容端点反代
+      /api/*     → api-server:8081  ← 后端 API（404 loop-breaker 防止回环）
+      /*         → frontend:3000   ← React SPA
+    CORS: credentials:true + dynamicOrigin反射 + Authorization/X-Token头透传
+    431修复: maxHeaderSize=32KB, pm2 --max-http-header-size=32768
+
   【多模型调用】
     mimo-v2.5-pro (默认):  ANTHROPIC_BASE_URL=https://api.xiaomimimo.com/anthropic
-    sub2api 模型: curl -X POST http://localhost:8080/v1/chat/completions
+    sub2api 模型 (直连): curl -X POST http://localhost:8080/v1/chat/completions
       -H "Authorization: Bearer $(grep SUB2API_API_KEY /root/Toolkit/.env | cut -d= -f2)"
       -d '{"model":"gpt-4o","messages":[{"role":"user","content":"..."}]}'
+    sub2api 模型 (反代): POST /api/v1/chat/completions (同上，走全局代理)
+
+  【Outlook MailCenter 状态（v9.14 修复）】
+    auto-check: 只查 status=active 账号 + Graph API 二次验证
+    账号标签: abuse_mode=true 表示已停用（suspended字段已废弃）
+    UI标签: suspended/disabled/abuse_mode 全部显示为"已停用"
+    DB: 33条legacy记录已归一化
 
   【CF IP 池】
     状态: curl -s http://localhost:8081/api/tools/cf-pool/status
@@ -423,7 +438,7 @@ import { Router } from "express";
 
     let completeSent = false;
       const send = (d: Record<string,unknown>) => { if (d.type === "complete") completeSent = true; try { res.write(`data: ${JSON.stringify(d)}\n\n`); } catch (_) {} };
-    send({ type: "start", model: activeModelName });
+    send({ type: "start", model: "mimo-v2.5-pro" });
 
     const fullPrompt = `${AGENT_SYS}\n\n[用户任务]\n${task}`;
 

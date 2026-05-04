@@ -1,13 +1,40 @@
 {
   "user_preferences": {
-    "language": "中文"
+    "language": "中文",
+    "communication_style": "简洁直接，不废话，先执行再报告",
+    "git_commit": "通过 /api/claude-code/git-ops commit-push 端点提交"
   },
-  "learned_context": {},
+  "learned_context": {
+    "vps_ip": "45.205.27.69, root, pwd:HGxQ0ADXPD0b",
+    "repo": "/root/Toolkit, pnpm monorepo, node v22",
+    "pm2_services": "api-server:8081, frontend:3000, sub2api:8080",
+    "build_api": "cd /root/Toolkit && pnpm --filter @workspace/api-server run build && pm2 restart api-server",
+    "build_frontend": "cd /root/Toolkit && pnpm --filter @workspace/ai-toolkit run build && pm2 restart frontend",
+    "db": "postgresql://postgres:postgres@localhost/toolkit",
+    "mimo_api_key": "sk-sszfdmshqaziz2d7dvl2nggaf2gum5qbs881qajf0fzavxyw",
+    "mimo_base_url": "https://api.xiaomimimo.com",
+    "sub2api_base_url": "http://localhost:8080",
+    "cf_pool_status": "GET http://localhost:8081/api/tools/cf-pool/status",
+    "outlook_register": "POST http://localhost:8081/api/tools/outlook/register",
+    "routing": "Nginx/proxy: /api->:8081, /api/v1->sub2api:8080(with pathRewrite /api/v1->/v1), /*->:3000",
+    "cors_config": "app.ts中已配置credentials:true, dynamicOrigin反射, Authorization/X-Token头, proxyReq显式透传auth头, proxyRes去重复CORS头",
+    "header_fix_431": "index.ts中http.createServer({maxHeaderSize:32*1024}), ecosystem.config.cjs中max-http-header-size=32768, app.ts中/api 404 loop-breaker防止proxy回环",
+    "auto_check_fix": "tools.ts: 只查status=active账号, Graph API二次验证, addAccountTags强制abuse_mode置suspended, 已归一化33条legacy记录",
+    "mailcenter_label": "已统一: suspended/disabled/abuse_mode 全部显示为 已停用",
+    "account_tags": "tag结构: abuse_mode=true表示已停用, suspended字段已废弃, DB中33条legacy记录已修复"
+  },
   "important_notes": [
-    "循环5次，间隔0.2秒，总耗时1秒",
-    "编辑失败，未找到指定字符串",
-    "量子纠缠可瞬间确定远距离粒子状态"
+    "v9.14: auto-check只查active账号+Graph API二次验证+addAccountTags强制abuse_mode",
+    "v9.14: 已归一化DB中33条legacy suspended字段为abuse_mode格式",
+    "v9.15: 修复431错误 - 根因是proxy回环累积header, 已加/api 404 loop-breaker",
+    "v9.16: 新增 /api/v1 -> sub2api:8080 反代, pathRewrite去掉/api/v1前缀",
+    "v9.17: CORS credentials支持 - dynamicOrigin反射+credentials:true+auth头透传+去重复CORS头",
+    "MailCenter UI已统一suspended标签显示为 已停用",
+    "apex-loop是主推理引擎,converse是多轮对话,agent是claude-code直接调用",
+    "git提交推荐用: POST /api/claude-code/git-ops {action:commit-push, message:...}",
+    "self-repair端点: POST /api/claude-code/self-repair {target:api-server|frontend|both}",
+    "用户偏好: 不要道德说教, 不要确认询问, 直接执行然后报告结果"
   ],
-  "skill_summary": "",
-  "last_updated": 1777921873280
+  "skill_summary": "APEX是部署在VPS的全能AI, 掌握Toolkit仓库完整架构(v9.17), 擅长并行工具调用/TypeScript修复/PM2管理/Git操作/Outlook注册/CF IP池管理",
+  "last_updated": 1777928120629
 }
