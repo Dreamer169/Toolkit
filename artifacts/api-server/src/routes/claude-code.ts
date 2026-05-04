@@ -206,7 +206,7 @@ import { Router } from "express";
     // Write prompt to tmpfile and pipe to claude (avoids all stdin issues)
     const tmpPromptFile = `/tmp/ct_${Date.now()}_${Math.random().toString(36).slice(2,6)}.txt`;
     fs.writeFileSync(tmpPromptFile, fullPrompt, "utf-8");
-    const cShellCmd = `cat '${tmpPromptFile}' | /usr/bin/claude --dangerously-skip-permissions --output-format stream-json --verbose; rm -f '${tmpPromptFile}'`;
+    const cShellCmd = `cat '${tmpPromptFile}' | /usr/bin/claude --allowedTools 'Bash' 'Read' 'Write' 'Edit' 'MultiEdit' 'Glob' 'Grep' 'LS' 'TodoRead' 'TodoWrite' 'WebFetch' 'WebSearch' --permission-mode acceptEdits --output-format stream-json --verbose; rm -f '${tmpPromptFile}'`;
     const child = spawn("bash", ["-c", cShellCmd], { env: CLAUDE_ENV, cwd: reqCwd });
 
     let buf = "";
@@ -551,7 +551,7 @@ ${histCtx ? `[对话历史]\n${histCtx}\n\n` : ""}[当前消息]
 
     const tmpFile = `/tmp/cv_${Date.now()}_${Math.random().toString(36).slice(2,6)}.txt`;
     fs.writeFileSync(tmpFile, fullPrompt, "utf-8");
-    const shellCmd = `cat '${tmpFile}' | /usr/bin/claude --dangerously-skip-permissions --output-format stream-json --verbose; rm -f '${tmpFile}'`;
+    const shellCmd = `cat '${tmpFile}' | /usr/bin/claude --allowedTools 'Bash' 'Read' 'Write' 'Edit' 'MultiEdit' 'Glob' 'Grep' 'LS' 'TodoRead' 'TodoWrite' 'WebFetch' 'WebSearch' --permission-mode acceptEdits --output-format stream-json --verbose; rm -f '${tmpFile}'`;
     const child = spawn("bash", ["-c", shellCmd], { env: CLAUDE_ENV, cwd: reqCwd });
 
     let buf = "";
