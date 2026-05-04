@@ -50,6 +50,8 @@ const SUB2API_TARGET = process.env["SUB2API_TARGET"] ?? "http://127.0.0.1:8080";
 const _sub2apiProxy = createProxyMiddleware({
   target: SUB2API_TARGET,
   changeOrigin: true,
+  // Express 挂载在 /api/v1 时会剥掉前缀，pathRewrite 把 /api/v1 补回去
+  pathRewrite: (path: string) => `/api/v1${path}`,
   on: {
     error: (err, _req, res) => {
       logger.warn({ err: String(err) }, "[sub2api-proxy] upstream :8080 unavailable");
