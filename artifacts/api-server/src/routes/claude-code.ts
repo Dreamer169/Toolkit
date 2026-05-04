@@ -33,7 +33,8 @@ import { Router } from "express";
   const FULL_ENV: NodeJS.ProcessEnv = {
     ...process.env,
     HOME: "/root", USER: "root",
-    PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/root/.local/bin",
+    PATH: "/usr/local/go/bin:/root/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/root/.local/bin",
+    GOPATH: "/root/go", GOROOT: "/usr/local/go",
     TERM: "xterm-256color", LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8",
     PYTHONUNBUFFERED: "1", DEBIAN_FRONTEND: "noninteractive",
     GIT_AUTHOR_NAME: "AI Agent", GIT_AUTHOR_EMAIL: "ai@toolkit.local",
@@ -71,7 +72,7 @@ import { Router } from "express";
   async function execCmd(cmd: string, cwd = REPO_DIR): Promise<{ stdout: string; stderr: string; code: number; duration: number }> {
     const t0 = Date.now();
     return new Promise((resolve) => {
-      exec(cmd, { env: FULL_ENV, cwd, timeout: 120_000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      exec(cmd, { env: FULL_ENV, cwd, timeout: 300_000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
         resolve({ stdout: stdout ?? "", stderr: stderr ?? "", code: err?.code ?? 0, duration: Date.now() - t0 });
       });
     });
@@ -874,7 +875,7 @@ import { Router } from "express";
     async function executeApexTool(name: string, inp: Record<string,unknown>, defaultCwd: string): Promise<{output:string;code:number}> {
       try {
         if (name === "bash") {
-          const cmd = String(inp.command ?? ""); const wd = String(inp.cwd ?? defaultCwd); const t = Number(inp.timeout ?? 120000);
+          const cmd = String(inp.command ?? ""); const wd = String(inp.cwd ?? defaultCwd); const t = Number(inp.timeout ?? 300000);
           return await new Promise(resolve => {
             exec(cmd, { env: FULL_ENV, cwd: wd, timeout: t, maxBuffer: 10*1024*1024 }, (err, stdout, stderr) => {
               const out = (stdout ?? "") + (stderr ? "\n[stderr] " + stderr : "");
