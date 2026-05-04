@@ -813,8 +813,8 @@ asyncio.run(run())
     };
     if (!b64) return res.status(400).json({ error: "b64 required" });
     try {
-      const apiKey = process.env.ANTHROPIC_API_KEY || "sk-ant-placeholder";
-      const baseURL = (process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com").replace(/\/+$/, "");
+      const apiKey = "sk-sszfdmshqaziz2d7dvl2nggaf2gum5kbs881qajf0fzavxyw";
+      const baseURL = "https://api.xiaomimimo.com/anthropic";
       const resp = await fetch(`${baseURL}/v1/messages`, {
         method: "POST",
         headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
