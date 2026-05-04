@@ -26,6 +26,8 @@ import { Router } from "express";
   /* Claude Code API env (real model, no permission restrictions) */
   const CLAUDE_ENV: NodeJS.ProcessEnv = {
     ...FULL_ENV,
+    GH_TOKEN: process.env.GH_TOKEN ?? "",
+    GITHUB_TOKEN: process.env.GH_TOKEN ?? "",
     ANTHROPIC_BASE_URL: "https://api.xiaomimimo.com/anthropic",
     ANTHROPIC_AUTH_TOKEN: "sk-sszfdmshqaziz2d7dvl2nggaf2gum5kbs881qajf0fzavxyw",
     ANTHROPIC_MODEL: "mimo-v2.5-pro",
@@ -131,6 +133,24 @@ import { Router } from "express";
   - 做完所有事情后，总结结果`;
 
   /* ─── parse claude stream-json event → our SSE format ─── */
+  function getToolIcon(name: string): string {
+    const m: Record<string,string> = {Bash:"bash",Read:"read",Write:"write",Edit:"edit",MultiEdit:"edit",Glob:"glob",Grep:"grep",LS:"ls",TodoRead:"todo",TodoWrite:"todo",WebFetch:"web",WebSearch:"web"};
+    return m[name] ?? "tool";
+  }
+  function getToolLabel(name: string, inp: Record<string,unknown>): string {
+    if (name==="Bash") return (inp.command as string ?? inp.description as string ?? "").slice(0,100);
+    if (name==="Read") return "read " + String(inp.file_path ?? inp.path ?? "");
+    if (name==="Write") return "write " + String(inp.file_path ?? "");
+    if (name==="Edit"||name==="MultiEdit") return "edit " + String(inp.file_path ?? "");
+    if (name==="Glob") return "glob " + String(inp.pattern ?? "") + " in " + String(inp.path ?? ".");
+    if (name==="Grep") return "grep " + String(inp.pattern ?? "") + " " + String(inp.path ?? "");
+    if (name==="LS") return "ls " + String(inp.path ?? ".");
+    if (name==="TodoRead") return "read todo list";
+    if (name==="TodoWrite") return "update todo list";
+    if (name==="WebFetch") return "fetch " + String(inp.url ?? "");
+    if (name==="WebSearch") return "search: " + String(inp.query ?? "");
+    return name;
+  }
   function mapClaudeEvent(raw: Record<string,unknown>): Record<string,unknown> | null {
     const t = raw.type as string;
     if (t === "system") return { type: "status", text: "Claude Agent 初始化…" };
@@ -141,9 +161,9 @@ import { Router } from "express";
       const toolUses = parts.filter(c=>c.type==="tool_use");
       if (toolUses.length > 0) {
         const tu = toolUses[0];
-        const cmd = tu.input?.command ?? "";
-        const desc = tu.input?.description ?? "";
-        return { type: "exec_start", cmd: cmd || desc, toolId: tu.id, ai_text: texts };
+        const inp = (tu.input ?? {}) as Record<string,unknown>;
+        const toolName = String(tu.name ?? "Bash");
+        return { type: "exec_start", tool: getToolIcon(toolName), toolName, cmd: getToolLabel(toolName, inp), toolId: tu.id, ai_text: texts, filePath: String(inp.file_path ?? inp.path ?? "") || null };
       }
       if (texts) return { type: "ai_response", text: texts };
       return null;
@@ -186,7 +206,7 @@ import { Router } from "express";
     // Write prompt to tmpfile and pipe to claude (avoids all stdin issues)
     const tmpPromptFile = `/tmp/ct_${Date.now()}_${Math.random().toString(36).slice(2,6)}.txt`;
     fs.writeFileSync(tmpPromptFile, fullPrompt, "utf-8");
-    const cShellCmd = `cat '${tmpPromptFile}' | /usr/bin/claude --allowedTools 'Bash' --output-format stream-json --verbose; rm -f '${tmpPromptFile}'`;
+    const cShellCmd = `cat '${tmpPromptFile}' | /usr/bin/claude --dangerously-skip-permissions --output-format stream-json --verbose; rm -f '${tmpPromptFile}'`;
     const child = spawn("bash", ["-c", cShellCmd], { env: CLAUDE_ENV, cwd: reqCwd });
 
     let buf = "";
@@ -531,7 +551,7 @@ ${histCtx ? `[对话历史]\n${histCtx}\n\n` : ""}[当前消息]
 
     const tmpFile = `/tmp/cv_${Date.now()}_${Math.random().toString(36).slice(2,6)}.txt`;
     fs.writeFileSync(tmpFile, fullPrompt, "utf-8");
-    const shellCmd = `cat '${tmpFile}' | /usr/bin/claude --allowedTools 'Bash' --output-format stream-json --verbose; rm -f '${tmpFile}'`;
+    const shellCmd = `cat '${tmpFile}' | /usr/bin/claude --dangerously-skip-permissions --output-format stream-json --verbose; rm -f '${tmpFile}'`;
     const child = spawn("bash", ["-c", shellCmd], { env: CLAUDE_ENV, cwd: reqCwd });
 
     let buf = "";
