@@ -493,5 +493,90 @@ import { Router } from "express";
     res.json({ok:true});
   });
 
+
+  /* ─── POST /api/claude-code/converse — UNIFIED multi-turn with Bash ─── */
+  router.post("/claude-code/converse", (req, res) => {
+    const { sessionId, history = [], message, cwd: reqCwd = REPO_DIR } = req.body as {
+      sessionId?: string; history?: Array<{role:string;content:string;events?:unknown[]}>; message: string; cwd?: string;
+    };
+    if (!message?.trim()) { res.status(400).json({ error: "message required" }); return; }
+
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+
+    const send = (d: Record<string,unknown>) => { try { res.write(`data: ${JSON.stringify(d)}\n\n`); } catch (_) {} };
+    send({ type: "start" });
+
+    // Build conversation history context
+    const histCtx = history.slice(-8).map(m => {
+      const role = m.role === "user" ? "用户" : "助手";
+      const evSummary = (m.events ?? []).filter((e: unknown) => {
+        const ev = e as Record<string,unknown>;
+        return ev.type === "exec_done" && ev.stdout;
+      }).map((e: unknown) => {
+        const ev = e as Record<string,unknown>;
+        return `[执行: ${(ev.cmd as string ?? "").slice(0,60)}]\n输出: ${(ev.stdout as string ?? "").slice(0,300)}`;
+      }).join("\n");
+      return `${role}: ${m.content}${evSummary ? "\n"+evSummary : ""}`;
+    }).join("\n\n");
+
+    const fullPrompt = `${AGENT_SYS}
+
+${histCtx ? `[对话历史]\n${histCtx}\n\n` : ""}[当前消息]
+用户: ${message}
+
+请直接响应并在需要时使用 Bash 工具执行操作。`;
+
+    const tmpFile = `/tmp/cv_${Date.now()}_${Math.random().toString(36).slice(2,6)}.txt`;
+    fs.writeFileSync(tmpFile, fullPrompt, "utf-8");
+    const shellCmd = `cat '${tmpFile}' | /usr/bin/claude --allowedTools 'Bash' --output-format stream-json --verbose; rm -f '${tmpFile}'`;
+    const child = spawn("bash", ["-c", shellCmd], { env: CLAUDE_ENV, cwd: reqCwd });
+
+    let buf = "";
+    let completeSent = false;
+    child.stdout.on("data", (data: Buffer) => {
+      buf += data.toString();
+      const lines = buf.split("\n");
+      buf = lines.pop() ?? "";
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t) continue;
+        try {
+          const raw = JSON.parse(t) as Record<string,unknown>;
+          const mapped = mapClaudeEvent(raw);
+          if (mapped) {
+            if (mapped.type === "complete") completeSent = true;
+            send(mapped);
+          }
+        } catch {}
+      }
+    });
+    child.stderr.on("data", (data: Buffer) => {
+      const t = data.toString().trim();
+      if (t && !t.includes("Loaded MCP") && !t.includes("logLevel") && !t.includes("stream-json")) {
+        send({ type: "status", text: t.slice(0, 150) });
+      }
+    });
+    child.on("close", (code, signal) => {
+      if (!completeSent) send({ type: "complete", text: "" });
+      if (code !== 0 && signal) send({ type: "error", text: `退出异常: code=${code}` });
+      // Auto-save session
+      if (sessionId) {
+        try {
+          ensureDir(SESSIONS_DIR);
+          const f = path.join(SESSIONS_DIR, `${sessionId}.json`);
+          const ex = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f,"utf-8")) : {};
+          const now = Date.now();
+          const msgs = [...(ex.messages ?? []), { role:"user", content:message, ts: now }];
+          fs.writeFileSync(f, JSON.stringify({ ...ex, id:sessionId, updated_at:now, created_at:ex.created_at??now, messages: msgs }, null, 2));
+        } catch {}
+      }
+      try { res.end(); } catch (_) {}
+    });
+    req.on("close", () => { try { child.kill("SIGTERM"); } catch (_) {} });
+  });
+
   export default router;
   
