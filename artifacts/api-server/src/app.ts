@@ -45,6 +45,24 @@ app.get("/v1/models", (_req, res) => {
   });
 });
 
+// v9.16: /api/v1/** → sub2api(:8080) 统一入口反代（浏览器只需连接 :8081 一个端口）
+const SUB2API_TARGET = process.env["SUB2API_TARGET"] ?? "http://127.0.0.1:8080";
+const _sub2apiProxy = createProxyMiddleware({
+  target: SUB2API_TARGET,
+  changeOrigin: true,
+  on: {
+    error: (err, _req, res) => {
+      logger.warn({ err: String(err) }, "[sub2api-proxy] upstream :8080 unavailable");
+      const r = res as unknown as { headersSent?: boolean; writeHead?: (s: number, h: Record<string, string>) => void; end?: (b: string) => void };
+      if (r.writeHead && !r.headersSent) {
+        r.writeHead(502, { "content-type": "application/json" });
+        r.end?.(JSON.stringify({ code: -1, message: "sub2api service unavailable" }));
+      }
+    },
+  },
+});
+app.use("/api/v1", _sub2apiProxy);
+
 // v9.15: 未匹配的 /api/** 路由直接返回 404，防止被 frontend proxy 转发到 Vite
 // 再被 Vite proxy 转回 api-server 造成死循环（431 根本原因）
 app.use("/api", (_req, res) => {
