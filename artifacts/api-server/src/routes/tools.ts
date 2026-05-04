@@ -1573,6 +1573,26 @@ router.post("/tools/outlook/register", async (req, res) => {
             job.logs.push({ type: "warn", message: `⚠ 账号库保存失败(${acc.email}): ${dbErr}` });
             continue;
           }
+          // ── 统一数据库同步（fire-and-forget，失败不阻断）──
+          try {
+            const _idn2 = identityMap.get(acc.email);
+            const _syncPayload = JSON.stringify({
+              action: "outlook",
+              email: acc.email,
+              password: (acc as { email: string; password?: string }).password || "",
+              status: "active",
+              proxy: _idn2?.proxy_formatted || (_idn2?.proxy_port ? `socks5://127.0.0.1:${_idn2.proxy_port}` : null),
+              egress_ip: _idn2?.exit_ip || null,
+              user_agent: _idn2?.user_agent || null,
+              fingerprint_json: _idn2?.fingerprint_json || null,
+              cookies_json: _idn2?.cookies_json || null,
+            });
+            import("child_process").then(({ spawn: _spawn }) => {
+              const _cp = _spawn("python3", ["/data/Toolkit/artifacts/api-server/sync_unified_db.py"]);
+              _cp.stdin.write(_syncPayload);
+              _cp.stdin.end();
+            }).catch(() => {});
+          } catch (_) {}
           // 2. 同步到邮箱库（独立 try，失败不阻断后续）
           try {
             await execute(
@@ -4684,6 +4704,27 @@ router.post('/tools/obvious/provision', async (req, res) => {
     ];
     if (proxy) args.push('--proxy', proxy);
     _spawnObviousJob(created.jobId, args, { DISPLAY: ':99' });
+    // 监听 obvious provision 完成事件，同步写入统一数据库
+    const _provJobId = created.jobId;
+    const _provLabel = accLabel;
+    jobQueue.once('done', async (doneJob: { jobId: string; exitCode?: number }) => {
+      if (doneJob.jobId !== _provJobId || doneJob.exitCode !== 0) return;
+      try {
+        const _fs = await import('fs');
+        const _idxPath = OBVIOUS_ACC_DIR + '/index.json';
+        const _allAcc = _fs.existsSync(_idxPath)
+          ? JSON.parse(_fs.readFileSync(_idxPath, 'utf8')) as Array<Record<string, unknown>>
+          : [];
+        const _newAcc = _allAcc.find(a => a.label === _provLabel);
+        if (_newAcc) {
+          const _cp = (await import('child_process')).spawn(
+            'python3', ['/data/Toolkit/artifacts/api-server/sync_unified_db.py']
+          );
+          _cp.stdin.write(JSON.stringify({ action: 'obvious', ..._newAcc }));
+          _cp.stdin.end();
+        }
+      } catch (_) {}
+    });
     res.json({ success: true, jobId: created.jobId, label: accLabel, message: 'obvious账号注册任务已启动' });
   } catch (e: unknown) { res.status(500).json({ success: false, error: String(e) }); }
 });
