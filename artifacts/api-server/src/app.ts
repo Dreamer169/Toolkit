@@ -45,6 +45,12 @@ app.get("/v1/models", (_req, res) => {
   });
 });
 
+// v9.15: 未匹配的 /api/** 路由直接返回 404，防止被 frontend proxy 转发到 Vite
+// 再被 Vite proxy 转回 api-server 造成死循环（431 根本原因）
+app.use("/api", (_req, res) => {
+  res.status(404).json({ error: "API route not found" });
+});
+
 // v8.83 — frontend 反代: 所有未被上面路由消费的请求转发到本机前端 dev server (:3000)
 // 这样 api-server (:8081) 单一公网入口同时承载 API + 前端，省一条 frp 隧道
 const FRONTEND_TARGET = process.env["FRONTEND_PROXY_TARGET"] ?? "http://127.0.0.1:3000";
