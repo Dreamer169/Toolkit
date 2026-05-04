@@ -420,7 +420,6 @@ module.exports = {
       "watch": false,
       "autorestart": true
     }
-  ]
     ,{
       "name": "socat-854",
       "script": "socat",
@@ -442,6 +441,29 @@ module.exports = {
       "max_restarts": 999,
       "watch": false,
       "autorestart": true
+    }
+
+    ,{
+      "name": "ip2free-monitor2",
+      "script": "/root/Toolkit/artifacts/api-server/ip2free_monitor2.py",
+      "interpreter": "python3",
+      "cwd": "/root/Toolkit/artifacts/api-server",
+      "env": { "PYTHONUNBUFFERED": "1" },
+      "restart_delay": 10000,
+      "max_restarts": 20,
+      "watch": false,
+      "autorestart": false
+    }
+    ,{
+      "name": "ip2free-solve-all",
+      "script": "/root/Toolkit/artifacts/api-server/ip2free_solve_all.py",
+      "interpreter": "python3",
+      "cwd": "/root/Toolkit/artifacts/api-server",
+      "env": { "PYTHONUNBUFFERED": "1" },
+      "restart_delay": 10000,
+      "max_restarts": 5,
+      "watch": false,
+      "autorestart": false
     }
   ]
 };
