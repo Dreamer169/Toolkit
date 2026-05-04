@@ -5,7 +5,7 @@ module.exports = {
       "script": "/root/Toolkit/artifacts/api-server/dist/index.mjs",
       "cwd": "/root/Toolkit",
       "interpreter": "node",
-      "interpreter_args": "--enable-source-maps",
+      "interpreter_args": "--max-old-space-size=1536 --enable-source-maps",
       "env": {
         "DATABASE_URL": "postgresql://postgres:postgres@localhost/toolkit",
         "PORT": "8081",
@@ -24,7 +24,8 @@ module.exports = {
         "WEBSHARE_API_KEY": "lx7r5124cubob5mfmofbdtjvdti5bqy2lxdg06ho"
       },
       "restart_delay": 3000,
-      "max_restarts": 20,
+      "max_memory_restart": "1200M",
+      "max_restarts": 999,
       "watch": false,
       "autorestart": true
     },

@@ -68,3 +68,11 @@ const server = await _listenWithRetry();
 }
 
 server.on("error", (err) => { logger.error({ err }, "Server error"); });
+
+// v9.01: global crash防护 — 防止 unhandledRejection/uncaughtException 导致进程退出
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error({ reason: String(reason), promise: String(promise) }, '[crash-guard] unhandledRejection — caught, not exiting');
+});
+process.on('uncaughtException', (err) => {
+  logger.error({ err: String(err), stack: (err as Error).stack }, '[crash-guard] uncaughtException — caught, not exiting');
+});
