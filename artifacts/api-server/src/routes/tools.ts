@@ -5781,24 +5781,28 @@ router.post("/tools/outlook/auto-check", async (req: Request, res: Response) => 
 
 
 // ── Outlook 截图查看器 API (v9.24) ────────────────────────────────────────────
-// GET /api/tools/outlook/screenshots — 列出所有 fail/ok/err 截图及分类
+// GET /api/tools/outlook/screenshots — list fail/ok/err/intermediate screenshots
 router.get("/tools/outlook/screenshots", async (_req, res) => {
-  const { readdir, stat: fsStat } = await import("fs/promises");
+  const fsp = await import("fs/promises");
+  const DIR = "/tmp";
   try {
-    const files = await readdir("/tmp");
-    const pngs = files.filter(f =>
-      (f.startsWith("outlook_fail_") || f.startsWith("outlook_ok_") || f.startsWith("outlook_err_")) &&
-      f.endsWith(".png")
-    );
-    const screenshots = await Promise.all(pngs.map(async f => {
-      const s = await fsStat();
-      const typeRaw = f.startsWith("outlook_ok_") ? "ok" : f.startsWith("outlook_err_") ? "err" : "fail";
-      const email = f.replace(/^outlook_(fail|ok|err)_/, "").replace(/\.png$/, "") + "@outlook.com";
-      // size 分级: <50KB = activity-block (MS 快速拒绝页), >=50KB = captcha/form (真实页面)
-      const errorType = typeRaw === "fail" ? (s.size < 50_000 ? "activity-block" : "captcha") : null;
-      return { name: f, email, type: typeRaw, size: s.size, mtime: s.mtimeMs, errorType };
+    const files = await fsp.readdir(DIR);
+    const pngs = files.filter((f: string) => f.startsWith("outlook_") && f.endsWith(".png"));
+    const screenshots = await Promise.all(pngs.map(async (f: string) => {
+      const fullPath = DIR + "/" + f;
+      const s = await fsp.stat(fullPath);
+      let typeRaw: "ok" | "fail" | "err" = "fail";
+      if (f.startsWith("outlook_ok_")) typeRaw = "ok";
+      else if (f.startsWith("outlook_err_")) typeRaw = "err";
+      const isIntermediate = f.startsWith("outlook_after_username_");
+      const slug = f.replace(/^outlook_(after_username_|fail_|ok_|err_)/, "").replace(/\.png$/, "");
+      const email = slug ? slug + "@outlook.com" : f;
+      const errorType = typeRaw === "fail" && !isIntermediate
+        ? (s.size < 50_000 ? "activity-block" : "captcha") : null;
+      const label = isIntermediate ? "intermediate" : typeRaw;
+      return { name: f, email, type: typeRaw, label, size: s.size, mtime: s.mtimeMs, errorType };
     }));
-    screenshots.sort((a, b) => b.mtime - a.mtime);
+    screenshots.sort((a: any, b: any) => b.mtime - a.mtime);
     res.json({ success: true, screenshots });
   } catch (e) {
     res.status(500).json({ success: false, error: String(e) });
@@ -5809,7 +5813,7 @@ router.get("/tools/outlook/screenshots", async (_req, res) => {
 router.get("/tools/outlook/screenshot-img/:name", async (req, res) => {
   const { createReadStream, existsSync } = await import("fs");
   const name = req.params.name.replace(/[^a-zA-Z0-9._-]/g, "");
-  if (!/^outlook_(fail|ok|err)_[\w.]+\.png$/.test(name)) {
+  if (!/^outlook_[\w.]+\.png$/.test(name)) {
     res.status(400).json({ success: false, error: "invalid name" }); return;
   }
   const fp = "/tmp/" + name;
