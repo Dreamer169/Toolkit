@@ -991,7 +991,28 @@ import { Router } from "express";
       sse({ type:"start", mode:"apex-native" });
       const mem = loadMemory();
       const sysProm = AGENT_SYS + formatMemory(mem);
-      const msgs: {role:"user"|"assistant";content:unknown}[] = [...history.slice(-6).map(h => ({ role: h.role as "user"|"assistant", content: h.content })), { role:"user", content: message }];
+      // Vision pre-process images before building msgs
+      let visionCtx = "";
+      if (images && images.length > 0) {
+        const visionResults: string[] = [];
+        for (const img of images.slice(0, 4)) {
+          try {
+            const vport = process.env.PORT ?? 8081;
+            const vr = await fetch("http://localhost:" + vport + "/api/claude-code/vision", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ b64: img.b64, mime: img.mime, question: "详细描述这张图片的内容，包括文字、代码、UI元素、数据等所有细节" }),
+              signal: AbortSignal.timeout(30000),
+            });
+            const vd = await vr.json() as { ok?: boolean; text?: string; description?: string; error?: string };
+            if (vd.ok && (vd.text || vd.description)) {
+              visionResults.push("[图片 " + img.name + ": " + (vd.text ?? vd.description) + "]");
+            }
+          } catch (ve) { visionResults.push("[图片 " + img.name + ": 解析失败 " + String(ve).slice(0,80) + "]"); }
+        }
+        if (visionResults.length > 0) visionCtx = "\n\n[用户上传的图片内容]\n" + visionResults.join("\n");
+      }
+      const userContent = message + visionCtx;
+      const msgs: {role:"user"|"assistant";content:unknown}[] = [...history.slice(-6).map(h => ({ role: h.role as "user"|"assistant", content: h.content })), { role:"user", content: userContent }];
       let closed = false; res.on("close", () => { closed = true; });
       let finalText = ""; let turn = 0;
       while (!closed && turn < maxTurns) {
