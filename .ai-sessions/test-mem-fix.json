@@ -1,0 +1,17 @@
+{
+  "id": "test-mem-fix",
+  "updated_at": 1777919223173,
+  "created_at": 1777919223173,
+  "messages": [
+    {
+      "role": "user",
+      "content": "用memory_write工具保存：key_type=user_preferences, key=language, value=中文",
+      "ts": 1777919223173
+    },
+    {
+      "role": "assistant",
+      "content": "已保存：`user_preferences.language = 中文`",
+      "ts": 1777919223174
+    }
+  ]
+}

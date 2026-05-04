@@ -1,0 +1,17 @@
+{
+  "id": "test-glob-fix",
+  "updated_at": 1777919204161,
+  "created_at": 1777919204161,
+  "messages": [
+    {
+      "role": "user",
+      "content": "用glob工具搜索 **/*.ts 文件，只列出前5个结果就好",
+      "ts": 1777919204161
+    },
+    {
+      "role": "assistant",
+      "content": "前5个 `.ts` 文件结果：\n\n```\n1. /root/Toolkit/artifacts/ai-toolkit/src/data/tools.ts\n2. /root/Toolkit/artifacts/ai-toolkit/src/hooks/use-toast.ts\n3. /root/Toolkit/artifacts/ai-toolkit/src/lib/utils.ts\n4. /root/Toolkit/artifacts/ai-toolkit/vite.config.ts\n5. /root/Toolkit/artifacts/api-server/src/app.ts\n```\n\n总共匹配到大量文件（含 node_modules 中的类型声明）。如果只需要项目源码，可以用更精确的路径如 `artifacts/**/*.ts` 来排除依赖。",
+      "ts": 1777919204162
+    }
+  ]
+}

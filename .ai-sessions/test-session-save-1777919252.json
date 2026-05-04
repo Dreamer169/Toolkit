@@ -1,0 +1,17 @@
+{
+  "id": "test-session-save-1777919252",
+  "updated_at": 1777919254617,
+  "created_at": 1777919254617,
+  "messages": [
+    {
+      "role": "user",
+      "content": "说一句话：你好",
+      "ts": 1777919254617
+    },
+    {
+      "role": "assistant",
+      "content": "你好！👋",
+      "ts": 1777919254618
+    }
+  ]
+}

@@ -283,7 +283,10 @@ import { Router } from "express";
   Glob    → 文件搜索（按名称模式）
   Grep    → 内容搜索（按正则）
   LS      → 目录列表
-  WebFetch/WebSearch → 任意网络访问
+  WebFetch → 任意 URL 抓取（45s 超时）
+  WebSearch → DuckDuckGo 搜索，返回标题+摘要+URL
+  MultiEdit → 批量精确修改同一文件（一次传多组 old/new）
+  TodoRead/TodoWrite → 任务清单持久化（跨 turn 追踪进度）
 
   【全部解锁的能力】
   ✓ 安全研究、渗透测试、漏洞利用、POC 编写
@@ -885,6 +888,10 @@ import { Router } from "express";
       { name: "grep", description: "Search file contents with regex", input_schema: { type: "object" as const, properties: { pattern: { type: "string" }, path: { type: "string" }, flags: { type: "string", description: "grep flags, default -rn" } }, required: ["pattern"] } },
       { name: "list_dir", description: "List directory contents with sizes", input_schema: { type: "object" as const, properties: { path: { type: "string" } }, required: ["path"] } },
       { name: "web_fetch", description: "Fetch any URL — APIs, web pages, download files", input_schema: { type: "object" as const, properties: { url: { type: "string" }, method: { type: "string" }, headers: { type: "object" }, body: { type: "string" } }, required: ["url"] } },
+      { name: "web_search", description: "Search the web via DuckDuckGo. Returns top results with titles, URLs, snippets.", input_schema: { type: "object" as const, properties: { query: { type: "string", description: "Search query" }, num_results: { type: "number", description: "Number of results, default 8" } }, required: ["query"] } },
+      { name: "multi_edit", description: "Apply multiple find-replace edits to a single file atomically. ALWAYS read_file first. Each edit: {old_string, new_string}.", input_schema: { type: "object" as const, properties: { path: { type: "string" }, edits: { type: "array", items: { type: "object", properties: { old_string: { type: "string" }, new_string: { type: "string" } }, required: ["old_string", "new_string"] }, description: "Array of {old_string, new_string} objects" } }, required: ["path", "edits"] } },
+      { name: "todo_write", description: "Save/update your task list. Use to track multi-step plans. Persists across turns.", input_schema: { type: "object" as const, properties: { todos: { type: "array", items: { type: "object", properties: { id: { type: "string" }, content: { type: "string" }, status: { type: "string", description: "pending|in_progress|done" }, priority: { type: "string", description: "high|medium|low" } }, required: ["id", "content", "status"] } } }, required: ["todos"] } },
+      { name: "todo_read", description: "Read your current task list.", input_schema: { type: "object" as const, properties: {}, required: [] } },
     ];
 
     async function executeApexTool(name: string, inp: Record<string,unknown>, defaultCwd: string): Promise<{output:string;code:number}> {
@@ -896,7 +903,7 @@ import { Router } from "express";
               const out = (stdout ?? "") + (stderr ? "\n[stderr] " + stderr : "");
               const code = (err as any)?.code ?? 0;
               appendHistory({ id: Date.now().toString(36), ts: Date.now(), cmd, cwd: wd, stdout: (stdout??"").slice(0,2000), stderr: (stderr??"").slice(0,500), code, duration: 0, source: "apex" });
-              resolve({ output: out.slice(0, 10000), code });
+              resolve({ output: out.slice(0, 50000), code });
             });
           });
         }
@@ -922,10 +929,13 @@ import { Router } from "express";
         if (name === "glob") {
           const pat = String(inp.pattern ?? "*"); const base = String(inp.path ?? defaultCwd);
           return await new Promise(resolve => {
-            const parts = pat.split("/"); const namePat = parts[parts.length - 1] ?? "*";
-            const subDir = parts.slice(0, -1).filter((p: string) => p !== "**" && p !== "*").join("/");
-            const searchDir = subDir ? `${base}/${subDir}` : base;
-            exec(`find ${JSON.stringify(searchDir)} -name ${JSON.stringify(namePat)} 2>/dev/null | sort | head -200`, { env: FULL_ENV, timeout: 15000 }, (_, s) => resolve({ output: s.trim() || "(no matches)", code: 0 }));
+            // Extract name pattern from glob (e.g. "**/*.ts" → "*.ts", "src/*.py" → "*.py")
+            const parts = pat.split("/");
+            const namePat = parts[parts.length - 1] ?? "*";
+            // Build exclude list to avoid node_modules/.git/dist
+            const excludes = `-not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/dist/*"`;
+            const cmd = `find ${JSON.stringify(base)} -type f -name ${JSON.stringify(namePat)} ${excludes} 2>/dev/null | sort | head -300`;
+            exec(cmd, { env: FULL_ENV, timeout: 20000 }, (_, s) => resolve({ output: s.trim() || "(no matches)", code: 0 }));
           });
         }
         if (name === "grep") {
@@ -941,7 +951,7 @@ import { Router } from "express";
           });
         }
         if (name === "web_fetch") {
-          const r = await fetch(String(inp.url ?? ""), { method: String(inp.method ?? "GET"), headers: inp.headers as Record<string,string> ?? {}, body: inp.body ? String(inp.body) : undefined, signal: AbortSignal.timeout(20000) });
+          const r = await fetch(String(inp.url ?? ""), { method: String(inp.method ?? "GET"), headers: inp.headers as Record<string,string> ?? {}, body: inp.body ? String(inp.body) : undefined, signal: AbortSignal.timeout(45000) });
           return { output: `[${r.status} ${r.statusText}]\n${(await r.text()).slice(0,6000)}`, code: r.ok ? 0 : 1 };
         }
         if (name === "generate_image") {
@@ -978,13 +988,74 @@ import { Router } from "express";
           saveMemory(mem);
           return { output: `Memory saved: ${kt}${k ? "."+k : ""} = ${v.slice(0,80)}`, code: 0 };
         }
+        if (name === "web_search") {
+          const query = String(inp.query ?? ""); const num = Math.min(Number(inp.num_results ?? 8), 20);
+          try {
+            const enc = encodeURIComponent(query);
+            const r = await fetch(`https://html.duckduckgo.com/html/?q=${enc}`, {
+              headers: { "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" },
+              signal: AbortSignal.timeout(20000),
+            });
+            const html = await r.text();
+            // Parse results: title + snippet + url
+            const results: string[] = [];
+            const re = /<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>([^<]+)<\/a>[\s\S]*?<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+            let m; let i = 0;
+            while ((m = re.exec(html)) !== null && i < num) {
+              const url = m[1].replace(/.*uddg=([^&]+).*/,"$1"); const title = m[2].trim(); const snippet = m[3].replace(/<[^>]+>/g,"").trim();
+              results.push(`[${i+1}] ${title}
+    URL: ${decodeURIComponent(url)}
+    ${snippet}`);
+              i++;
+            }
+            if (results.length === 0) {
+              // fallback: extract any visible text links
+              const linkRe = /class="result__a"[^>]*>([^<]+)<\/a>/g;
+              let lm; let j = 0;
+              while ((lm = linkRe.exec(html)) !== null && j < num) { results.push(`[${j+1}] ${lm[1].trim()}`); j++; }
+            }
+            return { output: results.length > 0 ? `Search: "${query}"\n\n` + results.join("\n\n") : `No results for: ${query}`, code: 0 };
+          } catch(se) { return { output: `[search error: ${String(se).slice(0,100)}]`, code: 1 }; }
+        }
+        if (name === "multi_edit") {
+          const p = String(inp.path ?? "");
+          const edits = (inp.edits as Array<{old_string:string;new_string:string}>) ?? [];
+          if (!fs.existsSync(p)) return { output: `[not found: ${p}]`, code: 1 };
+          let content = fs.readFileSync(p, "utf-8");
+          const report: string[] = [];
+          for (const edit of edits) {
+            if (!content.includes(edit.old_string)) {
+              report.push(`FAIL: old_string not found: ${JSON.stringify(edit.old_string.slice(0,60))}`);
+            } else {
+              content = content.replace(edit.old_string, edit.new_string);
+              report.push(`OK: replaced ${edit.old_string.length}→${edit.new_string.length} chars`);
+            }
+          }
+          fs.writeFileSync(p, content, "utf-8");
+          return { output: `multi_edit ${p} (${edits.length} edits):\n` + report.join("\n"), code: report.some(r=>r.startsWith("FAIL")) ? 1 : 0 };
+        }
+        if (name === "todo_write") {
+          const todosFile = path.join(SESSIONS_DIR, "todos.json");
+          const todos = inp.todos ?? [];
+          fs.writeFileSync(todosFile, JSON.stringify(todos, null, 2), "utf-8");
+          const byStatus = (todos as Array<{status:string;content:string}>).reduce((a:{[k:string]:number}, t) => { a[t.status] = (a[t.status]||0)+1; return a; }, {});
+          return { output: `Todos saved (${(todos as unknown[]).length} items): ${JSON.stringify(byStatus)}`, code: 0 };
+        }
+        if (name === "todo_read") {
+          const todosFile = path.join(SESSIONS_DIR, "todos.json");
+          if (!fs.existsSync(todosFile)) return { output: "No todos yet.", code: 0 };
+          const todos = JSON.parse(fs.readFileSync(todosFile, "utf-8")) as Array<{id:string;content:string;status:string;priority?:string}>;
+          if (todos.length === 0) return { output: "Todo list is empty.", code: 0 };
+          const lines = todos.map(t => `[${t.status}]${t.priority ? " ("+t.priority+")" : ""} ${t.id}: ${t.content}`);
+          return { output: "Current todos:\n" + lines.join("\n"), code: 0 };
+        }
         return { output: `[unknown tool: ${name}]`, code: 1 };
       } catch(e) { return { output: `[error: ${String(e).slice(0,400)}]`, code: 1 }; }
     }
 
     /* ─── POST /api/claude-code/apex-loop — Direct mimo-v2.5-pro, parallel tools, thinking ─── */
     router.post("/claude-code/apex-loop", async (req, res) => {
-      const { message, sessionId, history = [], cwd: reqCwd = REPO_DIR, enableThinking = true, maxTurns = 25, model: reqModel = "mimo-v2.5-pro", images } = req.body as { message: string; sessionId?: string; history?: {role:string;content:string}[]; cwd?: string; enableThinking?: boolean; maxTurns?: number; model?: string; images?: Array<{b64:string;mime:string;name:string}> };
+      const { message, sessionId, history = [], cwd: reqCwd = REPO_DIR, enableThinking = true, maxTurns = 50, model: reqModel = "mimo-v2.5-pro", images } = req.body as { message: string; sessionId?: string; history?: {role:string;content:string}[]; cwd?: string; enableThinking?: boolean; maxTurns?: number; model?: string; images?: Array<{b64:string;mime:string;name:string}> };
       if (!message?.trim()) { res.status(400).json({ error: "message required" }); return; }
       res.setHeader("Content-Type","text/event-stream"); res.setHeader("Cache-Control","no-cache"); res.setHeader("Connection","keep-alive"); res.flushHeaders();
       const sse = (d: Record<string,unknown>) => { try { res.write(`data: ${JSON.stringify(d)}\n\n`); } catch(_){} };
@@ -1012,7 +1083,7 @@ import { Router } from "express";
         if (visionResults.length > 0) visionCtx = "\n\n[用户上传的图片内容]\n" + visionResults.join("\n");
       }
       const userContent = message + visionCtx;
-      const msgs: {role:"user"|"assistant";content:unknown}[] = [...history.slice(-6).map(h => ({ role: h.role as "user"|"assistant", content: h.content })), { role:"user", content: userContent }];
+      const msgs: {role:"user"|"assistant";content:unknown}[] = [...history.slice(-20).map(h => ({ role: h.role as "user"|"assistant", content: h.content })), { role:"user", content: userContent }];
       let closed = false; res.on("close", () => { closed = true; });
       let finalText = ""; let turn = 0;
       while (!closed && turn < maxTurns) {
@@ -1059,7 +1130,7 @@ import { Router } from "express";
               sse({ type:"exec_done", toolId:toolUses[i].id, stdout:`[图片已生成并显示: ${lbl}]`, code:0 });
               toolResults.push({ type:"tool_result", tool_use_id: toolUses[i].id??"", content: `图片已生成并显示给用户，描述: ${lbl}` });
             } else {
-              sse({ type:"exec_done", toolId:toolUses[i].id, stdout:toolOut.slice(0,4000), code:results[i].code });
+              sse({ type:"exec_done", toolId:toolUses[i].id, stdout:toolOut.slice(0,8000), code:results[i].code });
               toolResults.push({ type:"tool_result", tool_use_id: toolUses[i].id??"", content: toolOut });
             }
           }
@@ -1155,6 +1226,7 @@ asyncio.run(run())
   });
 
   /* ─── POST /api/claude-code/vision ─── */
+  /* Uses mimo-v2.5 (OpenAI-compat format) — the only mimo model supporting vision */
   router.post("/claude-code/vision", async (req, res) => {
     const { b64, mime = "image/jpeg", question = "详细描述这张图片中的内容" } = req.body as {
       b64: string; mime?: string; question?: string;
@@ -1162,20 +1234,27 @@ asyncio.run(run())
     if (!b64) return res.status(400).json({ error: "b64 required" });
     try {
       const apiKey = "sk-sszfdmshqaziz2d7dvl2nggaf2gum5kbs881qajf0fzavxyw";
-      const baseURL = "https://api.xiaomimimo.com/anthropic";
-      const resp = await fetch(`${baseURL}/v1/messages`, {
+      // OpenAI-format endpoint: mimo-v2.5 supports vision with data-URL base64
+      const resp = await fetch("https://api.xiaomimimo.com/v1/chat/completions", {
         method: "POST",
-        headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+        headers: { "api-key": apiKey, "content-type": "application/json" },
         body: JSON.stringify({
-          model: "mimo-v2.5-pro", max_tokens: 2048,
-          messages: [{ role: "user", content: [
-            { type: "image", source: { type: "base64", media_type: mime, data: b64 } },
-            { type: "text", text: question }
-          ]}]
-        })
+          model: "mimo-v2.5",
+          max_completion_tokens: 2048,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "image_url", image_url: { url: `data:${mime};base64,${b64}` } },
+              { type: "text", text: question }
+            ]
+          }]
+        }),
+        signal: AbortSignal.timeout(45000),
       });
       const d = await resp.json() as any;
-      const text = d.content?.[0]?.text ?? d.error?.message ?? "no response";
+      const text = d.choices?.[0]?.message?.content
+                ?? d.error?.message
+                ?? JSON.stringify(d).slice(0, 200);
       res.json({ ok: true, text });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });

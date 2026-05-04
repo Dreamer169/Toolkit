@@ -1,0 +1,17 @@
+{
+  "id": "test-me",
+  "updated_at": 1777920034613,
+  "created_at": 1777920034613,
+  "messages": [
+    {
+      "role": "user",
+      "content": "创建文件 /tmp/multi_test.txt 内容是 'hello world\nfoo bar'，然后用 multi_edit 同时把 hello 改成 HI 和 foo 改成 BAZ，最后 read_file 验证",
+      "ts": 1777920034613
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "ts": 1777920034614
+    }
+  ]
+}

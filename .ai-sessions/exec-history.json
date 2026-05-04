@@ -75,5 +75,104 @@
     "code": 127,
     "duration": 0,
     "source": "apex"
+  },
+  {
+    "id": "morj7q4w",
+    "ts": 1777919246096,
+    "cmd": "ls -la /tmp/*.jpg /tmp/*.png /tmp/*.jpeg 2>/dev/null | head -10",
+    "cwd": "/root/Toolkit",
+    "stdout": "-rw-r--r-- 1 root root   62833 May  2 07:47 /tmp/af2_login.png\n-rw-r--r-- 1 root root   64513 May  2 07:50 /tmp/af3_filled.png\n-rw-r--r-- 1 root root   61751 May  2 07:49 /tmp/af3_login.png\n-rw-r--r-- 1 root root   65089 May  2 07:51 /tmp/af4_after.png\n-rw-r--r-- 1 root root   64321 May  2 07:51 /tmp/af4_before.png\n-rw-r--r-- 1 root root   90193 May  2 14:56 /tmp/af_after.png\n-rw-r--r-- 1 root root   80221 May  2 14:58 /tmp/af_before_submit.png\n-rw-r--r-- 1 root root   79409 May  3 08:29 /tmp/af_loaded_us-auto-2.png\n-rw-r--r-- 1 root root    4817 May  3 05:33 /tmp/af_loaded_us-auto-5.png\n-rw-r--r-- 1 root root   59814 May  2 07:45 /tmp/af_login_captcha.png\n",
+    "stderr": "",
+    "code": 0,
+    "duration": 0,
+    "source": "apex"
+  },
+  {
+    "id": "morj7trq",
+    "ts": 1777919250806,
+    "cmd": "find /tmp -name \"*.jpg\" -o -name \"*.png\" -o -name \"*.jpeg\" -mmin -10 2>/dev/null | head -5",
+    "cwd": "/root/Toolkit",
+    "stdout": "/tmp/dc_penelopecdq761_03_email.png\n/tmp/dc_a.morales987_04_password.png\n/tmp/oauth_round_emmasanchez920@outlook.com_1.png\n/tmp/dc_matthew.a73_04_password.png\n/tmp/canvas_emily_gomez98_7_page.png\n",
+    "stderr": "",
+    "code": 0,
+    "duration": 0,
+    "source": "apex"
+  },
+  {
+    "id": "morjc4yk",
+    "ts": 1777919451932,
+    "cmd": "find /tmp -name \"*.png\" -o -name \"*.jpg\" -o -name \"*.jpeg\" -o -name \"*.gif\" -o -name \"*.webp\" -mmin -10 2>/dev/null | head -20",
+    "cwd": "/root/Toolkit",
+    "stdout": "/tmp/replit_after_step1_solidmeadow908.png\n/tmp/oauth_round_mason.romero79@outlook.com_1.png\n/tmp/replit_after_step1_rapiddove752.png\n/tmp/replit_after_step1_distantotterdy541.png\n/tmp/test_gen.jpg\n/tmp/oauth_round_n.vasquez556@outlook.com_1.png\n/tmp/outlook_ok_n.vasquez556.png\n/tmp/replit_step1_lunarraven160.png\n/tmp/replit_step1_ivoryytmaple6590.png\n/tmp/replit_step1_mapleforest170.png\n/tmp/outlook_fail_oliviaramirez862.png\n/tmp/replit_after_step1_rubybadger239.png\n/tmp/ws_pydoll_v8_final.png\n/tmp/replit_step1_rc0356080385.png\n/tmp/replit_step1_rc0350053947.png\n/tmp/replit_after_step1_trueakbrook6936.png\n/tmp/replit_after_step1_rc0356080385.png\n/tmp/replit_step1_forestlively312.png\n/tmp/replit_after_step1_forestlively312.png\n/tmp/replit_after_step1_otter9825bri.png\n",
+    "stderr": "",
+    "code": 0,
+    "duration": 0,
+    "source": "apex"
+  },
+  {
+    "id": "morjc8q5",
+    "ts": 1777919456813,
+    "cmd": "find /root/Toolkit -name \"uploads\" -type d 2>/dev/null",
+    "cwd": "/root/Toolkit",
+    "stdout": "",
+    "stderr": "",
+    "code": 0,
+    "duration": 0,
+    "source": "apex"
+  },
+  {
+    "id": "morjeisd",
+    "ts": 1777919563165,
+    "cmd": "df -h /",
+    "cwd": "/root/Toolkit",
+    "stdout": "Filesystem      Size  Used Avail Use% Mounted on\n/dev/vda1        29G   26G  3.7G  88% /\n",
+    "stderr": "",
+    "code": 0,
+    "duration": 0,
+    "source": "apex"
+  },
+  {
+    "id": "morjeisd",
+    "ts": 1777919563165,
+    "cmd": "free -h",
+    "cwd": "/root/Toolkit",
+    "stdout": "               total        used        free      shared  buff/cache   available\nMem:           3.8Gi       963Mi       1.0Gi       105Mi       1.9Gi       2.5Gi\nSwap:          4.0Gi       1.3Gi       2.7Gi\n",
+    "stderr": "",
+    "code": 0,
+    "duration": 0,
+    "source": "apex"
+  },
+  {
+    "id": "morjeise",
+    "ts": 1777919563166,
+    "cmd": "cat /etc/os-release | head -3",
+    "cwd": "/root/Toolkit",
+    "stdout": "PRETTY_NAME=\"Ubuntu 22.04 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"22.04\"\n",
+    "stderr": "",
+    "code": 0,
+    "duration": 0,
+    "source": "apex"
+  },
+  {
+    "id": "morjeise",
+    "ts": 1777919563166,
+    "cmd": "whoami",
+    "cwd": "/root/Toolkit",
+    "stdout": "root\n",
+    "stderr": "",
+    "code": 0,
+    "duration": 0,
+    "source": "apex"
+  },
+  {
+    "id": "morjeixg",
+    "ts": 1777919563348,
+    "cmd": "pm2 list --no-color | grep online | wc -l",
+    "cwd": "/root/Toolkit",
+    "stdout": "33\n",
+    "stderr": "",
+    "code": 0,
+    "duration": 0,
+    "source": "apex"
   }
 ]

@@ -1,0 +1,17 @@
+{
+  "id": "test-td",
+  "updated_at": 1777920023233,
+  "created_at": 1777920023233,
+  "messages": [
+    {
+      "role": "user",
+      "content": "使用 todo_write 保存两个任务: {id:'t1', content:'测试任务A', status:'pending', priority:'high'} 和 {id:'t2', content:'测试任务B', status:'done'}，然后用 todo_read 读回来",
+      "ts": 1777920023233
+    },
+    {
+      "role": "assistant",
+      "content": "已完成任务保存和读取：\n\n**保存结果：**\n```\n2 个任务已保存: pending(1), done(1)\n```\n\n**当前任务列表：**\n```\n[完成] t2: 测试任务B\n[进行中] (高优先级) t1: 测试任务A\n```",
+      "ts": 1777920023234
+    }
+  ]
+}

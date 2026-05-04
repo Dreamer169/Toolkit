@@ -1,0 +1,17 @@
+{
+  "id": "test-ws",
+  "updated_at": 1777920003585,
+  "created_at": 1777920003585,
+  "messages": [
+    {
+      "role": "user",
+      "content": "使用 web_search 工具搜索 'Xiaomi MiMo multimodal 2025'，返回前3条结果的标题",
+      "ts": 1777920003585
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "ts": 1777920003586
+    }
+  ]
+}

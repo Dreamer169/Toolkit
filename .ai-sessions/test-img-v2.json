@@ -1,0 +1,17 @@
+{
+  "id": "test-img-v2",
+  "updated_at": 1777919456814,
+  "created_at": 1777919456814,
+  "messages": [
+    {
+      "role": "user",
+      "content": "描述这张图片",
+      "ts": 1777919456814
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "ts": 1777919456815
+    }
+  ]
+}

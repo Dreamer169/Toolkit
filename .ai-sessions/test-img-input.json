@@ -1,0 +1,17 @@
+{
+  "id": "test-img-input",
+  "updated_at": 1777919250807,
+  "created_at": 1777919250807,
+  "messages": [
+    {
+      "role": "user",
+      "content": "描述这张图片",
+      "ts": 1777919250807
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "ts": 1777919250808
+    }
+  ]
+}
