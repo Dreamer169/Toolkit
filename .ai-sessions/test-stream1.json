@@ -1,0 +1,18 @@
+{
+  "id": "test-stream1",
+  "updated_at": 1777921845691,
+  "created_at": 1777921845691,
+  "messages": [
+    {
+      "role": "user",
+      "content": "bash工具运行: for i in 1 2 3 4 5; do echo step_$i; sleep 0.2; done",
+      "ts": 1777921845691
+    },
+    {
+      "role": "assistant",
+      "content": "执行完毕，输出：\n\n```\nstep_1\nstep_2\nstep_3\nstep_4\nstep_5\n```\n\n循环 5 次，每次间隔 0.2 秒，总耗时约 1 秒。",
+      "ts": 1777921845692
+    }
+  ],
+  "title": "Bash循环计时示例"
+}

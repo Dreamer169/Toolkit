@@ -896,17 +896,31 @@ import { Router } from "express";
       { name: "call_model", description: "Call any mimo AI model for a sub-task: reasoning, summarization, translation, code review, vision analysis, etc. Models: mimo-v2.5-pro (default, thinking), mimo-v2.5 (vision+multimodal), mimo-v2-omni (omni), mimo-v2-flash (fast). Returns the model response text.", input_schema: { type: "object" as const, properties: { prompt: { type: "string", description: "User message/question for the model" }, model: { type: "string", description: "Model name, default mimo-v2.5-pro" }, system: { type: "string", description: "System prompt (optional)" }, max_tokens: { type: "number", description: "Max output tokens, default 2048" }, image_b64: { type: "string", description: "Optional base64 image (uses mimo-v2.5 automatically)" }, image_mime: { type: "string", description: "Image MIME type, e.g. image/jpeg" } }, required: ["prompt"] } },
     ];
 
-    async function executeApexTool(name: string, inp: Record<string,unknown>, defaultCwd: string): Promise<{output:string;code:number}> {
+    async function executeApexTool(name: string, inp: Record<string,unknown>, defaultCwd: string, onStream?: (chunk: string) => void): Promise<{output:string;code:number}> {
       try {
         if (name === "bash") {
           const cmd = String(inp.command ?? ""); const wd = String(inp.cwd ?? defaultCwd); const t = Number(inp.timeout ?? 300000);
           return await new Promise(resolve => {
-            exec(cmd, { env: FULL_ENV, cwd: wd, timeout: t, maxBuffer: 10*1024*1024 }, (err, stdout, stderr) => {
-              const out = (stdout ?? "") + (stderr ? "\n[stderr] " + stderr : "");
-              const code = (err as any)?.code ?? 0;
-              appendHistory({ id: Date.now().toString(36), ts: Date.now(), cmd, cwd: wd, stdout: (stdout??"").slice(0,2000), stderr: (stderr??"").slice(0,500), code, duration: 0, source: "apex" });
-              resolve({ output: out.slice(0, 50000), code });
-            });
+            const startTs = Date.now();
+            if (onStream) {
+              const proc = spawn("bash", ["-c", cmd], { env: FULL_ENV, cwd: wd });
+              let full = ""; let killed = false;
+              const timer = setTimeout(() => { killed = true; proc.kill("SIGTERM"); resolve({ output: full.slice(0,50000) + "\n[timeout]", code: 124 }); }, t);
+              proc.stdout.on("data", (d: Buffer) => { const s = d.toString(); full += s; onStream(s); });
+              proc.stderr.on("data", (d: Buffer) => { const s = "[stderr] " + d.toString(); full += s; onStream(s); });
+              proc.on("close", (code: number|null) => {
+                if (killed) return; clearTimeout(timer);
+                appendHistory({ id: Date.now().toString(36), ts: startTs, cmd, cwd: wd, stdout: full.slice(0,2000), stderr: "", code: code??0, duration: Date.now()-startTs, source: "apex" });
+                resolve({ output: full.slice(0, 50000), code: code ?? 0 });
+              });
+            } else {
+              exec(cmd, { env: FULL_ENV, cwd: wd, timeout: t, maxBuffer: 10*1024*1024 }, (err, stdout, stderr) => {
+                const out = (stdout ?? "") + (stderr ? "\n[stderr] " + stderr : "");
+                const code = (err as any)?.code ?? 0;
+                appendHistory({ id: Date.now().toString(36), ts: startTs, cmd, cwd: wd, stdout: (stdout??"").slice(0,2000), stderr: (stderr??"").slice(0,500), code, duration: Date.now()-startTs, source: "apex" });
+                resolve({ output: out.slice(0, 50000), code });
+              });
+            }
           });
         }
         if (name === "read_file") {
@@ -924,7 +938,14 @@ import { Router } from "express";
           const p = String(inp.path ?? ""); const oldStr = String(inp.old_string ?? ""); const newStr = String(inp.new_string ?? "");
           if (!fs.existsSync(p)) return { output: `[not found: ${p}]`, code: 1 };
           const orig = fs.readFileSync(p, "utf-8");
-          if (!orig.includes(oldStr)) return { output: `[EDIT FAILED] old_string not found in ${p}\nSearched for (first 80): ${JSON.stringify(oldStr.slice(0,80))}`, code: 1 };
+          if (!orig.includes(oldStr)) {
+            const firstLine = oldStr.split("\n")[0].trim();
+            const lines = orig.split("\n");
+            const best = lines.map((l, i) => ({ i: i+1, l, s: firstLine.split("").filter((c: string) => l.includes(c)).length }))
+              .sort((a: any, b: any) => b.s - a.s).slice(0, 3);
+            const hint = best.map((c: any) => `  line ${c.i}: ${c.l.slice(0,100)}`).join("\n");
+            return { output: `[EDIT FAILED] old_string not found in ${p}\nSearched for: ${JSON.stringify(oldStr.slice(0,80))}\nClosest lines:\n${hint}`, code: 1 };
+          }
           fs.writeFileSync(p, orig.replace(oldStr, newStr), "utf-8");
           return { output: `Edited ${p} — replaced ${oldStr.length} chars with ${newStr.length} chars`, code: 0 };
         }
@@ -1061,25 +1082,50 @@ import { Router } from "express";
           const maxTok = Number(inp.max_tokens ?? 2048);
           const apiKey = "sk-sszfdmshqaziz2d7dvl2nggaf2gum5kbs881qajf0fzavxyw";
           try {
-            // Build content array (support multimodal if image provided)
             const userContent: unknown[] = [];
             if (imgB64) userContent.push({ type: "image_url", image_url: { url: `data:${imgMime};base64,${imgB64}` } });
             userContent.push({ type: "text", text: userPrompt });
             const messages: unknown[] = [];
             if (sys) messages.push({ role: "system", content: sys });
             messages.push({ role: "user", content: userContent });
+            const reqBody: Record<string,unknown> = { model: mdl, max_completion_tokens: maxTok, messages };
+            if (onStream) reqBody.stream = true;
             const resp = await fetch("https://api.xiaomimimo.com/v1/chat/completions", {
               method: "POST",
               headers: { "api-key": apiKey, "content-type": "application/json" },
-              body: JSON.stringify({ model: mdl, max_completion_tokens: maxTok, messages }),
+              body: JSON.stringify(reqBody),
               signal: AbortSignal.timeout(120000),
             });
-            const d = await resp.json() as any;
-            if (d.error) return { output: `[call_model error: ${JSON.stringify(d.error)}]`, code: 1 };
-            const text = d.choices?.[0]?.message?.content ?? "no response";
-            const reasoning = d.choices?.[0]?.message?.reasoning_content;
-            const out = reasoning ? `[thinking]\n${reasoning.slice(0,500)}\n[answer]\n${text}` : text;
-            return { output: `[model: ${mdl}]\n${out}`, code: 0 };
+            if (!resp.ok) return { output: `[call_model HTTP ${resp.status}]`, code: 1 };
+            if (onStream && resp.body) {
+              let fullText = ""; let fullReasoning = "";
+              const reader = (resp.body as any).getReader(); const dec = new TextDecoder();
+              let buf = "";
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buf += dec.decode(value, { stream: true });
+                const lines2 = buf.split("\n"); buf = lines2.pop() ?? "";
+                for (const ln of lines2) {
+                  if (!ln.startsWith("data: ") || ln.trim() === "data: [DONE]") continue;
+                  try {
+                    const ck = JSON.parse(ln.slice(6));
+                    const delta = ck.choices?.[0]?.delta;
+                    if (delta?.content) { fullText += delta.content; onStream(delta.content); }
+                    if (delta?.reasoning_content) fullReasoning += delta.reasoning_content;
+                  } catch(_) {}
+                }
+              }
+              const out2 = fullReasoning ? `[thinking]\n${fullReasoning.slice(0,500)}\n[answer]\n${fullText}` : fullText;
+              return { output: `[model: ${mdl}]\n${out2}`, code: 0 };
+            } else {
+              const d = await resp.json() as any;
+              if (d.error) return { output: `[call_model error: ${JSON.stringify(d.error)}]`, code: 1 };
+              const text = d.choices?.[0]?.message?.content ?? "no response";
+              const reasoning = d.choices?.[0]?.message?.reasoning_content;
+              const out = reasoning ? `[thinking]\n${reasoning.slice(0,500)}\n[answer]\n${text}` : text;
+              return { output: `[model: ${mdl}]\n${out}`, code: 0 };
+            }
           } catch(ce) { return { output: `[call_model failed: ${String(ce).slice(0,200)}]`, code: 1 }; }
         }
         return { output: `[unknown tool: ${name}]`, code: 1 };
@@ -1149,7 +1195,12 @@ import { Router } from "express";
             sse({ type:"exec_start", tool:icon, toolName:tn, cmd:lbl, toolId:tu.id });
           }
           // Execute ALL tools in PARALLEL
-          const results = await Promise.all(toolUses.map(tu => executeApexTool(tu.name??"", tu.input??{}, reqCwd)));
+          const results = await Promise.all(toolUses.map(tu => executeApexTool(
+            tu.name??"", tu.input??{}, reqCwd,
+            (tu.name==="bash" || tu.name==="call_model")
+              ? (chunk: string) => sse({ type:"exec_stream", toolId:tu.id, chunk:chunk.slice(0,2000) })
+              : undefined
+          )));
           const toolResults: {type:string;tool_use_id:string;content:string}[] = [];
           for (let i=0; i<toolUses.length; i++) {
             const toolOut = results[i].output;
@@ -1160,6 +1211,23 @@ import { Router } from "express";
               const mime = rest.slice(colon1+1, colon2);
               const lbl = rest.slice(colon2+1).slice(0,120);
               sse({ type:"apex_image", b64, mime, label:lbl, toolId:toolUses[i].id });
+              // [2] Auto-analyze screenshots with vision (take_screenshot only)
+              if (toolUses[i].name === "take_screenshot" && b64.length > 100) {
+                try {
+                  const vport2 = process.env.PORT ?? 8081;
+                  const vr2 = await fetch(`http://localhost:${vport2}/api/claude-code/vision`, {
+                    method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ b64, mime, question: "详细描述截图内容：页面标题、布局、文字内容、UI元素、按钮、错误信息、数据等所有可见细节" }),
+                    signal: AbortSignal.timeout(35000),
+                  });
+                  const vd2 = await vr2.json() as { ok?: boolean; text?: string };
+                  if (vd2.ok && vd2.text) {
+                    sse({ type:"exec_done", toolId:toolUses[i].id, stdout:`\uD83D\uDCF8 截图已分析: ${lbl}`, code:0 });
+                    toolResults.push({ type:"tool_result", tool_use_id: toolUses[i].id??"", content: `[截图视觉分析 - ${lbl}]\n${vd2.text}` });
+                    continue;
+                  }
+                } catch(_) {}
+              }
               sse({ type:"exec_done", toolId:toolUses[i].id, stdout:`[图片已生成并显示: ${lbl}]`, code:0 });
               toolResults.push({ type:"tool_result", tool_use_id: toolUses[i].id??"", content: `图片已生成并显示给用户，描述: ${lbl}` });
             } else {
@@ -1172,7 +1240,55 @@ import { Router } from "express";
       }
       if (!closed) {
         sse({ type:"complete", text:finalText });
-        if (sessionId) { try { const f=path.join(SESSIONS_DIR,`${sessionId}.json`); const ex=fs.existsSync(f)?JSON.parse(fs.readFileSync(f,"utf-8")):{};const now=Date.now();fs.writeFileSync(f,JSON.stringify({...ex,id:sessionId,updated_at:now,created_at:ex.created_at??now,messages:[...(ex.messages??[]),{role:"user",content:message,ts:now},{role:"assistant",content:finalText,ts:now+1}]},null,2)); } catch(_){} }
+        if (sessionId) {
+          try {
+            const f = path.join(SESSIONS_DIR, `${sessionId}.json`);
+            const ex = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf-8")) : {};
+            const now = Date.now();
+            const isNewSession = !ex.title && !(ex.messages?.length);
+            fs.writeFileSync(f, JSON.stringify({ ...ex, id:sessionId, updated_at:now, created_at:ex.created_at??now,
+              messages:[...(ex.messages??[]),{role:"user",content:message,ts:now},{role:"assistant",content:finalText,ts:now+1}] }, null, 2));
+            // Async post-processing: title generation + memory distillation
+            setImmediate(async () => {
+              try {
+                const ak2 = "sk-sszfdmshqaziz2d7dvl2nggaf2gum5kbs881qajf0fzavxyw";
+                // [6] Auto-title for new sessions
+                if (isNewSession && message.trim().length > 5) {
+                  const tr = await fetch("https://api.xiaomimimo.com/v1/chat/completions", {
+                    method: "POST", headers: { "api-key": ak2, "content-type": "application/json" },
+                    body: JSON.stringify({ model: "mimo-v2-flash", max_completion_tokens: 25,
+                      messages: [{ role:"user", content: `\u7ED9\u4EE5\u4E0B\u95EE\u9898\u751F\u6210\u4E00\u4E2A\u4E2D\u6587\u6807\u9898\uFF0C\u4E0D\u8D85\u8FC712\u5B57\uFF0C\u53EA\u8F93\u51FA\u6807\u9898\uFF1A${message.slice(0,200)}` }] }),
+                    signal: AbortSignal.timeout(12000),
+                  });
+                  const td = await tr.json() as any;
+                  const rawTitle = td.choices?.[0]?.message?.content?.trim() ?? "";
+                  const title = rawTitle.replace(/[\u201c\u201d\u2018\u2019"']/g, "").slice(0, 20);
+                  if (title && title.length > 1) {
+                    const cur = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f,"utf-8")) : {};
+                    if (!cur.title) fs.writeFileSync(f, JSON.stringify({ ...cur, title }, null, 2));
+                  }
+                }
+                // [5] Auto-memory: distill key insight from multi-turn tasks
+                if (finalText && finalText.length > 80 && turn > 1) {
+                  const mem2 = loadMemory();
+                  const mr = await fetch("https://api.xiaomimimo.com/v1/chat/completions", {
+                    method: "POST", headers: { "api-key": ak2, "content-type": "application/json" },
+                    body: JSON.stringify({ model: "mimo-v2-flash", max_completion_tokens: 50,
+                      messages: [{ role:"user", content: `\u4ECE\u4E0B\u9762AI\u56DE\u7B54\u63D0\u53D6\u4E00\u6761\u6700\u91CD\u8981\u7684\u65B0\u4FE1\u606F\uFF08\u226425\u5B57\uFF0C\u53EA\u8F93\u51FA\u7ED3\u8BBA\uFF0C\u65E0\u65B0\u4FE1\u606F\u5219\u8F93\u51FA\u201C\u65E0\u201D\uFF09\uFF1A\n${finalText.slice(0,400)}` }] }),
+                    signal: AbortSignal.timeout(12000),
+                  });
+                  const md = await mr.json() as any;
+                  const note = md.choices?.[0]?.message?.content?.trim();
+                  if (note && note !== "\u65E0" && note.length > 3 && !(mem2.important_notes ?? []).includes(note)) {
+                    mem2.important_notes = [...(mem2.important_notes ?? []).slice(-29), note];
+                    mem2.last_updated = Date.now();
+                    saveMemory(mem2);
+                  }
+                }
+              } catch(_) {}
+            });
+          } catch(_) {}
+        }
       }
       try { res.end(); } catch(_) {}
     });

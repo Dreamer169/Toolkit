@@ -185,5 +185,16 @@
     "code": 0,
     "duration": 0,
     "source": "apex"
+  },
+  {
+    "id": "morkrcsg",
+    "ts": 1777921840523,
+    "cmd": "for i in 1 2 3 4 5; do echo step_$i; sleep 0.2; done",
+    "cwd": "/root/Toolkit",
+    "stdout": "step_1\nstep_2\nstep_3\nstep_4\nstep_5\n",
+    "stderr": "",
+    "code": 0,
+    "duration": 1013,
+    "source": "apex"
   }
 ]
