@@ -120,6 +120,9 @@ export default function MailCenter() {
   const [messages, setMessages]         = useState<MailMsg[]>([]);
   const [selMsg, setSelMsg]             = useState<MailMsg | null>(null);
   const [search, setSearch]             = useState("");
+  const [accSearch, setAccSearch]       = useState("");
+  const [checkBusy, setCheckBusy]       = useState(false);
+  const [checkResult, setCheckResult]   = useState<string | null>(null);
   const [busy, setBusy]                 = useState(false);
   const [authBusy, setAuthBusy]         = useState<number | "all" | null>(null);
   const [error, setError]               = useState("");
@@ -187,6 +190,22 @@ export default function MailCenter() {
   const [manualBusy, setManualBusy]         = useState(false);
   const [manualMsg, setManualMsg]           = useState("");
 
+  const handleAutoCheck = async () => {
+    if (checkBusy) return;
+    setCheckBusy(true); setCheckResult(null);
+    try {
+      const res = await fetch("/api/tools/outlook/auto-check", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ limit: 30 }),
+      });
+      const d = await res.json() as { success: boolean; checked: number; valid: number; needsAuth: number; banned: number; skipped: number };
+      if (d.success) {
+        setCheckResult("已检测 " + d.checked + " 个｜✓正常 " + d.valid + "  ⚠需授权 " + d.needsAuth + "  ✗封禁 " + d.banned);
+        await loadAccounts();
+      } else { setCheckResult("检测失败"); }
+    } catch { setCheckResult("检测出错"); }
+    finally { setCheckBusy(false); }
+  };
   const loadAccounts = useCallback(async () => {
     const d = await fetch(`${API}/tools/outlook/accounts`).then(r => r.json()).catch(() => ({}));
     if (d.success) setAccounts(d.accounts ?? []);
@@ -884,11 +903,47 @@ export default function MailCenter() {
           )}
         </div>
 
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto flex flex-col">
+          {/* 自动检测按钮 */}
+          <div className="px-2 pt-1.5 pb-0 shrink-0">
+            <button
+              onClick={handleAutoCheck}
+              disabled={checkBusy}
+              className="w-full flex items-center justify-center gap-1 py-1 rounded text-xs font-medium bg-[#1c2128] hover:bg-[#21262d] border border-[#30363d] text-gray-300 disabled:opacity-50 transition-colors"
+            >
+              {checkBusy
+                ? <><svg className="w-3 h-3 animate-spin mr-1" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>检测中…</>
+                : <><svg className="w-3 h-3 mr-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>立即检测（30个）</>
+              }
+            </button>
+            {checkResult && <p className="text-[10px] text-blue-400 mt-0.5 leading-tight">{checkResult}</p>}
+            <p className="text-[10px] text-gray-600 mt-0.5 leading-tight">↻ 后台每 4 小时自动检测 50 个</p>
+          </div>
+          {/* 账号搜索过滤框 */}
+          <div className="px-2 py-1.5 border-b border-[#21262d] shrink-0">
+            <div className="relative">
+              <input
+                value={accSearch}
+                onChange={e => setAccSearch(e.target.value)}
+                placeholder="搜邮箱…"
+                className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 pl-6 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:border-blue-500"
+              />
+              <svg className="absolute left-1.5 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-600" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+              {accSearch && (
+                <button onClick={() => setAccSearch("")} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 text-xs">✕</button>
+              )}
+            </div>
+            {accSearch && (
+              <p className="text-[10px] text-gray-600 mt-0.5 px-0.5">
+                {accounts.filter(a => a.email.toLowerCase().includes(accSearch.toLowerCase())).length} / {accounts.length} 个
+              </p>
+            )}
+          </div>
+          <div className="flex-1 overflow-y-auto">
           {accounts.length === 0 && (
             <p className="text-xs text-gray-600 text-center mt-8 px-4">暂无 Outlook 账号<br/>去「Outlook 工作流」注册</p>
           )}
-          {accounts.map((acc) => {
+          {(accSearch ? accounts.filter(a => a.email.toLowerCase().includes(accSearch.toLowerCase())) : accounts).map((acc) => {
             const active       = selAccount?.id === acc.id;
             const isSuspended  = acc.status === "suspended";
             const isNeedsOAuth = acc.status === "needs_oauth" || acc.status === "needs_oauth_pending";
@@ -1004,6 +1059,7 @@ export default function MailCenter() {
               </div>
             );
           })}
+        </div>
         </div>
       </aside>
 
@@ -1182,20 +1238,25 @@ export default function MailCenter() {
 
           {selAccount && !needsAuth && error && (
             <div className="p-3 space-y-2">
-              {/BasicAuthBlocked|LOGIN failed|基础认证|basic auth/i.test(error) ? (
+              {/BasicAuthBlocked|LOGIN failed|基础认证|basic auth|AUTHENTICATIONFAILED|AUTHENTICATE|搜索需要 OAuth/i.test(error) ? (
                 <div className="bg-amber-900/20 border border-amber-700/40 rounded-lg p-3 space-y-2">
-                  <p className="text-xs text-amber-400 font-medium">⚠ 微软已封锁此账号的 IMAP 基础认证</p>
+                  <p className="text-xs text-amber-400 font-medium">⚠ 微软已全面停用 IMAP 密码登录（非账号封禁）</p>
                   <p className="text-[11px] text-gray-400 leading-5">
-                    自 2023 年起，微软对 Outlook.com 个人账号强制要求现代身份验证。<br/>
-                    解决方案：<br/>
-                    1. 登录 <span className="text-blue-400">outlook.live.com</span><br/>
-                    2. 设置 → 邮件 → 同步邮件 → 将「允许使用 IMAP 的设备和应用」设为开<br/>
-                    3. 或使用「获取授权」完成 OAuth 登录后即可通过 Graph API 读取邮件
+                    自 2022 年起，微软对所有 Outlook.com 个人账号停用了 IMAP 基础密码认证，这不是你的账号被封禁，而是整个协议被禁用。<br/><br/>
+                    <span className="text-emerald-400 font-medium">解决方案（推荐）：</span>点击下方「获取授权」完成 OAuth 授权，授权后可通过 Graph API 读取所有邮件和搜索。
                   </p>
                 </div>
               ) : (
                 <p className="text-xs text-red-400">{error}</p>
               )}
+            </div>
+          )}
+          {selAccount && needsAuth && error && /搜索需要 OAuth/i.test(error) && (
+            <div className="p-3">
+              <div className="bg-blue-900/20 border border-blue-700/40 rounded-lg p-3">
+                <p className="text-xs text-blue-300 font-medium">🔍 搜索需要 OAuth 授权</p>
+                <p className="text-[11px] text-gray-400 mt-1">此账号尚未完成 OAuth 授权，无法使用邮件搜索。请点击「获取授权」后即可搜索。</p>
+              </div>
             </div>
           )}
 

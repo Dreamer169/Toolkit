@@ -3220,6 +3220,11 @@ router.post("/tools/outlook/auto-auth", async (req, res) => {
     );
     const acc = rows[0];
     if (!acc) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
+    // 封禁账号（suspended+abuse_mode）直接短路，不浪费时间试 token/Graph/IMAP
+    if (acc.status === "suspended" && (acc.tags ?? "").includes("abuse_mode")) {
+      res.json({ success: false, error: "账号已被微软封禁（API封禁），无法读取邮件", via: "blocked" });
+      return;
+    }
 
     // 已有 refresh_token → 直接刷新 access_token，无需用户操作
     const acctProxy = await resolveAccountProxy(accountId);
@@ -3620,9 +3625,15 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
     const rows = await query<{
       id: number; email: string; password: string | null;
       token: string | null; refresh_token: string | null;
-    }>("SELECT id, email, password, token, refresh_token FROM accounts WHERE id=$1 AND platform='outlook'", [accountId]);
+      status: string | null; tags: string | null;
+    }>("SELECT id, email, password, token, refresh_token, status, tags FROM accounts WHERE id=$1 AND platform='outlook'", [accountId]);
     const acc = rows[0];
     if (!acc) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
+    // 封禁账号直接短路，不浪费时间试 token/Graph/IMAP
+    if (acc.status === "suspended" && (acc.tags ?? "").includes("abuse_mode")) {
+      res.json({ success: false, error: "账号已被微软封禁（API封禁），无法读取邮件", via: "blocked" });
+      return;
+    }
 
     const mailFolder = folder || "inbox";
     const isAllFolder = mailFolder === "all";
@@ -3700,18 +3711,30 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
 
     // ── IMAP 路径（降级）──────────────────────────────────────────────────
     // 优先：XOAUTH2 IMAP（如有 token，与 hrhcode 相同方式）
-    // 备用：Basic Auth IMAP（密码，微软已对个人账号封锁）
+    // 备用：Basic Auth IMAP（密码，微软已封，仅用于显示实际错误信息）
     if (accessToken) {
-      // Graph API 失败但 token 有效 → 尝试 XOAUTH2 IMAP
+      // Graph API 失败但有 token → 尝试 XOAUTH2 IMAP
       const xoauthResult = await fetchViaImap(acc.email, acc.password ?? "", mailFolder, limit, search ?? "", accessToken, acctProxy);
       if (xoauthResult.success) {
         if ((xoauthResult.messages as unknown[]).length > 0) { try { await addAccountTags(accountId, ["inbox_verified"]); } catch {} }
         res.json({ success: true, messages: xoauthResult.messages, count: (xoauthResult.messages as unknown[]).length, email: acc.email, via: "imap_xoauth2" });
         return;
       }
+      // XOAUTH2 失败 → 判断是否为永久封禁账号（suspended+abuse_mode）
+      // 永久封禁账号不提示重授权，正常显示错误；其他账号提示 token 失效需重授权
+      const _isSuspAbuse = acc.status === "suspended" && (acc.tags ?? "").includes("abuse_mode");
+      if (!_isSuspAbuse) {
+        res.json({ success: false, error: "账号 OAuth 授权已失效，请重新授权后即可读取邮件", needsAuth: true });
+        return;
+      }
     }
     if (!acc.password) {
       res.json({ success: false, error: "账号无密码且无 OAuth token，无法读取邮件", needsAuth: true });
+      return;
+    }
+    // 有搜索词但无 OAuth token → Basic Auth 已封，搜索不可用
+    if (search && !accessToken) {
+      res.json({ success: false, error: "搜索需要 OAuth 授权，请点击「获取授权」完成授权后即可搜索", needsAuth: true });
       return;
     }
     const imapResult = await fetchViaImap(acc.email, acc.password, mailFolder, limit, search ?? "", undefined, acctProxy);
@@ -5577,6 +5600,94 @@ router.get("/tools/oxylabs/register/:jobId", async (req, res) => {
 router.delete("/tools/oxylabs/register/:jobId", (req, res) => {
   const stopped = jobQueue.stop(req.params.jobId);
   res.json({ success: !!stopped });
+});
+
+
+// ── 自动检测账号 token 健康状态 ───────────────────────────────────────────
+// 安全策略：只用 refresh_token 换 token（标准 OAuth，不触发封号）
+// 不做 IMAP 登录，不高频，每账号间隔 1.2 秒，跳过已知封禁账号
+router.post("/tools/outlook/auto-check", async (req: Request, res: Response) => {
+  const body = req.body as Record<string, unknown>;
+  const limit = Math.min(50, Math.max(1, Number(body.limit ?? 30)));
+  try {
+    const { query: dbQ, execute: dbEx } = await import("../db.js");
+    // 候选账号：有 refresh_token，非封禁，按 updated_at 升序（最久未检测优先）
+    const candidates = await dbQ<{
+      id: number; email: string; refresh_token: string;
+      tags: string | null; status: string | null;
+    }>(
+      `SELECT id, email, refresh_token, tags, status FROM accounts
+       WHERE platform='outlook'
+         AND refresh_token IS NOT NULL AND refresh_token <> ''
+         AND NOT (status='suspended' AND COALESCE(tags,'') LIKE '%abuse_mode%')
+       ORDER BY updated_at ASC NULLS FIRST
+       LIMIT $1`,
+      [limit]
+    );
+
+    let valid = 0, needsAuth = 0, banned = 0, skipped = 0;
+    const results: Array<{ id: number; email: string; result: string }> = [];
+
+    for (const acc of candidates) {
+      // 每账号间隔 1.2 秒，避免微软频率检测
+      await new Promise<void>(r => setTimeout(r, 1200));
+      try {
+        const r = await microsoftFetch(
+          "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              grant_type: "refresh_token",
+              client_id: OAUTH_CLIENT_ID,
+              refresh_token: acc.refresh_token,
+              scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
+            }).toString(),
+          }
+        );
+        const td = await r.json() as { access_token?: string; refresh_token?: string; error?: string; error_description?: string };
+
+        if (td.access_token) {
+          // token 有效 → 更新 DB，顺带清除 token_invalid 标签
+          await dbEx(
+            "UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
+            [td.access_token, td.refresh_token ?? acc.refresh_token, acc.id]
+          );
+          if ((acc.tags ?? "").includes("token_invalid")) {
+            const cleaned = (acc.tags ?? "").split(",").map(t => t.trim()).filter(t => t && t !== "token_invalid").join(",") || null;
+            await dbEx("UPDATE accounts SET tags=$1 WHERE id=$2", [cleaned, acc.id]);
+          }
+          valid++;
+          results.push({ id: acc.id, email: acc.email, result: "valid" });
+        } else {
+          const errCode = td.error ?? "";
+          const errDesc = td.error_description ?? "";
+          if (errDesc.includes("AADSTS70000") || errDesc.includes("service abuse") || errDesc.includes("blocked") || errDesc.includes("AADSTS530032")) {
+            // 账号被微软封禁
+            await addAccountTags(acc.id, ["abuse_mode"], "suspended");
+            banned++;
+            results.push({ id: acc.id, email: acc.email, result: "banned" });
+          } else if (errCode === "invalid_grant" || errDesc.includes("AADSTS70008") || errDesc.includes("AADSTS50078") || errDesc.includes("AADSTS700082") || errDesc.includes("AADSTS135010")) {
+            // refresh_token 过期 → 需要重新授权
+            await addAccountTags(acc.id, ["token_invalid"]);
+            needsAuth++;
+            results.push({ id: acc.id, email: acc.email, result: "needsAuth" });
+          } else {
+            // 未知错误（网络/临时）→ 跳过，不打标签
+            skipped++;
+            results.push({ id: acc.id, email: acc.email, result: "skipped" });
+          }
+        }
+      } catch {
+        skipped++;
+        results.push({ id: acc.id, email: acc.email, result: "error" });
+      }
+    }
+
+    res.json({ success: true, checked: candidates.length, valid, needsAuth, banned, skipped });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
 });
 
 export default router;
