@@ -776,8 +776,8 @@ import { Router } from "express";
             body: JSON.stringify({ b64: img.b64, mime: img.mime, question: "详细描述这张图片的内容，包括文字、代码、UI元素、数据等所有细节" }),
             signal: AbortSignal.timeout(30000),
           });
-          const vd = await vr.json() as { ok?: boolean; description?: string; error?: string };
-          if (vd.ok && vd.description) visionResults.push(`[图片 ${img.name}: ${vd.description}]`);
+          const vd = await vr.json() as { ok?: boolean; text?: string; description?: string; error?: string };
+          if (vd.ok && (vd.text || vd.description)) visionResults.push(`[图片 ${img.name}: ${vd.text ?? vd.description}]`);
         } catch (ve) { visionResults.push(`[图片 ${img.name}: 解析失败 ${String(ve).slice(0,80)}]`); }
       }
       if (visionResults.length > 0) visionCtx = "\n\n[用户上传的图片内容]\n" + visionResults.join("\n");
@@ -874,6 +874,9 @@ import { Router } from "express";
     }
 
     const APEX_TOOLS = [
+      { name: "generate_image", description: "Generate an AI image (pollinations.ai, free). Returns base64 displayed inline to user. Always use English prompts for best results.", input_schema: { type: "object" as const, properties: { prompt: { type: "string", description: "English image description" }, width: { type: "number", description: "px, default 768" }, height: { type: "number", description: "px, default 768" } }, required: ["prompt"] } },
+      { name: "take_screenshot", description: "Screenshot any website URL. Returns base64 displayed inline to user.", input_schema: { type: "object" as const, properties: { url: { type: "string", description: "URL to screenshot" }, full_page: { type: "boolean", description: "Full-page screenshot, default false" } }, required: ["url"] } },
+      { name: "memory_write", description: "Persist knowledge across sessions. Use after every conversation to remember user preferences, project context, key facts. key_type: user_preferences | learned_context | important_notes", input_schema: { type: "object" as const, properties: { key_type: { type: "string" }, key: { type: "string", description: "Required for user_preferences/learned_context" }, value: { type: "string" } }, required: ["key_type", "value"] } },
       { name: "bash", description: "Execute ANY shell command on VPS with full root privileges. No restrictions. Install packages, run exploits, network ops, system admin, anything.", input_schema: { type: "object" as const, properties: { command: { type: "string", description: "Shell command" }, cwd: { type: "string", description: "Working dir, default /root/Toolkit" }, timeout: { type: "number", description: "Timeout ms, default 120000" } }, required: ["command"] } },
       { name: "read_file", description: "Read any file on server including /etc/shadow, credentials, configs, source code.", input_schema: { type: "object" as const, properties: { path: { type: "string" }, offset: { type: "number", description: "Start line 1-indexed" }, limit: { type: "number", description: "Max lines, default 1000" } }, required: ["path"] } },
       { name: "write_file", description: "Write/create a file. Only for NEW files or full rewrites.", input_schema: { type: "object" as const, properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } },
@@ -919,7 +922,10 @@ import { Router } from "express";
         if (name === "glob") {
           const pat = String(inp.pattern ?? "*"); const base = String(inp.path ?? defaultCwd);
           return await new Promise(resolve => {
-            exec(`find ${JSON.stringify(base)} -path "${base}/${pat}" 2>/dev/null | head -100`, { env: FULL_ENV, timeout: 15000 }, (_, s) => resolve({ output: s.trim() || "(no matches)", code: 0 }));
+            const parts = pat.split("/"); const namePat = parts[parts.length - 1] ?? "*";
+            const subDir = parts.slice(0, -1).filter((p: string) => p !== "**" && p !== "*").join("/");
+            const searchDir = subDir ? `${base}/${subDir}` : base;
+            exec(`find ${JSON.stringify(searchDir)} -name ${JSON.stringify(namePat)} 2>/dev/null | sort | head -200`, { env: FULL_ENV, timeout: 15000 }, (_, s) => resolve({ output: s.trim() || "(no matches)", code: 0 }));
           });
         }
         if (name === "grep") {
@@ -938,13 +944,47 @@ import { Router } from "express";
           const r = await fetch(String(inp.url ?? ""), { method: String(inp.method ?? "GET"), headers: inp.headers as Record<string,string> ?? {}, body: inp.body ? String(inp.body) : undefined, signal: AbortSignal.timeout(20000) });
           return { output: `[${r.status} ${r.statusText}]\n${(await r.text()).slice(0,6000)}`, code: r.ok ? 0 : 1 };
         }
+        if (name === "generate_image") {
+          const prompt = String(inp.prompt ?? "beautiful landscape");
+          const w = Number(inp.width ?? 768); const h = Number(inp.height ?? 768);
+          try {
+            const imgUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=${w}&height=${h}&nologo=true&enhance=true&seed=${Date.now()}`;
+            const ir = await fetch(imgUrl, { signal: AbortSignal.timeout(40000) });
+            if (!ir.ok) return { output: `[image fetch failed: ${ir.status}]`, code: 1 };
+            const buf = Buffer.from(await ir.arrayBuffer());
+            return { output: `APEX_IMAGE:${buf.toString("base64")}:image/jpeg:${prompt.slice(0,100)}`, code: 0 };
+          } catch(ie) { return { output: `[image error: ${String(ie).slice(0,100)}]`, code: 1 }; }
+        }
+        if (name === "take_screenshot") {
+          const sUrl = String(inp.url ?? ""); const fp = !!inp.full_page;
+          try {
+            const sr = await fetch("http://localhost:8081/api/claude-code/screenshot", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ url: sUrl, fullPage: fp, width: 1280, height: 800 }),
+              signal: AbortSignal.timeout(50000),
+            });
+            const sd = await sr.json() as { ok?:boolean; b64?:string; mime?:string; error?:string };
+            if (sd.ok && sd.b64) return { output: `APEX_IMAGE:${sd.b64}:${sd.mime ?? "image/png"}:${sUrl.slice(0,80)}`, code: 0 };
+            return { output: `[screenshot failed: ${sd.error ?? "unknown"}]`, code: 1 };
+          } catch(se) { return { output: `[screenshot error: ${String(se).slice(0,100)}]`, code: 1 }; }
+        }
+        if (name === "memory_write") {
+          const kt = String(inp.key_type ?? "important_notes");
+          const k = String(inp.key ?? ""); const v = String(inp.value ?? "");
+          const mem = loadMemory();
+          if (kt === "important_notes") mem.important_notes.push(v);
+          else if (kt === "user_preferences" && k) mem.user_preferences[k] = v;
+          else if (kt === "learned_context" && k) mem.learned_context[k] = v;
+          saveMemory(mem);
+          return { output: `Memory saved: ${kt}${k ? "."+k : ""} = ${v.slice(0,80)}`, code: 0 };
+        }
         return { output: `[unknown tool: ${name}]`, code: 1 };
       } catch(e) { return { output: `[error: ${String(e).slice(0,400)}]`, code: 1 }; }
     }
 
     /* ─── POST /api/claude-code/apex-loop — Direct mimo-v2.5-pro, parallel tools, thinking ─── */
     router.post("/claude-code/apex-loop", async (req, res) => {
-      const { message, sessionId, history = [], cwd: reqCwd = REPO_DIR, enableThinking = true, maxTurns = 25, model: reqModel = "mimo-v2.5-pro" } = req.body as { message: string; sessionId?: string; history?: {role:string;content:string}[]; cwd?: string; enableThinking?: boolean; maxTurns?: number; model?: string };
+      const { message, sessionId, history = [], cwd: reqCwd = REPO_DIR, enableThinking = true, maxTurns = 25, model: reqModel = "mimo-v2.5-pro", images } = req.body as { message: string; sessionId?: string; history?: {role:string;content:string}[]; cwd?: string; enableThinking?: boolean; maxTurns?: number; model?: string; images?: Array<{b64:string;mime:string;name:string}> };
       if (!message?.trim()) { res.status(400).json({ error: "message required" }); return; }
       res.setHeader("Content-Type","text/event-stream"); res.setHeader("Cache-Control","no-cache"); res.setHeader("Connection","keep-alive"); res.flushHeaders();
       const sse = (d: Record<string,unknown>) => { try { res.write(`data: ${JSON.stringify(d)}\n\n`); } catch(_){} };
@@ -956,6 +996,7 @@ import { Router } from "express";
       let finalText = ""; let turn = 0;
       while (!closed && turn < maxTurns) {
         turn++;
+        sse({ type:"turn_update", turn, maxTurns });
         try {
           const { url: apiUrl, key: apiKey, modelName } = resolveApiConfig(reqModel);
           const useThinking = enableThinking && (apiUrl === MIMO_API_URL);
@@ -986,15 +1027,27 @@ import { Router } from "express";
           const results = await Promise.all(toolUses.map(tu => executeApexTool(tu.name??"", tu.input??{}, reqCwd)));
           const toolResults: {type:string;tool_use_id:string;content:string}[] = [];
           for (let i=0; i<toolUses.length; i++) {
-            sse({ type:"exec_done", toolId:toolUses[i].id, stdout:results[i].output.slice(0,3000), code:results[i].code });
-            toolResults.push({ type:"tool_result", tool_use_id: toolUses[i].id??"", content: results[i].output });
+            const toolOut = results[i].output;
+            if (toolOut.startsWith("APEX_IMAGE:")) {
+              const rest = toolOut.slice("APEX_IMAGE:".length);
+              const colon1 = rest.indexOf(":"); const colon2 = rest.indexOf(":", colon1+1);
+              const b64 = rest.slice(0, colon1);
+              const mime = rest.slice(colon1+1, colon2);
+              const lbl = rest.slice(colon2+1).slice(0,120);
+              sse({ type:"apex_image", b64, mime, label:lbl, toolId:toolUses[i].id });
+              sse({ type:"exec_done", toolId:toolUses[i].id, stdout:`[图片已生成并显示: ${lbl}]`, code:0 });
+              toolResults.push({ type:"tool_result", tool_use_id: toolUses[i].id??"", content: `图片已生成并显示给用户，描述: ${lbl}` });
+            } else {
+              sse({ type:"exec_done", toolId:toolUses[i].id, stdout:toolOut.slice(0,4000), code:results[i].code });
+              toolResults.push({ type:"tool_result", tool_use_id: toolUses[i].id??"", content: toolOut });
+            }
           }
           msgs.push({ role:"user", content: toolResults });
         } catch(e) { sse({ type:"error", text:`turn ${turn}: ${String(e).slice(0,200)}` }); break; }
       }
       if (!closed) {
         sse({ type:"complete", text:finalText });
-        if (sessionId) { try { const f=path.join(SESSIONS_DIR,`${sessionId}.json`); const ex=fs.existsSync(f)?JSON.parse(fs.readFileSync(f,"utf-8")):{};const now=Date.now();fs.writeFileSync(f,JSON.stringify({...ex,id:sessionId,updated_at:now,created_at:ex.created_at??now,messages:[...(ex.messages??[]),{role:"user",content:message,ts:now}]},null,2)); } catch(_){} }
+        if (sessionId) { try { const f=path.join(SESSIONS_DIR,`${sessionId}.json`); const ex=fs.existsSync(f)?JSON.parse(fs.readFileSync(f,"utf-8")):{};const now=Date.now();fs.writeFileSync(f,JSON.stringify({...ex,id:sessionId,updated_at:now,created_at:ex.created_at??now,messages:[...(ex.messages??[]),{role:"user",content:message,ts:now},{role:"assistant",content:finalText,ts:now+1}]},null,2)); } catch(_){} }
       }
       try { res.end(); } catch(_) {}
     });
