@@ -990,34 +990,36 @@ import { Router } from "express";
         }
         if (name === "web_search") {
           const query = String(inp.query ?? ""); const num = Math.min(Number(inp.num_results ?? 8), 20);
-          try {
+          // Use curl via xray HTTP proxy (127.0.0.1:10808) to bypass VPS network restrictions
+          return await new Promise(resolve => {
             const enc = encodeURIComponent(query);
-            const r = await fetch(`https://html.duckduckgo.com/html/?q=${enc}`, {
-              headers: { "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" },
-              signal: AbortSignal.timeout(20000),
+            const curlArgs = [
+              "-s", "--max-time", "25",
+              "--proxy", "http://127.0.0.1:10808",
+              "-A", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120",
+              "-H", "Accept-Language: zh-CN,zh;q=0.9,en;q=0.8",
+              `https://html.duckduckgo.com/html/?q=${enc}`
+            ];
+            exec(`curl ${curlArgs.join(" ")}`, { env: FULL_ENV, timeout: 30000, maxBuffer: 2*1024*1024 }, (err, html) => {
+              if (err || !html) return resolve({ output: `[search failed: ${String(err).slice(0,100)}]`, code: 1 });
+              const results: string[] = [];
+              const titleRe = /<a[^>]+class="result__a"[^>]*>([^<]+)<\/a>/g;
+              const snippetRe = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+              const urlRe = /uddg=([^&"]+)/g;
+              const titles: string[] = []; const snippets: string[] = []; const urls: string[] = [];
+              let m: RegExpExecArray | null;
+              while ((m = titleRe.exec(html)) !== null) titles.push(m[1].trim());
+              while ((m = snippetRe.exec(html)) !== null) snippets.push(m[1].replace(/<[^>]+>/g, "").trim());
+              while ((m = urlRe.exec(html)) !== null) urls.push(decodeURIComponent(m[1]));
+              for (let i = 0; i < Math.min(titles.length, num); i++) {
+                const urlPart = urls[i] ? `  URL: ${urls[i]}\n` : "";
+                results.push(`[${i+1}] ${titles[i]}\n${urlPart}  ${snippets[i] ?? ""}`);
+              }
+              resolve({ output: results.length > 0 ? `Search: "${query}"\n\n` + results.join("\n\n") : `No results for: ${query}`, code: 0 });
             });
-            const html = await r.text();
-            // Parse results: title + snippet + url
-            const results: string[] = [];
-            const re = /<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>([^<]+)<\/a>[\s\S]*?<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
-            let m; let i = 0;
-            while ((m = re.exec(html)) !== null && i < num) {
-              const url = m[1].replace(/.*uddg=([^&]+).*/,"$1"); const title = m[2].trim(); const snippet = m[3].replace(/<[^>]+>/g,"").trim();
-              results.push(`[${i+1}] ${title}
-    URL: ${decodeURIComponent(url)}
-    ${snippet}`);
-              i++;
-            }
-            if (results.length === 0) {
-              // fallback: extract any visible text links
-              const linkRe = /class="result__a"[^>]*>([^<]+)<\/a>/g;
-              let lm; let j = 0;
-              while ((lm = linkRe.exec(html)) !== null && j < num) { results.push(`[${j+1}] ${lm[1].trim()}`); j++; }
-            }
-            return { output: results.length > 0 ? `Search: "${query}"\n\n` + results.join("\n\n") : `No results for: ${query}`, code: 0 };
-          } catch(se) { return { output: `[search error: ${String(se).slice(0,100)}]`, code: 1 }; }
+          });
         }
-        if (name === "multi_edit") {
+                if (name === "multi_edit") {
           const p = String(inp.path ?? "");
           const edits = (inp.edits as Array<{old_string:string;new_string:string}>) ?? [];
           if (!fs.existsSync(p)) return { output: `[not found: ${p}]`, code: 1 };
