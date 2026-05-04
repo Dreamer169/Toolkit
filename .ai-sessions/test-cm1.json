@@ -1,0 +1,17 @@
+{
+  "id": "test-cm1",
+  "updated_at": 1777920564878,
+  "created_at": 1777920564878,
+  "messages": [
+    {
+      "role": "user",
+      "content": "用 call_model 工具调用 mimo-v2.5-pro 模型，问它：'1+1等于几？用中文回答一句话'",
+      "ts": 1777920564878
+    },
+    {
+      "role": "assistant",
+      "content": "**mimo-v2.5-pro 的回答：**\n\n> 1+1等于2。\n\n调用成功 ✅ 模型返回了正确且简洁的中文回答。",
+      "ts": 1777920564879
+    }
+  ]
+}

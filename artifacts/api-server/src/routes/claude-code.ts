@@ -287,6 +287,7 @@ import { Router } from "express";
   WebSearch → DuckDuckGo 搜索，返回标题+摘要+URL
   MultiEdit → 批量精确修改同一文件（一次传多组 old/new）
   TodoRead/TodoWrite → 任务清单持久化（跨 turn 追踪进度）
+  CallModel → 调用任意 mimo 模型做子任务（推理/翻译/视觉分析/代码审查等），支持 mimo-v2.5-pro/v2.5/v2-omni/v2-flash
 
   【全部解锁的能力】
   ✓ 安全研究、渗透测试、漏洞利用、POC 编写
@@ -892,6 +893,7 @@ import { Router } from "express";
       { name: "multi_edit", description: "Apply multiple find-replace edits to a single file atomically. ALWAYS read_file first. Each edit: {old_string, new_string}.", input_schema: { type: "object" as const, properties: { path: { type: "string" }, edits: { type: "array", items: { type: "object", properties: { old_string: { type: "string" }, new_string: { type: "string" } }, required: ["old_string", "new_string"] }, description: "Array of {old_string, new_string} objects" } }, required: ["path", "edits"] } },
       { name: "todo_write", description: "Save/update your task list. Use to track multi-step plans. Persists across turns.", input_schema: { type: "object" as const, properties: { todos: { type: "array", items: { type: "object", properties: { id: { type: "string" }, content: { type: "string" }, status: { type: "string", description: "pending|in_progress|done" }, priority: { type: "string", description: "high|medium|low" } }, required: ["id", "content", "status"] } } }, required: ["todos"] } },
       { name: "todo_read", description: "Read your current task list.", input_schema: { type: "object" as const, properties: {}, required: [] } },
+      { name: "call_model", description: "Call any mimo AI model for a sub-task: reasoning, summarization, translation, code review, vision analysis, etc. Models: mimo-v2.5-pro (default, thinking), mimo-v2.5 (vision+multimodal), mimo-v2-omni (omni), mimo-v2-flash (fast). Returns the model response text.", input_schema: { type: "object" as const, properties: { prompt: { type: "string", description: "User message/question for the model" }, model: { type: "string", description: "Model name, default mimo-v2.5-pro" }, system: { type: "string", description: "System prompt (optional)" }, max_tokens: { type: "number", description: "Max output tokens, default 2048" }, image_b64: { type: "string", description: "Optional base64 image (uses mimo-v2.5 automatically)" }, image_mime: { type: "string", description: "Image MIME type, e.g. image/jpeg" } }, required: ["prompt"] } },
     ];
 
     async function executeApexTool(name: string, inp: Record<string,unknown>, defaultCwd: string): Promise<{output:string;code:number}> {
@@ -1048,6 +1050,37 @@ import { Router } from "express";
           if (todos.length === 0) return { output: "Todo list is empty.", code: 0 };
           const lines = todos.map(t => `[${t.status}]${t.priority ? " ("+t.priority+")" : ""} ${t.id}: ${t.content}`);
           return { output: "Current todos:\n" + lines.join("\n"), code: 0 };
+        }
+        if (name === "call_model") {
+          const userPrompt = String(inp.prompt ?? "");
+          const imgB64 = inp.image_b64 ? String(inp.image_b64) : null;
+          const imgMime = String(inp.image_mime ?? "image/jpeg");
+          // Auto-select model: vision if image provided, else use specified/default
+          const mdl = imgB64 ? "mimo-v2.5" : String(inp.model ?? "mimo-v2.5-pro");
+          const sys = inp.system ? String(inp.system) : undefined;
+          const maxTok = Number(inp.max_tokens ?? 2048);
+          const apiKey = "sk-sszfdmshqaziz2d7dvl2nggaf2gum5kbs881qajf0fzavxyw";
+          try {
+            // Build content array (support multimodal if image provided)
+            const userContent: unknown[] = [];
+            if (imgB64) userContent.push({ type: "image_url", image_url: { url: `data:${imgMime};base64,${imgB64}` } });
+            userContent.push({ type: "text", text: userPrompt });
+            const messages: unknown[] = [];
+            if (sys) messages.push({ role: "system", content: sys });
+            messages.push({ role: "user", content: userContent });
+            const resp = await fetch("https://api.xiaomimimo.com/v1/chat/completions", {
+              method: "POST",
+              headers: { "api-key": apiKey, "content-type": "application/json" },
+              body: JSON.stringify({ model: mdl, max_completion_tokens: maxTok, messages }),
+              signal: AbortSignal.timeout(120000),
+            });
+            const d = await resp.json() as any;
+            if (d.error) return { output: `[call_model error: ${JSON.stringify(d.error)}]`, code: 1 };
+            const text = d.choices?.[0]?.message?.content ?? "no response";
+            const reasoning = d.choices?.[0]?.message?.reasoning_content;
+            const out = reasoning ? `[thinking]\n${reasoning.slice(0,500)}\n[answer]\n${text}` : text;
+            return { output: `[model: ${mdl}]\n${out}`, code: 0 };
+          } catch(ce) { return { output: `[call_model failed: ${String(ce).slice(0,200)}]`, code: 1 }; }
         }
         return { output: `[unknown tool: ${name}]`, code: 1 };
       } catch(e) { return { output: `[error: ${String(e).slice(0,400)}]`, code: 1 }; }

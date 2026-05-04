@@ -1,0 +1,17 @@
+{
+  "id": "test-wf1",
+  "updated_at": 1777920574913,
+  "created_at": 1777920574913,
+  "messages": [
+    {
+      "role": "user",
+      "content": "用 web_fetch 工具访问 https://httpbin.org/json，显示响应内容",
+      "ts": 1777920574913
+    },
+    {
+      "role": "assistant",
+      "content": "**200 OK** — 响应内容：\n\n```json\n{\n  \"slideshow\": {\n    \"author\": \"Yours Truly\",\n    \"date\": \"date of publication\",\n    \"slides\": [\n      {\n        \"title\": \"Wake up to WonderWidgets!\",\n        \"type\": \"all\"\n      },\n      {\n        \"items\": [\n          \"Why <em>WonderWidgets</em> are great\",\n          \"Who <em>buys</em> WonderWidgets\"\n        ],\n        \"title\": \"Overview\",\n        \"type\": \"all\"\n      }\n    ],\n    \"title\": \"Sample Slide Show\"\n  }\n}\n```\n\nhttpbin.org 返回的示例 JSON，展示了一个 slideshow 结构，包含作者、日期和两张幻灯片。",
+      "ts": 1777920574914
+    }
+  ]
+}
