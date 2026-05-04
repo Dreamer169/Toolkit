@@ -990,32 +990,30 @@ import { Router } from "express";
         }
         if (name === "web_search") {
           const query = String(inp.query ?? ""); const num = Math.min(Number(inp.num_results ?? 8), 20);
-          // Use curl via xray HTTP proxy (127.0.0.1:10808) to bypass VPS network restrictions
           return await new Promise(resolve => {
             const enc = encodeURIComponent(query);
-            const curlArgs = [
+            const { execFile } = require("child_process") as typeof import("child_process");
+            execFile("curl", [
               "-s", "--max-time", "25",
               "--proxy", "http://127.0.0.1:10808",
               "-A", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120",
               "-H", "Accept-Language: zh-CN,zh;q=0.9,en;q=0.8",
               `https://html.duckduckgo.com/html/?q=${enc}`
-            ];
-            exec(`curl ${curlArgs.join(" ")}`, { env: FULL_ENV, timeout: 30000, maxBuffer: 2*1024*1024 }, (err, html) => {
+            ], { env: FULL_ENV, timeout: 28000, maxBuffer: 3*1024*1024 }, (err, html) => {
               if (err || !html) return resolve({ output: `[search failed: ${String(err).slice(0,100)}]`, code: 1 });
               const results: string[] = [];
-              const titleRe = /<a[^>]+class="result__a"[^>]*>([^<]+)<\/a>/g;
-              const snippetRe = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
-              const urlRe = /uddg=([^&"]+)/g;
-              const titles: string[] = []; const snippets: string[] = []; const urls: string[] = [];
-              let m: RegExpExecArray | null;
-              while ((m = titleRe.exec(html)) !== null) titles.push(m[1].trim());
-              while ((m = snippetRe.exec(html)) !== null) snippets.push(m[1].replace(/<[^>]+>/g, "").trim());
-              while ((m = urlRe.exec(html)) !== null) urls.push(decodeURIComponent(m[1]));
+              const tRe = /<a[^>]+class="result__a"[^>]*>([^<]+)<\/a>/g;
+              const sRe = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+              const uRe = /uddg=([^&"]+)/g;
+              const titles: string[] = [], snips: string[] = [], urls: string[] = [];
+              let m: RegExpExecArray|null;
+              while ((m = tRe.exec(html)) !== null) titles.push(m[1].trim());
+              while ((m = sRe.exec(html)) !== null) snips.push(m[1].replace(/<[^>]+>/g,"").trim());
+              while ((m = uRe.exec(html)) !== null) urls.push(decodeURIComponent(m[1]));
               for (let i = 0; i < Math.min(titles.length, num); i++) {
-                const urlPart = urls[i] ? `  URL: ${urls[i]}\n` : "";
-                results.push(`[${i+1}] ${titles[i]}\n${urlPart}  ${snippets[i] ?? ""}`);
+                results.push(`[${i+1}] ${titles[i]}\n  ${urls[i]||""}\n  ${snips[i]||""}`);
               }
-              resolve({ output: results.length > 0 ? `Search: "${query}"\n\n` + results.join("\n\n") : `No results for: ${query}`, code: 0 });
+              resolve({ output: results.length > 0 ? `Search: "${query}"\n\n`+results.join("\n\n") : `No results for: ${query}`, code: 0 });
             });
           });
         }

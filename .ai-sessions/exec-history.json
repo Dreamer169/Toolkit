@@ -174,5 +174,16 @@
     "code": 0,
     "duration": 0,
     "source": "apex"
+  },
+  {
+    "id": "morjusvd",
+    "ts": 1777920322729,
+    "cmd": "curl -s \"https://html.duckduckgo.com/html/?q=Xiaomi+MiMo+2025\" -A \"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\" | grep -oP '<a rel=\"nofollow\" class=\"result__a\" href=\"[^\"]*\">[^<]*</a>' | head -3 | sed 's/<a rel=\"nofollow\" class=\"result__a\" href=\"[^\"]*\">//;s/<\\/a>//'",
+    "cwd": "/root/Toolkit",
+    "stdout": "",
+    "stderr": "",
+    "code": 0,
+    "duration": 0,
+    "source": "apex"
   }
 ]
