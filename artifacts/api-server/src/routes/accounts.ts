@@ -940,6 +940,7 @@ router.post("/replit/register", (req, res) => {
 
           // ── Step 2a: 最多 6 次不同代理端口重试（shuffle不重复）───────
           let captchaFailCount = 0; // 同一 Outlook 账号的 captcha_token_invalid 次数
+          let abuseCaptchaCount = 0; // Microsoft Outlook abuse_captcha_required 次数
           let cfBlockedCount   = 0; // cf_api_blocked count → escalate Tor → direct
           let cfJsTimeoutCount = 0; // consecutive cf_js_challenge_timeout → inject Tor after threshold
           let torRateLimited   = false; // Tor IP also got account_rate_limited → never re-inject Tor
@@ -1256,6 +1257,24 @@ router.post("/replit/register", (req, res) => {
               if (cfIpC) {
                 try { rotateCfIpInXray(cfIpC); } catch {}
               }
+              continue;
+            }
+            // abuse_captcha_required: Microsoft Outlook abuse/captcha 拦截页
+            // auto_device_code.py press-hold 失败 → retryable → 换端口重试
+            // 这是 Outlook 侧 IP 信誉问题, 非 Replit 侧, outlook 邮箱本身仍可用
+            if (lastErr.includes("abuse_captcha_required")) {
+              abuseCaptchaCount++;
+              const _cfIpA = xrayPortCfIp.get(tryPort);
+              const _cfNoteA = _cfIpA ? ` (CF IP ${_cfIpA})` : "";
+              const _bumpA = bumpPortCooldown(tryPort, "abuse_captcha_required", 1); // minLevel=1 ~10min
+              if (_cfIpA) {
+                try { rotateCfIpInXray(_cfIpA); } catch {}
+              }
+              if (abuseCaptchaCount >= 2) {
+                log(`    abuse_captcha_required x${abuseCaptchaCount} on port ${tryPort}${_cfNoteA} -> 已换port仍失败, 跳Outlook`);
+                break;
+              }
+              log(`    abuse_captcha_required (${abuseCaptchaCount}/2) on port ${tryPort}${_cfNoteA} -> cooldown ${Math.round(_bumpA.ms/60000)}min + 立即换port重试`);
               continue;
             }
             // account_rate_limited:
