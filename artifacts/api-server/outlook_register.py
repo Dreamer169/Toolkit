@@ -2476,34 +2476,43 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
             if not result.get("access_token") and not result.get("refresh_token"):
                 try:
                     import time as _time
-                    _vpage = context.new_page()
-                    _vpage.goto("https://login.live.com", timeout=20000, wait_until="domcontentloaded")
-                    _time.sleep(1.5)
-                    _vei = _vpage.query_selector("input[type=email],input[name=loginfmt]")
-                    if _vei:
-                        _vei.fill(f"{actual_email}@outlook.com")
-                        _vbtn = _vpage.query_selector("input[type=submit],#idSIButton9,button[type=submit]")
-                        if _vbtn:
-                            _vbtn.click()
-                        _time.sleep(3)
-                        _vbody = _vpage.inner_text("body")
-                        _not_found = (
-                            "We couldn\x27t find a Microsoft account" in _vbody
-                            or "couldn\x27t find" in _vbody
-                            or "no account found" in _vbody
-                            or "找不到此 Microsoft" in _vbody
-                        )
+                    # v9.00: MS账号扩散最多需要 30s，最多重试 3次×10s
+                    _MAX_PROP = 3
+                    for _pa in range(_MAX_PROP):
+                        _vpage = context.new_page()
+                        _vpage.goto("https://login.live.com", timeout=20000, wait_until="domcontentloaded")
+                        _time.sleep(1.5)
+                        _vei = _vpage.query_selector("input[type=email],input[name=loginfmt]")
+                        _not_found = False
+                        if _vei:
+                            _vei.fill(f"{actual_email}@outlook.com")
+                            _vbtn = _vpage.query_selector("input[type=submit],#idSIButton9,button[type=submit]")
+                            if _vbtn:
+                                _vbtn.click()
+                            _time.sleep(3)
+                            _vbody = _vpage.inner_text("body")
+                            _not_found = (
+                                "We couldn\x27t find a Microsoft account" in _vbody
+                                or "couldn\x27t find" in _vbody
+                                or "no account found" in _vbody
+                                or "找不到此 Microsoft" in _vbody
+                            )
+                        try:
+                            _vpage.close()
+                        except Exception:
+                            pass
                         if _not_found:
-                            print(f"[register] ❌ 登录验证: 账号 {actual_email}@outlook.com 在微软系统中不存在，撤销成功标记", flush=True)
-                            result["success"] = False
-                            result["error"] = "account_not_propagated_login_verify_failed"
-                            ok = False
+                            if _pa < _MAX_PROP - 1:
+                                print(f"[register] ⚠ 账号尚未扩散, 等待10s再次验证 ({_pa+1}/{_MAX_PROP})…", flush=True)
+                                _time.sleep(10)
+                            else:
+                                print(f"[register] ❌ 登录验证: 账号 {actual_email}@outlook.com 在微软系统中不存在，撤销成功标记", flush=True)
+                                result["success"] = False
+                                result["error"] = "account_not_propagated_login_verify_failed"
+                                ok = False
                         else:
                             print(f"[register] ✅ 登录验证通过: 账号存在，等待设备码授权", flush=True)
-                    try:
-                        _vpage.close()
-                    except Exception:
-                        pass
+                            break
                 except Exception as _ve:
                     print(f"[register] ⚠ 登录验证异常(忽略): {_ve}", flush=True)
             # ───────────────────────────────────────────────────────────
@@ -2719,6 +2728,9 @@ def main():
         _last_ip_info = ip_info
         _retry_email = ""    # 记录上次失败时已生成的邮箱（换IP重试时复用，避免重新注册全流程）
         _retry_password = "" # 记录上次失败时已生成的密码
+        _ws_proxy_idx = i        # v9.00 webshare限速换代理：当前代理下标
+        _ws_proxy_retries = 0    # v9.00 webshare代理切换次数
+        MAX_WS_PROXY_RETRIES = 2 # v9.00 最多换2次备用代理
 
         while True:
             # CF模式换IP重试：CAPTCHA/Timeout失败时 ban 当前IP，重新获取新IP
@@ -2811,6 +2823,23 @@ def main():
                 print(f"  ⚠ {_reason} 失败（IP={ip_info['ip']}），换新CF IP重试 ({cf_ip_retry}/{MAX_CF_IP_RETRIES})…", flush=True)
                 _cf_pool.ban_ip(ip_info["ip"])
                 continue
+            # v9.00 Webshare代理限速 — 换下一个未使用的备用代理重试
+            if (not r["success"] and not use_cf_pool and proxy_list
+                    and "频率过快" in _err_str
+                    and _ws_proxy_retries < MAX_WS_PROXY_RETRIES):
+                _next_ws = _ws_proxy_idx + 1
+                while _next_ws < len(proxy_list) and _next_ws in _used_proxy_indices:
+                    _next_ws += 1
+                if _next_ws < len(proxy_list):
+                    _bannable = proxy_list[_ws_proxy_idx][:35]
+                    print(f"  ⚠ IP频率限制 ({_bannable}…), 换备用代理重试 ({_ws_proxy_retries+1}/{MAX_WS_PROXY_RETRIES})…", flush=True)
+                    _used_proxy_indices.add(_next_ws)
+                    _ws_proxy_idx = _next_ws
+                    cur_proxy = proxy_list[_next_ws]
+                    _ws_proxy_retries += 1
+                    continue
+                else:
+                    print(f"  ⚠ IP频率限制, 无备用代理 (已用{len(_used_proxy_indices)}/{len(proxy_list)}), 放弃此账号", flush=True)
             break
 
         results.append(r)
