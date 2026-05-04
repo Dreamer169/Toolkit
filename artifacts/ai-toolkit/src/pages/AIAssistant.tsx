@@ -1,729 +1,724 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 
-/* ─── Types ─────────────────────────────────── */
-type Role = "user" | "assistant";
-interface Msg { role: Role; content: string; isStreaming?: boolean; modelId?: string }
-interface ExecResult { stdout: string; stderr: string; code: number; success: boolean }
-interface LogEntry { cmd: string; result: ExecResult; ts: number }
-interface Session { id: string; title: string; created_at: number; updated_at: number; msgCount: number; model: string }
+  // ─── Types ───────────────────────────────────────────────────────────────────
+  interface Msg { role: "user"|"assistant"; content: string; ts: number; }
+  interface Session { id: string; title: string; msgCount: number; updated_at: number; model: string; }
+  interface HistoryEntry { id: string; ts: number; cmd: string; stdout: string; code: number; duration: number; source?: string; }
+  interface Proc { id: number; name: string; status: string; cpu: number; mem: number; restarts: number; }
+  interface Metrics { cpu: number; mem:{total:number;used:number;pct:number}; disk:{fs:string;used:string;avail:string;pct:string}[]; processes:Proc[]; cfPool:{available:number;used_total:number;banned_total:number}; git:string; ts: number; }
+  interface OutlookJob { id:string; status:string; accountCount?:number; lastLog?:{message?:string}; }
+  interface AgentEvent { type:string; text?:string; cmd?:string; stdout?:string; ai_text?:string; toolId?:string; status?:string; job?:OutlookJob; accountCount?:number; lastLog?:string; jobId?:string; accounts?:{email:string;password:string}[]; code?:number; }
 
-/* Agent event from /api/claude-code/agent */
-interface AgentEvent {
-  type: "start"|"status"|"ai_thinking"|"ai_response"|"read_file"|"write_file"|"write_error"|"exec_start"|"exec_done"|"complete"|"stuck"|"error";
-  text?: string; path?: string; cmd?: string; stdout?: string; stderr?: string;
-  code?: number; lines?: number; size?: number; iteration?: number; iterations?: number; error?: boolean | string;
-}
+  const BASE = "";
 
-/* ─── Models ─────────────────────────────────── */
-const MODELS = [
-  { id: "default", label: "Claude Code 内置", badge: "mimo-v2.5-pro", desc: "默认·最强" },
-  { id: "opus",    label: "claude-opus-4-7",  badge: "Opus",          desc: "旗舰"     },
-  { id: "sonnet",  label: "claude-sonnet-4-6", badge: "Sonnet",        desc: "均衡"     },
-  { id: "haiku",   label: "claude-haiku-4-5",  badge: "Haiku",         desc: "极速"     },
-];
-
-/* ─── Chat system prompt (for quick Q&A mode) ─── */
-const CHAT_SYS = `你是部署在 VPS（45.205.27.69）上的 AI 运维和编程助手，拥有完整服务器控制权。
-工作目录：/root/Toolkit (pnpm monorepo)
-服务：api-server(PM2#62,8081)、frontend(PM2#1,3000,Vite HMR)、remote-exec(PM2#5,9999)、ip2free-monitor2(PM2#85)、ip2free-solve-all(PM2#86)、xray(PM2#4)、ngrok(PM2#22-24)
-需执行操作时用 \`\`\`bash 块，需写文件用 [WRITE: /path]内容[/WRITE]，需读文件用 [READ: /path]。
-回答简洁，优先中文。`;
-
-/* ─── Helpers ────────────────────────────────── */
-const genId = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
-const fmtDate = (ts: number) => {
-  const diff = Date.now() - ts;
-  if (diff < 60000) return "刚刚";
-  if (diff < 3600000) return Math.floor(diff / 60000) + "分钟前";
-  const d = new Date(ts);
-  const now = new Date();
-  if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString("zh", { hour: "2-digit", minute: "2-digit" });
-  return d.toLocaleDateString("zh", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
-};
-const fmtSize = (n: number) => n > 1024 ? (n / 1024).toFixed(1) + "k" : n + "B";
-
-function renderMd(text: string): string {
-  return text
-    .replace(/\*\*(.+?)\*\*/g, "<strong class='text-white'>$1</strong>")
-    .replace(/`([^`\n]+)`/g, "<code class='ic'>$1</code>")
-    .replace(/^#{1,3} (.+)$/gm, "<span class='mh'>$1</span>")
-    .replace(/^[-•] (.+)$/gm, "<span class='ml'>• $1</span>")
-    .replace(/^\d+\. (.+)$/gm, "<span class='ml'>$&</span>");
-}
-
-/* ─── Agent Event Log Item ───────────────────── */
-function AgentLogItem({ ev }: { ev: AgentEvent }) {
-  const [open, setOpen] = useState(ev.type === "exec_done" && ev.code !== 0);
-  switch (ev.type) {
-    case "status": case "ai_thinking":
-      return <div className="flex items-center gap-2 text-[11px] text-gray-500 py-1">
-        <span className="animate-spin text-orange-400">⟳</span> {ev.text}
-      </div>;
-    case "read_file":
-      return <div className={`flex items-center gap-2 text-[11px] py-1 ${ev.error ? "text-red-400" : "text-blue-400"}`}>
-        <span>📂</span>
-        <span className="font-mono truncate flex-1" title={ev.path}>{ev.path}</span>
-        {ev.lines && <span className="text-gray-600">{ev.lines}行</span>}
-        {ev.error && <span className="text-red-400">未找到</span>}
-      </div>;
-    case "write_file":
-      return <div className="flex items-center gap-2 text-[11px] text-emerald-400 py-1">
-        <span>✏️</span>
-        <span className="font-mono truncate flex-1" title={ev.path}>{ev.path}</span>
-        {ev.lines && <span className="text-gray-600">{ev.lines}行 {ev.size ? fmtSize(ev.size) : ""}</span>}
-      </div>;
-    case "write_error":
-      return <div className="flex items-center gap-2 text-[11px] text-red-400 py-1">
-        <span>❌</span> <span className="font-mono truncate flex-1">{ev.path}</span>
-        <span className="text-red-300/70">{String(ev.error).slice(0, 50)}</span>
-      </div>;
-    case "exec_start":
-      return <div className="flex items-center gap-2 text-[11px] text-yellow-400 py-1">
-        <span>▶</span> <code className="truncate flex-1 text-yellow-200/70">{ev.cmd?.slice(0, 60)}</code>
-      </div>;
-    case "exec_done":
-      return <div className="border border-[#30363d] rounded-lg overflow-hidden text-[11px] font-mono my-1">
-        <div className={`flex items-center gap-2 px-2 py-1.5 cursor-pointer hover:bg-[#161b22] ${ev.code === 0 ? "bg-[#0d1117]" : "bg-red-900/20"}`}
-          onClick={() => setOpen(o => !o)}>
-          <span className={ev.code === 0 ? "text-emerald-400" : "text-red-400"}>{ev.code === 0 ? "✓" : `✗ ${ev.code}`}</span>
-          <code className="flex-1 truncate text-yellow-200/70">{ev.cmd?.slice(0, 55)}</code>
-          <span className="text-gray-600">{open ? "▲" : "▼"}</span>
-        </div>
-        {open && (ev.stdout || ev.stderr) && (
-          <div className="px-2 py-1.5 bg-black/40 max-h-36 overflow-y-auto">
-            {ev.stdout && <pre className="text-emerald-300/80 whitespace-pre-wrap break-all leading-4">{ev.stdout.slice(0, 800)}</pre>}
-            {ev.stderr && <pre className="text-red-300/70 whitespace-pre-wrap break-all leading-4">{ev.stderr.slice(0, 400)}</pre>}
-          </div>
-        )}
-      </div>;
-    case "ai_response":
-      return <div className="border-l-2 border-orange-500/40 pl-2 py-1 my-1">
-        <div className="text-[10px] text-orange-400/60 mb-0.5">AI 第 {ev.iteration} 轮回复</div>
-        <div className="text-[11px] text-gray-400 line-clamp-3 whitespace-pre-wrap">{ev.text?.slice(0, 200)}{(ev.text?.length ?? 0) > 200 ? "…" : ""}</div>
-      </div>;
-    case "complete":
-      return <div className="bg-emerald-900/20 border border-emerald-500/30 rounded-lg px-3 py-2 text-[11px] text-emerald-300">
-        ✅ 任务完成 ({ev.iterations} 轮)
-      </div>;
-    case "stuck":
-      return <div className="bg-yellow-900/20 border border-yellow-500/30 rounded-lg px-3 py-2 text-[11px] text-yellow-300">
-        ⚠️ 遇到阻碍：{ev.text?.replace("[STUCK:", "").replace("]", "")}
-      </div>;
-    case "error":
-      return <div className="bg-red-900/20 border border-red-500/30 rounded-lg px-3 py-2 text-[11px] text-red-300">
-        ❌ 错误：{ev.text}
-      </div>;
-    default: return null;
+  // ─── Helpers ─────────────────────────────────────────────────────────────────
+  function timeAgo(ts: number) {
+    const s = Math.floor((Date.now()-ts)/1000);
+    if (s<60) return `${s}s前`;
+    if (s<3600) return `${Math.floor(s/60)}m前`;
+    return `${Math.floor(s/3600)}h前`;
   }
-}
+  function genId() { return Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
+  function fmtBytes(mb: number) { return mb>1024 ? `${(mb/1024).toFixed(1)}GB` : `${mb}MB`; }
 
-/* ─── ExecBlock (in chat messages) ──────────────────── */
-function ExecBlock({ cmd, result, onRun, autoRan }: {
-  cmd: string; result?: ExecResult; onRun: (cmd: string) => void; autoRan?: boolean;
-}) {
-  const [open, setOpen] = useState(!!result);
-  return (
-    <div className="my-2 border border-[#30363d] rounded-xl overflow-hidden text-xs font-mono">
-      <div className="flex items-center gap-2 px-3 py-2 bg-[#0d1117] cursor-pointer hover:bg-[#161b22]"
-        onClick={() => result && setOpen(o => !o)}>
-        <span className="text-yellow-400">$</span>
-        <code className="flex-1 text-yellow-200/80 truncate">{cmd}</code>
-        {autoRan && <span className="text-[9px] bg-purple-500/20 text-purple-300 px-1.5 py-0.5 rounded font-sans">auto</span>}
-        {!result
-          ? <button onClick={e => { e.stopPropagation(); onRun(cmd); }}
-              className="px-2.5 py-0.5 rounded bg-blue-600/40 hover:bg-blue-600/70 text-blue-300 text-[11px] font-sans">▶ 运行</button>
-          : <span className={`text-[10px] px-1.5 rounded font-sans ${result.code === 0 ? "text-emerald-400" : "text-red-400"}`}>
-              {result.code === 0 ? "✓ OK" : `✗ exit ${result.code}`}</span>
-        }
-        {result && <span className="text-gray-600 font-sans text-[10px]">{open ? "▲" : "▼"}</span>}
+  // ─── GaugeMini ────────────────────────────────────────────────────────────────
+  function Gauge({val,label,warn=70,danger=85}:{val:number;label:string;warn?:number;danger?:number}) {
+    const col = val>=danger?"#ef4444":val>=warn?"#f59e0b":"#10b981";
+    return (
+      <div style={{textAlign:"center",minWidth:64}}>
+        <svg width="64" height="64" viewBox="0 0 64 64">
+          <circle cx="32" cy="32" r="26" fill="none" stroke="#1e293b" strokeWidth="7"/>
+          <circle cx="32" cy="32" r="26" fill="none" stroke={col} strokeWidth="7"
+            strokeDasharray={2*Math.PI*26} strokeDashoffset={2*Math.PI*26*(1-val/100)}
+            strokeLinecap="round" style={{transition:"stroke-dashoffset 0.5s",transform:"rotate(-90deg)",transformOrigin:"center"}}/>
+          <text x="32" y="37" textAnchor="middle" fill="#f1f5f9" fontSize="13" fontWeight="bold">{Math.round(val)}%</text>
+        </svg>
+        <div style={{color:"#94a3b8",fontSize:11,marginTop:-4}}>{label}</div>
       </div>
-      {open && result && (
-        <div className="px-3 py-2 bg-black/50 max-h-52 overflow-y-auto">
-          {result.stdout?.trim() && <pre className="text-emerald-300/80 whitespace-pre-wrap break-all leading-5">{result.stdout.trim()}</pre>}
-          {result.stderr?.trim() && <pre className="text-red-300/70 whitespace-pre-wrap break-all leading-5">{result.stderr.trim()}</pre>}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ─── FileWriteBlock ─────────────────────────── */
-function FileWriteBlock({ filePath, content, onApply }: {
-  filePath: string; content: string; onApply: (p: string, c: string) => Promise<void>;
-}) {
-  const [applied, setApplied] = useState(false);
-  const [applying, setApplying] = useState(false);
-  return (
-    <div className="my-2 border border-emerald-500/25 rounded-xl overflow-hidden text-xs font-mono">
-      <div className="flex items-center gap-2 px-3 py-2 bg-[#0d1117] border-b border-[#21262d]">
-        <span className="text-emerald-400">📝</span>
-        <span className="flex-1 text-emerald-200/80 truncate">{filePath}</span>
-        <span className="text-gray-600">{content.split("\n").length}行</span>
-        {!applied
-          ? <button onClick={async () => { setApplying(true); await onApply(filePath, content); setApplied(true); setApplying(false); }}
-              disabled={applying}
-              className="px-2.5 py-0.5 rounded bg-emerald-600/40 hover:bg-emerald-600/70 text-emerald-300 text-[11px] font-sans disabled:opacity-50">
-              {applying ? "写入…" : "✏️ 写入"}
-            </button>
-          : <span className="text-emerald-400 text-[11px] font-sans">✓ 已写入</span>
-        }
-      </div>
-      <div className="px-3 py-2 bg-black/40 max-h-40 overflow-y-auto">
-        <pre className="text-gray-300/80 whitespace-pre-wrap break-all leading-5">{content.slice(0, 1500)}{content.length > 1500 ? "\n…" : ""}</pre>
-      </div>
-    </div>
-  );
-}
-
-/* ─── MsgBubble ──────────────────────────────── */
-function MsgBubble({ msg, execResults, autoRanCmds, onRun, onWriteFile }: {
-  msg: Msg; execResults: Map<string, ExecResult>; autoRanCmds: Set<string>;
-  onRun: (cmd: string) => void; onWriteFile: (p: string, c: string) => Promise<void>;
-}) {
-  const modelBadge = MODELS.find(m => m.id === (msg.modelId ?? "default"))?.badge ?? "mimo-v2.5-pro";
-  if (msg.role === "user") return (
-    <div className="flex justify-end mb-3">
-      <div className="max-w-[82%] bg-blue-600/90 text-white rounded-2xl rounded-br-sm px-4 py-2.5 text-sm whitespace-pre-wrap leading-relaxed">
-        {msg.content}
-      </div>
-    </div>
-  );
-  const parts: React.ReactNode[] = [];
-  const re = /```(?:bash|sh|shell|cmd)?\n?([\s\S]*?)```|\[WRITE:\s*([^\]]+)\]\n?([\s\S]*?)\[\/WRITE\]/g;
-  let last = 0; let m; let ki = 0;
-  while ((m = re.exec(msg.content)) !== null) {
-    const before = msg.content.slice(last, m.index);
-    if (before) parts.push(<span key={ki++} className="whitespace-pre-wrap text-sm leading-relaxed block" dangerouslySetInnerHTML={{ __html: renderMd(before) }} />);
-    if (m[1] !== undefined) {
-      const rawCmd = m[1].trim();
-      parts.push(<ExecBlock key={ki++} cmd={rawCmd} result={execResults.get(rawCmd)} onRun={onRun} autoRan={autoRanCmds.has(rawCmd)} />);
-    } else if (m[2]) {
-      parts.push(<FileWriteBlock key={ki++} filePath={m[2]} content={m[3]?.trim() ?? ""} onApply={onWriteFile} />);
-    }
-    last = m.index + m[0].length;
+    );
   }
-  const tail = msg.content.slice(last);
-  if (tail) parts.push(<span key={ki++} className="whitespace-pre-wrap text-sm leading-relaxed block" dangerouslySetInnerHTML={{ __html: renderMd(tail) }} />);
-  return (
-    <div className="flex justify-start mb-4">
-      <div className="max-w-[90%]">
-        <div className="text-[10px] text-gray-500 mb-1 ml-1 flex items-center gap-2">
-          <span className="w-3 h-3 rounded-full bg-gradient-to-br from-orange-400 to-rose-500 inline-block shrink-0" />
-          <span className="font-medium text-orange-400/80">{modelBadge}</span>
-          {msg.isStreaming && <span className="animate-pulse text-blue-400 text-xs">▌</span>}
-        </div>
-        <div className="bg-[#1a2030] border border-[#21262d] text-gray-200 rounded-2xl rounded-bl-sm px-4 py-3 leading-relaxed">
-          {parts}
-        </div>
-      </div>
-    </div>
-  );
-}
 
-/* ─── ModelPicker ────────────────────────────── */
-function ModelPicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  return (
-    <div className="flex gap-1 flex-wrap">
-      {MODELS.map(m => (
-        <button key={m.id} onClick={() => onChange(m.id)} title={m.label}
-          className={`text-[11px] px-2.5 py-1 rounded-lg border transition-all ${value === m.id ? "bg-orange-500/20 border-orange-500/50 text-orange-300 font-semibold" : "bg-[#0d1117] border-[#30363d] text-gray-400 hover:text-gray-200 hover:border-[#444c56]"}`}>
-          <span className="opacity-60">{m.desc} · </span>{m.badge}
-        </button>
-      ))}
-    </div>
-  );
-}
+  // ─── StatusBadge ──────────────────────────────────────────────────────────────
+  function Badge({status}:{status:string}) {
+    const colors: Record<string,string> = {online:"#10b981",running:"#10b981",done:"#10b981",stopped:"#ef4444",error:"#ef4444",errored:"#ef4444",waiting:"#f59e0b",launching:"#f59e0b"};
+    return <span style={{background:colors[status]??"#64748b",color:"#fff",borderRadius:4,padding:"1px 6px",fontSize:11,fontWeight:600}}>{status}</span>;
+  }
 
-/* ─── SessionPanel ───────────────────────────── */
-function SessionPanel({ current, onLoad, onNew }: { current: string; onLoad: (id: string) => void; onNew: () => void }) {
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [loading, setLoading] = useState(true);
-  const refresh = useCallback(async () => {
-    try { setSessions(await (await fetch("/api/claude-code/sessions")).json()); }
-    catch { /* */ } finally { setLoading(false); }
-  }, []);
-  useEffect(() => { void refresh(); }, [refresh]);
-  const del = async (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    await fetch(`/api/claude-code/sessions/${id}`, { method: "DELETE" });
-    setSessions(p => p.filter(s => s.id !== id));
-  };
-  return (
-    <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between mb-3 shrink-0">
-        <span className="text-[11px] text-gray-500 font-medium uppercase tracking-wider">历史会话</span>
-        <div className="flex gap-1.5">
-          <button onClick={() => void refresh()} className="text-[10px] text-gray-600 hover:text-gray-400 px-1.5 py-1 rounded hover:bg-[#21262d]">↺</button>
-          <button onClick={onNew} className="text-[10px] bg-orange-600/20 hover:bg-orange-600/40 border border-orange-600/30 text-orange-300 px-2 py-1 rounded">+ 新</button>
-        </div>
-      </div>
-      {loading ? <div className="text-xs text-gray-600 text-center py-6 animate-pulse">加载…</div>
-        : sessions.length === 0 ? <div className="text-xs text-gray-600 text-center py-6">暂无历史</div>
-        : <div className="space-y-1 overflow-y-auto flex-1">
-            {sessions.map(s => (
-              <div key={s.id} onClick={() => onLoad(s.id)}
-                className={`group px-3 py-2 rounded-xl border cursor-pointer transition-all ${s.id === current ? "bg-orange-500/10 border-orange-500/40" : "bg-[#0d1117] border-[#30363d] hover:border-[#444c56] hover:bg-[#161b22]"}`}>
-                <div className="flex items-start gap-1.5">
-                  <div className="flex-1 min-w-0">
-                    <div className="text-xs font-medium truncate text-gray-200">{s.title}</div>
-                    <div className="text-[10px] text-gray-600 mt-0.5">{s.msgCount}条 · {fmtDate(s.updated_at)}</div>
-                  </div>
-                  <button onClick={e => void del(s.id, e)} className="opacity-0 group-hover:opacity-100 text-[10px] text-red-400/60 hover:text-red-400 px-1 rounded">✕</button>
-                </div>
-              </div>
-            ))}
-          </div>
-      }
-    </div>
-  );
-}
+  // ─── Main Component ──────────────────────────────────────────────────────────
+  export default function AIAssistant() {
+    const [tab, setTab] = useState<"hub"|"agent"|"chat">("hub");
 
-/* ─── Quick shortcuts ────────────────────────── */
-const QUICK_CMDS = [
-  { label: "PM2 总览",         cmd: "pm2 list" },
-  { label: "api-server 日志",  cmd: "pm2 logs api-server --lines 30 --nostream" },
-  { label: "ip2free 监控",     cmd: "pm2 logs ip2free-monitor2 --lines 20 --nostream" },
-  { label: "solve-all 日志",   cmd: "pm2 logs ip2free-solve-all --lines 20 --nostream" },
-  { label: "磁盘/内存",        cmd: "df -h / && free -h" },
-  { label: "重建 api-server",  cmd: "cd /root/Toolkit && pnpm --filter @workspace/api-server run build && pm2 restart api-server" },
-];
-
-const AGENT_TEMPLATES = [
-  { label: "分析 api-server 路由", task: "读取 /root/Toolkit/artifacts/api-server/src/routes/index.ts 和所有路由文件，分析当前所有 API 路由的结构和功能，列出清单。" },
-  { label: "续写未完成代码",       task: "扫描 /root/Toolkit/artifacts 下所有 TypeScript 文件，找出有 TODO 注释或未实现（throw Error、// ...）的函数，读取后续写完整实现。" },
-  { label: "磁盘清理建议",         task: "分析服务器磁盘使用情况：执行 du -sh /root/Toolkit /root/Toolkit/node_modules /root/Toolkit/artifacts/*/node_modules 等，找出最大的目录，给出清理方案并执行安全的清理操作。" },
-  { label: "检查所有服务健康",     task: "检查所有 PM2 服务状态：pm2 list、各关键服务的最近日志（api-server, ip2free-monitor2, ip2free-solve-all, xray），找出异常并给出修复建议。" },
-  { label: "新增 API 路由",        task: "在 /root/Toolkit/artifacts/api-server/src/routes/ 下新增一个示例路由文件，读取 routes/index.ts 了解挂载模式，然后新增路由并正确挂载到 index.ts，最后构建并验证。" },
-];
-
-/* ─── Main ───────────────────────────────────── */
-export default function AIAssistant({ onNavigate: _onNavigate }: { onNavigate: (tab: string) => void }) {
-  const initialMsg: Msg = { role: "assistant", modelId: "default",
-    content: `你好！我是任务中枢 AI，搭载 **Claude Code 内置模型 (mimo-v2.5-pro)**，直连 VPS 45.205.27.69。
-
-我有两种工作模式：
-
-**💬 对话模式** — 快速问答，生成代码和命令供你一键执行
-
-**🤖 Agent 模式** — 我来全权执行：自动读取相关文件、写入代码、运行命令、构建服务，直到任务完成。适合：
-• 续写服务器上未完成的代码
-• 新增 API 路由/前端页面（自动对接路由配置）
-• 排查修复服务故障
-• 磁盘清理、服务管理` };
-
-  const [mode, setMode] = useState<"chat" | "agent">("chat");
-  // Chat state
-  const [msgs, setMsgs] = useState<Msg[]>([initialMsg]);
-  const [input, setInput] = useState("");
-  const [chatLoading, setChatLoading] = useState(false);
-  const [execResults, setExecResults] = useState<Map<string, ExecResult>>(new Map());
-  const [autoRanCmds, setAutoRanCmds] = useState<Set<string>>(new Set());
-  const [execLog, setExecLog] = useState<LogEntry[]>([]);
-  // Agent state
-  const [agentTask, setAgentTask] = useState("");
-  const [agentRunning, setAgentRunning] = useState(false);
-  const [agentEvents, setAgentEvents] = useState<AgentEvent[]>([]);
-  const [agentFinalMsg, setAgentFinalMsg] = useState("");
-  // Shared
-  const [model, setModel] = useState("default");
-  const [sessionId, setSessionId] = useState(genId);
-  const [sessionTitle, setSessionTitle] = useState("新会话");
-  const [bashInput, setBashInput] = useState("");
-  const [bashRunning, setBashRunning] = useState(false);
-  const [sideTab, setSideTab] = useState<"sessions" | "bash" | "log">("sessions");
-  const bottomRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-  const agentBottomRef = useRef<HTMLDivElement>(null);
-  const saveTimer = useRef<ReturnType<typeof setTimeout>>();
-
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs]);
-  useEffect(() => { agentBottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [agentEvents]);
-
-  /* ─── Auto-save ─── */
-  const saveSession = useCallback((messages: Msg[], title: string) => {
-    clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      if (messages.length <= 1) return;
-      await fetch("/api/claude-code/sessions", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: sessionId, title, messages, model }),
-      });
-    }, 1500);
-  }, [sessionId, model]);
-
-  /* ─── Load session ─── */
-  const loadSession = useCallback(async (id: string) => {
-    try {
-      const data = await (await fetch(`/api/claude-code/sessions/${id}`)).json();
-      setMsgs(data.messages ?? [initialMsg]);
-      setModel(data.model ?? "default");
-      setSessionId(data.id);
-      setSessionTitle(data.title ?? "会话");
-      setExecResults(new Map());
-      setAutoRanCmds(new Set());
-      setMode("chat");
-      setSideTab("bash");
-    } catch { /* */ }
-  }, []);
-
-  /* ─── New session ─── */
-  const newSession = useCallback(() => {
-    setMsgs([initialMsg]);
-    setSessionId(genId());
-    setSessionTitle("新会话");
-    setExecResults(new Map());
-    setAutoRanCmds(new Set());
-    setExecLog([]);
-    setAgentEvents([]);
-    setAgentFinalMsg("");
-    setTimeout(() => inputRef.current?.focus(), 50);
-  }, []);
-
-  /* ─── runCmd (exec panel) ─── */
-  const runCmd = useCallback(async (cmd: string): Promise<ExecResult> => {
-    const ts = Date.now();
-    try {
-      const r = await fetch("/api/claude-code/exec", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cmd }),
-      });
-      const data: ExecResult = await r.json();
-      setExecResults(p => new Map(p).set(cmd, data));
-      setExecLog(p => [...p.slice(-49), { cmd, result: data, ts }]);
-      setSideTab("log");
-      return data;
-    } catch (e) {
-      const err: ExecResult = { stdout: "", stderr: String(e), code: 1, success: false };
-      setExecResults(p => new Map(p).set(cmd, err));
-      setExecLog(p => [...p.slice(-49), { cmd, result: err, ts }]);
-      return err;
-    }
-  }, []);
-
-  const bashRun = useCallback(async (cmd: string) => {
-    setBashRunning(true); await runCmd(cmd); setBashRunning(false);
-  }, [runCmd]);
-
-  const writeFile = useCallback(async (filePath: string, content: string) => {
-    await fetch("/api/claude-code/file-write", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: filePath, content, createBackup: true }),
-    });
-  }, []);
-
-  /* ─── Extract bash from AI text ─── */
-  const extractBash = (text: string): string[] => {
-    const re = /```(?:bash|sh|shell|cmd)?\n?([\s\S]*?)```/g;
-    const cmds: string[] = []; let m;
-    while ((m = re.exec(text)) !== null) cmds.push(m[1].trim());
-    return cmds;
-  };
-
-  /* ─── Auto-read files from user message ─── */
-  const autoReadFiles = async (userMsg: string): Promise<string> => {
-    const re = /\/[^\s"'`<>()[\]]+\.[a-zA-Z]{1,10}/g;
-    const paths = [...new Set([...userMsg.matchAll(re)].map(m => m[0]))];
-    if (!paths.length) return "";
-    const reads = await Promise.all(paths.map(async p => {
-      try {
-        const r = await fetch("/api/claude-code/file-read", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: p }) });
-        if (!r.ok) return null;
-        const d = await r.json();
-        return `\n[文件: ${p}]\n\`\`\`\n${d.content}\n\`\`\``;
-      } catch { return null; }
-    }));
-    return reads.filter(Boolean).join("\n");
-  };
-
-  /* ─── Chat: send message ─── */
-  const sendChat = async (text = input) => {
-    const msg = text.trim();
-    if (!msg || chatLoading) return;
-    setInput("");
-    setChatLoading(true);
-    const fileCtx = await autoReadFiles(msg);
-    const userMsg: Msg = { role: "user", content: msg };
-    const assistantMsg: Msg = { role: "assistant", content: "", isStreaming: true, modelId: model };
-    setMsgs(prev => [...prev, userMsg, assistantMsg]);
-    const execCtx = execLog.length > 0
-      ? "\n[最近执行]\n" + execLog.slice(-2).map(e => `$ ${e.cmd}\n${(e.result.stdout || "").slice(0, 300)}\n[exit: ${e.result.code}]`).join("\n\n")
-      : "";
-    const history = msgs.slice(-10).filter(m => m.content).map(m => (m.role === "user" ? "Human" : "Assistant") + ": " + m.content.slice(0, 600)).join("\n");
-    const fullPrompt = [CHAT_SYS, execCtx, fileCtx, history ? history + "\nHuman: " + msg : msg].filter(Boolean).join("\n");
-    let finalText = "";
-    try {
-      const resp = await fetch("/api/claude-code/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: fullPrompt, model }) });
-      const reader = resp.body!.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        const lines = buf.split("\n"); buf = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const ev = JSON.parse(line.slice(6));
-            if (ev.type === "text") { finalText += ev.content; setMsgs(prev => { const last = { ...prev[prev.length - 1], content: finalText }; return [...prev.slice(0, -1), last]; }); }
-          } catch { /* */ }
-        }
-      }
-    } catch (e) {
-      finalText = `[错误] ${String(e)}`;
-      setMsgs(prev => { const last = { ...prev[prev.length - 1], content: finalText }; return [...prev.slice(0, -1), last]; });
-    }
-    setMsgs(prev => { const last = { ...prev[prev.length - 1], isStreaming: false }; return [...prev.slice(0, -1), last]; });
-    setChatLoading(false);
-    const newTitle = msgs.length <= 1 ? msg.slice(0, 30) : sessionTitle;
-    setSessionTitle(newTitle);
-    saveSession([...msgs, userMsg, { role: "assistant", content: finalText, modelId: model }], newTitle);
-    setTimeout(() => inputRef.current?.focus(), 50);
-  };
-
-  /* ─── Agent: run task ─── */
-  const runAgent = async (taskText = agentTask) => {
-    const task = taskText.trim();
-    if (!task || agentRunning) return;
-    setAgentRunning(true);
-    setAgentEvents([]);
-    setAgentFinalMsg("");
-    try {
-      const resp = await fetch("/api/claude-code/agent", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task, model }),
-      });
-      const reader = resp.body!.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        const lines = buf.split("\n"); buf = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const ev: AgentEvent = JSON.parse(line.slice(6));
-            setAgentEvents(prev => [...prev, ev]);
-            if (ev.type === "complete" || ev.type === "stuck") setAgentFinalMsg(ev.text ?? "");
-          } catch { /* */ }
-        }
-      }
-    } catch (e) {
-      setAgentEvents(prev => [...prev, { type: "error", text: String(e) }]);
-    }
-    setAgentRunning(false);
-    // Save agent task to chat history as a summary
-    const summary: Msg = { role: "user", content: `[Agent任务] ${task}` };
-    const result: Msg = { role: "assistant", content: agentFinalMsg || "Agent 任务已完成", modelId: model };
-    const newTitle = task.slice(0, 30);
-    setSessionTitle(newTitle);
-    saveSession([...msgs, summary, result], newTitle);
-  };
-
-  const onChatKey = (e: React.KeyboardEvent) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendChat(); } };
-  const onAgentKey = (e: React.KeyboardEvent) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void runAgent(); } };
-  const currentBadge = MODELS.find(m => m.id === model)?.badge ?? "mimo-v2.5-pro";
-
-  return (
-    <div className="grid lg:grid-cols-[minmax(0,1fr)_290px] gap-4" style={{ height: "calc(100vh - 180px)" }}>
-
-      {/* ── Left: Main Panel ── */}
-      <section className="bg-[#161b22] border border-[#21262d] rounded-2xl flex flex-col overflow-hidden">
+    return (
+      <div style={{height:"100vh",display:"flex",flexDirection:"column",background:"#0f172a",color:"#f1f5f9",fontFamily:"'SF Mono',Consolas,monospace",overflow:"hidden"}}>
         {/* Header */}
-        <div className="px-4 py-3 border-b border-[#21262d] shrink-0 space-y-2.5">
-          <div className="flex items-center gap-3">
-            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-orange-400 to-rose-500 flex items-center justify-center text-[11px] font-bold text-white shrink-0">AI</div>
-            <div className="flex-1 min-w-0">
-              <h2 className="text-white font-semibold text-sm leading-none truncate">{sessionTitle}</h2>
-              <p className="text-[11px] text-gray-500 mt-0.5">Claude Code · VPS 45.205.27.69</p>
-            </div>
-            {/* Mode toggle */}
-            <div className="flex gap-1 bg-[#0d1117] border border-[#30363d] rounded-lg p-0.5 shrink-0">
-              <button onClick={() => setMode("chat")}
-                className={`text-[11px] px-3 py-1.5 rounded-md transition-all font-medium ${mode === "chat" ? "bg-blue-600/30 text-blue-300 border border-blue-500/40" : "text-gray-500 hover:text-gray-300"}`}>
-                💬 对话
-              </button>
-              <button onClick={() => setMode("agent")}
-                className={`text-[11px] px-3 py-1.5 rounded-md transition-all font-medium ${mode === "agent" ? "bg-purple-600/30 text-purple-300 border border-purple-500/40" : "text-gray-500 hover:text-gray-300"}`}>
-                🤖 Agent
-              </button>
-            </div>
-          </div>
-          <ModelPicker value={model} onChange={setModel} />
-        </div>
-
-        {/* ── Chat Mode ── */}
-        {mode === "chat" && <>
-          <div className="flex-1 overflow-y-auto px-4 py-4">
-            {msgs.map((msg, i) => (
-              <MsgBubble key={i} msg={msg} execResults={execResults} autoRanCmds={autoRanCmds} onRun={bashRun} onWriteFile={writeFile} />
-            ))}
-            {chatLoading && msgs[msgs.length - 1]?.content === "" && (
-              <div className="flex justify-start mb-3">
-                <div className="bg-[#1a2030] border border-[#21262d] rounded-2xl px-5 py-3">
-                  <span className="flex gap-1.5 items-center">
-                    {[0,1,2].map(i => <span key={i} className="w-1.5 h-1.5 rounded-full bg-orange-400/60 animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />)}
-                    <span className="text-[11px] text-gray-600 ml-1">{currentBadge} 思考中…</span>
-                  </span>
-                </div>
-              </div>
-            )}
-            <div ref={bottomRef} />
-          </div>
-          <div className="px-4 py-3 border-t border-[#21262d] shrink-0">
-            <div className="flex gap-2 items-end">
-              <textarea ref={inputRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={onChatKey}
-                disabled={chatLoading} rows={1}
-                placeholder={`问 ${currentBadge} 任何问题，或让我操作服务器… (Enter)`}
-                className="flex-1 resize-none bg-[#0d1117] border border-[#30363d] rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-600 outline-none focus:border-blue-500/60 disabled:opacity-50 leading-relaxed"
-                style={{ maxHeight: "100px", overflowY: "auto" }} />
-              <button onClick={() => void sendChat()} disabled={chatLoading || !input.trim()}
-                className="px-4 py-2.5 rounded-xl bg-blue-600/80 hover:bg-blue-500 disabled:opacity-40 text-white text-sm font-semibold shrink-0 transition-colors">
-                发送
-              </button>
-            </div>
-          </div>
-        </>}
-
-        {/* ── Agent Mode ── */}
-        {mode === "agent" && <>
-          {/* Task input */}
-          <div className="px-4 py-4 border-b border-[#21262d] shrink-0 space-y-3">
-            <div>
-              <label className="text-[11px] text-gray-500 mb-1.5 block">任务描述（AI 将自主执行，直到完成）</label>
-              <textarea value={agentTask} onChange={e => setAgentTask(e.target.value)} onKeyDown={onAgentKey}
-                disabled={agentRunning} rows={3}
-                placeholder={"例如：读取 /root/Toolkit/artifacts/api-server/src/routes/ 下的所有路由文件，新增一个 /api/test/ping 路由返回服务器时间，并正确挂载到 index.ts，构建并验证。\n\n（Ctrl+Enter 执行）"}
-                className="w-full resize-none bg-[#0d1117] border border-[#30363d] rounded-xl px-4 py-3 text-sm text-white placeholder-gray-600 outline-none focus:border-purple-500/60 disabled:opacity-50 leading-relaxed" />
-            </div>
-            {/* Templates */}
-            <div className="flex gap-1.5 flex-wrap">
-              {AGENT_TEMPLATES.map(t => (
-                <button key={t.label} onClick={() => setAgentTask(t.task)} disabled={agentRunning}
-                  className="text-[11px] px-2.5 py-1 rounded-lg bg-[#21262d] hover:bg-[#30363d] border border-[#30363d] text-gray-400 hover:text-gray-200 disabled:opacity-40 transition-colors">
-                  {t.label}
-                </button>
-              ))}
-            </div>
-            <button onClick={() => void runAgent()} disabled={agentRunning || !agentTask.trim()}
-              className={`w-full py-2.5 rounded-xl font-semibold text-sm transition-all ${agentRunning ? "bg-purple-800/40 border border-purple-500/40 text-purple-300 cursor-not-allowed" : "bg-purple-600/80 hover:bg-purple-500 text-white disabled:opacity-40"}`}>
-              {agentRunning ? "🤖 Agent 执行中…" : "🚀 启动 Agent"}
+        <div style={{display:"flex",alignItems:"center",gap:12,padding:"10px 16px",background:"#1e293b",borderBottom:"1px solid #334155",flexShrink:0}}>
+          <span style={{fontSize:18,fontWeight:700,letterSpacing:1}}>🤖 AI 全权运维</span>
+          <span style={{fontSize:11,color:"#64748b",flex:1}}>root@45.205.27.69 · mimo-v2.5-pro · 无限制</span>
+          {["hub","agent","chat"].map(t=>(
+            <button key={t} onClick={()=>setTab(t as "hub"|"agent"|"chat")} style={{
+              padding:"4px 14px",borderRadius:6,border:"none",cursor:"pointer",fontSize:13,fontWeight:600,
+              background:tab===t?"#3b82f6":"#334155",color:tab===t?"#fff":"#94a3b8",transition:"all 0.15s"
+            }}>
+              {t==="hub"?"🧭 任务中枢":t==="agent"?"🤖 Agent":"💬 AI对话"}
             </button>
-          </div>
-
-          {/* Agent execution log */}
-          <div className="flex-1 overflow-y-auto px-4 py-3 space-y-0.5">
-            {agentEvents.length === 0 && !agentRunning && (
-              <div className="text-center text-gray-600 text-xs py-12">
-                <div className="text-3xl mb-3">🤖</div>
-                <div>描述任务，点击「启动 Agent」</div>
-                <div className="mt-1 text-[11px]">AI 会自主读取文件、写入代码、执行命令直到完成</div>
-              </div>
-            )}
-            {agentEvents.map((ev, i) => <AgentLogItem key={i} ev={ev} />)}
-            {agentRunning && (
-              <div className="flex items-center gap-2 text-[11px] text-purple-400 py-2 animate-pulse">
-                <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
-                <span className="w-1.5 h-1.5 rounded-full bg-purple-400 animation-delay-150" />
-                <span className="w-1.5 h-1.5 rounded-full bg-purple-400 animation-delay-300" />
-                Agent 执行中…
-              </div>
-            )}
-            {agentFinalMsg && !agentRunning && (
-              <div className="mt-3 bg-[#1a2030] border border-[#21262d] rounded-xl px-4 py-3 text-sm text-gray-200">
-                <div className="text-[10px] text-orange-400/70 mb-2">AI 执行总结</div>
-                <div className="whitespace-pre-wrap leading-relaxed" dangerouslySetInnerHTML={{ __html: renderMd(agentFinalMsg) }} />
-              </div>
-            )}
-            <div ref={agentBottomRef} />
-          </div>
-        </>}
-      </section>
-
-      {/* ── Right: Sidebar ── */}
-      <aside className="flex flex-col gap-3 overflow-hidden" style={{ maxHeight: "calc(100vh - 180px)" }}>
-        {/* Status */}
-        <div className="bg-[#161b22] border border-[#21262d] rounded-2xl px-3 py-2.5 flex flex-wrap gap-x-3 gap-y-1 text-[11px] shrink-0">
-          <div className="flex items-center gap-1.5"><span className="text-emerald-400">●</span><span className="text-gray-400">VPS 45.205.27.69</span></div>
-          <div className="flex items-center gap-1.5"><span className="text-orange-400">●</span><span className="text-gray-400">Claude Code</span></div>
-          {agentRunning && <div className="flex items-center gap-1.5"><span className="text-purple-400 animate-pulse">●</span><span className="text-purple-300">Agent 运行中</span></div>}
+          ))}
         </div>
+        {/* Body */}
+        <div style={{flex:1,overflow:"hidden",display:"flex"}}>
+          {tab==="hub" && <TaskHub/>}
+          {tab==="agent" && <AgentMode/>}
+          {tab==="chat" && <ChatMode/>}
+        </div>
+      </div>
+    );
+  }
 
-        {/* Tabs */}
-        <div className="bg-[#161b22] border border-[#21262d] rounded-2xl overflow-hidden flex flex-col flex-1 min-h-0">
-          <div className="flex border-b border-[#21262d] shrink-0">
-            {(["sessions", "bash", "log"] as const).map(t => (
-              <button key={t} onClick={() => setSideTab(t)}
-                className={`flex-1 py-2 text-[11px] font-medium transition-colors ${sideTab === t ? "text-white border-b-2 border-orange-500 bg-[#1a2030]" : "text-gray-500 hover:text-gray-300"}`}>
-                {t === "sessions" ? "💾 会话" : t === "bash" ? "🖥 命令" : `📋${execLog.length > 0 ? `(${execLog.length})` : ""}`}
-              </button>
-            ))}
-          </div>
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // TASK HUB
+  // ═══════════════════════════════════════════════════════════════════════════════
+  function TaskHub() {
+    const [metrics, setMetrics] = useState<Metrics|null>(null);
+    const [subTab, setSubTab] = useState<"quick"|"outlook"|"pm2"|"git"|"history">("quick");
+    const [loading, setLoading] = useState(false);
+    const [output, setOutput] = useState("");
+    const [outlookJobs, setOutlookJobs] = useState<OutlookJob[]>([]);
+    const [history, setHistory] = useState<HistoryEntry[]>([]);
 
-          {sideTab === "sessions" && (
-            <div className="p-3 flex-1 min-h-0 overflow-hidden flex flex-col">
-              <SessionPanel current={sessionId} onLoad={loadSession} onNew={newSession} />
-            </div>
-          )}
+    const fetchMetrics = useCallback(async () => {
+      try { const r = await fetch(`${BASE}/api/claude-code/server-metrics`); const d = await r.json(); setMetrics(d); } catch {}
+    }, []);
 
-          {sideTab === "bash" && (
-            <div className="p-3 space-y-2.5 overflow-y-auto flex-1">
-              <div className="flex gap-2">
-                <input value={bashInput} onChange={e => setBashInput(e.target.value)}
-                  onKeyDown={e => { if (e.key === "Enter" && bashInput.trim()) { void bashRun(bashInput); setBashInput(""); } }}
-                  placeholder="bash 命令…"
-                  className="flex-1 bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-xs text-white font-mono placeholder-gray-600 outline-none focus:border-yellow-500/60" />
-                <button onClick={() => { if (bashInput.trim()) { void bashRun(bashInput); setBashInput(""); } }}
-                  disabled={bashRunning || !bashInput.trim()}
-                  className="px-3 py-2 rounded-lg bg-yellow-600/20 hover:bg-yellow-600/40 border border-yellow-600/30 text-yellow-300 text-xs disabled:opacity-40 font-bold">{bashRunning ? "…" : "▶"}</button>
+    useEffect(() => { fetchMetrics(); const t = setInterval(fetchMetrics, 15000); return ()=>clearInterval(t); }, [fetchMetrics]);
+
+    useEffect(()=>{
+      if (subTab==="outlook") fetchOutlookJobs();
+      if (subTab==="history") fetchHistory();
+    }, [subTab]);
+
+    const fetchOutlookJobs = async () => {
+      try { const r = await fetch(`${BASE}/api/claude-code/outlook-jobs`); setOutlookJobs(await r.json()); } catch {}
+    };
+    const fetchHistory = async () => {
+      try { const r = await fetch(`${BASE}/api/claude-code/history`); setHistory(await r.json()); } catch {}
+    };
+
+    const runAction = async (label: string, cmd: string) => {
+      setLoading(true); setOutput(`▶ ${label}\n`);
+      const es = new EventSource(`${BASE}/api/claude-code/exec-stream`);
+      // exec-stream is POST, use fetch with ReadableStream
+      es.close();
+      try {
+        const res = await fetch(`${BASE}/api/claude-code/exec-stream`, {
+          method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({cmd})
+        });
+        const reader = res.body!.getReader(); const dec = new TextDecoder();
+        let buf="";
+        while(true) {
+          const {done,value} = await reader.read(); if(done) break;
+          buf += dec.decode(value,{stream:true});
+          const lines = buf.split("\n"); buf = lines.pop()??"";
+          for (const line of lines) {
+            if (!line.startsWith("data:")) continue;
+            try { const e=JSON.parse(line.slice(5).trim());
+              if (e.type==="stdout"||e.type==="stderr") setOutput(p=>p+e.text);
+              if (e.type==="done") setOutput(p=>p+`\n✓ 完成 (exit ${e.code}, ${e.duration}ms)`);
+            } catch {}
+          }
+        }
+      } catch (e) { setOutput(p=>p+String(e)); }
+      setLoading(false);
+    };
+
+    const quickActions: [string,string,string][] = [
+      ["🔵 注册1个Outlook","outlook-1","#1d4ed8"],
+      ["🔵 注册3个Outlook","outlook-3","#1d4ed8"],
+      ["🔵 注册5个Outlook","outlook-5","#1d4ed8"],
+      ["🔵 注册10个Outlook","outlook-10","#1d4ed8"],
+      ["🔨 构建重启API","build-api","#7c3aed"],
+      ["📝 Git提交推送","git-push","#0369a1"],
+      ["📋 PM2进程列表","pm2-list","#064e3b"],
+      ["📊 CF IP池状态","cf-pool","#064e3b"],
+      ["🐍 pm2日志 api-server","pm2-logs","#92400e"],
+      ["♻️ 重启 api-server","restart-api","#7c2d12"],
+      ["♻️ 重启前端","restart-fe","#7c2d12"],
+      ["🔍 执行历史","history","#374151"],
+    ];
+
+    const handleQuick = async (id: string) => {
+      if (id.startsWith("outlook-")) {
+        const n = id.split("-")[1];
+        setSubTab("outlook");
+        return;
+      }
+      const cmds: Record<string,string> = {
+        "build-api": "cd /root/Toolkit && pnpm --filter @workspace/api-server run build && pm2 restart api-server 2>&1 | tail -5",
+        "git-push": `cd /root/Toolkit && git add -A && git status --short | head -5 && git commit -m "AI Agent: auto sync ${new Date().toISOString().slice(0,16)}" 2>&1 | tail -3`,
+        "pm2-list": "pm2 list 2>&1",
+        "cf-pool": "curl -s http://localhost:8081/api/tools/cf-pool/status | python3 -m json.tool 2>&1 | head -20",
+        "pm2-logs": "pm2 logs api-server --lines 30 --nostream 2>&1 | tail -30",
+        "restart-api": "pm2 restart api-server 2>&1",
+        "restart-fe": "pm2 restart ai-toolkit 2>&1 || pm2 restart 1 2>&1",
+        "history": "cat /root/Toolkit/.ai-sessions/exec-history.json 2>/dev/null | python3 -c \"import sys,json;h=json.load(sys.stdin);[print(e.get('cmd','?')[:60],'-',e.get('code',0)) for e in h[-10:]]\"",
+      };
+      if (cmds[id]) await runAction(id, cmds[id]);
+      else setSubTab("outlook");
+    };
+
+    return (
+      <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+        {/* Left: Metrics Panel */}
+        <div style={{width:260,background:"#1e293b",borderRight:"1px solid #334155",padding:14,overflowY:"auto",flexShrink:0}}>
+          <div style={{fontSize:13,fontWeight:700,marginBottom:10,color:"#60a5fa"}}>📡 服务器状态</div>
+          {metrics ? (
+            <>
+              <div style={{display:"flex",gap:8,justifyContent:"space-around",marginBottom:12}}>
+                <Gauge val={metrics.cpu} label="CPU"/>
+                <Gauge val={metrics.mem.pct} label="内存" warn={80} danger={90}/>
               </div>
-              <div className="space-y-1">
-                {QUICK_CMDS.map(({ label, cmd }) => (
-                  <button key={cmd} onClick={() => void bashRun(cmd)} disabled={bashRunning}
-                    className="w-full text-left px-3 py-2 rounded-lg bg-[#0d1117] hover:bg-[#21262d] border border-[#30363d] hover:border-[#444c56] transition-colors disabled:opacity-40 group">
-                    <div className="text-[11px] text-gray-200 font-medium group-hover:text-white">{label}</div>
-                    <div className="text-[10px] text-gray-600 font-mono truncate mt-0.5">{cmd.slice(0, 50)}</div>
-                  </button>
+              {/* Disk */}
+              {metrics.disk?.map((d,i)=>(
+                <div key={i} style={{marginBottom:6}}>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"#94a3b8"}}>
+                    <span>💾 {d.fs}</span><span>{d.used}/{d.avail} ({d.pct})</span>
+                  </div>
+                  <div style={{height:4,background:"#334155",borderRadius:2,marginTop:2}}>
+                    <div style={{height:"100%",width:d.pct,background:parseInt(d.pct||"0")>80?"#ef4444":"#3b82f6",borderRadius:2}}/>
+                  </div>
+                </div>
+              ))}
+              {/* CF Pool */}
+              <div style={{marginTop:10,padding:8,background:"#0f172a",borderRadius:6}}>
+                <div style={{fontSize:11,color:"#60a5fa",fontWeight:600,marginBottom:4}}>☁️ CF IP 池</div>
+                <div style={{fontSize:12,color:"#94a3b8"}}>可用: <span style={{color:"#10b981",fontWeight:700}}>{metrics.cfPool?.available}</span></div>
+                <div style={{fontSize:12,color:"#94a3b8"}}>已用: {metrics.cfPool?.used_total} · 封禁: {metrics.cfPool?.banned_total}</div>
+              </div>
+              {/* Git */}
+              <div style={{marginTop:8,padding:8,background:"#0f172a",borderRadius:6}}>
+                <div style={{fontSize:11,color:"#a78bfa",fontWeight:600,marginBottom:2}}>📁 Git</div>
+                <pre style={{fontSize:10,color:"#94a3b8",margin:0,whiteSpace:"pre-wrap",wordBreak:"break-all"}}>{metrics.git?.slice(0,200)||"clean"}</pre>
+              </div>
+              {/* Processes summary */}
+              <div style={{marginTop:8,padding:8,background:"#0f172a",borderRadius:6}}>
+                <div style={{fontSize:11,color:"#fbbf24",fontWeight:600,marginBottom:4}}>🔧 PM2 进程</div>
+                {metrics.processes?.map((p)=>(
+                  <div key={p.id} style={{display:"flex",alignItems:"center",gap:4,marginBottom:2}}>
+                    <Badge status={p.status}/>
+                    <span style={{fontSize:11,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</span>
+                    <span style={{fontSize:10,color:"#64748b"}}>{p.cpu}%</span>
+                  </div>
                 ))}
               </div>
+              <div style={{fontSize:10,color:"#475569",marginTop:8,textAlign:"right"}}>更新: {new Date(metrics.ts).toLocaleTimeString()}</div>
+            </>
+          ) : (
+            <div style={{color:"#64748b",textAlign:"center",paddingTop:40}}>加载中…</div>
+          )}
+          <button onClick={fetchMetrics} style={{width:"100%",marginTop:8,padding:"5px 0",background:"#1e3a5f",border:"1px solid #334155",borderRadius:4,color:"#60a5fa",fontSize:12,cursor:"pointer"}}>🔄 刷新</button>
+        </div>
+
+        {/* Right: Action Panel */}
+        <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+          {/* SubTabs */}
+          <div style={{display:"flex",gap:4,padding:"8px 12px",background:"#1e293b",borderBottom:"1px solid #334155",flexShrink:0}}>
+            {(["quick","outlook","pm2","git","history"] as const).map(t=>(
+              <button key={t} onClick={()=>setSubTab(t)} style={{
+                padding:"3px 10px",borderRadius:4,border:"none",cursor:"pointer",fontSize:12,
+                background:subTab===t?"#3b82f6":"#334155",color:subTab===t?"#fff":"#94a3b8"
+              }}>
+                {t==="quick"?"⚡ 快捷操作":t==="outlook"?"📧 Outlook注册":t==="pm2"?"⚙️ PM2":t==="git"?"📁 Git":"🕐 历史"}
+              </button>
+            ))}
+          </div>
+
+          <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+            {/* Sub panels */}
+            {subTab==="quick" && (
+              <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+                <div style={{padding:12,display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,flexShrink:0}}>
+                  {quickActions.map(([label,id,color])=>(
+                    <button key={id} onClick={()=>handleQuick(id)} disabled={loading}
+                      style={{padding:"8px 10px",background:color,border:"none",borderRadius:6,color:"#fff",fontSize:12,cursor:"pointer",textAlign:"left",opacity:loading?0.6:1}}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {output && (
+                  <div style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column",margin:"0 12px 12px"}}>
+                    <div style={{fontSize:11,color:"#64748b",marginBottom:4}}>输出：</div>
+                    <pre style={{flex:1,overflow:"auto",background:"#0f172a",border:"1px solid #334155",borderRadius:6,padding:10,margin:0,fontSize:12,color:"#e2e8f0",whiteSpace:"pre-wrap"}}>
+                      {output}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            )}
+            {subTab==="outlook" && <OutlookPanel jobs={outlookJobs} onRefresh={fetchOutlookJobs}/>}
+            {subTab==="pm2" && <PM2Panel procs={metrics?.processes??[]} onAction={runAction}/>}
+            {subTab==="git" && <GitPanel onAction={runAction} output={output}/>}
+            {subTab==="history" && <HistoryPanel history={history} onRefresh={fetchHistory}/>}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ─── Outlook Panel ────────────────────────────────────────────────────────────
+  function OutlookPanel({jobs, onRefresh}:{jobs:OutlookJob[];onRefresh:()=>void}) {
+    const [count, setCount] = useState(3);
+    const [engine, setEngine] = useState("patchright");
+    const [events, setEvents] = useState<AgentEvent[]>([]);
+    const [running, setRunning] = useState(false);
+    const [activeJob, setActiveJob] = useState<AgentEvent|null>(null);
+    const eventRef = useRef<HTMLDivElement>(null);
+
+    const startRegister = async () => {
+      setRunning(true); setEvents([]); setActiveJob(null);
+      try {
+        const res = await fetch(`${BASE}/api/claude-code/outlook-register`, {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({count,engine,proxyMode:"cf",headless:true,wait:11,retries:2})
+        });
+        const reader = res.body!.getReader(); const dec = new TextDecoder(); let buf="";
+        while(true) {
+          const {done,value} = await reader.read(); if(done) break;
+          buf+=dec.decode(value,{stream:true});
+          const lines=buf.split("\n"); buf=lines.pop()??"";
+          for (const line of lines) {
+            if(!line.startsWith("data:")) continue;
+            try {
+              const e:AgentEvent = JSON.parse(line.slice(5).trim());
+              setEvents(p=>[...p,e]);
+              if(e.type==="progress"||e.type==="complete"||e.type==="started") setActiveJob(e);
+              if(eventRef.current) eventRef.current.scrollTop=eventRef.current.scrollHeight;
+            } catch {}
+          }
+        }
+      } catch(e) { setEvents(p=>[...p,{type:"error",text:String(e)}]); }
+      setRunning(false); onRefresh();
+    };
+
+    const getStatusColor = (status?: string) => status==="done"?"#10b981":status==="running"?"#f59e0b":status==="error"?"#ef4444":"#64748b";
+
+    return (
+      <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",padding:12,gap:10}}>
+        {/* Controls */}
+        <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0,background:"#1e293b",padding:10,borderRadius:8}}>
+          <span style={{fontSize:13,fontWeight:700,color:"#60a5fa"}}>📧 Outlook 批量注册</span>
+          <select value={engine} onChange={e=>setEngine(e.target.value)} style={{background:"#334155",color:"#f1f5f9",border:"none",borderRadius:4,padding:"3px 6px",fontSize:12}}>
+            <option value="patchright">patchright</option>
+            <option value="playwright">playwright</option>
+          </select>
+          <label style={{fontSize:12,color:"#94a3b8"}}>数量:</label>
+          {[1,3,5,10].map(n=>(
+            <button key={n} onClick={()=>setCount(n)} style={{
+              padding:"3px 10px",borderRadius:4,border:"none",cursor:"pointer",fontSize:13,fontWeight:count===n?700:400,
+              background:count===n?"#1d4ed8":"#334155",color:"#fff"
+            }}>{n}</button>
+          ))}
+          <button onClick={startRegister} disabled={running}
+            style={{marginLeft:"auto",padding:"5px 18px",background:running?"#374151":"#16a34a",border:"none",borderRadius:6,color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700}}>
+            {running?"⏳ 注册中…":"▶ 开始注册"}
+          </button>
+        </div>
+
+        <div style={{flex:1,display:"flex",gap:10,overflow:"hidden"}}>
+          {/* Live progress */}
+          <div style={{flex:1,display:"flex",flexDirection:"column",gap:8,overflow:"hidden"}}>
+            {activeJob && (
+              <div style={{background:"#0f172a",border:`1px solid ${getStatusColor(activeJob.status)}`,borderRadius:8,padding:10,flexShrink:0}}>
+                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                  <span style={{fontSize:20}}>{activeJob.status==="done"?"✅":activeJob.status==="error"?"❌":"⏳"}</span>
+                  <div>
+                    <div style={{fontSize:13,fontWeight:700,color:getStatusColor(activeJob.status)}}>
+                      {activeJob.status==="done"?"注册完成":activeJob.status==="error"?"注册失败":"注册进行中…"}
+                    </div>
+                    {activeJob.jobId && <div style={{fontSize:11,color:"#64748b"}}>Job: {activeJob.jobId}</div>}
+                  </div>
+                  <div style={{marginLeft:"auto",fontSize:24,fontWeight:700,color:"#10b981"}}>
+                    {activeJob.accountCount??0}<span style={{fontSize:13,color:"#64748b"}}>/{count}</span>
+                  </div>
+                </div>
+                {activeJob.lastLog && <div style={{marginTop:6,fontSize:12,color:"#94a3b8"}}>{activeJob.lastLog}</div>}
+                {activeJob.accounts && activeJob.accounts.length>0 && (
+                  <div style={{marginTop:8}}>
+                    <div style={{fontSize:11,color:"#10b981",fontWeight:600,marginBottom:4}}>✅ 注册成功账号：</div>
+                    {activeJob.accounts.map((a,i)=>(
+                      <div key={i} style={{fontSize:12,color:"#e2e8f0",padding:"2px 4px",background:"#1e293b",borderRadius:3,marginBottom:2}}>
+                        {a.email} <span style={{color:"#64748b"}}>/ {a.password}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            <div ref={eventRef} style={{flex:1,overflow:"auto",background:"#0f172a",border:"1px solid #334155",borderRadius:6,padding:8}}>
+              <div style={{fontSize:11,color:"#64748b",marginBottom:4}}>实时日志：</div>
+              {events.map((e,i)=>(
+                <div key={i} style={{fontSize:11,color:e.type==="error"?"#ef4444":e.type==="progress"?"#fbbf24":e.type==="complete"?"#10b981":"#94a3b8",marginBottom:1}}>
+                  {e.type==="status" && `📡 ${e.text}`}
+                  {e.type==="started" && `🚀 ${e.message ?? "任务已启动"}`}
+                  {e.type==="progress" && `⏳ [${e.status}] ${e.accountCount??0} 个账号 · ${e.lastLog??""}`}
+                  {e.type==="complete" && `✅ 完成：${e.accountCount??0} 个账号`}
+                  {e.type==="error" && `❌ ${e.text}`}
+                </div>
+              ))}
+              {running && <div style={{fontSize:11,color:"#f59e0b"}}>● 等待中…</div>}
+            </div>
+          </div>
+          {/* Job history */}
+          <div style={{width:260,background:"#0f172a",border:"1px solid #334155",borderRadius:6,padding:8,overflowY:"auto",flexShrink:0}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+              <span style={{fontSize:11,color:"#60a5fa",fontWeight:600}}>近期任务</span>
+              <button onClick={onRefresh} style={{background:"none",border:"none",color:"#64748b",cursor:"pointer",fontSize:11}}>🔄</button>
+            </div>
+            {jobs.length===0 && <div style={{fontSize:11,color:"#475569"}}>暂无任务</div>}
+            {jobs.map((j)=>(
+              <div key={j.id} style={{marginBottom:6,padding:6,background:"#1e293b",borderRadius:4,borderLeft:`3px solid ${getStatusColor(j.status)}`}}>
+                <div style={{display:"flex",justifyContent:"space-between"}}>
+                  <Badge status={j.status}/>
+                  <span style={{fontSize:12,fontWeight:700,color:"#10b981"}}>{j.accountCount??0}个</span>
+                </div>
+                <div style={{fontSize:10,color:"#64748b",marginTop:2}}>{j.id.slice(0,25)}</div>
+                <div style={{fontSize:10,color:"#94a3b8",marginTop:1}}>{j.lastLog?.message?.slice(0,40)??"…"}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ─── PM2 Panel ────────────────────────────────────────────────────────────────
+  function PM2Panel({procs, onAction}:{procs:Proc[];onAction:(label:string,cmd:string)=>void}) {
+    return (
+      <div style={{flex:1,overflowY:"auto",padding:12}}>
+        <div style={{fontSize:13,fontWeight:700,color:"#fbbf24",marginBottom:10}}>⚙️ PM2 进程管理</div>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+          <thead>
+            <tr style={{color:"#64748b",textAlign:"left"}}>
+              {["ID","名称","状态","CPU","内存","重启","操作"].map(h=>(
+                <th key={h} style={{padding:"4px 8px",borderBottom:"1px solid #334155"}}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {procs.map(p=>(
+              <tr key={p.id} style={{borderBottom:"1px solid #1e293b"}}>
+                <td style={{padding:"5px 8px",color:"#64748b"}}>{p.id}</td>
+                <td style={{padding:"5px 8px",fontWeight:600}}>{p.name}</td>
+                <td style={{padding:"5px 8px"}}><Badge status={p.status}/></td>
+                <td style={{padding:"5px 8px",color:p.cpu>50?"#ef4444":"#94a3b8"}}>{p.cpu}%</td>
+                <td style={{padding:"5px 8px",color:"#94a3b8"}}>{fmtBytes(p.mem)}</td>
+                <td style={{padding:"5px 8px",color:p.restarts>5?"#f59e0b":"#94a3b8"}}>{p.restarts}</td>
+                <td style={{padding:"5px 8px",display:"flex",gap:4}}>
+                  <button onClick={()=>onAction(`restart ${p.name}`,`pm2 restart ${p.name} 2>&1`)} style={{padding:"2px 8px",background:"#7c3aed",border:"none",borderRadius:3,color:"#fff",cursor:"pointer",fontSize:11}}>重启</button>
+                  <button onClick={()=>onAction(`logs ${p.name}`,`pm2 logs ${p.name} --lines 30 --nostream 2>&1 | tail -30`)} style={{padding:"2px 8px",background:"#0369a1",border:"none",borderRadius:3,color:"#fff",cursor:"pointer",fontSize:11}}>日志</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
+  // ─── Git Panel ────────────────────────────────────────────────────────────────
+  function GitPanel({onAction,output}:{onAction:(label:string,cmd:string)=>void;output:string}) {
+    const [msg, setMsg] = useState("AI Agent: auto sync");
+    const actions = [
+      ["📋 状态","git --no-optional-locks status 2>&1"],
+      ["📜 日志","git --no-optional-locks log --oneline -15 2>&1"],
+      ["🔍 Diff","git --no-optional-locks diff --stat HEAD 2>&1 | head -30"],
+      ["⬇️ Pull","cd /root/Toolkit && git stash 2>/dev/null; git pull origin main 2>&1 | tail -8"],
+    ];
+    return (
+      <div style={{flex:1,display:"flex",flexDirection:"column",padding:12,gap:8,overflow:"auto"}}>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",flexShrink:0}}>
+          {actions.map(([label,cmd])=>(
+            <button key={label} onClick={()=>onAction(label,cmd)} style={{padding:"5px 12px",background:"#0369a1",border:"none",borderRadius:5,color:"#fff",cursor:"pointer",fontSize:12}}>{label}</button>
+          ))}
+        </div>
+        <div style={{display:"flex",gap:6,flexShrink:0}}>
+          <input value={msg} onChange={e=>setMsg(e.target.value)} style={{flex:1,background:"#1e293b",border:"1px solid #334155",borderRadius:4,color:"#f1f5f9",padding:"4px 8px",fontSize:12}}/>
+          <button onClick={()=>onAction("Git Commit+Push",`cd /root/Toolkit && git add -A && git commit -m "${msg}" && git push 2>&1 | tail -5`)}
+            style={{padding:"4px 14px",background:"#16a34a",border:"none",borderRadius:4,color:"#fff",cursor:"pointer",fontSize:12,fontWeight:700}}>提交推送</button>
+        </div>
+        {output && <pre style={{flex:1,overflow:"auto",background:"#0f172a",border:"1px solid #334155",borderRadius:6,padding:10,margin:0,fontSize:12,color:"#e2e8f0",whiteSpace:"pre-wrap"}}>{output}</pre>}
+      </div>
+    );
+  }
+
+  // ─── History Panel ────────────────────────────────────────────────────────────
+  function HistoryPanel({history,onRefresh}:{history:HistoryEntry[];onRefresh:()=>void}) {
+    const [filter, setFilter] = useState<"all"|"ok"|"fail">("all");
+    const filtered = history.filter(h=>filter==="all"?true:filter==="ok"?h.code===0:h.code!==0).slice(0,50);
+    return (
+      <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",padding:12}}>
+        <div style={{display:"flex",gap:8,marginBottom:8,flexShrink:0}}>
+          {(["all","ok","fail"] as const).map(f=>(
+            <button key={f} onClick={()=>setFilter(f)} style={{padding:"3px 10px",background:filter===f?"#3b82f6":"#334155",border:"none",borderRadius:4,color:"#fff",cursor:"pointer",fontSize:12}}>
+              {f==="all"?"全部":f==="ok"?"✅ 成功":"❌ 失败"}
+            </button>
+          ))}
+          <button onClick={onRefresh} style={{padding:"3px 10px",background:"#334155",border:"none",borderRadius:4,color:"#94a3b8",cursor:"pointer",fontSize:12,marginLeft:"auto"}}>🔄</button>
+        </div>
+        <div style={{flex:1,overflowY:"auto"}}>
+          {filtered.map((h)=>(
+            <div key={h.id} style={{marginBottom:4,padding:6,background:"#1e293b",borderRadius:4,borderLeft:`3px solid ${h.code===0?"#10b981":"#ef4444"}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                <code style={{fontSize:12,color:"#e2e8f0",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{h.cmd.slice(0,80)}</code>
+                <span style={{fontSize:10,color:"#64748b",marginLeft:8,flexShrink:0}}>{timeAgo(h.ts)}</span>
+              </div>
+              {h.stdout && <pre style={{fontSize:11,color:"#94a3b8",margin:0,maxHeight:40,overflow:"hidden",whiteSpace:"pre-wrap"}}>{h.stdout.slice(0,120)}</pre>}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // AGENT MODE — Real Claude -p --allowedTools Bash
+  // ═══════════════════════════════════════════════════════════════════════════════
+  function AgentMode() {
+    const [task, setTask] = useState("");
+    const [events, setEvents] = useState<AgentEvent[]>([]);
+    const [running, setRunning] = useState(false);
+    const eventRef = useRef<HTMLDivElement>(null);
+
+    const examples = [
+      "注册3个Outlook账号，等待完成后告诉我账号信息",
+      "检查所有PM2进程状态，重启有问题的进程",
+      "查看api-server最近50行日志，分析是否有错误",
+      "检查CF IP池状态，如果可用IP少于100则补充",
+      "构建重启api-server，验证/api/healthz返回正常",
+      "查看最新Outlook注册任务的账号列表",
+      "git提交当前所有改动并推送到GitHub",
+      "分析注册失败原因并尝试修复",
+    ];
+
+    const runAgent = async () => {
+      if (!task.trim() || running) return;
+      setRunning(true); setEvents([]);
+      try {
+        const res = await fetch(`${BASE}/api/claude-code/agent`, {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({task})
+        });
+        const reader = res.body!.getReader(); const dec = new TextDecoder(); let buf="";
+        while(true) {
+          const {done,value} = await reader.read(); if(done) break;
+          buf+=dec.decode(value,{stream:true});
+          const lines=buf.split("\n"); buf=lines.pop()??"";
+          for (const line of lines) {
+            if(!line.startsWith("data:")) continue;
+            try {
+              const e:AgentEvent=JSON.parse(line.slice(5).trim());
+              setEvents(p=>[...p,e]);
+              if(eventRef.current) eventRef.current.scrollTop=eventRef.current.scrollHeight;
+            } catch {}
+          }
+        }
+      } catch(e){ setEvents(p=>[...p,{type:"error",text:String(e)}]); }
+      setRunning(false);
+    };
+
+    return (
+      <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        {/* Task input */}
+        <div style={{padding:12,background:"#1e293b",borderBottom:"1px solid #334155",flexShrink:0}}>
+          <div style={{fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:8}}>
+            🤖 Agent 模式 — 真实 Claude Bash 执行 (mimo-v2.5-pro · 无限制)
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <textarea value={task} onChange={e=>setTask(e.target.value)}
+              onKeyDown={e=>{if(e.key==="Enter"&&(e.ctrlKey||e.metaKey))runAgent();}}
+              placeholder="描述你要做的任务… 例如：注册3个Outlook账号"
+              style={{flex:1,background:"#0f172a",border:"1px solid #334155",borderRadius:6,color:"#f1f5f9",padding:"8px 10px",fontSize:13,resize:"none",height:64,fontFamily:"inherit"}}/>
+            <button onClick={runAgent} disabled={running||!task.trim()}
+              style={{padding:"0 20px",background:running?"#374151":"#7c3aed",border:"none",borderRadius:6,color:"#fff",cursor:"pointer",fontSize:14,fontWeight:700,minWidth:80,opacity:!task.trim()?0.5:1}}>
+              {running?"⏳":"▶ 执行"}
+            </button>
+          </div>
+          {/* Example prompts */}
+          <div style={{display:"flex",gap:6,marginTop:8,flexWrap:"wrap"}}>
+            {examples.map((ex,i)=>(
+              <button key={i} onClick={()=>setTask(ex)} style={{padding:"2px 8px",background:"#1e293b",border:"1px solid #475569",borderRadius:12,color:"#94a3b8",cursor:"pointer",fontSize:11}}>
+                {ex.slice(0,30)}…
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Events stream */}
+        <div ref={eventRef} style={{flex:1,overflowY:"auto",padding:12,display:"flex",flexDirection:"column",gap:6}}>
+          {events.length===0 && !running && (
+            <div style={{textAlign:"center",paddingTop:60,color:"#475569"}}>
+              <div style={{fontSize:40,marginBottom:12}}>🤖</div>
+              <div style={{fontSize:14,marginBottom:8}}>AI Agent 就绪 (Claude Code · Bash 工具 · 无权限限制)</div>
+              <div style={{fontSize:12,color:"#334155"}}>选择示例或输入任务，Agent 将自主执行并实时汇报每一步</div>
             </div>
           )}
 
-          {sideTab === "log" && (
-            <div className="p-3 flex-1 overflow-y-auto">
-              {execLog.length === 0
-                ? <p className="text-xs text-gray-600 text-center py-8">暂无记录</p>
-                : <>
-                    <div className="flex justify-end mb-2"><button onClick={() => setExecLog([])} className="text-[10px] text-gray-600 hover:text-gray-400">清空</button></div>
-                    <div className="space-y-1.5">
-                      {[...execLog].reverse().map((entry, i) => (
-                        <div key={i} className="bg-[#0d1117] border border-[#30363d] rounded-xl overflow-hidden text-xs font-mono">
-                          <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-[#21262d]">
-                            <span className={entry.result.code === 0 ? "text-emerald-400" : "text-red-400"}>{entry.result.code === 0 ? "✓" : `✗${entry.result.code}`}</span>
-                            <code className="flex-1 truncate text-yellow-100/70">{entry.cmd.slice(0, 40)}</code>
-                          </div>
-                          {(entry.result.stdout?.trim() || entry.result.stderr?.trim()) && (
-                            <pre className="px-2.5 py-1.5 text-emerald-300/70 whitespace-pre-wrap max-h-20 overflow-y-auto break-all leading-5">
-                              {(entry.result.stdout?.trim() || entry.result.stderr?.trim() || "").slice(0, 200)}
-                            </pre>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </>
-              }
+          {events.map((e,i)=>{
+            if (e.type==="start") return <div key={i} style={{color:"#64748b",fontSize:12}}>▷ Agent 启动…</div>;
+            if (e.type==="status") return <div key={i} style={{color:"#64748b",fontSize:12}}>◦ {e.text}</div>;
+            if (e.type==="ai_response"||e.type==="complete") return (
+              <div key={i} style={{background:"#1e293b",border:"1px solid #334155",borderRadius:8,padding:10}}>
+                <div style={{fontSize:11,color:"#7c3aed",fontWeight:600,marginBottom:4}}>🤖 Claude 分析</div>
+                <div style={{fontSize:13,color:"#e2e8f0",whiteSpace:"pre-wrap",lineHeight:1.6}}>{e.text}</div>
+              </div>
+            );
+            if (e.type==="exec_start") return (
+              <div key={i} style={{background:"#0f172a",border:"1px solid #1e3a5f",borderRadius:6,padding:8}}>
+                <div style={{fontSize:11,color:"#60a5fa",fontWeight:600,marginBottom:4}}>⚡ 执行命令</div>
+                {e.ai_text && <div style={{fontSize:11,color:"#64748b",marginBottom:4}}>{e.ai_text}</div>}
+                <code style={{fontSize:12,color:"#fbbf24",display:"block",background:"#020617",padding:"4px 8px",borderRadius:4,whiteSpace:"pre-wrap"}}>{e.cmd}</code>
+              </div>
+            );
+            if (e.type==="exec_done") return (
+              <div key={i} style={{background:"#0c1a0c",border:"1px solid #14532d",borderRadius:6,padding:8}}>
+                <div style={{fontSize:11,color:"#10b981",marginBottom:4}}>✓ 输出</div>
+                <pre style={{fontSize:12,color:"#86efac",margin:0,whiteSpace:"pre-wrap",maxHeight:300,overflow:"auto"}}>{e.stdout}</pre>
+              </div>
+            );
+            if (e.type==="error") return (
+              <div key={i} style={{background:"#1c0505",border:"1px solid #7f1d1d",borderRadius:6,padding:8,fontSize:12,color:"#fca5a5"}}>❌ {e.text}</div>
+            );
+            return null;
+          })}
+          {running && (
+            <div style={{display:"flex",alignItems:"center",gap:8,color:"#f59e0b",padding:"8px 0"}}>
+              <span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>⟳</span>
+              <span style={{fontSize:13}}>Claude Agent 执行中… (使用 Bash 工具，无权限限制)</span>
             </div>
           )}
         </div>
-      </aside>
+      </div>
+    );
+  }
 
-      <style>{`
-        .ic { background:#1e2a3a; color:#79c0ff; padding:1px 5px; border-radius:4px; font-family:monospace; font-size:.85em; }
-        .mh { display:block; font-weight:700; color:#e2e8f0; font-size:1.05em; margin:8px 0 4px; }
-        .ml { display:block; margin:2px 0; }
-      `}</style>
-    </div>
-  );
-}
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // CHAT MODE — Single-turn with real Claude
+  // ═══════════════════════════════════════════════════════════════════════════════
+  function ChatMode() {
+    const [sessions, setSessions] = useState<Session[]>([]);
+    const [activeId, setActiveId] = useState<string|null>(null);
+    const [messages, setMessages] = useState<Msg[]>([]);
+    const [input, setInput] = useState("");
+    const [streaming, setStreaming] = useState(false);
+    const chatRef = useRef<HTMLDivElement>(null);
+
+    useEffect(()=>{ fetchSessions(); },[]);
+    useEffect(()=>{ if(chatRef.current) chatRef.current.scrollTop=chatRef.current.scrollHeight; },[messages]);
+
+    const fetchSessions = async () => {
+      try { const r=await fetch(`${BASE}/api/claude-code/sessions`); setSessions(await r.json()); } catch {}
+    };
+
+    const newSession = () => {
+      const id=genId(); setActiveId(id); setMessages([]);
+    };
+
+    const loadSession = async (id: string) => {
+      try { const r=await fetch(`${BASE}/api/claude-code/sessions/${id}`); const d=await r.json(); setMessages(d.messages??[]); setActiveId(id); } catch {}
+    };
+
+    const saveSession = async (msgs: Msg[]) => {
+      if (!activeId) return;
+      try {
+        await fetch(`${BASE}/api/claude-code/sessions`, {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({id:activeId, title:msgs[0]?.content.slice(0,30)??"新会话", messages:msgs})
+        });
+        fetchSessions();
+      } catch {}
+    };
+
+    const sendMessage = async () => {
+      if (!input.trim() || streaming) return;
+      if (!activeId) { const id=genId(); setActiveId(id); }
+      const userMsg: Msg = {role:"user",content:input.trim(),ts:Date.now()};
+      const newMsgs = [...messages, userMsg];
+      setMessages(newMsgs); setInput(""); setStreaming(true);
+      let aiContent="";
+      const aiMsg: Msg = {role:"assistant",content:"",ts:Date.now()};
+      setMessages([...newMsgs, aiMsg]);
+      try {
+        const res=await fetch(`${BASE}/api/claude-code/chat`, {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({message:userMsg.content})
+        });
+        const reader=res.body!.getReader(); const dec=new TextDecoder(); let buf="";
+        while(true) {
+          const {done,value}=await reader.read(); if(done) break;
+          buf+=dec.decode(value,{stream:true});
+          const lines=buf.split("\n"); buf=lines.pop()??"";
+          for (const line of lines) {
+            if(!line.startsWith("data:")) continue;
+            try {
+              const e=JSON.parse(line.slice(5).trim());
+              if(e.type==="text") { aiContent+=e.content; setMessages([...newMsgs,{role:"assistant",content:aiContent,ts:Date.now()}]); }
+            } catch {}
+          }
+        }
+      } catch(err){ aiContent="[错误: "+String(err)+"]"; setMessages([...newMsgs,{role:"assistant",content:aiContent,ts:Date.now()}]); }
+      const finalMsgs=[...newMsgs,{role:"assistant" as const,content:aiContent,ts:Date.now()}];
+      setMessages(finalMsgs); setStreaming(false);
+      saveSession(finalMsgs);
+    };
+
+    return (
+      <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+        {/* Session list */}
+        <div style={{width:200,background:"#1e293b",borderRight:"1px solid #334155",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+          <button onClick={newSession} style={{margin:8,padding:"6px 0",background:"#7c3aed",border:"none",borderRadius:6,color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700}}>+ 新会话</button>
+          <div style={{flex:1,overflowY:"auto"}}>
+            {sessions.map(s=>(
+              <div key={s.id} onClick={()=>loadSession(s.id)}
+                style={{padding:"8px 10px",cursor:"pointer",borderBottom:"1px solid #334155",background:activeId===s.id?"#1e3a5f":"transparent"}}>
+                <div style={{fontSize:12,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.title}</div>
+                <div style={{fontSize:10,color:"#64748b"}}>{s.msgCount}条 · {timeAgo(s.updated_at)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Chat area */}
+        <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+          <div ref={chatRef} style={{flex:1,overflowY:"auto",padding:16,display:"flex",flexDirection:"column",gap:10}}>
+            {messages.length===0 && (
+              <div style={{textAlign:"center",paddingTop:60,color:"#475569"}}>
+                <div style={{fontSize:36}}>💬</div>
+                <div style={{fontSize:14,marginTop:8}}>AI 对话 — mimo-v2.5-pro</div>
+                <div style={{fontSize:12,color:"#334155",marginTop:4}}>随意提问，可以问服务器状态、代码问题、操作建议等</div>
+              </div>
+            )}
+            {messages.map((m,i)=>(
+              <div key={i} style={{display:"flex",flexDirection:"column",alignItems:m.role==="user"?"flex-end":"flex-start"}}>
+                <div style={{
+                  maxWidth:"80%",padding:"8px 12px",borderRadius:10,fontSize:13,lineHeight:1.6,
+                  background:m.role==="user"?"#1d4ed8":"#1e293b",
+                  color:m.role==="user"?"#fff":"#e2e8f0",
+                  whiteSpace:"pre-wrap",wordBreak:"break-word"
+                }}>{m.content || (streaming&&i===messages.length-1?"●":"")}</div>
+                <div style={{fontSize:10,color:"#475569",marginTop:2}}>{timeAgo(m.ts)}</div>
+              </div>
+            ))}
+          </div>
+          {/* Input */}
+          <div style={{padding:12,background:"#1e293b",borderTop:"1px solid #334155",display:"flex",gap:8}}>
+            <textarea value={input} onChange={e=>setInput(e.target.value)}
+              onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage();}}}
+              placeholder="输入消息… (Enter发送, Shift+Enter换行)"
+              style={{flex:1,background:"#0f172a",border:"1px solid #334155",borderRadius:6,color:"#f1f5f9",padding:"8px 10px",fontSize:13,resize:"none",height:56,fontFamily:"inherit"}}/>
+            <button onClick={sendMessage} disabled={streaming||!input.trim()}
+              style={{padding:"0 16px",background:streaming?"#374151":"#3b82f6",border:"none",borderRadius:6,color:"#fff",cursor:"pointer",fontSize:14,fontWeight:700,opacity:!input.trim()?0.5:1}}>
+              {streaming?"⏳":"发送"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  
