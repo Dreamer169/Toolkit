@@ -102,9 +102,14 @@ import { Router } from "express";
       return JSON.parse(fs.readFileSync(MEMORY_FILE, "utf-8"));
     } catch { return { user_preferences:{}, learned_context:{}, important_notes:[], skill_summary:"", last_updated:0 }; }
   }
+  const MAX_NOTES = 30;
   function saveMemory(m: MemoryData) {
     ensureDir(SESSIONS_DIR);
     m.last_updated = Date.now();
+    // Prevent unbounded growth — keep most recent MAX_NOTES entries
+    if (m.important_notes.length > MAX_NOTES) {
+      m.important_notes = m.important_notes.slice(-MAX_NOTES);
+    }
     fs.writeFileSync(MEMORY_FILE, JSON.stringify(m, null, 2));
   }
   function formatMemory(m: MemoryData): string {
@@ -190,6 +195,14 @@ CF IP池: curl http://localhost:8081/api/tools/cf-pool/status
 ═══════════════════════════════════════════
   跨会话记忆（每次学到新信息必须更新）
 ═══════════════════════════════════════════
+
+自我修复闭环 (修改代码后必须执行):
+  修改 api-server 代码后，立即调用:
+    curl -s -X POST http://localhost:8081/api/claude-code/self-repair \
+      -H "Content-Type: application/json" -d '{"target":"api-server"}'
+  修改前端代码后，target 改为 "frontend"；两者都改用 "both"。
+  该接口会自动: 构建 → PM2重启 → 健康检查，并返回每步结果。
+  若构建失败，立即分析错误日志并自动修正，再次调用直到全部通过。
 
 记忆文件: /root/Toolkit/.ai-sessions/memory.json
 更新方式（用 Bash 工具执行）:
@@ -315,7 +328,7 @@ asyncio.run(shot('URL_HERE', '/tmp/screenshot_NAME.png'))
 
     let completeSent = false;
       const send = (d: Record<string,unknown>) => { if (d.type === "complete") completeSent = true; try { res.write(`data: ${JSON.stringify(d)}\n\n`); } catch (_) {} };
-    send({ type: "start" });
+    send({ type: "start", model: activeModelName });
 
     const fullPrompt = `${AGENT_SYS}\n\n[用户任务]\n${task}`;
 
@@ -632,8 +645,8 @@ asyncio.run(shot('URL_HERE', '/tmp/screenshot_NAME.png'))
 
   /* ─── POST /api/claude-code/converse — UNIFIED multi-turn with Bash ─── */
   router.post("/claude-code/converse", (req, res) => {
-    const { sessionId, history = [], message, cwd: reqCwd = REPO_DIR } = req.body as {
-      sessionId?: string; history?: Array<{role:string;content:string;events?:unknown[]}>; message: string; cwd?: string;
+    const { sessionId, history = [], message, cwd: reqCwd = REPO_DIR, model: reqModel = "mimo" } = req.body as {
+      sessionId?: string; history?: Array<{role:string;content:string;events?:unknown[]}>; message: string; cwd?: string; model?: string;
     };
     if (!message?.trim()) { res.status(400).json({ error: "message required" }); return; }
 
@@ -663,6 +676,13 @@ asyncio.run(shot('URL_HERE', '/tmp/screenshot_NAME.png'))
       (histCtx ? "[对话历史]\n" + histCtx + "\n\n" : "") +
       "[当前消息]\n用户: " + message + "\n\n直接响应，需要时使用工具。如果学到新的用户偏好，顺手更新记忆文件。";
 
+    // Resolve model/env: mimo (default) vs sub2api (any model name)
+    const isSub2api = reqModel !== "mimo" && reqModel !== "default";
+    const activeModelName = isSub2api ? reqModel : "mimo-v2.5-pro";
+    const converseEnv: NodeJS.ProcessEnv = isSub2api
+      ? { ...CLAUDE_ENV, ANTHROPIC_BASE_URL: "http://localhost:8080/v1", ANTHROPIC_AUTH_TOKEN: process.env.SUB2API_KEY ?? "sk-sub2api", ANTHROPIC_MODEL: reqModel, ANTHROPIC_DEFAULT_SONNET_MODEL: reqModel, ANTHROPIC_DEFAULT_OPUS_MODEL: reqModel, ANTHROPIC_DEFAULT_HAIKU_MODEL: reqModel }
+      : CLAUDE_ENV;
+
     // Spawn claude directly — stdin pipe, no bash wrapper, no shell escaping issues
     const child = spawn("/usr/bin/claude", [
       "--allowedTools", "Bash", "Read", "Write", "Edit", "MultiEdit",
@@ -670,7 +690,7 @@ asyncio.run(shot('URL_HERE', '/tmp/screenshot_NAME.png'))
       "--permission-mode", "acceptEdits",
       "--output-format", "stream-json",
       "--verbose",
-    ], { env: CLAUDE_ENV, cwd: reqCwd, stdio: ["pipe", "pipe", "pipe"] });
+    ], { env: converseEnv, cwd: reqCwd, stdio: ["pipe", "pipe", "pipe"] });
 
     child.stdin.write(fullPrompt, "utf-8");
     child.stdin.end();
@@ -831,6 +851,62 @@ asyncio.run(run())
       res.json({ ok: true, text });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
+
+  /* ─── POST /api/claude-code/self-repair ─── */
+  router.post("/claude-code/self-repair", async (req, res) => {
+    const { target = "api-server" } = req.body as { target?: "api-server" | "frontend" | "both" };
+    const buildFilter: Record<string, string> = {
+      "api-server": "@workspace/api-server",
+      "frontend":   "@workspace/ai-toolkit",
+      "both":       "@workspace/api-server && pnpm --filter @workspace/ai-toolkit",
+    };
+    const pm2Name: Record<string, string[]> = {
+      "api-server": ["api-server"],
+      "frontend":   ["frontend"],
+      "both":       ["api-server", "frontend"],
+    };
+    const filter = buildFilter[target] ?? buildFilter["api-server"];
+    const services = pm2Name[target] ?? ["api-server"];
+
+    const run = (cmd: string) => new Promise<{ ok: boolean; out: string }>((resolve) => {
+      execFile("bash", ["-c", cmd], { timeout: 90000 }, (err, stdout, stderr) => {
+        resolve({ ok: !err, out: (stdout + stderr).trim().slice(0, 800) });
+      });
+    });
+
+    const steps: Array<{ step: string; ok: boolean; out: string }> = [];
+
+    // Step 1: Build
+    const build = await run(`cd ${REPO_DIR} && pnpm --filter ${filter} run build 2>&1`);
+    steps.push({ step: "build", ...build });
+
+    if (!build.ok) {
+      res.json({ ok: false, steps, summary: "构建失败，未重启" });
+      return;
+    }
+
+    // Step 2: Restart PM2
+    for (const svc of services) {
+      const restart = await run(`pm2 restart ${svc} 2>&1`);
+      steps.push({ step: `restart:${svc}`, ...restart });
+    }
+
+    // Step 3: Health check (wait 2s for service to come up)
+    await new Promise(r => setTimeout(r, 2000));
+    const port = target === "frontend" ? 3000 : 8081;
+    const health = await run(`curl -sf http://localhost:${port}/api/healthz 2>&1 || curl -sf http://localhost:${port}/ 2>&1`);
+    steps.push({ step: "healthcheck", ...health });
+
+    const allOk = steps.every(s => s.ok);
+    res.json({
+      ok: allOk,
+      steps,
+      summary: allOk
+        ? `✅ ${target} 自我修复完成 — 构建→重启→健康检查全部通过`
+        : `⚠️ 部分步骤失败，查看 steps 详情`,
+    });
+  });
+
 
 
   export default router;
