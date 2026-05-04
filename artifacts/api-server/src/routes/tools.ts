@@ -1576,16 +1576,19 @@ router.post("/tools/outlook/register", async (req, res) => {
           // ── 统一数据库同步（fire-and-forget，失败不阻断）──
           try {
             const _idn2 = identityMap.get(acc.email);
+            const _tok2  = tokenMap.get(acc.email);
             const _syncPayload = JSON.stringify({
               action: "outlook",
-              email: acc.email,
-              password: (acc as { email: string; password?: string }).password || "",
-              status: "active",
+              email:         acc.email,
+              password:      (acc as { email: string; password?: string }).password || "",
+              token:         _tok2?.access_token  || _idn2?.access_token  || null,
+              refresh_token: _tok2?.refresh_token || _idn2?.refresh_token || null,
+              status:        "active",
               proxy: _idn2?.proxy_formatted || (_idn2?.proxy_port ? `socks5://127.0.0.1:${_idn2.proxy_port}` : null),
-              egress_ip: _idn2?.exit_ip || null,
-              user_agent: _idn2?.user_agent || null,
-              fingerprint_json: _idn2?.fingerprint_json || null,
-              cookies_json: _idn2?.cookies_json || null,
+              egress_ip:        _idn2?.exit_ip          || null,
+              user_agent:       _idn2?.user_agent        || null,
+              fingerprint_json: _idn2?.fingerprint_json  || null,
+              cookies_json:     _idn2?.cookies_json       || null,
             });
             import("child_process").then(({ spawn: _spawn }) => {
               const _cp = _spawn("python3", ["/data/Toolkit/artifacts/api-server/sync_unified_db.py"]);
@@ -4711,11 +4714,16 @@ router.post('/tools/obvious/provision', async (req, res) => {
       if (doneJob.jobId !== _provJobId || doneJob.exitCode !== 0) return;
       try {
         const _fs = await import('fs');
+        // 优先读 manifest.json（含 password/proxy/全字段），fallback 到 index.json
+        const _manifestPath = OBVIOUS_ACC_DIR + '/' + _provLabel + '/manifest.json';
         const _idxPath = OBVIOUS_ACC_DIR + '/index.json';
-        const _allAcc = _fs.existsSync(_idxPath)
-          ? JSON.parse(_fs.readFileSync(_idxPath, 'utf8')) as Array<Record<string, unknown>>
-          : [];
-        const _newAcc = _allAcc.find(a => a.label === _provLabel);
+        let _newAcc: Record<string, unknown> | null = null;
+        if (_fs.existsSync(_manifestPath)) {
+          _newAcc = JSON.parse(_fs.readFileSync(_manifestPath, 'utf8')) as Record<string, unknown>;
+        } else if (_fs.existsSync(_idxPath)) {
+          const _all = JSON.parse(_fs.readFileSync(_idxPath, 'utf8')) as Array<Record<string, unknown>>;
+          _newAcc = _all.find(a => a.label === _provLabel) ?? null;
+        }
         if (_newAcc) {
           const _cp = (await import('child_process')).spawn(
             'python3', ['/data/Toolkit/artifacts/api-server/sync_unified_db.py']
