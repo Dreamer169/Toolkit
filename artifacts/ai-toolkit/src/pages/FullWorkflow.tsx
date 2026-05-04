@@ -53,7 +53,9 @@ export default function FullWorkflow() {
   const [data, setData] = useState<PrepareData | null>(null);
   const [proxy, setProxy] = useState("");
   const [autoProxy, setAutoProxy] = useState(true);
+  const [proxyMode, setProxyMode] = useState<"cf"|"shared">("cf");
   const [poolCount, setPoolCount] = useState<number | null>(null);
+  const [cfPool, setCfPool] = useState<{ available: number } | null>(null);
   const [engine, setEngine] = useState("patchright");
   const [headless, setHeadless] = useState(true);
   const [wait, setWait] = useState(11);
@@ -74,11 +76,13 @@ export default function FullWorkflow() {
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
-  // 加载代理池数量
+  // 加载代理池数量 + CF pool 状态
   useEffect(() => {
-    // 只显示 DB 共享 socks5 代理池数量（与其他功能共用的住宅代理池）
     fetch(`${API}/data/proxies`).then(r => r.json()).then(d => {
       if (d.success) setPoolCount(d.eligibleTotal ?? d.total);
+    }).catch(() => {});
+    fetch(`${API}/tools/cf-pool/status`).then(r => r.json()).then(d => {
+      if (d.success) setCfPool({ available: d.available ?? 0 });
     }).catch(() => {});
   }, []);
 
@@ -124,8 +128,8 @@ export default function FullWorkflow() {
           username: data.outlook.username,
           email: data.outlook.email,
           password: data.outlook.password,
-          autoProxy: !proxy && autoProxy,
-          proxyMode: !proxy && autoProxy ? "shared" : "",
+          autoProxy: !proxy && proxyMode === "shared",
+          proxyMode: !proxy ? proxyMode : "",
           cfPort: 443,
         }),
       });
@@ -354,12 +358,32 @@ export default function FullWorkflow() {
       {phase === "ready" && (
         <div className="space-y-3">
           {/* 代理状态提示 */}
-          {!proxy && poolCount !== null && poolCount > 0 ? (
+          {/* 代理模式选择 */}
+          {!proxy && (
+            <div className="flex gap-2 items-center">
+              <span className="text-xs text-gray-400 whitespace-nowrap">代理模式：</span>
+              {(["cf", "shared"] as const).map(m => (
+                <button key={m} onClick={() => setProxyMode(m)}
+                  className={`px-3 py-1.5 rounded-lg text-xs border transition-all ${proxyMode === m ? "bg-blue-700 border-blue-500 text-white" : "bg-[#21262d] border-[#30363d] text-gray-400 hover:text-white"}`}>
+                  {m === "cf" ? `☁️ CF IP池${cfPool ? ` (${cfPool.available}个)` : ""}` : `🌐 共享代理池${poolCount ? ` (${poolCount}个)` : ""}`}
+                </button>
+              ))}
+            </div>
+          )}
+          {!proxy && proxyMode === "cf" ? (
+            <div className="bg-blue-900/20 border border-blue-700/40 rounded-lg px-4 py-3 flex items-center gap-3">
+              <span className="text-blue-400 text-lg flex-shrink-0">☁️</span>
+              <div className="flex-1 text-sm">
+                <p className="text-blue-300 font-medium">CF IP池模式：{cfPool ? `${cfPool.available} 个节点可用` : "检测中…"}</p>
+                <p className="text-blue-600 text-xs mt-0.5">每账号独占一个 CF CDN anycast IP，经 xray VLESS 中继，微软识别率最低</p>
+              </div>
+            </div>
+          ) : !proxy && proxyMode === "shared" && poolCount !== null && poolCount > 0 ? (
             <div className="bg-emerald-900/20 border border-emerald-700/40 rounded-lg px-4 py-3 flex items-center gap-3">
               <span className="text-emerald-400 text-lg flex-shrink-0">🌐</span>
               <div className="flex-1 text-sm">
-                <p className="text-emerald-300 font-medium">代理池已就绪：{poolCount} 个共享代理可用</p>
-                <p className="text-emerald-600 text-xs mt-0.5">优先使用子节点代理链路/住宅代理；不足时后端自动退回 CF+xray 备用池</p>
+                <p className="text-emerald-300 font-medium">共享代理池：{poolCount} 个节点可用</p>
+                <p className="text-emerald-600 text-xs mt-0.5">优先住宅代理；不足时自动退回 CF+xray 备用池</p>
               </div>
               <button onClick={pickProxyFromPool} className="px-3 py-1.5 bg-emerald-800 hover:bg-emerald-700 rounded text-xs text-emerald-300 whitespace-nowrap">
                 手动选取查看
@@ -369,8 +393,8 @@ export default function FullWorkflow() {
             <div className="bg-amber-900/30 border border-amber-700/50 rounded-lg px-4 py-3 flex items-start gap-3">
               <span className="text-amber-400 text-lg flex-shrink-0">⚠️</span>
               <div className="text-sm">
-                <p className="text-amber-300 font-medium">未填写代理——注册会在 CAPTCHA 卡住</p>
-                <p className="text-amber-500 text-xs mt-0.5">微软对数据中心 IP 强制验证。填写住宅代理后再点「启动注册」，或直接点下方「仅保存凭据」跳过注册步骤。</p>
+                <p className="text-amber-300 font-medium">{proxyMode === "cf" ? "CF IP池为空，注册前请先补充池子" : "共享代理池为空——注册会在 CAPTCHA 卡住"}</p>
+                <p className="text-amber-500 text-xs mt-0.5">微软对数据中心 IP 强制验证。请切换到 CF IP池模式或填写手动代理，或点下方「仅保存凭据」跳过注册。</p>
               </div>
             </div>
           ) : (
@@ -388,9 +412,9 @@ export default function FullWorkflow() {
                 className="w-20 bg-transparent text-center text-sm text-white focus:outline-none"
               />
             </div>
-            <button onClick={startRegistration} className={`flex-1 py-3 rounded-lg text-white font-semibold transition-colors ${(proxy || autoProxy) ? "bg-blue-700 hover:bg-blue-600" : "bg-blue-900/60 hover:bg-blue-800/60 border border-blue-700/50"}`}>
+            <button onClick={startRegistration} className={`flex-1 py-3 rounded-lg text-white font-semibold transition-colors ${(proxy || proxyMode) ? "bg-blue-700 hover:bg-blue-600" : "bg-blue-900/60 hover:bg-blue-800/60 border border-blue-700/50"}`}>
               🚀 启动注册{Number(count) > 1 ? `（顺序 ×${count}）` : ""}
-              {!proxy && autoProxy ? "（共享代理池优先）" : !proxy ? "（无代理）" : ""}
+              {!proxy && proxyMode === "cf" ? "（CF IP池）" : !proxy && proxyMode === "shared" ? "（共享代理池优先）" : !proxy ? "（无代理）" : ""}
             </button>
             <button onClick={prepare} className="px-4 py-3 bg-[#21262d] border border-[#30363d] rounded-lg text-gray-400 hover:text-white text-sm">
               重新生成

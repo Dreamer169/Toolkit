@@ -1708,7 +1708,7 @@ router.post("/tools/outlook/register", async (req, res) => {
                 job.logs.push({ type: 'log', message: `🌐 自动授权代理: ${_autoProxy} [${_proxyTag}]` });
                 const autoProc = spawnAuto(
                   'python3', [autoScript, JSON.stringify(autoPayload), _autoProxy],
-                  { detached: true, stdio: "ignore", env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: '1' } }
+                  { stdio: ["ignore", "pipe", "pipe"], env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: '1' } }
                 );
                 job.logs.push({ type: 'log', message: `🤖 自动完成 ${autoPayload.length} 个账号的设备码授权…` });
                 // v8.79 Bug L: 解析 Python 的 RESULTS: 行 → 跳过 error/suspended (它们 poll 必 timeout)
@@ -1724,7 +1724,16 @@ router.post("/tools/outlook/register", async (req, res) => {
                     }
                   }
                 });
-                // v8.96: token exchange done inside Python via same CF proxy
+                // v9.01: stderr capture (stdio changed ignore->pipe)
+                autoProc.stderr?.on('data', (d2: Buffer) => {
+                  const errL = d2.toString().split('\n').filter(Boolean);
+                  for (const el of errL) {
+                    const et = el.trim();
+                    if (et && et.length > 5 && !et.includes('DeprecationWarning') && !et.includes('FutureWarning'))
+                      job.logs.push({ type: 'log', message: '[auto-auth-sys] ' + et.slice(0, 200) });
+                  }
+                });
+                // v9.01: token exchange done inside Python via CF proxy
                 autoProc.on('close', (code: number | null) => {
                   job.logs.push({ type: code === 0 ? 'success' : 'warn', message: '\u{1F916} \u81EA\u52A8\u6388\u6743\u5B8C\u6210 (code=' + code + ') \u2014 token \u5DF2\u7531 Python \u5728 CF proxy \u5185\u5151\u6362\u5165\u5E93' });
                 });
