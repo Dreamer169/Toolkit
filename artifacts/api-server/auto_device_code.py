@@ -771,4 +771,14 @@ async def main():
     print(f"[summary] done={done} suspended={suspended} errors={errors}", flush=True)
 
 
-asyncio.run(main())
+async def _main_with_cleanup():
+    try:
+        await main()
+    finally:
+        # v8.99: cleanup all XrayRelay instances spawned by _pick_cf_proxy()
+        for _relay in _ACTIVE_RELAYS:
+            try: _relay.stop()
+            except Exception: pass
+        _ACTIVE_RELAYS.clear()
+
+asyncio.run(_main_with_cleanup())
