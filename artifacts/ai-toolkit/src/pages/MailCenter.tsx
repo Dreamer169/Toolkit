@@ -954,7 +954,7 @@ export default function MailCenter() {
             const noAccess     = !isOAuth && !isImap;
             // dot color: suspended=red, needs_oauth=amber, oauth=green, imap=blue, none=amber
             const dot      = isSuspended ? "bg-red-500" : isNeedsOAuth ? "bg-amber-400" : isOAuth ? "bg-emerald-400" : isImap ? "bg-blue-400" : "bg-amber-400";
-            const label    = isSuspended ? (isAbuse ? "API封禁" : "已停用") : isNeedsOAuth ? "需授权" : isOAuth ? "OAuth" : isImap ? "IMAP" : "需授权";
+            const label    = isSuspended ? "已停用" : isNeedsOAuth ? "需授权" : isOAuth ? "OAuth" : isImap ? "IMAP" : "需授权";
             const labelCls = isSuspended ? "text-red-500" : isNeedsOAuth ? "text-amber-500" : isOAuth ? "text-emerald-500" : isImap ? "text-blue-400" : "text-amber-500";
             const vr = verifyStatus(acc.id);
             const vb = vr ? verifyBadge(vr.status) : null;
