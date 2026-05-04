@@ -2477,7 +2477,7 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
                 try:
                     import time as _time
                     # v9.00: MS账号扩散最多需要 30s，最多重试 3次×10s
-                    _MAX_PROP = 3
+                    _MAX_PROP = 5
                     for _pa in range(_MAX_PROP):
                         _vpage = context.new_page()
                         _vpage.goto("https://login.live.com", timeout=20000, wait_until="domcontentloaded")
@@ -2503,13 +2503,13 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
                             pass
                         if _not_found:
                             if _pa < _MAX_PROP - 1:
-                                print(f"[register] ⚠ 账号尚未扩散, 等待10s再次验证 ({_pa+1}/{_MAX_PROP})…", flush=True)
-                                _time.sleep(10)
+                                print(f"[register] ⚠ 账号尚未扩散, 等待15s再次验证 ({_pa+1}/{_MAX_PROP})…", flush=True)
+                                _time.sleep(15)
                             else:
-                                print(f"[register] ❌ 登录验证: 账号 {actual_email}@outlook.com 在微软系统中不存在，撤销成功标记", flush=True)
-                                result["success"] = False
-                                result["error"] = "account_not_propagated_login_verify_failed"
-                                ok = False
+                                print(f"[register] ⚠ 登录验证: 账号 {actual_email}@outlook.com 在微软系统中不存在，扩散超时保留成功标记", flush=True)
+                                result["propagation_pending"] = True  # v9.23: cookie confirmed
+                                # v9.23: do not set error, account was created
+                                # v9.23: keep ok=True (success cookie confirmed)
                         else:
                             print(f"[register] ✅ 登录验证通过: 账号存在，等待设备码授权", flush=True)
                             break

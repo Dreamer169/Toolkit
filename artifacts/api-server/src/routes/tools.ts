@@ -1349,10 +1349,12 @@ router.post("/tools/outlook/register", async (req, res) => {
     autoProxy = false,
     proxyMode = "cf",             // "cf" = 使用 CF IP 池 + xray 中继
     cfPort    = 443,
+    username  = "",               // v9.23: 预生成用户名
+    password  = "",               // v9.23: 预生成密码
   } = req.body as {
     count?: number; proxy?: string; proxies?: string; headless?: boolean; delay?: number;
     engine?: string; wait?: number; retries?: number; autoProxy?: boolean;
-    proxyMode?: string; cfPort?: number;
+    proxyMode?: string; cfPort?: number; username?: string; password?: string;
   };
 
   const n   = Math.min(999, Math.max(1, Math.floor(Number(count) || 1)));
@@ -1432,6 +1434,15 @@ router.post("/tools/outlook/register", async (req, res) => {
     job.logs.push({ type: "log", message: `☁️ CF+xray 代理池：共享代理不可用时作为备用，每账号独占一个已测速 CF 节点` });
   }
 
+  // v9.23 BUG-FIX: pass pre-generated username/password to Python (first account)
+  if (username) {
+    const cleanUser = (username as string).replace(/@outlook\.com$/i, "");
+    args.push("--username", cleanUser);
+    job.logs.push({ type: "log", message: "Pre-generated username: " + cleanUser + "@outlook.com" });
+  }
+  if (password) {
+    args.push("--password", password as string);
+  }
   const _spawnEnv: Record<string, string> = { ...process.env as Record<string, string>, PYTHONUNBUFFERED: "1" };
   if (!headless) _spawnEnv["DISPLAY"] = process.env.DISPLAY || ":99";
   const child = spawn("python3", args, { env: _spawnEnv });
