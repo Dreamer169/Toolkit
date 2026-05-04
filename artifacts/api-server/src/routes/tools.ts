@@ -1203,7 +1203,7 @@ router.post("/tools/outlook/batch-oauth/auto-complete", async (req, res) => {
     const acLogPath = `/tmp/dc_autocomplete_${Date.now()}.log`;
     const acLogFd = oAc(acLogPath, "a");
     const acProc = spawnAc(
-      "python3", [acScript, JSON.stringify(autoPayload), "http://127.0.0.1:10809"],
+      "python3", [acScript, JSON.stringify(autoPayload), ""],  // v8.99: 空串→Python _pick_cf_proxy()独立中继
       { detached: true, stdio: ["ignore", acLogFd, acLogFd], env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: "1" } }
     );
     acProc.unref();
@@ -1303,7 +1303,7 @@ router.post("/tools/outlook/batch-oauth/reauth-manual", async (req, res) => {
     const rmLogPath = `/tmp/dc_reauth_${Date.now()}.log`;
     const rmLogFd = oRm(rmLogPath, "a");
     const rmProc = spawnRm(
-      "python3", [rmScript, JSON.stringify(autoPayload), "http://127.0.0.1:10809"],
+      "python3", [rmScript, JSON.stringify(autoPayload), ""],  // v8.99: 空串→Python _pick_cf_proxy()独立中继
       { detached: true, stdio: ["ignore", rmLogFd, rmLogFd], env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: "1" } }
     );
     rmProc.unref();
@@ -1703,7 +1703,7 @@ router.post("/tools/outlook/register", async (req, res) => {
                 }
                 const _autoProxy = _aliveProxyPort > 0
                   ? `socks5://127.0.0.1:${_aliveProxyPort}`
-                  : 'socks5://127.0.0.1:10820';  // Pool A 静态, 保 CF Workers AS13335 一致性
+                  : '';  // v8.99: 不再 fallback 到共享静态端口 → auto_device_code.py 自行 _pick_cf_proxy()
                 const _proxyTag = _aliveProxyPort > 0 ? 'per-account-alive' : 'pool-A-fallback (dyn-xray dead)';
                 job.logs.push({ type: 'log', message: `🌐 自动授权代理: ${_autoProxy} [${_proxyTag}]` });
                 const autoProc = spawnAuto(
