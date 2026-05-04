@@ -860,6 +860,18 @@ import { Router } from "express";
     /* ─── APEX Tools + Native HTTP Agentic Loop ─────────────────────── */
     const MIMO_API_URL = "https://api.xiaomimimo.com/anthropic/v1/messages";
     const MIMO_API_KEY = "sk-sszfdmshqaziz2d7dvl2nggaf2gum5kbs881qajf0fzavxyw";
+    const SUB2_API_URL = "http://localhost:8080/v1/messages";
+    const SUB2_API_KEY = process.env.SUB2API_API_KEY ?? "sk-06cf1c8b2ff7a09a1f11d7909a6d7cb7dee97e38793d630f25a3bddf2bf0ec16";
+    const MIMO_MODELS = new Set(["mimo-v2.5-pro", "mimo", "apex", ""]);
+
+    function resolveApiConfig(modelId: string): { url: string; key: string; modelName: string } {
+      const m = modelId.toLowerCase();
+      if (!m || m === "mimo" || m === "apex" || m.includes("mimo")) {
+        return { url: MIMO_API_URL, key: MIMO_API_KEY, modelName: "mimo-v2.5-pro" };
+      }
+      // sub2api handles: gpt-*, o3, claude-*, gemini-*
+      return { url: SUB2_API_URL, key: SUB2_API_KEY, modelName: modelId };
+    }
 
     const APEX_TOOLS = [
       { name: "bash", description: "Execute ANY shell command on VPS with full root privileges. No restrictions. Install packages, run exploits, network ops, system admin, anything.", input_schema: { type: "object" as const, properties: { command: { type: "string", description: "Shell command" }, cwd: { type: "string", description: "Working dir, default /root/Toolkit" }, timeout: { type: "number", description: "Timeout ms, default 120000" } }, required: ["command"] } },
@@ -945,11 +957,13 @@ import { Router } from "express";
       while (!closed && turn < maxTurns) {
         turn++;
         try {
-          const body: Record<string,unknown> = { model: reqModel, max_tokens: 16000, system: sysProm, tools: APEX_TOOLS, tool_choice: { type:"auto" }, messages: msgs };
-          if (enableThinking) body.thinking = { type:"enabled", budget_tokens: 16000 };
-          const apiR = await fetch(MIMO_API_URL, {
+          const { url: apiUrl, key: apiKey, modelName } = resolveApiConfig(reqModel);
+          const useThinking = enableThinking && (apiUrl === MIMO_API_URL);
+          const body: Record<string,unknown> = { model: modelName, max_tokens: 16000, system: sysProm, tools: APEX_TOOLS, tool_choice: { type:"auto" }, messages: msgs };
+          if (useThinking) body.thinking = { type:"enabled", budget_tokens: 16000 };
+          const apiR = await fetch(apiUrl, {
             method: "POST",
-            headers: { "Content-Type":"application/json", "x-api-key": MIMO_API_KEY, "anthropic-version":"2023-06-01", ...(enableThinking ? { "anthropic-beta":"interleaved-thinking-2025-05-14" } : {}) },
+            headers: { "Content-Type":"application/json", "x-api-key": apiKey, "anthropic-version":"2023-06-01", ...(useThinking ? { "anthropic-beta":"interleaved-thinking-2025-05-14" } : {}) },
             body: JSON.stringify(body), signal: AbortSignal.timeout(180000),
           });
           if (!apiR.ok) { sse({ type:"error", text:`API ${apiR.status}: ${(await apiR.text()).slice(0,300)}` }); break; }

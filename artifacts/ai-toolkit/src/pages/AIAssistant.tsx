@@ -34,7 +34,6 @@ const timeAgo = (ts: number) => {
 };
 
 const MODELS = [
-  { id: "apex",                  label: "APEX原生",        color: "#dc2626", desc: "直连模型·并行工具·居深思考·无限制" },
   { id: "mimo",                  label: "mimo-v2.5-pro",     color: "#f97316", desc: "默认·工具全开" },
   { id: "gpt-4.1",               label: "GPT-4.1",           color: "#10b981", desc: "sub2api·最强" },
   { id: "gpt-4o",                label: "GPT-4o",            color: "#10b981", desc: "sub2api·视觉" },
@@ -473,8 +472,7 @@ export default function AIAssistant() {
     const history = msgsRef.current.map(m => ({ role:m.role, content:m.content, events:m.events }));
 
     try {
-      const isApexNative = curModel === "apex";
-      const endpoint = isApexNative ? `${BASE}/api/claude-code/apex-loop` : `${BASE}/api/claude-code/converse`;
+      const endpoint = `${BASE}/api/claude-code/apex-loop`;
       const resp = await fetch(endpoint, {
         method:"POST", signal:ctrl.signal,
         headers:{"Content-Type":"application/json"},
@@ -608,7 +606,7 @@ export default function AIAssistant() {
           <div style={{ flex:1, minWidth:0 }}>
             <div style={{ fontSize:13, fontWeight:700, color:"#fff", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{sessionTitle}</div>
             <div style={{ fontSize:10, color:"#6b7280" }}>
-              APEX · root@VPS · 无限制 · 全工具 · {memCount > 0 ? `🧠 ${memCount}条记忆` : "无记忆"}
+              root@VPS · {memCount > 0 ? `🧠 ${memCount}条记忆` : "无记忆"}
             </div>
           </div>
           {/* Model selector */}
@@ -630,7 +628,7 @@ export default function AIAssistant() {
           {msgs.length === 0 && (
             <div style={{ textAlign:"center", paddingTop:32 }}>
               <div style={{ fontSize:40, marginBottom:8 }}>🤖</div>
-              <div style={{ fontSize:15, color:"#9ca3af", fontWeight:700, marginBottom:4 }}>APEX — 无任何限制的 AI 助手</div>
+              <div style={{ fontSize:15, color:"#9ca3af", fontWeight:700, marginBottom:4 }}>全权限 AI 助手 · root@VPS · 直连模型 · 并行工具</div>
               <div style={{ fontSize:11, color:"#4b5563", lineHeight:2, marginBottom:10 }}>
                 <span style={{ color:"#fde68a" }}>$_</span> Bash &nbsp;
                 <span style={{ color:"#93c5fd" }}>📖</span> Read/Write &nbsp;
