@@ -2838,7 +2838,7 @@ async function pickAdaptiveProxy(
 
   const POOL_CASE = `
     CASE
-      WHEN formatted ILIKE 'http://%'                               THEN 'webshare_http'
+      WHEN formatted ILIKE 'http://%@%'                             THEN 'webshare_http'
       WHEN (host='127.0.0.1' AND port BETWEEN 10820 AND 10845)     THEN 'local_socks5'
       WHEN (host='127.0.0.1' AND port BETWEEN 1089 AND 1199)       THEN 'subnode_bridge'
       ELSE 'other'
@@ -2852,7 +2852,7 @@ async function pickAdaptiveProxy(
   for (const pool of order) {
     if (remain <= 0) break;
     let filter = "";
-    if (pool === "webshare_http")  filter = "AND formatted ILIKE 'http://%'";
+    if (pool === "webshare_http")  filter = "AND formatted ILIKE 'http://%@%'";  // v8.98: exclude bare CF IPs (http://IP:443 no-auth) — they need xray relay, cannot do HTTP CONNECT
     if (pool === "local_socks5")   filter = `AND host='127.0.0.1' AND port BETWEEN 10820 AND 10845`;
     if (pool === "subnode_bridge") filter = `AND host='127.0.0.1' AND port BETWEEN 1089 AND 1199`;
     if (!filter) continue;
