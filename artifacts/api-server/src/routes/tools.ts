@@ -1374,7 +1374,7 @@ router.post("/tools/outlook/register", async (req, res) => {
         // 这些 CF IP 只能通过 xray VLESS relay 使用，不支持直接 HTTP CONNECT 隧道
         // → ERR_TUNNEL_CONNECTION_FAILED。改用 pickAdaptiveProxy("outlook") 正确优先
         // local_socks5 (xray SOCKS5 端口 10820-10845) 和 webshare HTTP 真实代理。
-        const pickedRaw = await pickAdaptiveProxy("outlook", n);
+        const pickedRaw = await pickAdaptiveProxy("outlook", Math.min(10, n * 3));  // v9.00: 3x spare proxies for rate-limit rotation
         const picked = pickedRaw.map((p) => ({ formatted: p.formatted, source: p.pool }));
       if (picked.length > 0) {
         proxyList = picked.map((p) => p.formatted);
