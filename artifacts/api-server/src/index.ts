@@ -10,6 +10,8 @@ import { startProxyMaintenance } from "./routes/data.js";
 import { attachCdpRelayWebSocket } from "./lib/cdp_relay_ws.js";
 import { PersistenceManager } from "./lib/persistence-manager.js";
 
+import { createServer } from "http";
+
 const rawPort = process.env["PORT"];
 if (!rawPort) throw new Error("PORT environment variable is required but was not provided.");
 
@@ -25,7 +27,9 @@ async function _listenWithRetry(): Promise<ReturnType<typeof app.listen>> {
   for (let attempt = 1; attempt <= 6; attempt++) {
     try {
       const sv = await new Promise<ReturnType<typeof app.listen>>((resolve, reject) => {
-        const s = app.listen(port);
+        // v9.15: raise HTTP parser maxHeaderSize to 32 KB (fixes 431 on large cookies)
+        const s = createServer({ maxHeaderSize: 32 * 1024 }, app);
+        s.listen(port);
         s.once("listening", () => resolve(s));
         s.once("error", reject);
       });
