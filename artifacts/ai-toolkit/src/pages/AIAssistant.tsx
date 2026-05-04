@@ -112,6 +112,30 @@ function ToolCallBlock({ ev }: { ev: AgentEv }) {
   return null;
 }
 
+/* ── Thinking block (collapsible) ── */
+function ThinkingBlock({ thinking }: { thinking: string }) {
+  const [open, setOpen] = useState(false);
+  const lines = thinking.split("\n").length;
+  return (
+    <div style={{ border:"1px solid #3b1d6e", borderRadius:8, overflow:"hidden", marginBottom:8 }}>
+      <div onClick={() => setOpen(o => !o)}
+        style={{ display:"flex", alignItems:"center", gap:6, padding:"6px 10px", background:"#1a0a2e", cursor:"pointer" }}>
+        <span style={{ fontSize:12 }}>🧠</span>
+        <span style={{ fontSize:11, color:"#c084fc", fontWeight:700 }}>思维链</span>
+        <span style={{ fontSize:10, color:"#7c3aed" }}>{lines}行</span>
+        <span style={{ fontSize:9, color:"#4b5563", marginLeft:"auto" }}>{open ? "收起 ▲" : "展开 ▼"}</span>
+      </div>
+      {open && (
+        <div style={{ padding:"8px 10px", background:"#0d0020", maxHeight:320, overflow:"auto" }}>
+          <pre style={{ color:"#c084fc", fontSize:11, lineHeight:1.6, whiteSpace:"pre-wrap", wordBreak:"break-word", margin:0, fontFamily:"monospace" }}>
+            {thinking}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MsgBubble({ msg, onCopy }: { msg: Msg; onCopy: (t: string) => void }) {
   if (msg.role === "user") return (
     <div style={{ display:"flex", justifyContent:"flex-end", marginBottom:12 }}>
@@ -140,17 +164,19 @@ function MsgBubble({ msg, onCopy }: { msg: Msg; onCopy: (t: string) => void }) {
           <div style={{ width:20, height:20, borderRadius:6, background:"linear-gradient(135deg,#f97316,#db2777)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:8, fontWeight:800, color:"#fff" }}>AI</div>
           <span style={{ fontSize:10, color:mdl.color, fontWeight:700 }}>{mdl.label}</span>
           {doneCount > 0 && <span style={{ fontSize:10, color:"#6b7280" }}>· {doneCount}次调用</span>}
+          {msg.thinking && <span style={{ fontSize:10, color:"#7c3aed" }}>· 深度思考</span>}
           {msg.streaming && <span style={{ fontSize:11, color:"#60a5fa", animation:"pulse 1s infinite" }}>▌</span>}
         </div>
-        <div style={{ background:"#161b22", border:"1px solid #21262d", borderRadius:"4px 18px 18px 18px", padding:"10px 14px" }}>
+        <div style={{ background:"#161b22", border:`1px solid ${msg.model === "extended-think" ? "#3b1d6e" : (msg.model && (msg.model.startsWith("gpt") || msg.model.startsWith("obvious")) ? "#0d2b1a" : msg.model && msg.model.startsWith("claude") ? "#1a0d2b" : "#21262d")}`, borderRadius:"4px 18px 18px 18px", padding:"10px 14px" }}>
+          {msg.thinking && <ThinkingBlock thinking={msg.thinking} />}
           {toolEvents.map((ev, i) => <ToolCallBlock key={i} ev={ev} />)}
           {msg.content && (
             <div style={{ fontSize:14, color:"#e2e8f0", lineHeight:1.75, marginTop:toolEvents.length > 0 ? 8 : 0, wordBreak:"break-word" }}
               dangerouslySetInnerHTML={{ __html: renderMd(msg.content) }} />
           )}
-          {msg.streaming && !msg.content && toolEvents.length === 0 && (
+          {msg.streaming && !msg.content && toolEvents.length === 0 && !msg.thinking && (
             <div style={{ display:"flex", gap:4, padding:"4px 0" }}>
-              {[0,1,2].map(i => <span key={i} style={{ width:6, height:6, borderRadius:"50%", background:"#f97316", animation:`bounce 1.1s ${i*0.18}s ease-in-out infinite` }} />)}
+              {[0,1,2].map(i => <span key={i} style={{ width:6, height:6, borderRadius:"50%", background: msg.model === "extended-think" ? "#a855f7" : (msg.model && msg.model.startsWith("gpt") ? "#10b981" : msg.model && msg.model.startsWith("claude") ? "#7c3aed" : "#f97316"), animation:`bounce 1.1s ${i*0.18}s ease-in-out infinite` }} />)}
             </div>
           )}
         </div>
@@ -436,12 +462,12 @@ export default function AIAssistant() {
     const curModel = modelRef.current;
     setMsgs(prev => [...prev, userMsg, { id:aiId, role:"assistant", content:"", events:[], ts:Date.now(), streaming:true, model:curModel }]);
 
-    const history = msgsRef.current.map(m => ({ role:m.role, content:m.content, events:m.events }));
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     let finalContent = "";
     const liveEvents: AgentEv[] = [];
     const toolIdToIdx: Record<string,number> = {};
+    const history = msgsRef.current.map(m => ({ role:m.role, content:m.content, events:m.events }));
 
     try {
       const resp = await fetch(`${BASE}/api/claude-code/converse`, {
@@ -492,10 +518,10 @@ export default function AIAssistant() {
             });
           } catch {}
         }
-      }
+      } // end while
     } catch (e: unknown) {
-      if ((e as Error).name !== "AbortError") finalContent = `连接错误: ${String(e)}`;
-    }
+        if ((e as Error).name !== "AbortError") finalContent = `连接错误: ${String(e)}`;
+      }
 
     const doneMsg: Msg = { id:aiId, role:"assistant", content:finalContent, events:[...liveEvents], streaming:false, ts:Date.now(), model:curModel };
     setMsgs(prev => {
@@ -627,6 +653,16 @@ export default function AIAssistant() {
             </div>
           )}
           {msgs.map(msg => <MsgBubble key={msg.id} msg={msg} onCopy={copyText} />)}
+          {/* Extended think loading state */}
+          {loading && selectedModel === "extended-think" && msgs[msgs.length-1]?.role === "assistant" && !msgs[msgs.length-1]?.content && (
+            <div style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 12px", background:"#1a0a2e", border:"1px solid #3b1d6e", borderRadius:10, marginBottom:8 }}>
+              <span style={{ animation:"spin 1.5s linear infinite", display:"inline-block", fontSize:14 }}>🧠</span>
+              <span style={{ fontSize:12, color:"#c084fc" }}>深度思考中… 正在构建思维链</span>
+              <div style={{ display:"flex", gap:3, marginLeft:"auto" }}>
+                {[0,1,2].map(i => <span key={i} style={{ width:5, height:5, borderRadius:"50%", background:"#a855f7", animation:`bounce 1.1s ${i*0.18}s ease-in-out infinite` }} />)}
+              </div>
+            </div>
+          )}
           <div ref={bottomRef} />
         </div>
 
