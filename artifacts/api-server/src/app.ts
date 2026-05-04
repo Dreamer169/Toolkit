@@ -27,7 +27,22 @@ app.use(
     },
   }),
 );
-app.use(cors());
+// v9.17: CORS 支持 credentials — 动态反射请求 origin，允许浏览器携带 Cookie/Authorization
+// 注意：credentials:true 时 origin 不能是 "*"，必须精确匹配
+app.use(cors({
+  origin: (origin, callback) => {
+    // origin 为 undefined = 服务端直调（curl/server-to-server），直接放行
+    callback(null, origin ?? true);
+  },
+  credentials: true,
+  allowedHeaders: [
+    "Content-Type", "Authorization", "X-Requested-With",
+    "Accept", "Origin", "X-Token",
+  ],
+  exposedHeaders: ["Content-Disposition", "X-Total-Count"],
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  maxAge: 86400, // OPTIONS 预检缓存 24h，减少浏览器预检次数
+}));
 app.use(express.urlencoded({ extended: true, limit: "4mb" }));
 
 app.use("/api", tunnelRouter);
@@ -53,6 +68,28 @@ const _sub2apiProxy = createProxyMiddleware({
   // Express 挂载在 /api/v1 时会剥掉前缀，pathRewrite 把 /api/v1 补回去
   pathRewrite: (path: string) => `/api/v1${path}`,
   on: {
+    // 明确透传认证相关 header（http-proxy-middleware 默认已转发，这里加白名单兜底）
+    proxyReq: (proxyReq, req) => {
+      const authHdr = (req as import("http").IncomingMessage).headers["authorization"];
+      if (authHdr && !proxyReq.getHeader("authorization")) {
+        proxyReq.setHeader("authorization", authHdr);
+      }
+      const tokenHdr = (req as import("http").IncomingMessage).headers["x-token"];
+      if (tokenHdr && !proxyReq.getHeader("x-token")) {
+        proxyReq.setHeader("x-token", tokenHdr);
+      }
+    },
+    // 若 sub2api 自身也带了 CORS header，先移除，由 api-server cors() 统一管理
+    proxyRes: (proxyRes) => {
+      const drop = [
+        "access-control-allow-origin",
+        "access-control-allow-credentials",
+        "access-control-allow-headers",
+        "access-control-allow-methods",
+        "access-control-max-age",
+      ];
+      for (const h of drop) delete proxyRes.headers[h];
+    },
     error: (err, _req, res) => {
       logger.warn({ err: String(err) }, "[sub2api-proxy] upstream :8080 unavailable");
       const r = res as unknown as { headersSent?: boolean; writeHead?: (s: number, h: Record<string, string>) => void; end?: (b: string) => void };
