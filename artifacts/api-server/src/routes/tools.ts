@@ -1370,7 +1370,12 @@ router.post("/tools/outlook/register", async (req, res) => {
 
   if (!proxy && autoProxy && proxyMode === "shared") {
     try {
-      const picked = await pickSharedProxyPool(n, "outlook");
+      // v8.95 BUG-FIX: pickSharedProxyPool 会返回 external CF IPs (http://IP:443)
+        // 这些 CF IP 只能通过 xray VLESS relay 使用，不支持直接 HTTP CONNECT 隧道
+        // → ERR_TUNNEL_CONNECTION_FAILED。改用 pickAdaptiveProxy("outlook") 正确优先
+        // local_socks5 (xray SOCKS5 端口 10820-10845) 和 webshare HTTP 真实代理。
+        const pickedRaw = await pickAdaptiveProxy("outlook", n);
+        const picked = pickedRaw.map((p) => ({ formatted: p.formatted, source: p.pool }));
       if (picked.length > 0) {
         proxyList = picked.map((p) => p.formatted);
         proxy = proxyList[0] || "";
