@@ -10,6 +10,7 @@ interface Msg {
   id: string; role: Role; content: string; events: AgentEv[];
   ts: number; streaming?: boolean; model?: string;
   images?: { b64: string; mime: string; name: string }[];
+  thinking?: string;
 }
 interface Session { id: string; title: string; created_at: number; updated_at: number; msgCount: number }
 interface Metrics { cpu?: number; mem?: { pct: number }; cfPool?: { available: number } }
@@ -465,6 +466,7 @@ export default function AIAssistant() {
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     let finalContent = "";
+    let finalThinking = "";
     const liveEvents: AgentEv[] = [];
     const toolIdToIdx: Record<string,number> = {};
     const history = msgsRef.current.map(m => ({ role:m.role, content:m.content, events:m.events }));
@@ -499,6 +501,8 @@ export default function AIAssistant() {
             } else if (ev.type === "ai_response") {
               finalContent = finalContent ? finalContent + "\n\n" + (ev.text ?? "") : (ev.text ?? "");
               liveEvents.push(ev);
+            } else if (ev.type === "thinking") {
+              finalThinking = (finalThinking ? finalThinking + "\n\n" : "") + (ev.text ?? "");
             } else if (ev.type === "exec_start") {
               toolIdToIdx[ev.toolId ?? ""] = liveEvents.length;
               liveEvents.push({ ...ev });
@@ -513,7 +517,7 @@ export default function AIAssistant() {
             }
             if (ev.type === "error") finalContent = `⚠ ${ev.text}`;
             setMsgs(prev => {
-              const last = { ...prev[prev.length-1], content:finalContent, events:[...liveEvents], streaming:true };
+              const last = { ...prev[prev.length-1], content:finalContent, thinking:finalThinking||undefined, events:[...liveEvents], streaming:true };
               return [...prev.slice(0,-1), last];
             });
           } catch {}
@@ -523,7 +527,7 @@ export default function AIAssistant() {
         if ((e as Error).name !== "AbortError") finalContent = `连接错误: ${String(e)}`;
       }
 
-    const doneMsg: Msg = { id:aiId, role:"assistant", content:finalContent, events:[...liveEvents], streaming:false, ts:Date.now(), model:curModel };
+    const doneMsg: Msg = { id:aiId, role:"assistant", content:finalContent, thinking:finalThinking||undefined, events:[...liveEvents], streaming:false, ts:Date.now(), model:curModel };
     setMsgs(prev => {
       const updated = [...prev.slice(0,-1), doneMsg];
       const isFirst = prev.filter(m => m.role==="user").length <= 1;
