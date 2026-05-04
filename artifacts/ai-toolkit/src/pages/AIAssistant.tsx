@@ -199,6 +199,8 @@ function MemoryPanel({ memory, onClear, onRefresh }: { memory: Memory | null; on
 }
 
 const QUICK = [
+  { label:"🎨 生成图片", cmd:"__IMAGINE__" },
+  { label:"📸 网页截图", cmd:"__SCREENSHOT__" },
   { label:"PM2 状态", cmd:"pm2 list" },
   { label:"服务器资源", cmd:"df -h / && free -h && uptime" },
   { label:"api-server 日志", cmd:"pm2 logs api-server --lines 30 --nostream" },
@@ -211,6 +213,11 @@ const QUICK = [
 
 export default function AIAssistant() {
   const [msgs, setMsgs] = useState<Msg[]>([]);
+  const [imgModal, setImgModal] = useState<{b64:string;mime:string;label:string}|null>(null);
+  const [imgPrompt, setImgPrompt] = useState("");
+  const [imgLoading, setImgLoading] = useState(false);
+  const [shotUrl, setShotUrl] = useState("");
+  const [showImgBar, setShowImgBar] = useState(false);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [sessionId, setSessionId] = useState(genId);
@@ -261,6 +268,36 @@ export default function AIAssistant() {
 
   const copyText = (t: string) => {
     navigator.clipboard.writeText(t).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); });
+  };
+
+  const generateImage = async (prompt: string) => {
+    if (!prompt.trim() || imgLoading) return;
+    setImgLoading(true);
+    try {
+      const r = await fetch(`${BASE}/api/claude-code/imagine`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ prompt: prompt.trim(), width:768, height:768 })
+      });
+      const d = await r.json();
+      if (d.ok && d.b64) setImgModal({ b64:d.b64, mime:d.mime, label:prompt.trim() });
+      else alert("图像生成失败: " + (d.error ?? "unknown"));
+    } catch(e) { alert("错误: " + String(e)); }
+    setImgLoading(false);
+  };
+
+  const takeScreenshot = async (url: string) => {
+    if (!url.trim() || imgLoading) return;
+    setImgLoading(true);
+    try {
+      const r = await fetch(`${BASE}/api/claude-code/screenshot`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ url: url.trim(), width:1280, height:800 })
+      });
+      const d = await r.json();
+      if (d.ok && d.b64) setImgModal({ b64:d.b64, mime:d.mime, label:url.trim() });
+      else alert("截图失败: " + (d.error ?? "unknown"));
+    } catch(e) { alert("错误: " + String(e)); }
+    setImgLoading(false);
   };
 
   const send = async (text = input) => {
@@ -438,7 +475,11 @@ export default function AIAssistant() {
               </div>
               <div style={{ display:"flex", flexWrap:"wrap", gap:8, justifyContent:"center" }}>
                 {QUICK.map(q => (
-                  <button key={q.label} onClick={() => void send(q.cmd)}
+                  <button key={q.label} onClick={() => {
+                    if (q.cmd === "__IMAGINE__") { setShowImgBar(true); setTimeout(() => document.getElementById("img-prompt-in")?.focus(), 80); }
+                    else if (q.cmd === "__SCREENSHOT__") { setShowImgBar(true); setTimeout(() => document.getElementById("shot-url-in")?.focus(), 80); }
+                    else void send(q.cmd);
+                  }}
                     style={{ padding:"5px 12px", background:"#161b22", border:"1px solid #30363d", borderRadius:20, color:"#9ca3af", cursor:"pointer", fontSize:12, transition:"all .2s" }}
                     onMouseEnter={e => { e.currentTarget.style.borderColor="#f97316"; e.currentTarget.style.color="#f97316"; }}
                     onMouseLeave={e => { e.currentTarget.style.borderColor="#30363d"; e.currentTarget.style.color="#9ca3af"; }}>
@@ -453,6 +494,43 @@ export default function AIAssistant() {
         </div>
 
         <div style={{ padding:"10px 16px 12px", borderTop:"1px solid #21262d", flexShrink:0 }}>
+          {showImgBar && (
+            <div style={{ display:"flex", gap:6, marginBottom:6, padding:"8px 10px", background:"#161b22", borderRadius:10, border:"1px solid #30363d" }}>
+              <input id="img-prompt-in" value={imgPrompt} onChange={e=>setImgPrompt(e.target.value)}
+                onKeyDown={e=>{ if(e.key==="Enter"){ void generateImage(imgPrompt); setImgPrompt(""); }}}
+                placeholder="🎨 图片描述…"
+                style={{ flex:1, background:"#0d1117", border:"1px solid #374151", borderRadius:8, padding:"6px 10px", color:"#fff", fontSize:13, outline:"none" }} />
+              <input id="shot-url-in" value={shotUrl} onChange={e=>setShotUrl(e.target.value)}
+                onKeyDown={e=>{ if(e.key==="Enter"){ void takeScreenshot(shotUrl); setShotUrl(""); }}}
+                placeholder="📸 截图URL (回车)"
+                style={{ flex:1, background:"#0d1117", border:"1px solid #374151", borderRadius:8, padding:"6px 10px", color:"#fff", fontSize:13, outline:"none" }} />
+              <button onClick={()=>{ void generateImage(imgPrompt); setImgPrompt(""); }}
+                disabled={imgLoading || !imgPrompt.trim()}
+                style={{ padding:"6px 12px", background:imgPrompt.trim()?"#7c3aed":"#1f2937", border:"none", borderRadius:8, color:"#fff", cursor:"pointer", fontSize:12, whiteSpace:"nowrap" }}>
+                {imgLoading ? "…" : "生成 ↵"}
+              </button>
+              <button onClick={()=>{ void takeScreenshot(shotUrl); setShotUrl(""); }}
+                disabled={imgLoading || !shotUrl.trim()}
+                style={{ padding:"6px 12px", background:shotUrl.trim()?"#0891b2":"#1f2937", border:"none", borderRadius:8, color:"#fff", cursor:"pointer", fontSize:12, whiteSpace:"nowrap" }}>
+                {imgLoading ? "…" : "截图 ↵"}
+              </button>
+              <button onClick={()=>setShowImgBar(false)} style={{ padding:"6px 8px", background:"none", border:"none", color:"#6b7280", cursor:"pointer", fontSize:14 }}>✕</button>
+            </div>
+          )}
+          {imgModal && (
+            <div onClick={()=>setImgModal(null)} style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.85)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:1000, cursor:"zoom-out" }}>
+              <div onClick={e=>e.stopPropagation()} style={{ maxWidth:"90vw", maxHeight:"90vh", display:"flex", flexDirection:"column", gap:8, alignItems:"center" }}>
+                <img src={`data:${imgModal.mime};base64,${imgModal.b64}`} alt={imgModal.label}
+                  style={{ maxWidth:"85vw", maxHeight:"80vh", borderRadius:10, boxShadow:"0 0 40px rgba(0,0,0,.8)", objectFit:"contain" }} />
+                <div style={{ fontSize:12, color:"#9ca3af" }}>{imgModal.label}</div>
+                <div style={{ display:"flex", gap:8 }}>
+                  <a href={`data:${imgModal.mime};base64,${imgModal.b64}`} download="apex_image.jpg"
+                    style={{ padding:"6px 16px", background:"#f97316", borderRadius:8, color:"#fff", textDecoration:"none", fontSize:12 }}>下载</a>
+                  <button onClick={()=>setImgModal(null)} style={{ padding:"6px 16px", background:"#374151", border:"none", borderRadius:8, color:"#fff", cursor:"pointer", fontSize:12 }}>关闭</button>
+                </div>
+              </div>
+            </div>
+          )}
           <div style={{ display:"flex", gap:8, alignItems:"flex-end" }}>
             <textarea ref={inputRef} value={input} onChange={onInput} onKeyDown={onKey}
               disabled={loading} rows={1} placeholder="输入任何指令…  Enter 发送  Shift+Enter 换行"

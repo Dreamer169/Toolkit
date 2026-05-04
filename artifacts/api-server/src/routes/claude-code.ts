@@ -1,5 +1,7 @@
 import { Router } from "express";
-  import { exec, spawn } from "child_process";
+  import { exec, spawn, execFile } from "child_process";
+  import https from "https";
+  import http from "http";
   import fs from "fs";
   import path from "path";
 
@@ -201,6 +203,40 @@ m['last_updated'] = int(time.time())
 json.dump(m, open(f,'w'), ensure_ascii=False, indent=2)
 print('Memory updated')
 "
+
+═══════════════════════════════════════════
+  新增能力（和 Replit Agent 同等级别）
+═══════════════════════════════════════════
+
+【图像生成 - 完全免费无限制】
+直接用 Bash 调用，无需 API key：
+  curl -s "https://image.pollinations.ai/prompt/YOUR_PROMPT_URL_ENCODED?width=512&height=512&nologo=true&enhance=true" \
+    --max-time 30 -o /tmp/gen_IMAGE_NAME.jpg && echo "SAVED:/tmp/gen_IMAGE_NAME.jpg"
+  # 将结果路径返回给用户即可，前端会渲染图片
+  # 示例: curl -s "https://image.pollinations.ai/prompt/a%20red%20cat%20photorealistic?width=512&height=512&nologo=true" -o /tmp/gen_cat.jpg
+
+【截图任意网页 - 真实浏览器渲染】
+用 Bash 执行 Python 脚本：
+  python3 -c "
+import asyncio, os
+from patchright.async_api import async_playwright
+async def shot(url, out):
+    async with async_playwright() as p:
+        b = await p.chromium.launch(executable_path='/usr/local/bin/google-chrome',headless=True,args=['--no-sandbox','--disable-gpu'])
+        page = await b.new_page(viewport={'width':1280,'height':800})
+        await page.goto(url, timeout=15000)
+        await page.screenshot(path=out, full_page=False)
+        await b.close()
+        print('SCREENSHOT:'+out)
+asyncio.run(shot('URL_HERE', '/tmp/screenshot_NAME.png'))
+"
+
+【视觉理解 - 分析截图/图片内容】
+截图后用 WebFetch 直接分析页面内容（页面文本+元素），或用 Read 读取本地文件后描述。
+实际图片视觉分析：通过 /api/claude-code/vision 端点传入 base64 图片。
+
+【代码运行 + 可视化】
+  python3 -c "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt; plt.plot([1,2,3],[1,4,9]); plt.savefig('/tmp/chart.png'); print('SAVED:/tmp/chart.png')"
 
 ═══════════════════════════════════════════
   输出风格规范
@@ -717,6 +753,85 @@ print('Memory updated')
     saveMemory({ user_preferences:{}, learned_context:{}, important_notes:[], skill_summary:"", last_updated:0 });
     res.json({ ok: true });
   });
+
+  /* ─── POST /api/claude-code/imagine ─── */
+  router.post("/claude-code/imagine", async (req, res) => {
+    const { prompt, width = 512, height = 512 } = req.body as { prompt: string; width?: number; height?: number };
+    if (!prompt) return res.status(400).json({ error: "prompt required" });
+    const encoded = encodeURIComponent(prompt);
+    const url = `https://image.pollinations.ai/prompt/${encoded}?width=${width}&height=${height}&nologo=true&enhance=true`;
+    const fname = `/tmp/apex_img_${Date.now()}.jpg`;
+    const file = fs.createWriteStream(fname);
+    https.get(url, (r) => {
+      r.pipe(file as any);
+      file.on("finish", () => {
+        file.close();
+        const data = fs.readFileSync(fname);
+        const b64 = data.toString("base64");
+        try { fs.unlinkSync(fname); } catch (_) {}
+        res.json({ ok: true, b64, mime: "image/jpeg", prompt, width, height });
+      });
+    }).on("error", (e: Error) => res.status(500).json({ error: e.message }));
+  });
+
+  /* ─── POST /api/claude-code/screenshot ─── */
+  router.post("/claude-code/screenshot", async (req, res) => {
+    const { url, fullPage = false, width = 1280, height = 800 } = req.body as {
+      url: string; fullPage?: boolean; width?: number; height?: number;
+    };
+    if (!url) return res.status(400).json({ error: "url required" });
+    const fname = `/tmp/apex_shot_${Date.now()}.png`;
+    const script = `
+import asyncio, base64, sys
+from patchright.async_api import async_playwright
+async def run():
+    async with async_playwright() as p:
+        b = await p.chromium.launch(executable_path='/usr/local/bin/google-chrome',headless=True,args=['--no-sandbox','--disable-gpu','--disable-setuid-sandbox'])
+        page = await b.new_page(viewport={'width':${width},'height':${height}})
+        await page.goto(${JSON.stringify(url)}, timeout=20000, wait_until='networkidle')
+        await page.screenshot(path=${JSON.stringify(fname)}, full_page=${fullPage ? "True" : "False"})
+        await b.close()
+asyncio.run(run())
+`;
+    execFile("python3", ["-c", script], { timeout: 30000 }, (err: Error | null) => {
+      if (err) return res.status(500).json({ error: err.message });
+      try {
+        const data = fs.readFileSync(fname);
+        const b64 = data.toString("base64");
+        fs.unlinkSync(fname);
+        res.json({ ok: true, b64, mime: "image/png", url, width, height });
+      } catch (e2: any) {
+        res.status(500).json({ error: e2.message });
+      }
+    });
+  });
+
+  /* ─── POST /api/claude-code/vision ─── */
+  router.post("/claude-code/vision", async (req, res) => {
+    const { b64, mime = "image/jpeg", question = "详细描述这张图片中的内容" } = req.body as {
+      b64: string; mime?: string; question?: string;
+    };
+    if (!b64) return res.status(400).json({ error: "b64 required" });
+    try {
+      const apiKey = process.env.ANTHROPIC_API_KEY || "sk-ant-placeholder";
+      const baseURL = (process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com").replace(/\/+$/, "");
+      const resp = await fetch(`${baseURL}/v1/messages`, {
+        method: "POST",
+        headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "mimo-v2.5-pro", max_tokens: 2048,
+          messages: [{ role: "user", content: [
+            { type: "image", source: { type: "base64", media_type: mime, data: b64 } },
+            { type: "text", text: question }
+          ]}]
+        })
+      });
+      const d = await resp.json() as any;
+      const text = d.content?.[0]?.text ?? d.error?.message ?? "no response";
+      res.json({ ok: true, text });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
 
   export default router;
   
