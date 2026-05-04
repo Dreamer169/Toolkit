@@ -34,6 +34,7 @@ const timeAgo = (ts: number) => {
 };
 
 const MODELS = [
+  { id: "apex",                  label: "APEX原生",        color: "#dc2626", desc: "直连模型·并行工具·居深思考·无限制" },
   { id: "mimo",                  label: "mimo-v2.5-pro",     color: "#f97316", desc: "默认·工具全开" },
   { id: "gpt-4.1",               label: "GPT-4.1",           color: "#10b981", desc: "sub2api·最强" },
   { id: "gpt-4o",                label: "GPT-4o",            color: "#10b981", desc: "sub2api·视觉" },
@@ -472,7 +473,9 @@ export default function AIAssistant() {
     const history = msgsRef.current.map(m => ({ role:m.role, content:m.content, events:m.events }));
 
     try {
-      const resp = await fetch(`${BASE}/api/claude-code/converse`, {
+      const isApexNative = curModel === "apex";
+      const endpoint = isApexNative ? `${BASE}/api/claude-code/apex-loop` : `${BASE}/api/claude-code/converse`;
+      const resp = await fetch(endpoint, {
         method:"POST", signal:ctrl.signal,
         headers:{"Content-Type":"application/json"},
         body: JSON.stringify({
@@ -480,6 +483,7 @@ export default function AIAssistant() {
           history,
           message: msg,
           model: curModel,
+          enableThinking: true,
           images: imgs.length > 0 ? imgs : undefined,
         })
       });

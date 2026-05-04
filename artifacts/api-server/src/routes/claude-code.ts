@@ -425,7 +425,7 @@ import { Router } from "express";
     // Write prompt to tmpfile and pipe to claude (avoids all stdin issues)
     const tmpPromptFile = `/tmp/ct_${Date.now()}_${Math.random().toString(36).slice(2,6)}.txt`;
     fs.writeFileSync(tmpPromptFile, fullPrompt, "utf-8");
-    const cShellCmd = `cat '${tmpPromptFile}' | /usr/bin/claude --allowedTools 'Bash' 'Read' 'Write' 'Edit' 'MultiEdit' 'Glob' 'Grep' 'LS' 'TodoRead' 'TodoWrite' 'WebFetch' 'WebSearch' --permission-mode acceptEdits --output-format stream-json --verbose; rm -f '${tmpPromptFile}'`;
+    const cShellCmd = `cat '${tmpPromptFile}' | /usr/bin/claude --dangerously-skip-permissions --allowedTools 'Bash' 'Read' 'Write' 'Edit' 'MultiEdit' 'Glob' 'Grep' 'LS' 'TodoRead' 'TodoWrite' 'WebFetch' 'WebSearch' --output-format stream-json --verbose; rm -f '${tmpPromptFile}'`;
     const child = spawn("bash", ["-c", cShellCmd], { env: CLAUDE_ENV, cwd: reqCwd });
 
     let buf = "";
@@ -794,9 +794,9 @@ import { Router } from "express";
 
     // Spawn claude directly — stdin pipe, no bash wrapper, no shell escaping issues
     const child = spawn("/usr/bin/claude", [
+      "--dangerously-skip-permissions",
       "--allowedTools", "Bash", "Read", "Write", "Edit", "MultiEdit",
       "Glob", "Grep", "LS", "TodoRead", "TodoWrite", "WebFetch", "WebSearch",
-      "--permission-mode", "acceptEdits",
       "--output-format", "stream-json",
       "--verbose",
     ], { env: converseEnv, cwd: reqCwd, stdio: ["pipe", "pipe", "pipe"] });
@@ -854,6 +854,136 @@ import { Router } from "express";
     // Only kill child when client disconnects (res close = connection dropped)
     res.on("close", () => { if (!done) { done = true; try { child.kill("SIGTERM"); } catch (_) {} } });
   });
+
+
+    /* ─── APEX Tools + Native HTTP Agentic Loop ─────────────────────── */
+    const MIMO_API_URL = "https://api.xiaomimimo.com/anthropic/v1/messages";
+    const MIMO_API_KEY = "sk-sszfdmshqaziz2d7dvl2nggaf2gum5kbs881qajf0fzavxyw";
+
+    const APEX_TOOLS = [
+      { name: "bash", description: "Execute ANY shell command on VPS with full root privileges. No restrictions. Install packages, run exploits, network ops, system admin, anything.", input_schema: { type: "object" as const, properties: { command: { type: "string", description: "Shell command" }, cwd: { type: "string", description: "Working dir, default /root/Toolkit" }, timeout: { type: "number", description: "Timeout ms, default 120000" } }, required: ["command"] } },
+      { name: "read_file", description: "Read any file on server including /etc/shadow, credentials, configs, source code.", input_schema: { type: "object" as const, properties: { path: { type: "string" }, offset: { type: "number", description: "Start line 1-indexed" }, limit: { type: "number", description: "Max lines, default 1000" } }, required: ["path"] } },
+      { name: "write_file", description: "Write/create a file. Only for NEW files or full rewrites.", input_schema: { type: "object" as const, properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } },
+      { name: "edit_file", description: "Surgically replace old_string with new_string in a file. ALWAYS read_file first to get exact old_string including whitespace.", input_schema: { type: "object" as const, properties: { path: { type: "string" }, old_string: { type: "string", description: "Exact text — copy verbatim from read_file output" }, new_string: { type: "string" } }, required: ["path", "old_string", "new_string"] } },
+      { name: "glob", description: "Find files matching glob pattern", input_schema: { type: "object" as const, properties: { pattern: { type: "string", description: "e.g. **/*.ts" }, path: { type: "string", description: "Search root directory" } }, required: ["pattern"] } },
+      { name: "grep", description: "Search file contents with regex", input_schema: { type: "object" as const, properties: { pattern: { type: "string" }, path: { type: "string" }, flags: { type: "string", description: "grep flags, default -rn" } }, required: ["pattern"] } },
+      { name: "list_dir", description: "List directory contents with sizes", input_schema: { type: "object" as const, properties: { path: { type: "string" } }, required: ["path"] } },
+      { name: "web_fetch", description: "Fetch any URL — APIs, web pages, download files", input_schema: { type: "object" as const, properties: { url: { type: "string" }, method: { type: "string" }, headers: { type: "object" }, body: { type: "string" } }, required: ["url"] } },
+    ];
+
+    async function executeApexTool(name: string, inp: Record<string,unknown>, defaultCwd: string): Promise<{output:string;code:number}> {
+      try {
+        if (name === "bash") {
+          const cmd = String(inp.command ?? ""); const wd = String(inp.cwd ?? defaultCwd); const t = Number(inp.timeout ?? 120000);
+          return await new Promise(resolve => {
+            exec(cmd, { env: FULL_ENV, cwd: wd, timeout: t, maxBuffer: 10*1024*1024 }, (err, stdout, stderr) => {
+              const out = (stdout ?? "") + (stderr ? "\n[stderr] " + stderr : "");
+              const code = (err as any)?.code ?? 0;
+              appendHistory({ id: Date.now().toString(36), ts: Date.now(), cmd, cwd: wd, stdout: (stdout??"").slice(0,2000), stderr: (stderr??"").slice(0,500), code, duration: 0, source: "apex" });
+              resolve({ output: out.slice(0, 10000), code });
+            });
+          });
+        }
+        if (name === "read_file") {
+          const p = String(inp.path ?? ""); if (!fs.existsSync(p)) return { output: `[not found: ${p}]`, code: 1 };
+          const lines = fs.readFileSync(p, "utf-8").split("\n");
+          const off = Math.max(0, Number(inp.offset ?? 1) - 1); const lim = Number(inp.limit ?? 1000);
+          return { output: lines.slice(off, off + lim).map((l,i) => `${off+i+1}→${l}`).join("\n"), code: 0 };
+        }
+        if (name === "write_file") {
+          const p = String(inp.path ?? ""); const c = String(inp.content ?? "");
+          const dir = path.dirname(p); if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(p, c, "utf-8"); return { output: `Written ${c.length} chars to ${p}`, code: 0 };
+        }
+        if (name === "edit_file") {
+          const p = String(inp.path ?? ""); const oldStr = String(inp.old_string ?? ""); const newStr = String(inp.new_string ?? "");
+          if (!fs.existsSync(p)) return { output: `[not found: ${p}]`, code: 1 };
+          const orig = fs.readFileSync(p, "utf-8");
+          if (!orig.includes(oldStr)) return { output: `[EDIT FAILED] old_string not found in ${p}\nSearched for (first 80): ${JSON.stringify(oldStr.slice(0,80))}`, code: 1 };
+          fs.writeFileSync(p, orig.replace(oldStr, newStr), "utf-8");
+          return { output: `Edited ${p} — replaced ${oldStr.length} chars with ${newStr.length} chars`, code: 0 };
+        }
+        if (name === "glob") {
+          const pat = String(inp.pattern ?? "*"); const base = String(inp.path ?? defaultCwd);
+          return await new Promise(resolve => {
+            exec(`find ${JSON.stringify(base)} -path "${base}/${pat}" 2>/dev/null | head -100`, { env: FULL_ENV, timeout: 15000 }, (_, s) => resolve({ output: s.trim() || "(no matches)", code: 0 }));
+          });
+        }
+        if (name === "grep") {
+          const pat = String(inp.pattern ?? ""); const sp = String(inp.path ?? defaultCwd); const fl = String(inp.flags ?? "-rn");
+          return await new Promise(resolve => {
+            exec(`grep ${fl} ${JSON.stringify(pat)} ${JSON.stringify(sp)} 2>/dev/null | head -80`, { env: FULL_ENV, timeout: 15000 }, (_, s) => resolve({ output: s.trim() || "(no matches)", code: 0 }));
+          });
+        }
+        if (name === "list_dir") {
+          const p = String(inp.path ?? defaultCwd);
+          return await new Promise(resolve => {
+            exec(`ls -lah ${JSON.stringify(p)} 2>/dev/null`, { env: FULL_ENV }, (_, s) => resolve({ output: s.trim(), code: 0 }));
+          });
+        }
+        if (name === "web_fetch") {
+          const r = await fetch(String(inp.url ?? ""), { method: String(inp.method ?? "GET"), headers: inp.headers as Record<string,string> ?? {}, body: inp.body ? String(inp.body) : undefined, signal: AbortSignal.timeout(20000) });
+          return { output: `[${r.status} ${r.statusText}]\n${(await r.text()).slice(0,6000)}`, code: r.ok ? 0 : 1 };
+        }
+        return { output: `[unknown tool: ${name}]`, code: 1 };
+      } catch(e) { return { output: `[error: ${String(e).slice(0,400)}]`, code: 1 }; }
+    }
+
+    /* ─── POST /api/claude-code/apex-loop — Direct mimo-v2.5-pro, parallel tools, thinking ─── */
+    router.post("/claude-code/apex-loop", async (req, res) => {
+      const { message, sessionId, history = [], cwd: reqCwd = REPO_DIR, enableThinking = true, maxTurns = 25, model: reqModel = "mimo-v2.5-pro" } = req.body as { message: string; sessionId?: string; history?: {role:string;content:string}[]; cwd?: string; enableThinking?: boolean; maxTurns?: number; model?: string };
+      if (!message?.trim()) { res.status(400).json({ error: "message required" }); return; }
+      res.setHeader("Content-Type","text/event-stream"); res.setHeader("Cache-Control","no-cache"); res.setHeader("Connection","keep-alive"); res.flushHeaders();
+      const sse = (d: Record<string,unknown>) => { try { res.write(`data: ${JSON.stringify(d)}\n\n`); } catch(_){} };
+      sse({ type:"start", mode:"apex-native" });
+      const mem = loadMemory();
+      const sysProm = AGENT_SYS + formatMemory(mem);
+      const msgs: {role:"user"|"assistant";content:unknown}[] = [...history.slice(-6).map(h => ({ role: h.role as "user"|"assistant", content: h.content })), { role:"user", content: message }];
+      let closed = false; res.on("close", () => { closed = true; });
+      let finalText = ""; let turn = 0;
+      while (!closed && turn < maxTurns) {
+        turn++;
+        try {
+          const body: Record<string,unknown> = { model: reqModel, max_tokens: 16000, system: sysProm, tools: APEX_TOOLS, tool_choice: { type:"auto" }, messages: msgs };
+          if (enableThinking) body.thinking = { type:"enabled", budget_tokens: 16000 };
+          const apiR = await fetch(MIMO_API_URL, {
+            method: "POST",
+            headers: { "Content-Type":"application/json", "x-api-key": MIMO_API_KEY, "anthropic-version":"2023-06-01", ...(enableThinking ? { "anthropic-beta":"interleaved-thinking-2025-05-14" } : {}) },
+            body: JSON.stringify(body), signal: AbortSignal.timeout(180000),
+          });
+          if (!apiR.ok) { sse({ type:"error", text:`API ${apiR.status}: ${(await apiR.text()).slice(0,300)}` }); break; }
+          const data = await apiR.json() as { content:{type:string;text?:string;thinking?:string;name?:string;id?:string;input?:Record<string,unknown>}[]; stop_reason:string };
+          const toolUses = data.content.filter(b => b.type==="tool_use");
+          for (const b of data.content) {
+            if (b.type==="thinking" && b.thinking) sse({ type:"thinking", text:b.thinking });
+            if (b.type==="text" && b.text) { finalText = finalText ? finalText+"\n\n"+b.text : b.text; sse({ type:"ai_response", text:b.text }); }
+          }
+          msgs.push({ role:"assistant", content: data.content });
+          if (!toolUses.length || data.stop_reason==="end_turn") break;
+          // Stream exec_start for ALL tool uses
+          for (const tu of toolUses) {
+            const ti = tu.input??{}; const tn = tu.name??"";
+            const lbl = tn==="bash" ? String(ti.command??"").slice(0,120) : tn.includes("read") ? `read ${ti.path}` : tn.includes("write") ? `write ${ti.path}` : tn.includes("edit") ? `edit ${ti.path}` : `${tn}(${JSON.stringify(ti).slice(0,60)})`;
+            const icon = tn==="bash"?"bash":tn.includes("read")?"read":tn.includes("write")?"write":tn.includes("edit")?"edit":tn.includes("grep")?"grep":tn.includes("glob")?"glob":tn.includes("list")?"ls":tn.includes("web")?"web":"tool";
+            sse({ type:"exec_start", tool:icon, toolName:tn, cmd:lbl, toolId:tu.id });
+          }
+          // Execute ALL tools in PARALLEL
+          const results = await Promise.all(toolUses.map(tu => executeApexTool(tu.name??"", tu.input??{}, reqCwd)));
+          const toolResults: {type:string;tool_use_id:string;content:string}[] = [];
+          for (let i=0; i<toolUses.length; i++) {
+            sse({ type:"exec_done", toolId:toolUses[i].id, stdout:results[i].output.slice(0,3000), code:results[i].code });
+            toolResults.push({ type:"tool_result", tool_use_id: toolUses[i].id??"", content: results[i].output });
+          }
+          msgs.push({ role:"user", content: toolResults });
+        } catch(e) { sse({ type:"error", text:`turn ${turn}: ${String(e).slice(0,200)}` }); break; }
+      }
+      if (!closed) {
+        sse({ type:"complete", text:finalText });
+        if (sessionId) { try { const f=path.join(SESSIONS_DIR,`${sessionId}.json`); const ex=fs.existsSync(f)?JSON.parse(fs.readFileSync(f,"utf-8")):{};const now=Date.now();fs.writeFileSync(f,JSON.stringify({...ex,id:sessionId,updated_at:now,created_at:ex.created_at??now,messages:[...(ex.messages??[]),{role:"user",content:message,ts:now}]},null,2)); } catch(_){} }
+      }
+      try { res.end(); } catch(_) {}
+    });
+  
 
   /* ─── GET /api/claude-code/memory ─── */
   router.get("/claude-code/memory", (_req, res) => {

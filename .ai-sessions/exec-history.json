@@ -1,0 +1,13 @@
+[
+  {
+    "id": "mori7y6h",
+    "ts": 1777917576905,
+    "cmd": "uptime",
+    "cwd": "/root/Toolkit",
+    "stdout": " 17:59:36 up 10 days,  7:00,  0 users,  load average: 1.93, 2.02, 1.91\n",
+    "stderr": "",
+    "code": 0,
+    "duration": 0,
+    "source": "apex"
+  }
+]
