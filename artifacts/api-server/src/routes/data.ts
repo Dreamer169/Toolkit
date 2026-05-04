@@ -1,6 +1,20 @@
 import { Router } from "express";
 import { query, queryOne, execute } from "../db.js";
 import { Socket } from "net";
+import { execFile } from "child_process";
+
+const DB_PATH = "/data/Toolkit/artifacts/api-server/data.db";
+
+/** Run a SQLite SQL query via python3 sqlite3. Returns array of row objects. */
+function sqliteQuery(sql: string, params: (string | number)[] = []): Promise<Record<string, unknown>[]> {
+  return new Promise((resolve) => {
+    const script = `\nimport sqlite3, json, sys\ndb = sqlite3.connect(sys.argv[1])\ndb.row_factory = sqlite3.Row\ncur = db.execute(sys.argv[2], json.loads(sys.argv[3]))\nrows = [dict(r) for r in cur.fetchall()]\ndb.close()\nprint(json.dumps(rows))\n`;
+    execFile("python3", ["-c", script, DB_PATH, sql, JSON.stringify(params)], { timeout: 8000 }, (err, stdout) => {
+      if (err) { resolve([]); return; }
+      try { resolve(JSON.parse(stdout.trim())); } catch { resolve([]); }
+    });
+  });
+}
 
 const router = Router();
 
@@ -119,8 +133,35 @@ router.get("/data/archives", async (req, res) => {
     if (status)   { params.push(status);   sql += ` AND status=$${params.length}`; }
     if (search)   { params.push(`%${search}%`); sql += ` AND (email ILIKE $${params.length} OR username ILIKE $${params.length} OR notes ILIKE $${params.length})`; }
     sql += " ORDER BY created_at DESC LIMIT 500";
-    const rows = await query(sql, params);
-    res.json({ success: true, data: rows, total: rows.length });
+    const [pgRows, sqliteRows] = await Promise.all([
+      query(sql, params),
+      sqliteQuery(
+        `SELECT id, label as username, service as platform, email, password, token, refresh_token,
+                sandbox_id as machine_id, proxy as proxy_used, reg_email as registration_email,
+                status, notes, created_at,
+                service_user_id, service_workspace_id, service_project_id
+         FROM profiles WHERE 1=1` +
+        (platform ? ` AND service='${platform.replace(/'/g,"''")}'` : "") +
+        (status   ? ` AND status='${status.replace(/'/g,"''")}'`   : "") +
+        (search   ? ` AND (email LIKE '%${search.replace(/'/g,"''")}%' OR label LIKE '%${search.replace(/'/g,"''")}%' OR notes LIKE '%${search.replace(/'/g,"''")}%')` : "") +
+        ` ORDER BY created_at DESC LIMIT 200`
+      ),
+    ]);
+    const pgEmails = new Set((pgRows as Array<{email: string; platform: string}>).map(r => `${r.platform}:${r.email?.toLowerCase()}`));
+    const mergedSqlite = (sqliteRows as Array<Record<string,unknown>>)
+      .filter(r => {
+        const key = `${r.platform}:${String(r.email ?? "").toLowerCase()}`;
+        return r.email && !pgEmails.has(key);
+      })
+      .map((r, i) => {
+        const suid = r.service_user_id;
+        const swid = r.service_workspace_id;
+        const spid = r.service_project_id;
+        const identity_data = (suid || swid || spid) ? { userId: suid, workspaceId: swid, projectId: spid } : null;
+        return { ...r, id: 4000000 + Number(r.id ?? i), identity_data, _source: "sqlite" };
+      });
+    const data = [...(pgRows as Record<string,unknown>[]), ...mergedSqlite];
+    res.json({ success: true, data, total: data.length });
   } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
 });
 
@@ -255,8 +296,27 @@ router.get("/data/accounts", async (req, res) => {
     if (status)   { params.push(status);   sql += ` AND status=$${params.length}`; }
     if (search)   { params.push(`%${search}%`); sql += ` AND (email ILIKE $${params.length} OR username ILIKE $${params.length} OR notes ILIKE $${params.length})`; }
     sql += " ORDER BY created_at DESC LIMIT 500";
-    const rows = await query(sql, params);
-    res.json({ success: true, data: rows, total: rows.length });
+    const [pgRows, sqliteRows] = await Promise.all([
+      query(sql, params),
+      sqliteQuery(
+        `SELECT id, service as platform, email, password, api_key as token, status, notes, created_at FROM ai_accounts WHERE 1=1` +
+        (platform ? ` AND service='${platform.replace(/'/g,"''")}'` : "") +
+        (status   ? ` AND status='${status.replace(/'/g,"''")}'`   : "") +
+        (search   ? ` AND (email LIKE '%${search.replace(/'/g,"''")}%' OR notes LIKE '%${search.replace(/'/g,"''")}%')` : "") +
+        ` ORDER BY created_at DESC LIMIT 300`
+      ),
+    ]);
+    const pgEmails = new Set((pgRows as Array<{email: string}>).map(r => r.email?.toLowerCase()));
+    const mergedSqlite = (sqliteRows as Array<Record<string,unknown>>)
+      .filter(r => {
+        const em = String(r.email ?? "").toLowerCase();
+        // Allow records with no email (e.g. airforce api-key-only entries); only skip if email is non-empty AND already in PG
+        if (em && pgEmails.has(em)) return false;
+        return true;
+      })
+      .map((r, i) => ({ ...r, id: 2000000 + Number(r.id ?? i), _source: "sqlite" }));
+    const data = [...(pgRows as Record<string,unknown>[]), ...mergedSqlite];
+    res.json({ success: true, data, total: data.length });
   } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
 });
 
@@ -371,8 +431,24 @@ router.get("/data/emails", async (req, res) => {
     if (provider) { params.push(provider); sql += ` AND provider=$${params.length}`; }
     if (search) { params.push(`%${search}%`); sql += ` AND (address ILIKE $${params.length} OR notes ILIKE $${params.length})`; }
     sql += " ORDER BY created_at DESC LIMIT 500";
-    const rows = await query(sql, params);
-    res.json({ success: true, data: rows, total: rows.length });
+    const [pgRows, sqliteRows] = await Promise.all([
+      query(sql, params),
+      sqliteQuery(
+        `SELECT id, email as address, password, platform as provider, status, notes, created_at FROM emails WHERE 1=1` +
+        (provider ? ` AND platform='${provider.replace(/'/g,"''")}'` : "") +
+        (search   ? ` AND (email LIKE '%${search.replace(/'/g,"''")}%' OR notes LIKE '%${search.replace(/'/g,"''")}%')` : "") +
+        ` ORDER BY created_at DESC LIMIT 600`
+      ),
+    ]);
+    const pgAddrs = new Set((pgRows as Array<{address: string}>).map(r => r.address?.toLowerCase()));
+    const mergedSqlite = (sqliteRows as Array<Record<string,unknown>>)
+      .filter(r => {
+        const addr = String(r.address ?? "").toLowerCase();
+        return addr && !pgAddrs.has(addr);
+      })
+      .map((r, i) => ({ ...r, id: 3000000 + Number(r.id ?? i), _source: "sqlite" }));
+    const data = [...(pgRows as Record<string,unknown>[]), ...mergedSqlite];
+    res.json({ success: true, data, total: data.length });
   } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
 });
 
@@ -775,14 +851,28 @@ router.get("/data/stats", async (req, res) => {
     const byPlatform = await query<{ platform: string; count: string }>(
       `SELECT platform, COUNT(*) as count FROM accounts GROUP BY platform ORDER BY count DESC`
     );
+    const [sqliteAccountCount, sqliteEmailCount, sqliteProfileCount] = await Promise.all([
+      sqliteQuery("SELECT COUNT(*) as cnt FROM ai_accounts").then(r => Number((r[0] as Record<string,unknown>)?.cnt ?? 0)),
+      Promise.resolve(0), // emails in SQLite mirror PG temp_emails (same source); avoid double-count
+      sqliteQuery("SELECT COUNT(*) as cnt FROM profiles").then(r => Number((r[0] as Record<string,unknown>)?.cnt ?? 0)),
+    ]);
+    const sqliteByPlatform = await sqliteQuery("SELECT service as platform, COUNT(*) as count FROM ai_accounts GROUP BY service ORDER BY count DESC");
+    const pgByPlatformMap = new Map(byPlatform.map(r => [r.platform, Number(r.count)]));
+    for (const r of sqliteByPlatform as Array<{platform: string; count: number}>) {
+      const plat = String(r.platform);
+      pgByPlatformMap.set(plat, (pgByPlatformMap.get(plat) ?? 0) + Number(r.count));
+    }
+    const mergedByPlatform = Array.from(pgByPlatformMap.entries())
+      .map(([platform, count]) => ({ platform, count }))
+      .sort((a, b) => b.count - a.count);
     res.json({
       success: true,
-      accounts:    { total: Number(accts?.total ?? 0), active: Number(accts?.active ?? 0) },
-      archives:    { total: Number(archives?.total ?? 0) },
-      emails:      { total: Number(tempEmails?.total ?? 0) },
+      accounts:    { total: Number(accts?.total ?? 0) + sqliteAccountCount, active: Number(accts?.active ?? 0) },
+      archives:    { total: Number(archives?.total ?? 0) + sqliteProfileCount },
+      emails:      { total: Number(tempEmails?.total ?? 0) + sqliteEmailCount },
       long_term:   { total: Number(longTermEmails?.total ?? 0) },
       proxies:     { idle: Number(proxyStat?.idle ?? 0), active: Number(proxyStat?.active ?? 0), banned: Number(proxyStat?.banned ?? 0) },
-      byPlatform:  byPlatform.map(r => ({ platform: r.platform, count: Number(r.count) })),
+      byPlatform:  mergedByPlatform,
     });
   } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
 });
