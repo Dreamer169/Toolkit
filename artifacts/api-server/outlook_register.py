@@ -2460,6 +2460,8 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
         if ok:
             # 跳过微软注册后中断页（passkey / 保持登录 / 恢复邮箱等）
             _skip_ms_interrupts(page, label='post-register')
+            print("[register] v9.24: wait 15s for MS session propagation (avoid OAuth re-login)...", flush=True)
+            time.sleep(15)  # v9.24: post-reg propagation wait
             # ── in-browser OAuth2 authorization_code 授权 ──────────────
             try:
                 _tokens = get_oauth_token_in_browser(

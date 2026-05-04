@@ -5779,4 +5779,44 @@ router.post("/tools/outlook/auto-check", async (req: Request, res: Response) => 
   }
 });
 
+
+// ── Outlook 截图查看器 API (v9.24) ────────────────────────────────────────────
+// GET /api/tools/outlook/screenshots — 列出所有 fail/ok/err 截图及分类
+router.get("/tools/outlook/screenshots", async (_req, res) => {
+  const { readdir, stat: fsStat } = await import("fs/promises");
+  try {
+    const files = await readdir("/tmp");
+    const pngs = files.filter(f =>
+      (f.startsWith("outlook_fail_") || f.startsWith("outlook_ok_") || f.startsWith("outlook_err_")) &&
+      f.endsWith(".png")
+    );
+    const screenshots = await Promise.all(pngs.map(async f => {
+      const s = await fsStat();
+      const typeRaw = f.startsWith("outlook_ok_") ? "ok" : f.startsWith("outlook_err_") ? "err" : "fail";
+      const email = f.replace(/^outlook_(fail|ok|err)_/, "").replace(/\.png$/, "") + "@outlook.com";
+      // size 分级: <50KB = activity-block (MS 快速拒绝页), >=50KB = captcha/form (真实页面)
+      const errorType = typeRaw === "fail" ? (s.size < 50_000 ? "activity-block" : "captcha") : null;
+      return { name: f, email, type: typeRaw, size: s.size, mtime: s.mtimeMs, errorType };
+    }));
+    screenshots.sort((a, b) => b.mtime - a.mtime);
+    res.json({ success: true, screenshots });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+// GET /api/tools/outlook/screenshot-img/:name — 返回截图原始 PNG
+router.get("/tools/outlook/screenshot-img/:name", async (req, res) => {
+  const { createReadStream, existsSync } = await import("fs");
+  const name = req.params.name.replace(/[^a-zA-Z0-9._-]/g, "");
+  if (!/^outlook_(fail|ok|err)_[\w.]+\.png$/.test(name)) {
+    res.status(400).json({ success: false, error: "invalid name" }); return;
+  }
+  const fp = "/tmp/" + name;
+  if (!existsSync(fp)) { res.status(404).end(); return; }
+  res.setHeader("Content-Type", "image/png");
+  res.setHeader("Cache-Control", "max-age=1800");
+  createReadStream(fp).pipe(res as any);
+});
+
 export default router;

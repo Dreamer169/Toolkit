@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 
 const API = import.meta.env.BASE_URL.replace(/\/$/, "") + "/api";
 
@@ -48,6 +48,141 @@ function Step({ n, label, active, done }: { n: number; label: string; active: bo
   );
 }
 
+
+// ── v9.24 截图查看器 ─────────────────────────────────────────────────────────
+interface Screenshot {
+  name: string; email: string; type: "ok"|"fail"|"err";
+  size: number; mtime: number; errorType: string | null;
+}
+function ScreenshotViewer({ trigger }: { trigger: unknown }) {
+  const [items, setItems] = useState<Screenshot[]>([]);
+  const [expanded, setExpanded] = useState(false);
+  const [selected, setSelected] = useState<Screenshot | null>(null);
+  const [imgSrc, setImgSrc] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await fetch(`${API}/tools/outlook/screenshots`).then(r => r.json());
+      if (r.success) setItems(r.screenshots.slice(0, 30));
+    } catch { /* ignore */ }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(); }, [load, trigger]);
+
+  async function openImg(s: Screenshot) {
+    setSelected(s);
+    setImgSrc(null);
+    const url = `${API}/tools/outlook/screenshot-img/${encodeURIComponent(s.name)}`;
+    setImgSrc(url);
+  }
+
+  const fails = items.filter(s => s.type === "fail");
+  const oks   = items.filter(s => s.type === "ok");
+
+  function sizeLabel(s: Screenshot) {
+    if (s.type !== "fail") return null;
+    return s.errorType === "activity-block"
+      ? <span className="text-red-400 text-xs ml-1">活动拦截</span>
+      : <span className="text-amber-400 text-xs ml-1">CAPTCHA</span>;
+  }
+
+  return (
+    <div className="bg-[#161b22] border border-[#30363d] rounded-lg overflow-hidden">
+      <button
+        onClick={() => { setExpanded(e => !e); if (!expanded) load(); }}
+        className="w-full flex items-center justify-between px-4 py-2.5 hover:bg-[#21262d] transition-colors"
+      >
+        <span className="text-xs font-semibold text-gray-400 flex items-center gap-2">
+          📸 注册截图记录
+          {fails.length > 0 && <span className="bg-red-900/50 text-red-400 border border-red-800 rounded px-1.5 py-0.5 text-xs">{fails.length} 失败</span>}
+          {oks.length > 0 && <span className="bg-emerald-900/50 text-emerald-400 border border-emerald-800 rounded px-1.5 py-0.5 text-xs">{oks.length} 成功</span>}
+        </span>
+        <span className="text-gray-600 text-xs">{expanded ? "▲" : "▼"}</span>
+      </button>
+
+      {expanded && (
+        <div className="border-t border-[#30363d]">
+          {/* 缩略图网格 */}
+          <div className="p-3 flex flex-wrap gap-2">
+            {loading && items.length === 0 && <span className="text-gray-500 text-xs">加载中…</span>}
+            {items.map(s => (
+              <button
+                key={s.name}
+                onClick={() => openImg(s)}
+                className={`relative border rounded p-1 transition-all hover:scale-105 ${
+                  s.type === "ok" ? "border-emerald-700 bg-emerald-900/20" :
+                  s.type === "err" ? "border-amber-700 bg-amber-900/20" :
+                  "border-red-800 bg-red-900/20"
+                } ${selected?.name === s.name ? "ring-2 ring-blue-500" : ""}`}
+                title={`${s.email} (${(s.size/1024).toFixed(0)}KB) ${s.errorType || ""}`}
+              >
+                <img
+                  src={`${API}/tools/outlook/screenshot-img/${encodeURIComponent(s.name)}`}
+                  alt={s.email}
+                  className="w-20 h-14 object-cover object-top rounded"
+                  loading="lazy"
+                />
+                <div className={`absolute bottom-0 left-0 right-0 text-center rounded-b ${
+                  s.type === "ok" ? "bg-emerald-900/80" : "bg-red-900/80"
+                } py-0.5`}>
+                  <span className="text-xs text-white/80 truncate block px-1" style={{fontSize:"9px"}}>
+                    {s.email.replace("@outlook.com","")}
+                  </span>
+                </div>
+              </button>
+            ))}
+            {items.length === 0 && !loading && (
+              <span className="text-gray-600 text-xs py-2">暂无截图记录（/tmp/outlook_fail_*.png / outlook_ok_*.png）</span>
+            )}
+          </div>
+
+          {/* 失败分类统计 */}
+          {fails.length > 0 && (
+            <div className="px-3 pb-3 flex gap-3 text-xs">
+              <span className="text-gray-500">失败分类：</span>
+              <span className="text-red-400">
+                活动拦截 {fails.filter(f=>f.errorType==="activity-block").length} 个
+                <span className="text-gray-600 ml-1">（{'<'}50KB，MS快速拦截）</span>
+              </span>
+              <span className="text-amber-400">
+                CAPTCHA {fails.filter(f=>f.errorType==="captcha").length} 个
+                <span className="text-gray-600 ml-1">（{'≥'}50KB，页面超时）</span>
+              </span>
+            </div>
+          )}
+
+          {/* 大图预览 */}
+          {selected && imgSrc && (
+            <div className="border-t border-[#30363d] p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="text-xs text-gray-300 space-x-2">
+                  <span className={selected.type === "ok" ? "text-emerald-400" : "text-red-400"}>
+                    {selected.type === "ok" ? "✅ 成功" : "❌ 失败"}
+                  </span>
+                  <span>{selected.email}</span>
+                  {sizeLabel(selected)}
+                  <span className="text-gray-600">({(selected.size/1024).toFixed(0)}KB)</span>
+                </div>
+                <button onClick={() => setSelected(null)} className="text-gray-600 hover:text-white text-xs">✕ 关闭</button>
+              </div>
+              <img src={imgSrc} alt={selected.email} className="w-full rounded border border-[#30363d] max-h-80 object-contain object-top" />
+            </div>
+          )}
+
+          <div className="px-3 pb-3 flex justify-end">
+            <button onClick={load} className="text-xs text-gray-600 hover:text-gray-400 transition-colors">
+              {loading ? "刷新中…" : "↻ 刷新截图"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function FullWorkflow() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [data, setData] = useState<PrepareData | null>(null);
@@ -65,6 +200,7 @@ export default function FullWorkflow() {
   const [result, setResult] = useState<{ ok: boolean; email?: string; password?: string; msg?: string; accounts?: { email: string; password: string }[] } | null>(null);
   const [saved, setSaved] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
+  const [screenshotTrigger, setScreenshotTrigger] = useState(0);
   // 打码服务配置
   const logRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -156,7 +292,7 @@ export default function FullWorkflow() {
           clearInterval(pollRef.current!);
           addLog("⚠️ 任务已失效（服务器重启导致），请重新启动注册");
           setResult({ ok: false, msg: "任务丢失（服务器重启），请重试" });
-          setPhase("done");
+          setPhase("done"); setScreenshotTrigger(t => t + 1);
           return;
         }
         const d = await r.json();
@@ -509,6 +645,8 @@ export default function FullWorkflow() {
           <button onClick={prepare} className="px-4 py-2 bg-[#21262d] border border-[#30363d] rounded text-xs text-gray-400 hover:text-white">重试</button>
         </div>
       )}
+
+      <ScreenshotViewer trigger={screenshotTrigger} />
 
       {/* 说明 */}
       <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4 text-xs text-gray-500 space-y-1.5">
