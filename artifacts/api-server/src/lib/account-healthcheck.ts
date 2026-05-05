@@ -82,7 +82,7 @@ async function autoOAuth(acc: { id: number; email: string; password: string }): 
     email:           acc.email,
     password:        acc.password,
     userCode:        dc.userCode,
-    verificationUri: dc.verificationUri,
+    verificationUri: https://www.microsoft.com/link,  // v9.27: common endpoint returns login.microsoft.com/device (ERR_CONNECTION_CLOSED); force consumers URI
     accountId:       acc.id,
   }]);
 

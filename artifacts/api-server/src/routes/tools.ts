@@ -4240,8 +4240,24 @@ router.post("/tools/outlook/auto-verify-emails", async (req, res) => {
 
         // 对每封匹配邮件执行点击验证
         for (const msg of msgs) {
+          // v9.27 SSL-fix: pre-extract verify URL in TS (microsoftFetch handles proxy/SSL correctly)
+          // This avoids SSL EOF errors in click_verify_link.py's Python HTTP client
+          let _preVerifyUrl = "";
+          try {
+            const _bodyResp = await microsoftFetch(
+              ,
+              { headers: { Authorization:  } }, acctProxy
+            );
+            if (_bodyResp.ok) {
+              const _bd = await _bodyResp.json() as { body?: { content?: string } };
+              const _html = (_bd.body?.content ?? "").replace(/&amp;/g, "&");
+              const _m = _html.match(/https:\/\/replit\.com\/[^"<>\s]+/) ??
+                          _html.match(/https:\/\/reseek\.com\/[^"<>\s]+/);
+              if (_m) _preVerifyUrl = _m[0];
+            }
+          } catch (_ve) { /* fall through — let click_verify_link.py try itself */ }
           const scriptPath = path.resolve(__dirname, "../click_verify_link.py");
-          const params = JSON.stringify({ token: accessToken, message_id: msg.id, verify_url: "" });
+          const params = JSON.stringify({ token: accessToken, message_id: _preVerifyUrl ? "" : msg.id, verify_url: _preVerifyUrl });
           const { spawn } = await import("child_process");
           const clickResult = await new Promise<{ success: boolean; verify_url?: string; final_url?: string; title?: string; error?: string }>((resolve) => {
             const child = spawn(process.env.PYTHON_BIN || "/usr/bin/python3", [scriptPath, params], { env: { ...process.env, ...getMicrosoftProxyEnv(), PYTHONUNBUFFERED: "1" } });
