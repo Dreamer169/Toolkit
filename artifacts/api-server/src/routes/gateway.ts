@@ -2441,11 +2441,20 @@ const AF_PROBE_INTERVAL_MS = 30 * 60_000;          // 每30分钟探一次
 const AF_PROBE_PROBE_TIMEOUT_MS = 20_000;
 const afProbeFailCounts = new Map<string, number>();
 
+// 探针轮转：在已验证免费模型中轮换，避免单一模型被针对限速
+let _afProbeMdx = 0;
+function nextProbeModel(): string {
+  const m = AIRFORCE_CHAT_MODELS[_afProbeMdx % AIRFORCE_CHAT_MODELS.length]!;
+  _afProbeMdx++;
+  return m;
+}
+
 async function probeOneAirforceNode(node: GatewayNode): Promise<{ ok: boolean; status?: number; error?: string }> {
   const dispatcher = node.proxyUrl ? new ProxyAgent(node.proxyUrl) : undefined;
   const fetchFn = dispatcher ? (undiciFetch as typeof fetch) : fetch;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), AF_PROBE_PROBE_TIMEOUT_MS);
+  const probeModel = nextProbeModel();
   try {
     const resp = await fetchFn(`${node.baseUrl}/v1/chat/completions`, {
       method: "POST",
@@ -2455,17 +2464,48 @@ async function probeOneAirforceNode(node: GatewayNode): Promise<{ ok: boolean; s
         "User-Agent": "curl/7.88.1",
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
+        model: probeModel,
         messages: [{ role: "user", content: "hi" }],
-        max_tokens: 3,
+        max_tokens: 5,
       }),
       signal: ctrl.signal,
       ...(dispatcher ? { dispatcher } : {}),
     } as Parameters<typeof fetch>[1]);
     clearTimeout(timer);
-    if (resp.ok) return { ok: true, status: resp.status };
-    const body = await resp.text().catch(() => "");
-    return { ok: false, status: resp.status, error: body.slice(0, 120) };
+
+    const rawText = await resp.text().catch(() => "");
+
+    if (!resp.ok) {
+      // 429 = rate limit，不算真正故障
+      if (resp.status === 429) return { ok: false, status: 429, error: rawText.slice(0, 120) };
+      return { ok: false, status: resp.status, error: rawText.slice(0, 120) };
+    }
+
+    // HTTP 200 时还需验证 body：
+    // AirForce 对 PAYG-only 模型返回 200 + usage.total_tokens=0 + PAYG 提示
+    let parsed: Record<string, unknown> | null = null;
+    try { parsed = JSON.parse(rawText) as Record<string, unknown>; } catch { /**/ }
+
+    if (parsed) {
+      const content: string = (
+        (parsed["choices"] as Array<{ message?: { content?: string } }>)?.[0]
+          ?.message?.content ?? ""
+      );
+      const totalTokens = (parsed["usage"] as { total_tokens?: number })?.total_tokens ?? -1;
+
+      // 明确 PAYG 提示 → 视为凭据额度不足（按信用耗尽处理）
+      if (content.includes("Pay-As-You-Go")) {
+        return { ok: false, status: 402, error: `probe model ${probeModel} requires PAYG` };
+      }
+
+      // usage.total_tokens == 0 且无内容 → 模型未返回真实响应（可能模型失效）
+      // 但 429 的 fallback 有时也会走到这里，所以只在有 id 字段时才判定
+      if (totalTokens === 0 && !content.trim() && parsed["id"]) {
+        return { ok: false, status: 200, error: `probe model ${probeModel} returned empty (tokens=0)` };
+      }
+    }
+
+    return { ok: true, status: resp.status };
   } catch (e) {
     clearTimeout(timer);
     return { ok: false, error: String(e).slice(0, 80) };
@@ -2505,11 +2545,13 @@ async function airforceProbeLoop(): Promise<void> {
         n.lastError = `AF探测-限速(跳过): ${error ?? "HTTP 429"}`;
         n.lastStatus = 429;
       }
-    } else if (status === 401 || status === 403) {
-      // 封号/凭据失效：下线到 UTC 凌晨，且故障计数++
+    } else if (status === 401 || status === 403 || status === 402) {
+      // 401/403 = 封号/凭据失效；402 = 探针模型要求 PAYG（账号无余额）
+      // 均下线到 UTC 凌晨，故障计数++
       const fails = (afProbeFailCounts.get(node.id) ?? 0) + 1;
       afProbeFailCounts.set(node.id, fails);
-      const errMsg = `AF探测-封号HTTP${status}(${fails}次): ${error ?? ""}`;
+      const label = status === 402 ? "AF探测-PAYG限制" : `AF探测-封号HTTP${status}`;
+      const errMsg = `${label}(${fails}次): ${error ?? ""}`;
       for (const n of afNodes.filter((n2) => n2.apiKey === sk)) {
         n.downUntil = nowMs + msUntilUtcMidnight();
         n.lastError = errMsg;
