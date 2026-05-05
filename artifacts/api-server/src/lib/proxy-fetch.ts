@@ -181,7 +181,15 @@ export async function resolveAccountProxy(accountId: number): Promise<string> {
       [accountId]
     );
     const stored = rows[0]?.proxy_formatted?.trim();
-    if (stored) return stored;
+    if (stored) {
+      // v9.25: 动态临时端口探活，失效则 fallback 到固定xray池
+      const portMatch = stored.match(/:([0-9]+)$/);
+      if (portMatch) {
+        const port = Number(portMatch[1]);
+        const isXrayFixed = port >= 10800 && port <= 10899;
+        if (isXrayFixed || probeTcpAlive("127.0.0.1", port, 800)) return stored;
+      } else { return stored; }
+    }
   } catch { /* fall through to xray pool */ }
   return pickProxyForAccount(accountId);
 }

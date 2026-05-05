@@ -299,7 +299,7 @@ import { Router } from "express";
   Grep    → 内容搜索（按正则）
   LS      → 目录列表
   WebFetch → 任意 URL 抓取（45s 超时）
-  WebSearch → DuckDuckGo 搜索，返回标题+摘要+URL
+  WebSearch → 多源搜索（DDG+Bing并行、去重），返回标题+摘要+URL+可选全文
   MultiEdit → 批量精确修改同一文件（一次传多组 old/new）
   TodoRead/TodoWrite → 任务清单持久化（跨 turn 追踪进度）
   CallModel → 调用任意 mimo 模型做子任务（推理/翻译/视觉分析/代码审查等），支持 mimo-v2.5-pro/v2.5/v2-omni/v2-flash
@@ -904,7 +904,7 @@ import { Router } from "express";
       { name: "grep", description: "Search file contents with regex", input_schema: { type: "object" as const, properties: { pattern: { type: "string" }, path: { type: "string" }, flags: { type: "string", description: "grep flags, default -rn" } }, required: ["pattern"] } },
       { name: "list_dir", description: "List directory contents with sizes", input_schema: { type: "object" as const, properties: { path: { type: "string" } }, required: ["path"] } },
       { name: "web_fetch", description: "Fetch any URL — APIs, web pages, download files", input_schema: { type: "object" as const, properties: { url: { type: "string" }, method: { type: "string" }, headers: { type: "object" }, body: { type: "string" } }, required: ["url"] } },
-      { name: "web_search", description: "Search the web via DuckDuckGo. Returns top results with titles, URLs, snippets.", input_schema: { type: "object" as const, properties: { query: { type: "string", description: "Search query" }, num_results: { type: "number", description: "Number of results, default 8" } }, required: ["query"] } },
+      { name: "web_search", description: "Search the web (DDG, deduped) and optionally extract structured page content. Use deep_read to fully extract and read a specific URL via trafilatura (returns title+full text). Set fetch_content=true to enrich top-3 search results with page text.", input_schema: { type: "object" as const, properties: { query: { type: "string", description: "Search query. Optional when deep_read is set." }, num_results: { type: "number", description: "Number of results, default 8" }, fetch_content: { type: "boolean", description: "Auto-extract page text for top 3 results. Default false." }, deep_read: { type: "string", description: "URL to deeply read: fetches and extracts full structured content via trafilatura. Returns title + full article text (up to 6000 chars). Use when you need to read the full content of a specific page." } }, required: [] } },
       { name: "multi_edit", description: "Apply multiple find-replace edits to a single file atomically. ALWAYS read_file first. Each edit: {old_string, new_string}.", input_schema: { type: "object" as const, properties: { path: { type: "string" }, edits: { type: "array", items: { type: "object", properties: { old_string: { type: "string" }, new_string: { type: "string" } }, required: ["old_string", "new_string"] }, description: "Array of {old_string, new_string} objects" } }, required: ["path", "edits"] } },
       { name: "todo_write", description: "Save/update your task list. Use to track multi-step plans. Persists across turns.", input_schema: { type: "object" as const, properties: { todos: { type: "array", items: { type: "object", properties: { id: { type: "string" }, content: { type: "string" }, status: { type: "string", description: "pending|in_progress|done" }, priority: { type: "string", description: "high|medium|low" } }, required: ["id", "content", "status"] } } }, required: ["todos"] } },
       { name: "todo_read", description: "Read your current task list.", input_schema: { type: "object" as const, properties: {}, required: [] } },
@@ -1027,33 +1027,59 @@ import { Router } from "express";
           return { output: `Memory saved: ${kt}${k ? "."+k : ""} = ${v.slice(0,80)}`, code: 0 };
         }
         if (name === "web_search") {
-          const query = String(inp.query ?? ""); const num = Math.min(Number(inp.num_results ?? 8), 20);
-          return await new Promise(resolve => {
-            const enc = encodeURIComponent(query);
-            const { execFile } = require("child_process") as typeof import("child_process");
-            execFile("curl", [
-              "-s", "--max-time", "25",
-              "--proxy", "http://127.0.0.1:10808",
-              "-A", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120",
-              "-H", "Accept-Language: zh-CN,zh;q=0.9,en;q=0.8",
-              `https://html.duckduckgo.com/html/?q=${enc}`
-            ], { env: FULL_ENV, timeout: 28000, maxBuffer: 3*1024*1024 }, (err, html) => {
-              if (err || !html) return resolve({ output: `[search failed: ${String(err).slice(0,100)}]`, code: 1 });
-              const results: string[] = [];
-              const tRe = /<a[^>]+class="result__a"[^>]*>([^<]+)<\/a>/g;
-              const sRe = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
-              const uRe = /uddg=([^&"]+)/g;
-              const titles: string[] = [], snips: string[] = [], urls: string[] = [];
-              let m: RegExpExecArray|null;
-              while ((m = tRe.exec(html)) !== null) titles.push(m[1].trim());
-              while ((m = sRe.exec(html)) !== null) snips.push(m[1].replace(/<[^>]+>/g,"").trim());
-              while ((m = uRe.exec(html)) !== null) urls.push(decodeURIComponent(m[1]));
-              for (let i = 0; i < Math.min(titles.length, num); i++) {
-                results.push(`[${i+1}] ${titles[i]}\n  ${urls[i]||""}\n  ${snips[i]||""}`);
+          const query = String(inp.query ?? "");
+          const num = Math.min(Number(inp.num_results ?? 8), 20);
+          const fetchContent = !!inp.fetch_content;
+          const deepReadUrl = inp.deep_read ? String(inp.deep_read).trim() : "";
+          // deep_read: use trafilatura to extract full structured content from URL
+          if (deepReadUrl) {
+            try {
+              const fr = await fetch(`http://localhost:8086/fetch?url=${encodeURIComponent(deepReadUrl)}`, { signal: AbortSignal.timeout(25000) });
+              if (!fr.ok) throw new Error(`fetch HTTP ${fr.status}`);
+              const fd = await fr.json() as { url:string; content:string|null };
+              if (fd.content && fd.content !== "[failed]") {
+                const text = fd.content.slice(0, 6000);
+                return { output: `[deep_read] ${deepReadUrl}
+${"─".repeat(60)}
+${text}`, code: 0 };
               }
-              resolve({ output: results.length > 0 ? `Search: "${query}"\n\n`+results.join("\n\n") : `No results for: ${query}`, code: 0 });
+              return { output: `[deep_read] ${deepReadUrl}: 无法提取正文 (页面可能需要登录或JS渲染)`, code: 0 };
+            } catch(de) {
+              return { output: `[deep_read] 失败: ${String(de).slice(0,120)}`, code: 1 };
+            }
+          }
+          if (!query) return { output: "[web_search] 请提供 query 或 deep_read 参数", code: 1 };
+          try {
+            const params = new URLSearchParams({ q: query, n: String(num), fetch: fetchContent ? "true" : "false" });
+            const r = await fetch(`http://localhost:8086/search?${params}`, { signal: AbortSignal.timeout(30000) });
+            if (!r.ok) throw new Error(`apex-search HTTP ${r.status}`);
+            const data = await r.json() as { query:string; total:number; sources:string[]; results:Array<{source:string;title:string;url:string;snippet:string;content?:string}>; errors:string[] };
+            if (!data.results?.length) return { output: `[no results for: ${query}]`, code: 0 };
+            const lines = data.results.map((item, i) => {
+              let s = `[${i+1}][${item.source}] ${item.title}\n  ${item.url}\n  ${item.snippet}`;
+              if (item.content) s += `\n  [摘要] ${item.content.slice(0,400)}`;
+              return s;
             });
-          });
+            const src = data.sources.join("+");
+            const errs = data.errors?.length ? ` (部分失败: ${data.errors.join("|")})` : "";
+            return { output: `搜索: "${query}" — ${data.total}条 (${src})${errs}\n\n` + lines.join("\n\n"), code: 0 };
+          } catch(se) {
+            const enc = encodeURIComponent(query);
+            return await new Promise(resolve => {
+              const { execFile } = require("child_process") as typeof import("child_process");
+              execFile("curl",["-s","--max-time","20","--proxy","http://127.0.0.1:10808","-A","Mozilla/5.0",`https://html.duckduckgo.com/html/?q=${enc}`],
+                {env:FULL_ENV,timeout:22000,maxBuffer:2*1024*1024},(err,html)=>{
+                if(err||!html) return resolve({output:`[search failed: ${String(err).slice(0,80)}]`,code:1});
+                const tRe=/<a[^>]+class="result__a"[^>]*>([^<]+)<\/a>/g,sRe=/<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g,uRe=/uddg=([^&"]+)/g;
+                const titles:string[]=[],snips:string[]=[],urls:string[]=[]; let m:RegExpExecArray|null;
+                while((m=tRe.exec(html))!==null) titles.push(m[1].trim());
+                while((m=sRe.exec(html))!==null) snips.push(m[1].replace(/<[^>]+>/g,"").trim());
+                while((m=uRe.exec(html))!==null) urls.push(decodeURIComponent(m[1]));
+                const out=Array.from({length:Math.min(titles.length,num)},(_,i)=>`[${i+1}] ${titles[i]}\n  ${urls[i]||""}\n  ${snips[i]||""}`);
+                resolve({output:out.length?`[fallback-ddg] "${query}"\n\n`+out.join("\n\n"):`No results for: ${query}`,code:0});
+              });
+            });
+          }
         }
                 if (name === "multi_edit") {
           const p = String(inp.path ?? "");

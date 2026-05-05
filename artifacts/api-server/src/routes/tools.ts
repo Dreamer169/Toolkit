@@ -5702,6 +5702,8 @@ router.post("/tools/outlook/auto-check", async (req: Request, res: Response) => 
     for (const acc of candidates) {
       await new Promise<void>(r => setTimeout(r, 1200));
       try {
+        // v9.25: 使用账号绑定的 proxy，确保 token 刷新 IP == 注册 IP（防 MS 安全检测封号）
+        const acctProxy = await resolveAccountProxy(acc.id);
         const r = await microsoftFetch(
           "https://login.microsoftonline.com/common/oauth2/v2.0/token",
           {
@@ -5714,6 +5716,8 @@ router.post("/tools/outlook/auto-check", async (req: Request, res: Response) => 
               scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
             }).toString(),
           }
+        ,
+          acctProxy
         );
         const td = await r.json() as { access_token?: string; refresh_token?: string; error?: string; error_description?: string };
 
@@ -5722,7 +5726,7 @@ router.post("/tools/outlook/auto-check", async (req: Request, res: Response) => 
           // suspended 账号仍可换 token，但 Graph 会返回 401/403
           const gr = await microsoftFetch("https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName", {
             headers: { Authorization: `Bearer ${td.access_token}` },
-          });
+          }, acctProxy);
           const gd = await gr.json() as { error?: { code?: string } };
           const graphBanned =
             gr.status === 401 || gr.status === 403 ||

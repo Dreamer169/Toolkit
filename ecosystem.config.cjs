@@ -21,7 +21,8 @@ module.exports = {
         "CONNECT_PROXY_TOKEN": "vps_direct_proxy_2024",
         "FORCE_REGISTER_PORTS": "10854,10859,10851,10878,10857,10900,10901,10902,10903,10904,10905,10906,10907,10908,10909",
         "NO_WARP_OVERRIDE": "0",
-        "WEBSHARE_API_KEY": "lx7r5124cubob5mfmofbdtjvdti5bqy2lxdg06ho"
+        "WEBSHARE_API_KEY": "lx7r5124cubob5mfmofbdtjvdti5bqy2lxdg06ho",
+        "EXTRA_OPENAI_NODES": "[{\"baseUrl\": \"https://api.airforce\", \"apiKey\": \"sk-air-8dYyox8dnxVvtMvtOxqX05okEY4PyqK97eNmHuzU9JOZFO9KSMbe82T0V84bz02E\", \"name\": \"AirForce1\", \"count\": 1, \"proxyUrl\": \"http://127.0.0.1:8093\"}, {\"baseUrl\": \"https://api.airforce\", \"apiKey\": \"sk-air-4RJ912flbD8Hia6X1gYC7d2SIrHEzgRV5dcMC8rtMo7KAx3aHlMztMhu5qNIJ4tp\", \"name\": \"AirForce2\", \"count\": 1, \"proxyUrl\": \"http://127.0.0.1:8093\"}, {\"baseUrl\": \"https://api.airforce\", \"apiKey\": \"sk-air-m0hjKDuCxpi9hz1w9HT9mmO5p2E3ywdmwtgjoifsBoud51SYp6WPNWd6xgz1EaAS\", \"name\": \"AirForce3\", \"count\": 1, \"proxyUrl\": \"http://127.0.0.1:8093\"}]"
       },
       "restart_delay": 3000,
       "max_memory_restart": "1200M",
@@ -233,8 +234,7 @@ module.exports = {
         "REFRESH_SECS": "30",
         "PYTHONUNBUFFERED": "1"
       }
-    }
-,
+    },
     {
       "name": "http-poll-bridge-2",
       "script": "/root/Toolkit/http_poll_bridge.py",
@@ -315,8 +315,8 @@ module.exports = {
       "max_restarts": 30,
       "watch": false,
       "autorestart": true
-    }
-    ,{
+    },
+    {
       "name": "obvious-keepalive",
       "script": "/root/Toolkit/scripts/obvious_keepalive.py",
       "interpreter": "python3",
@@ -381,8 +381,8 @@ module.exports = {
       "max_restarts": 999,
       "watch": false,
       "autorestart": true
-    }
-    ,{
+    },
+    {
       "name": "obvious-proxy",
       "script": "/root/Toolkit/scripts/obvious_proxy.py",
       "interpreter": "python3",
@@ -396,18 +396,22 @@ module.exports = {
       "max_restarts": 999,
       "watch": false,
       "autorestart": true
-    }
-    ,{
+    },
+    {
       "name": "captcha-api",
       "script": "/root/Toolkit/scripts/captcha_recognition/captcha_api.py",
       "interpreter": "python3",
       "cwd": "/root/Toolkit/scripts/captcha_recognition",
-      "env": { "CAPTCHA_API_PORT": "8765", "PYTHONUNBUFFERED": "1" },
+      "env": {
+        "CAPTCHA_API_PORT": "8765",
+        "PYTHONUNBUFFERED": "1"
+      },
       "restart_delay": 5000,
       "max_restarts": 20,
       "watch": false,
       "autorestart": true
-    },{
+    },
+    {
       "name": "pydoll-bypass",
       "script": "/root/pydoll-service/pydoll_service.py",
       "interpreter": "python3",
@@ -420,8 +424,8 @@ module.exports = {
       "max_restarts": 20,
       "watch": false,
       "autorestart": true
-    }
-    ,{
+    },
+    {
       "name": "socat-854",
       "script": "socat",
       "args": "TCP-LISTEN:20854,bind=0.0.0.0,fork,reuseaddr TCP:127.0.0.1:10854",
@@ -431,8 +435,8 @@ module.exports = {
       "max_restarts": 999,
       "watch": false,
       "autorestart": true
-    }
-    ,{
+    },
+    {
       "name": "socat-839",
       "script": "socat",
       "args": "TCP-LISTEN:20839,bind=0.0.0.0,fork,reuseaddr TCP:127.0.0.1:10839",
@@ -442,29 +446,49 @@ module.exports = {
       "max_restarts": 999,
       "watch": false,
       "autorestart": true
-    }
-
-    ,{
+    },
+    {
       "name": "ip2free-monitor2",
       "script": "/root/Toolkit/artifacts/api-server/ip2free_monitor2.py",
       "interpreter": "python3",
       "cwd": "/root/Toolkit/artifacts/api-server",
-      "env": { "PYTHONUNBUFFERED": "1" },
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      },
       "restart_delay": 10000,
       "max_restarts": 20,
       "watch": false,
       "autorestart": false
-    }
-    ,{
+    },
+    {
       "name": "ip2free-solve-all",
       "script": "/root/Toolkit/artifacts/api-server/ip2free_solve_all.py",
       "interpreter": "python3",
       "cwd": "/root/Toolkit/artifacts/api-server",
-      "env": { "PYTHONUNBUFFERED": "1" },
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      },
       "restart_delay": 10000,
       "max_restarts": 5,
       "watch": false,
       "autorestart": false
+    },
+    {
+      "name": "socks5-bridge",
+      "script": "/root/Toolkit/scripts/socks5_bridge.py",
+      "interpreter": "python3",
+      "cwd": "/root/Toolkit/scripts",
+      "env": {
+        "BRIDGE_PORT": "8093",
+        "SOCKS5_HOST": "127.0.0.1",
+        "SOCKS5_PORT": "10854",
+        "SOCKS5_FALLBACK_PORTS": "10857,10859,10851",
+        "PYTHONUNBUFFERED": "1"
+      },
+      "restart_delay": 3000,
+      "max_restarts": 999,
+      "watch": false,
+      "autorestart": true
     }
   ]
 };

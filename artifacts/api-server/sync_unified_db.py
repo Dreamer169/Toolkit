@@ -48,7 +48,21 @@ def upsert_ai_account(d):
     return {"ok": True, "action": "ai_account", "service": d['service']}
 
 def upsert_profile(d):
-    """完整档案：账密 + token + 代理 + 指纹 + cookies + 沙箱信息"""
+    """完整档案：账密 + token + 代理 + 指纹 + cookies + 沙箱信息
+    v9.25: ON CONFLICT (email, service) DO UPDATE — 同邮箱同服务的档案会更新而非丢弃
+           proxy 字段：优先存 egress_ip 作为出口标识（动态xray端口重启后失效）
+    """
+    # 规范化 proxy：如果是动态临时端口（非10800-10899范围），改存 egress_ip 标记
+    proxy_to_store = d.get('proxy') or ''
+    egress_ip = d.get('egress_ip') or ''
+    import re as _re
+    _port_match = _re.search(r':(\d+)$', proxy_to_store)
+    if _port_match:
+        _port = int(_port_match.group(1))
+        if not (10800 <= _port <= 10899) and egress_ip:
+            # 动态端口：改存 egress_ip 作为代理标识，供还原时识别
+            proxy_to_store = f'cf_egress://{egress_ip}'
+
     with get_conn() as conn:
         conn.execute("""
             INSERT INTO profiles (
@@ -58,18 +72,29 @@ def upsert_profile(d):
               service_user_id, service_workspace_id, service_project_id, service_thread_id,
               exec_port, jupyter_port, reg_email, status, notes, created_at, updated_at
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT DO NOTHING
+            ON CONFLICT(email, service) DO UPDATE SET
+              password        = COALESCE(NULLIF(excluded.password,''),        password),
+              token           = COALESCE(NULLIF(excluded.token,''),           token),
+              refresh_token   = COALESCE(NULLIF(excluded.refresh_token,''),   refresh_token),
+              proxy           = COALESCE(NULLIF(excluded.proxy,''),           proxy),
+              egress_ip       = COALESCE(NULLIF(excluded.egress_ip,''),       egress_ip),
+              user_agent      = COALESCE(NULLIF(excluded.user_agent,''),      user_agent),
+              fingerprint_json= COALESCE(NULLIF(excluded.fingerprint_json,''),fingerprint_json),
+              cookies_json    = COALESCE(NULLIF(excluded.cookies_json,''),    cookies_json),
+              status          = excluded.status,
+              updated_at      = excluded.updated_at
         """, (
             d.get('label'), d.get('service'), d.get('platform'),
             d.get('email'), d.get('password'), d.get('token'), d.get('refresh_token'),
-            d.get('proxy'), d.get('egress_ip'), d.get('machine_id'), d.get('sandbox_id'),
+            proxy_to_store, egress_ip, d.get('machine_id'), d.get('sandbox_id'),
             d.get('user_agent'), d.get('fingerprint_json'), d.get('cookies_json'), d.get('local_storage_json'),
             d.get('service_user_id'), d.get('service_workspace_id'),
             d.get('service_project_id'), d.get('service_thread_id'),
             d.get('exec_port'), d.get('jupyter_port'), d.get('reg_email'),
             d.get('status','active'), d.get('notes'), d.get('created_at', now), now
         ))
-        pid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        pid = conn.execute("SELECT last_insert_rowid() OR (SELECT id FROM profiles WHERE email=? AND service=?)",
+                           (d.get('email',''), d.get('service',''))).fetchone()[0]
     return {"ok": True, "action": "profile", "profile_id": pid}
 
 def upsert_outlook(d):

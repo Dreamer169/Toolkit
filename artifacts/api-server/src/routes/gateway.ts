@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from "express";
+import { ProxyAgent, fetch as undiciFetch } from "undici";
 import { createHash } from "crypto";
 import { exec as execCmd } from "child_process";
 import { promisify } from "util";
@@ -23,6 +24,7 @@ type GatewayNode = {
   successes: number;
   failures: number;
   apiKey?: string;
+  proxyUrl?: string;
   source: "built-in" | "env" | "runtime" | "register";
   lastStatus?: number;
   lastError?: string;
@@ -195,7 +197,7 @@ async function ensureSub2ApiSetup(): Promise<void> {
 // EXTRA_OPENAI_NODES=[{"baseUrl":"https://...","apiKey":"sk-...","name":"slot2","count":4}]
 // EXTRA_ANTHROPIC_NODES=[{"baseUrl":"https://...","apiKey":"sk-ant-..."}]
 // EXTRA_GEMINI_NODES=[{"baseUrl":"https://...","apiKey":"AIza..."}]
-type ExtraNodeSlot = { baseUrl: string; apiKey: string; name?: string; count?: number };
+type ExtraNodeSlot = { baseUrl: string; apiKey: string; name?: string; count?: number; proxyUrl?: string };
 function parseExtraSlots(envKey: string): ExtraNodeSlot[] {
   const raw = process.env[envKey] || "";
   if (!raw.trim()) return [];
@@ -206,6 +208,7 @@ function parseExtraSlots(envKey: string): ExtraNodeSlot[] {
       apiKey: String(s.apiKey),
       name: s.name,
       count: Math.min(12, Math.max(1, Number(s.count || 2))),
+      proxyUrl: s.proxyUrl ? String(s.proxyUrl) : undefined,
     }));
   } catch { return []; }
 }
@@ -411,6 +414,7 @@ function createBuiltInNodes(): GatewayNode[] {
         type: "reseek-openai" as const,
         baseUrl: slot.baseUrl,
         apiKey: slot.apiKey,
+        proxyUrl: slot.proxyUrl,
         model: OPENAI_MODELS[ni % OPENAI_MODELS.length],
         priority: 2,
         enabled: true,
@@ -717,11 +721,12 @@ function chatCompletionJson(node: GatewayNode, model: string, content: string, i
   });
 }
 
-async function fetchTextWithTimeout(url: string, init: RequestInit, timeoutMs = 120_000) {
+async function fetchTextWithTimeout(url: string, init: RequestInit & { dispatcher?: unknown }, timeoutMs = 120_000) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { ...init, signal: controller.signal });
+    const fetchFn = init.dispatcher ? (undiciFetch as typeof fetch) : fetch;
+    const response = await fetchFn(url, { ...init, signal: controller.signal } as Parameters<typeof fetch>[1]);
     const text = await response.text();
     return { response, text };
   } finally {
@@ -732,6 +737,7 @@ async function fetchTextWithTimeout(url: string, init: RequestInit, timeoutMs = 
 async function callOpenAiCompatibleNode(node: GatewayNode, req: Request, body: ChatBody) {
   const requestBody = openAiCompatibleBody(body, node);
   const authorization = node.apiKey ? `Bearer ${node.apiKey}` : req.header("authorization");
+  const dispatcher = node.proxyUrl ? new ProxyAgent(node.proxyUrl) : undefined;
   return await fetchTextWithTimeout(`${node.baseUrl}/v1/chat/completions`, {
     method: "POST",
     headers: {
@@ -741,6 +747,7 @@ async function callOpenAiCompatibleNode(node: GatewayNode, req: Request, body: C
       ...(node.type === "friend-openai" ? { "x-gateway-hop": "1" } : {}),
     },
     body: JSON.stringify(requestBody),
+    ...(dispatcher ? { dispatcher } : {}),
   });
 }
 
