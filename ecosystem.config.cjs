@@ -428,7 +428,7 @@ module.exports = {
     {
       "name": "socat-854",
       "script": "socat",
-      "args": "TCP-LISTEN:20854,bind=0.0.0.0,fork,reuseaddr TCP:127.0.0.1:10854",
+      "args": "TCP-LISTEN:20854,bind=127.0.0.1,fork,reuseaddr TCP:127.0.0.1:10854",
       "interpreter": "none",
       "cwd": "/root",
       "restart_delay": 3000,
@@ -439,7 +439,7 @@ module.exports = {
     {
       "name": "socat-839",
       "script": "socat",
-      "args": "TCP-LISTEN:20839,bind=0.0.0.0,fork,reuseaddr TCP:127.0.0.1:10839",
+      "args": "TCP-LISTEN:20839,bind=127.0.0.1,fork,reuseaddr TCP:127.0.0.1:10839",
       "interpreter": "none",
       "cwd": "/root",
       "restart_delay": 3000,

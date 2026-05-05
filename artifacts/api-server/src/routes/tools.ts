@@ -1,3 +1,4 @@
+import { PersistenceManager } from "../lib/persistence-manager.js";
 import { jobQueue } from "../lib/job-queue.js";
 import { setLiveVerifyEnabled, getLiveVerifyStatus } from "../lib/live-verify-poller.js";
 import { microsoftFetch, getMicrosoftProxyEnv, pickProxyForAccount, resolveAccountProxy } from "../lib/proxy-fetch.js";
@@ -1443,8 +1444,12 @@ router.post("/tools/outlook/register", async (req, res) => {
   if (password) {
     args.push("--password", password as string);
   }
-  const _spawnEnv: Record<string, string> = { ...process.env as Record<string, string>, PYTHONUNBUFFERED: "1" };
-  if (!headless) _spawnEnv["DISPLAY"] = process.env.DISPLAY || ":99";
+  const _spawnEnv: Record<string, string> = {
+    ...process.env as Record<string, string>,
+    PYTHONUNBUFFERED: "1",
+    PLAYWRIGHT_BROWSERS_PATH: "/data/cache/ms-playwright",
+    DISPLAY: process.env.DISPLAY || ":99",
+  };
   const child = spawn("python3", args, { env: _spawnEnv });
   jobQueue.setChild(jobId, child);
 
@@ -1735,10 +1740,15 @@ router.post("/tools/outlook/register", async (req, res) => {
                 for (const _p of _pendingPorts) {
                   if (await _probePort(_p)) { _aliveProxyPort = _p; break; }
                 }
-                const _autoProxy = _aliveProxyPort > 0
-                  ? `socks5://127.0.0.1:${_aliveProxyPort}`
-                  : '';  // v8.99: 不再 fallback 到共享静态端口 → auto_device_code.py 自行 _pick_cf_proxy()
-                const _proxyTag = _aliveProxyPort > 0 ? 'per-account-alive' : 'pool-A-fallback (dyn-xray dead)';
+                // v9.25 FIX: CF VLESS cannot reach Microsoft URLs; use residential SOCKS5
+                const RESIDENTIAL_PORTS_FOR_AUTH = [10851, 10853, 10854, 10857, 10859];
+                let _autoProxy = _aliveProxyPort > 0 ? `socks5://127.0.0.1:${_aliveProxyPort}` : "";
+                let _proxyTag = _aliveProxyPort > 0 ? "per-account-alive" : "residential-fallback";
+                if (!_autoProxy) {
+                  for (const rp of RESIDENTIAL_PORTS_FOR_AUTH) {
+                    if (await _probePort(rp)) { _autoProxy = `socks5://127.0.0.1:${rp}`; break; }
+                  }
+                }
                 job.logs.push({ type: 'log', message: `🌐 自动授权代理: ${_autoProxy} [${_proxyTag}]` });
                 const autoProc = spawnAuto(
                   'python3', [autoScript, JSON.stringify(autoPayload), _autoProxy],
@@ -1770,6 +1780,8 @@ router.post("/tools/outlook/register", async (req, res) => {
                 // v9.01: token exchange done inside Python via CF proxy
                 autoProc.on('close', (code: number | null) => {
                   job.logs.push({ type: code === 0 ? 'success' : 'warn', message: '\u{1F916} \u81EA\u52A8\u6388\u6743\u5B8C\u6210 (code=' + code + ') \u2014 token \u5DF2\u7531 Python \u5728 CF proxy \u5185\u5151\u6362\u5165\u5E93' });
+                  // v9.02: persist auto-auth logs after process completes
+                  PersistenceManager.save(job).catch(() => {});
                 });
               }
             } catch (autoErr) {
@@ -3814,7 +3826,7 @@ router.post("/tools/outlook/auto-retoken", async (req, res) => {
 
     // detached=true: child joins own process group, survives parent restart
     const child = spawn("python3", [scriptPath, ...args], {
-      env: { ...process.env },
+      env: { ...process.env as Record<string,string>, PLAYWRIGHT_BROWSERS_PATH: "/data/cache/ms-playwright", DISPLAY: process.env.DISPLAY || ":99", PYTHONUNBUFFERED: "1" },
       stdio: "ignore",
       detached: true,
     });

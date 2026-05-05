@@ -2474,49 +2474,52 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
                 print(f"[oauth] 捕获异常: {_oe}", flush=True)
                 result["access_token"]  = ""
                 result["refresh_token"] = ""
-            # ── v8.90 post-reg login verify: 无 token 时确认账号真实存在 ──
+            # ── v9.26 BUG-FIX: 用 GetCredentialType API 替代浏览器登录页验证 ──
+            # 原 v8.90~v9.00 缺陷:
+            #  1) 浏览器新页面无注册cookie → MS路由不同 → 文本判断极不稳定 → 误报"不存在"
+            #  2) _MAX_PROP=5 × sleep(15s) = 最多浪费75s
+            # 新方案: GetCredentialType API 单次HTTP POST ~0.5s，IfExistsResult=0即账号存在
             if not result.get("access_token") and not result.get("refresh_token"):
                 try:
-                    import time as _time
-                    # v9.00: MS账号扩散最多需要 30s，最多重试 3次×10s
-                    _MAX_PROP = 5
+                    import urllib.request as _ur2, json as _jj2, time as _time
+                    _MAX_PROP  = 2   # 最多2次: 首次+1次5s重试，总计最多~6s
+                    _gct_url   = "https://login.microsoftonline.com/common/GetCredentialType"
+                    _gct_body  = _jj2.dumps({
+                        "username": f"{actual_email}@outlook.com",
+                        "isOtherIdpSupported": True, "checkPhones": False,
+                        "isRemoteNGCSupported": False, "isCookieBannerShown": False,
+                        "isFidoSupported": False, "originalRequest": "", "flowToken": "",
+                    }).encode()
+                    _gct_hdrs  = {
+                        "Content-Type": "application/json",
+                        "User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                        "Origin":       "https://login.microsoftonline.com",
+                    }
                     for _pa in range(_MAX_PROP):
-                        _vpage = context.new_page()
-                        _vpage.goto("https://login.live.com", timeout=20000, wait_until="domcontentloaded")
-                        _time.sleep(1.5)
-                        _vei = _vpage.query_selector("input[type=email],input[name=loginfmt]")
-                        _not_found = False
-                        if _vei:
-                            _vei.fill(f"{actual_email}@outlook.com")
-                            _vbtn = _vpage.query_selector("input[type=submit],#idSIButton9,button[type=submit]")
-                            if _vbtn:
-                                _vbtn.click()
-                            _time.sleep(3)
-                            _vbody = _vpage.inner_text("body")
-                            _not_found = (
-                                "We couldn\x27t find a Microsoft account" in _vbody
-                                or "couldn\x27t find" in _vbody
-                                or "no account found" in _vbody
-                                or "找不到此 Microsoft" in _vbody
-                            )
                         try:
-                            _vpage.close()
-                        except Exception:
-                            pass
-                        if _not_found:
-                            if _pa < _MAX_PROP - 1:
-                                print(f"[register] ⚠ 账号尚未扩散, 等待15s再次验证 ({_pa+1}/{_MAX_PROP})…", flush=True)
-                                _time.sleep(15)
-                            else:
-                                print(f"[register] ⚠ 登录验证: 账号 {actual_email}@outlook.com 在微软系统中不存在，扩散超时保留成功标记", flush=True)
-                                result["propagation_pending"] = True  # v9.23: cookie confirmed
-                                # v9.23: do not set error, account was created
-                                # v9.23: keep ok=True (success cookie confirmed)
-                        else:
-                            print(f"[register] ✅ 登录验证通过: 账号存在，等待设备码授权", flush=True)
+                            _req2  = _ur2.Request(_gct_url, data=_gct_body,
+                                                  headers=_gct_hdrs, method="POST")
+                            _resp2 = _jj2.loads(_ur2.urlopen(_req2, timeout=8).read())
+                            _ier   = _resp2.get("IfExistsResult", -1)
+                            # 0=存在  1=不存在  4=未知/需验证  5=重定向其他IdP(也算存在)
+                            _exists = _ier == 0 or _ier == 4 or _ier == 5
+                            print(f"[register] 登录验证 ({_pa+1}/{_MAX_PROP}): IfExistsResult={_ier} exists={_exists}", flush=True)
+                        except Exception as _ge:
+                            print(f"[register] GetCredentialType 调用失败({_pa+1}/{_MAX_PROP}): {_ge}", flush=True)
+                            _exists = True   # 调用失败时保守认为账号存在，避免误报
                             break
+                        if _exists:
+                            print(f"[register] \u2705 登录验证通过: 账号已存在 (IfExistsResult={_ier})", flush=True)
+                            break
+                        else:
+                            if _pa < _MAX_PROP - 1:
+                                print(f"[register] \u26a0 账号尚未扩散 (IfExistsResult={_ier}), 等待5s再次验证 ({_pa+1}/{_MAX_PROP})\u2026", flush=True)
+                                _time.sleep(5)
+                            else:
+                                print(f"[register] \u26a0 登录验证: 账号 {actual_email}@outlook.com 扩散超时，保留成功标记", flush=True)
+                                result["propagation_pending"] = True  # 账号已创建(cookie确认)，扩散尚未完成
                 except Exception as _ve:
-                    print(f"[register] ⚠ 登录验证异常(忽略): {_ve}", flush=True)
+                    print(f"[register] \u26a0 登录验证异常(忽略): {_ve}", flush=True)
             # ───────────────────────────────────────────────────────────
             try:
                 page.screenshot(path=f"/tmp/outlook_ok_{actual_email}.png")
@@ -2776,6 +2779,12 @@ def main():
                     _eip = ip_info.get("ip", "")
                 if 'xray_relay_inst' in dir() and xray_relay_inst:
                     _epp = int(getattr(xray_relay_inst, "socks_port", 0) or 0)
+                # v9.25: extract port from socks5://127.0.0.1:PORT when using --proxies
+                if _epp == 0 and cur_proxy:
+                    import re as _re
+                    _m = _re.search(r"socks5://127\.0\.0\.1:(\d+)", cur_proxy)
+                    if _m:
+                        _epp = int(_m.group(1))
             except Exception:
                 pass
             r = register_one(ctrl, args.engine, headless, _effective_user, _effective_pass, _eip, _epp, proxy_formatted=cur_proxy)

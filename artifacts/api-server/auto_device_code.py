@@ -33,7 +33,31 @@ SKIP_SELECTORS = [
 ]
 
 
+
+# Residential SOCKS5 ports verified to reach Microsoft URLs (not CF/xray relay)
+_RESIDENTIAL_PORTS = [10851, 10853, 10854, 10857, 10859]
+
+def _pick_residential_proxy() -> str:
+    import socket as _sock
+    for port in _RESIDENTIAL_PORTS:
+        try:
+            s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+            s.settimeout(1.5)
+            s.connect(("127.0.0.1", port))
+            s.close()
+            print(f"[res-proxy] using residential socks5://127.0.0.1:{port}", flush=True)
+            return f"socks5://127.0.0.1:{port}"
+        except Exception:
+            pass
+    return ""
+
 def _pick_cf_proxy() -> str:
+    # v9.25 FIX: CF VLESS xray relay CANNOT reach Microsoft URLs (ERR_CONNECTION_CLOSED).
+    # Always try residential SOCKS5 proxies first for microsoft.com/link
+    res = _pick_residential_proxy()
+    if res:
+        return res
+    # Last resort: CF pool (usually fails for MS but kept as last fallback)
     try:
         import json as _j
         _ps = _j.load(open('/tmp/cf_pool_state.json'))
@@ -50,9 +74,8 @@ def _pick_cf_proxy() -> str:
             return _relay.socks5_url
         _relay.stop()
     except Exception as _e:
-        print(f"[cf-proxy] 启动失败: {_e}", flush=True)
+        print(f"[cf-proxy] start failed: {_e}", flush=True)
     return ""
-
 
 _ACTIVE_RELAYS: list = []
 
@@ -578,9 +601,12 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                     cur_url = page.url or ""
                     print(f"[{email}] consent r={_retry} url={cur_url[:100]}", flush=True)
 
+                    # v9.02: 扩展 _on_device — 加入 login.live.com / account.live.com
+                    # 注: KMSI后页面可能跳到 login.live.com/... 或 account.live.com/...，
+                    #     不含 remoteconnect/deviceauth → 旧逻辑误判为非device页，跳过consent
                     _on_device = any(x in cur_url.lower() for x in [
                         "remoteconnect", "deviceauth", "microsoft.com/link", "microsoft.com/devicelogin",
-                        "login.microsoftonline.com", "account.live.com/abuse",
+                        "login.microsoftonline.com", "login.live.com", "account.live.com",
                     ]) or cur_url == ""
 
                     _clicked = False
@@ -589,12 +615,25 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                             try:
                                 btn = await page.query_selector(sel)
                                 if btn and await btn.is_visible():
+                                    _pre_url = page.url
                                     await btn.click()
                                     print(f"[{email}] consent click r={_retry} {sel}", flush=True)
                                     try:
                                         await page.wait_for_load_state("networkidle", timeout=12000)
                                     except Exception:
                                         await asyncio.sleep(10)
+                                    # v9.02: 若 URL 未变，尝试 JS dispatch_event 强制触发
+                                    if page.url == _pre_url:
+                                        try:
+                                            await btn.scroll_into_view_if_needed()
+                                            await btn.dispatch_event("click")
+                                            print(f"[{email}] consent js-click fallback r={_retry}", flush=True)
+                                            try:
+                                                await page.wait_for_load_state("networkidle", timeout=10000)
+                                            except Exception:
+                                                await asyncio.sleep(8)
+                                        except Exception as _jce:
+                                            print(f"[{email}] consent js-click err: {_jce}", flush=True)
                                     _consent_clicked = True
                                     _clicked = True
                                     await _safe_shot(page, email, f"06_consent_{_retry}")
@@ -630,7 +669,11 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                             except Exception:
                                 continue
                     else:
-                        print(f"[{email}] not device url skip consent", flush=True)
+                        print(f"[{email}] not device url — try real_done poll url={cur_url[:80]}", flush=True)
+                        # v9.02: URL 不在设备域白名单，仍然 poll 是否已 done（如 live.com 重定向后完成）
+                        _real_done = await _poll_real_done(page, email, max_wait=10)
+                        if _real_done:
+                            break
 
                     _real_done = await _poll_real_done(page, email, max_wait=20)
                     if _real_done:
