@@ -139,6 +139,42 @@ const SUB2API_GROUP_IDS = {
   gemini: 3,
 };
 
+// ── AirForce 全量模型列表（api.airforce，按 /v1/models operational 整理）
+const AIRFORCE_CHAT_MODELS = [
+  // 免费
+  "translategemma-27b", "gemma3-270m:free", "roleplay:free",
+  // $1-20/M
+  "deepseek-v3.2", "char", "char-v2", "gpt-oss-20b", "kimi-k2-thinking",
+  "kimi-k2", "lana", "llama-4-scout", "kimi-k2-0905", "deepseek-v4-flash-p2g",
+  "gpt-oss-120b", "glm-4.5-air", "gemini-3.1-flash-lite-p2g", "kimi-k2.6-thinking",
+  "grok-4.1-fast-non-reasoning", "unmoderated-gpt", "gemini-3-flash",
+  "gpt-4o-mini", "glm-4.7-flash",
+  // $38-80/M
+  "minimax-m2.7", "claude-sonnet-4.6", "glm-4.5", "gemini-2.5-flash",
+  "plutotext-r3-emotional", "minimax-m2.5-sub", "claude-sonnet-4.5-p2g",
+  "grok-4.1-fast-reasoning", "claude-3-7-ch-exp", "claude-4-ch-exp",
+  "kimi-k2.6-p2g", "kimi-k2.5", "gemini-3.1-flash-lite",
+  "gpt-5.4-p2g", "glm-5", "glm-4.7", "glm-5.1", "glm-4.6",
+  "claude-opus-4.5-p2g",
+  // $100-150/M
+  "claude-sonnet-4.6-p2g", "claude-sonnet-4.5-rp", "venice", "nemotron-3-super",
+  "roleplay-exp", "minimax-m2.5", "deepseek-v3-0324", "claude-sonnet-4.6-rp",
+  // $180-250/M
+  "grok-4-heavy", "grok-4.1-mini:free", "grok-4.1-fast", "grok-4.1-thinking",
+  "rnj-1", "claude-opus-4.6-p2g", "claude-opus-4.6-rp",
+  // $300+/M — 旗舰
+  "grok-4.20-beta", "claude-opus-4.5-rp", "claude-opus-4.7",
+  "gpt-5.5-p2g", "bard",
+];
+const AIRFORCE_IMAGE_MODELS = [
+  "flux-2-dev", "z-image", "flux-2-klein-9b",
+  "nano-banana-2-search", "image-1", "nano-banana-pro", "nano-banana-2",
+  "gpt-image-2", "suno-v5.5", "flux-2-pro", "image-1-watermark",
+  "veo-3.1-fast",
+];
+const AIRFORCE_MODELS = [...AIRFORCE_CHAT_MODELS, ...AIRFORCE_IMAGE_MODELS];
+
+
 // ── Sub2API 管理员 JWT 缓存（避免每次 login）──────────────────────────────────
 let _sub2apiJwtToken: string | null = null;
 let _sub2apiJwtExpiry = 0;
@@ -407,23 +443,27 @@ function createBuiltInNodes(): GatewayNode[] {
       source: "built-in" as const,
     })),
     // B15: 额外 OpenAI 凭据组（每组独立 baseUrl+apiKey，避免单点限流）
-    ...EXTRA_OPENAI_SLOTS.flatMap((slot, si) =>
-      Array.from({ length: slot.count ?? 2 }, (_, ni) => ({
+    ...EXTRA_OPENAI_SLOTS.flatMap((slot, si) => {
+      // 自动检测 AirForce 节点并绑定全量模型列表（支持 claude-opus-4.7、gpt-5.5-p2g 等）
+      const isAirForce = slot.baseUrl.includes("airforce");
+      const slotModels = isAirForce ? AIRFORCE_MODELS : undefined;
+      return Array.from({ length: slot.count ?? 2 }, (_, ni) => ({
         id: `extra-openai-s${si + 1}-n${ni + 1}`,
         name: `${slot.name || `Extra OpenAI S${si + 1}`} 节点${ni + 1}`,
         type: "friend-openai" as const,
         baseUrl: slot.baseUrl,
         apiKey: slot.apiKey,
         proxyUrl: slot.proxyUrl,
-        model: OPENAI_MODELS[ni % OPENAI_MODELS.length],
+        model: isAirForce ? AIRFORCE_CHAT_MODELS[ni % AIRFORCE_CHAT_MODELS.length] : OPENAI_MODELS[ni % OPENAI_MODELS.length],
+        models: slotModels,
         priority: 2,
         enabled: true,
         downUntil: 0,
         successes: 0,
         failures: 0,
         source: "built-in" as const,
-      }))
-    ),
+      }));
+    }),
     // B15: 额外 Anthropic 凭据组
     ...EXTRA_ANTHROPIC_SLOTS.flatMap((slot, si) =>
       ANTHROPIC_MODELS.map((model, ni) => ({
