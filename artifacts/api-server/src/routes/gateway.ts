@@ -1117,7 +1117,10 @@ async function streamNode(node: GatewayNode, req: Request, res: Response, body: 
     const ctrl = new AbortController();
     const streamTimeout = setTimeout(() => ctrl.abort(), 120_000);
     try {
-      const response = await fetch(`${node.baseUrl}/v1/chat/completions`, {
+      // B13 修复：stream 路径也通过 ProxyAgent 代理（friend-openai 需要走 :8093）
+      const streamDispatcher = node.proxyUrl ? new ProxyAgent(node.proxyUrl) : undefined;
+      const streamFetchFn = streamDispatcher ? (undiciFetch as typeof fetch) : fetch;
+      const response = await streamFetchFn(`${node.baseUrl}/v1/chat/completions`, {
         method: "POST",
         headers: {
           ...(authorization ? { Authorization: authorization } : {}),
@@ -1127,7 +1130,8 @@ async function streamNode(node: GatewayNode, req: Request, res: Response, body: 
         },
         body: JSON.stringify({ ...requestBody, stream: true }),
         signal: ctrl.signal,
-      });
+        ...(streamDispatcher ? { dispatcher: streamDispatcher } : {}),
+      } as Parameters<typeof fetch>[1]);
       if (!response.ok || !response.body) {
         const text = await response.text();
         if (isSub2ApiEmptyAccount(node, response.status, text)) {
