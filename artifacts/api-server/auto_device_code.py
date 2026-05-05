@@ -479,6 +479,42 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
 
             await _safe_shot(page, email, "03_email")
 
+            # v9.27 BUG2-FIX: detect "We couldn't find a Microsoft account" after email submit
+            try:
+                _body03 = (await page.inner_text("body")).lower()
+                _not_found = [
+                    "couldn't find a microsoft account",
+                    "couldn't find an account",
+                    "we couldn't find an account with that username",
+                    "that microsoft account doesn't exist",
+                    "no microsoft account found",
+                    "account doesn't exist",
+                    "we didn't find an account",
+                    "\u8be5\u8d26\u6237\u4e0d\u5b58\u5728",
+                    "\u627e\u4e0d\u5230\u6b64 microsoft \u8d26\u6237",
+                ]
+                if any(p in _body03 for p in _not_found):
+                    print(f"[{email}] \u274c MS \u62a5\u544a\u8d26\u53f7\u4e0d\u5b58\u5728 URL={page.url[:100]}", flush=True)
+                    result["status"] = "not_found"
+                    result["msg"] = "account_not_found_in_microsoft"
+                    try:
+                        import psycopg2 as _pg2
+                        _c2 = _pg2.connect(db_url or DB_URL)
+                        _cu2 = _c2.cursor()
+                        _cu2.execute(
+                            "UPDATE accounts SET tags=CASE WHEN COALESCE(tags,'')='' THEN 'not_found'"
+                            " WHEN tags NOT LIKE '%not_found%' THEN tags||',not_found' ELSE tags END,"
+                            " updated_at=NOW() WHERE id=%s",
+                            (account_id,)
+                        )
+                        _c2.commit(); _cu2.close(); _c2.close()
+                    except Exception as _dbe2:
+                        print(f"[{email}] DB not_found tag err: {_dbe2}", flush=True)
+                    await browser.close()
+                    return result
+            except Exception:
+                pass
+
             # Step 3: 密码
             for _pw in range(3):
                 pw_input = await page.query_selector(
@@ -609,8 +645,27 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                         "login.microsoftonline.com", "login.live.com", "account.live.com",
                     ]) or cur_url == ""
 
+                    # v9.27 BUG1-FIX: login.live.com is in _on_device whitelist for
+                    # post-KMSI flow, but the email-entry (step2) and password (step3)
+                    # pages also live on login.live.com. Their Next/Submit buttons match
+                    # consent_sels -> _consent_clicked=True without real device auth.
+                    # Guard: skip consent if any email/password input is currently visible.
+                    _is_login_step = False
+                    try:
+                        for _ls in [
+                            'input[type="email"]', 'input[name="loginfmt"]',
+                            'input[type="password"]', 'input[name="passwd"]',
+                        ]:
+                            _lel = await page.query_selector(_ls)
+                            if _lel and await _lel.is_visible():
+                                _is_login_step = True
+                                print(f'[{email}] consent-guard: login input visible ({_ls}), skip consent', flush=True)
+                                break
+                    except Exception:
+                        pass
+
                     _clicked = False
-                    if _on_device:
+                    if _on_device and not _is_login_step:
                         for sel in consent_sels:
                             try:
                                 btn = await page.query_selector(sel)

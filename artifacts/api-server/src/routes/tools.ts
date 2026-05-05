@@ -4243,7 +4243,7 @@ router.post("/tools/outlook/auto-verify-emails", async (req, res) => {
           const scriptPath = path.resolve(__dirname, "../click_verify_link.py");
           const params = JSON.stringify({ token: accessToken, message_id: msg.id, verify_url: "" });
           const { spawn } = await import("child_process");
-          const clickResult = await new Promise<{ success: boolean; verify_url?: string; error?: string }>((resolve) => {
+          const clickResult = await new Promise<{ success: boolean; verify_url?: string; final_url?: string; title?: string; error?: string }>((resolve) => {
             const child = spawn(process.env.PYTHON_BIN || "/usr/bin/python3", [scriptPath, params], { env: { ...process.env, ...getMicrosoftProxyEnv(), PYTHONUNBUFFERED: "1" } });
             let out = "";
             child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
@@ -4254,9 +4254,30 @@ router.post("/tools/outlook/auto-verify-emails", async (req, res) => {
             child.on("error", (e) => resolve({ success: false, error: e.message }));
             setTimeout(() => { child.kill(); resolve({ success: false, error: "timeout" }); }, 45000);
           });
+          // v9.27 Fix3+4: auto-tag replit_used after verify-link click
+          // 'Success! You can now close this window' -> replit_used
+          // 'already registered / already exists' -> also replit_used (consumed)
+          const _vFinalUrl = (clickResult.final_url ?? "").toLowerCase();
+          const _vTitle = (clickResult.title ?? "").toLowerCase();
+          const _vIsSuccess = clickResult.success
+            || _vTitle.includes("you can now close") || _vTitle.includes("success")
+            || _vTitle.includes("verified") || _vTitle.includes("confirmed")
+            || _vFinalUrl.includes("signup_success") || _vFinalUrl.includes("email-verified");
+          const _vIsAlready = _vTitle.includes("already") || _vTitle.includes("registered")
+            || _vFinalUrl.includes("already") || (clickResult.error ?? "").includes("already");
+          if (_vIsSuccess || _vIsAlready) {
+            const { execute: _tagEx } = await import("../db.js");
+            await _tagEx(
+              `UPDATE accounts SET tags = CASE WHEN COALESCE(tags,'')='' THEN 'replit_used'
+               WHEN tags NOT LIKE '%replit_used%' THEN tags||',replit_used' ELSE tags END,
+               updated_at=NOW() WHERE id=$1`,
+              [acc.id]
+            ).catch(() => {});
+            req.log.info({ id: acc.id, email: acc.email, isSuccess: _vIsSuccess, isAlready: _vIsAlready }, "[auto-verify] replit_used tag applied");
+          }
           results.push({
             accountId: acc.id, email: acc.email,
-            status: clickResult.success ? "clicked" : "failed",
+            status: clickResult.success ? "clicked" : (_vIsAlready ? "already_used" : "failed"),
             error: clickResult.error,
             verifyUrl: clickResult.verify_url,
           });
