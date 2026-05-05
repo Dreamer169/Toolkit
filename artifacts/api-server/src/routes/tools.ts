@@ -4245,8 +4245,8 @@ router.post("/tools/outlook/auto-verify-emails", async (req, res) => {
           let _preVerifyUrl = "";
           try {
             const _bodyResp = await microsoftFetch(
-              ,
-              { headers: { Authorization:  } }, acctProxy
+              `https://graph.microsoft.com/v1.0/me/messages/${msg.id}?$select=body`,
+              { headers: { Authorization: `Bearer ${accessToken}` } }, acctProxy
             );
             if (_bodyResp.ok) {
               const _bd = await _bodyResp.json() as { body?: { content?: string } };
