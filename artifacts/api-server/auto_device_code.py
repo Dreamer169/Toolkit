@@ -503,7 +503,7 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                         _cu2 = _c2.cursor()
                         _cu2.execute(
                             "UPDATE accounts SET tags=CASE WHEN COALESCE(tags,'')='' THEN 'not_found'"
-                            " WHEN tags NOT LIKE '%not_found%' THEN tags||',not_found' ELSE tags END,"
+                            " WHEN tags NOT LIKE '%%not_found%%' THEN tags||',not_found' ELSE tags END,"
                             " updated_at=NOW() WHERE id=%s",
                             (account_id,)
                         )
