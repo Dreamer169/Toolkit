@@ -411,7 +411,7 @@ function createBuiltInNodes(): GatewayNode[] {
       Array.from({ length: slot.count ?? 2 }, (_, ni) => ({
         id: `extra-openai-s${si + 1}-n${ni + 1}`,
         name: `${slot.name || `Extra OpenAI S${si + 1}`} 节点${ni + 1}`,
-        type: "reseek-openai" as const,
+        type: "friend-openai" as const,
         baseUrl: slot.baseUrl,
         apiKey: slot.apiKey,
         proxyUrl: slot.proxyUrl,
@@ -744,7 +744,7 @@ async function callOpenAiCompatibleNode(node: GatewayNode, req: Request, body: C
       ...(authorization ? { Authorization: authorization } : {}),
       "Content-Type": "application/json",
       "ngrok-skip-browser-warning": "1",
-      ...(node.type === "friend-openai" ? { "x-gateway-hop": "1" } : {}),
+      ...(node.type === "friend-openai" && node.source !== "built-in" ? { "x-gateway-hop": "1" } : {}),
     },
     body: JSON.stringify(requestBody),
     ...(dispatcher ? { dispatcher } : {}),
