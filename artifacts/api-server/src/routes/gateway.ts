@@ -2037,6 +2037,95 @@ router.post("/v1/chat/completions", async (req, res) => {
   res.status(503).json({ error: { message: "所有网关节点都暂时不可用", type: "gateway_unavailable", details: errors } });
 });
 
+// ── /v1/images/generations (AirForce flux / imagen / gpt-image-2) ─────────────
+// 兼容 OpenAI DALL-E API 格式，路由到具备图像能力的 AirForce built-in 节点
+const AIRFORCE_IMAGE_CAPABLE = new Set([
+  "flux-2-dev", "flux-2-pro", "flux-2-flex", "flux-2-klein-9b", "flux-2-klein-4b",
+  "gpt-image-2", "imagen-3", "imagen-4", "z-image", "image-1",
+  "image-1-edit", "image-1-watermark",
+]);
+const AF_IMAGE_MODELS_CYCLE = [
+  "flux-2-dev", "flux-2-pro", "gpt-image-2", "imagen-3", "imagen-4",
+  "z-image", "flux-2-flex", "flux-2-klein-9b",
+];
+let _afImgRr = 0;
+
+router.post("/v1/images/generations", async (req, res) => {
+  const body = req.body as {
+    model?: string;
+    prompt?: string;
+    n?: number;
+    size?: string;
+    response_format?: string;
+    quality?: string;
+    style?: string;
+    [k: string]: unknown;
+  };
+
+  const prompt = body.prompt;
+  if (!prompt || typeof prompt !== "string") {
+    res.status(400).json({ error: { message: "prompt is required", type: "invalid_request_error" } });
+    return;
+  }
+
+  const requestedModel = body.model || "flux-2-dev";
+  const n = Math.min(Number(body.n) || 1, 4);
+  const size = body.size || "1024x1024";
+  const responseFormat = body.response_format || "url";
+
+  // 选择一个可用的 AirForce built-in 节点
+  const afNodes = allNodes().filter(
+    (nd) => nd.enabled && nd.source === "built-in" && nd.baseUrl.includes("airforce") && nd.downUntil <= Date.now()
+  );
+  if (afNodes.length === 0) {
+    res.status(503).json({ error: { message: "No available AirForce nodes for image generation", type: "gateway_unavailable" } });
+    return;
+  }
+  // round-robin 选节点
+  const node = afNodes[_afImgRr % afNodes.length]!;
+  _afImgRr++;
+
+  // 选图像模型（优先用请求的，否则轮转）
+  const model = AIRFORCE_IMAGE_CAPABLE.has(requestedModel)
+    ? requestedModel
+    : AF_IMAGE_MODELS_CYCLE[_afImgRr % AF_IMAGE_MODELS_CYCLE.length]!;
+
+  const requestBody: Record<string, unknown> = { model, prompt, n, size, response_format: responseFormat };
+  if (body.quality) requestBody["quality"] = body.quality;
+  if (body.style) requestBody["style"] = body.style;
+
+  const dispatcher = node.proxyUrl ? new ProxyAgent(node.proxyUrl) : undefined;
+  const auth = node.apiKey ? `Bearer ${node.apiKey}` : req.header("authorization") || "";
+
+  try {
+    const { response, text } = await fetchTextWithTimeout(
+      `${node.baseUrl}/v1/images/generations`,
+      {
+        method: "POST",
+        headers: { Authorization: auth, "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
+        ...(dispatcher ? { dispatcher } : {}),
+      },
+      90_000,
+    );
+
+    if (!response.ok) {
+      res.status(response.status).json({
+        error: { message: text.slice(0, 500), type: "airforce_error", node: node.name },
+      });
+      return;
+    }
+
+    // 转发原始响应（AirForce 返回标准 OpenAI 格式）
+    let parsed: unknown;
+    try { parsed = JSON.parse(text); } catch { parsed = { raw: text }; }
+    res.json({ ...(parsed as Record<string, unknown>), _gateway_node: node.name, _model: model });
+  } catch (e: unknown) {
+    const err = e as Error;
+    res.status(502).json({ error: { message: err.message || "Image generation failed", type: "gateway_error" } });
+  }
+});
+
 // ── HTTP Exec（SSH 替代：远端控制 Reseek 工作区）────────────────────────────
 // 远端服务器无法 SSH 进 Reseek（防火墙封闭），用此端点代替
 // 安全：必须设置 EXEC_SECRET 环境变量，且请求头携带 X-Exec-Secret 匹配

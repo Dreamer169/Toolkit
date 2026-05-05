@@ -788,6 +788,96 @@
         "auth": "noauth",
         "udp": false
       }
+    },
+    {
+      "tag": "af-http-0",
+      "port": 8094,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "allowTransparent": false
+      }
+    },
+    {
+      "tag": "af-http-1",
+      "port": 8095,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "allowTransparent": false
+      }
+    },
+    {
+      "tag": "af-http-2",
+      "port": 8096,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "allowTransparent": false
+      }
+    },
+    {
+      "tag": "af-http-3",
+      "port": 8097,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "allowTransparent": false
+      }
+    },
+    {
+      "tag": "af-http-4",
+      "port": 8098,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "allowTransparent": false
+      }
+    },
+    {
+      "tag": "af-http-5",
+      "port": 8099,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "allowTransparent": false
+      }
+    },
+    {
+      "tag": "af-http-6",
+      "port": 8100,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "allowTransparent": false
+      }
+    },
+    {
+      "tag": "af-http-7",
+      "port": 8101,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "allowTransparent": false
+      }
+    },
+    {
+      "tag": "af-http-8",
+      "port": 8102,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "allowTransparent": false
+      }
+    },
+    {
+      "tag": "af-http-9",
+      "port": 8103,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "allowTransparent": false
+      }
     }
   ],
   "outbounds": [
@@ -2265,6 +2355,76 @@
   "routing": {
     "domainStrategy": "AsIs",
     "rules": [
+      {
+        "type": "field",
+        "inboundTag": [
+          "af-http-9"
+        ],
+        "outboundTag": "proxy-9"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "af-http-8"
+        ],
+        "outboundTag": "proxy-8"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "af-http-7"
+        ],
+        "outboundTag": "proxy-7"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "af-http-6"
+        ],
+        "outboundTag": "proxy-6"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "af-http-5"
+        ],
+        "outboundTag": "proxy-5"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "af-http-4"
+        ],
+        "outboundTag": "proxy-4"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "af-http-3"
+        ],
+        "outboundTag": "proxy-3"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "af-http-2"
+        ],
+        "outboundTag": "proxy-2"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "af-http-1"
+        ],
+        "outboundTag": "proxy-1"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "af-http-0"
+        ],
+        "outboundTag": "proxy-0"
+      },
       {
         "type": "field",
         "inboundTag": [
