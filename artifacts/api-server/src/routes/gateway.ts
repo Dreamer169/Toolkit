@@ -2356,5 +2356,108 @@ router.get('/setup-gateway-node.sh', (_req, res) => {
   res.sendFile('/root/Toolkit/public/setup-gateway-node.sh');
 });
 
+// ═══ B22: AirForce built-in 节点周期健康探测 ════════════════════════════════════
+// 专门针对 source="built-in" 的 AirForce 节点（背景探测不覆盖 built-in）
+// 探活模型: gpt-4o-mini（最便宜），区分 429 限速 vs 403/401 封号
+const AF_PROBE_INTERVAL_MS = 30 * 60_000;          // 每30分钟探一次
+const AF_PROBE_PROBE_TIMEOUT_MS = 20_000;
+const afProbeFailCounts = new Map<string, number>();
+
+async function probeOneAirforceNode(node: GatewayNode): Promise<{ ok: boolean; status?: number; error?: string }> {
+  const dispatcher = node.proxyUrl ? new ProxyAgent(node.proxyUrl) : undefined;
+  const fetchFn = dispatcher ? (undiciFetch as typeof fetch) : fetch;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), AF_PROBE_PROBE_TIMEOUT_MS);
+  try {
+    const resp = await fetchFn(`${node.baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${node.apiKey}`,
+        "Content-Type": "application/json",
+        "User-Agent": "curl/7.88.1",
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 3,
+      }),
+      signal: ctrl.signal,
+      ...(dispatcher ? { dispatcher } : {}),
+    } as Parameters<typeof fetch>[1]);
+    clearTimeout(timer);
+    if (resp.ok) return { ok: true, status: resp.status };
+    const body = await resp.text().catch(() => "");
+    return { ok: false, status: resp.status, error: body.slice(0, 120) };
+  } catch (e) {
+    clearTimeout(timer);
+    return { ok: false, error: String(e).slice(0, 80) };
+  }
+}
+
+async function airforceProbeLoop(): Promise<void> {
+  const afNodes = allNodes().filter(
+    (n) => n.enabled && n.source === "built-in" && n.baseUrl.includes("airforce"),
+  );
+  // 按 apiKey 去重：同一 sk 下的多个虚拟节点只探一次
+  const seen = new Set<string>();
+  for (const node of afNodes) {
+    const sk = node.apiKey ?? "";
+    if (seen.has(sk)) {
+      // 复制主节点的健康状态给同 sk 的兄弟节点
+      continue;
+    }
+    seen.add(sk);
+
+    const { ok, status, error } = await probeOneAirforceNode(node);
+    const nowMs = Date.now();
+
+    if (ok) {
+      // 探测成功：重置故障计数 & 解封
+      afProbeFailCounts.delete(node.id);
+      // 所有同 sk 的节点都解封
+      for (const n of afNodes.filter((n2) => n2.apiKey === sk)) {
+        if (!n.creditExhaustedAt || nowMs > n.downUntil) {
+          n.downUntil = 0;
+          n.creditExhaustedAt = undefined;
+          n.failures = 0;
+        }
+      }
+    } else {
+      const fails = (afProbeFailCounts.get(node.id) ?? 0) + 1;
+      afProbeFailCounts.set(node.id, fails);
+
+      let downMs: number;
+      let errTag: string;
+      if (status === 429) {
+        // 限速：退避 5min，不算封号
+        downMs = 5 * 60_000;
+        errTag = `AF探测-限速(${fails}次)`;
+      } else if (status === 401 || status === 403) {
+        // 封号/凭据失效：下线到 UTC 凌晨
+        downMs = msUntilUtcMidnight();
+        errTag = `AF探测-封号HTTP${status}(${fails}次)`;
+      } else {
+        // 网络超时等：指数退避最长2h
+        const steps = [2 * 60_000, 10 * 60_000, 30 * 60_000, 2 * 60 * 60_000];
+        downMs = steps[Math.min(fails - 1, steps.length - 1)]!;
+        errTag = `AF探测-网络错误(${fails}次)`;
+      }
+
+      const errMsg = `${errTag}: ${error ?? `HTTP ${status}`}`;
+      // 传播到所有同 sk 节点
+      for (const n of afNodes.filter((n2) => n2.apiKey === sk)) {
+        n.downUntil = nowMs + downMs;
+        n.lastError = errMsg;
+        n.lastStatus = status;
+      }
+    }
+  }
+}
+
+// 启动后 10s 先探一次，此后每30分钟循环
+setTimeout(() => { void airforceProbeLoop(); }, 10_000);
+setInterval(() => { void airforceProbeLoop(); }, AF_PROBE_INTERVAL_MS);
+
+
 export default router;
 
