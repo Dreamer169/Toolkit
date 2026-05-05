@@ -1366,7 +1366,7 @@ ${text}`, code: 0 };
   /* ─── POST /api/claude-code/imagine ─── */
   router.post("/claude-code/imagine", async (req, res) => {
     const { prompt, width = 512, height = 512 } = req.body as { prompt: string; width?: number; height?: number };
-    if (!prompt) return res.status(400).json({ error: "prompt required" });
+    if (!prompt) { res.status(400).json({ error: "prompt required" }); return; }
     const encoded = encodeURIComponent(prompt);
     const url = `https://image.pollinations.ai/prompt/${encoded}?width=${width}&height=${height}&nologo=true&enhance=true`;
     const fname = `/tmp/apex_img_${Date.now()}.jpg`;
@@ -1388,7 +1388,7 @@ ${text}`, code: 0 };
     const { url, fullPage = false, width = 1280, height = 800 } = req.body as {
       url: string; fullPage?: boolean; width?: number; height?: number;
     };
-    if (!url) return res.status(400).json({ error: "url required" });
+    if (!url) { res.status(400).json({ error: "url required" }); return; }
     const fname = `/tmp/apex_shot_${Date.now()}.png`;
     const script = `
 import asyncio, base64, sys
@@ -1403,7 +1403,7 @@ async def run():
 asyncio.run(run())
 `;
     execFile("python3", ["-c", script], { timeout: 30000 }, (err: Error | null) => {
-      if (err) return res.status(500).json({ error: err.message });
+      if (err) { res.status(500).json({ error: err.message }); return; }
       try {
         const data = fs.readFileSync(fname);
         const b64 = data.toString("base64");
@@ -1421,7 +1421,7 @@ asyncio.run(run())
     const { b64, mime = "image/jpeg", question = "详细描述这张图片中的内容" } = req.body as {
       b64: string; mime?: string; question?: string;
     };
-    if (!b64) return res.status(400).json({ error: "b64 required" });
+    if (!b64) { res.status(400).json({ error: "b64 required" }); return; }
     try {
       const apiKey = "sk-sszfdmshqaziz2d7dvl2nggaf2gum5kbs881qajf0fzavxyw";
       // OpenAI-format endpoint: mimo-v2.5 supports vision with data-URL base64

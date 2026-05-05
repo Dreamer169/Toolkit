@@ -6,13 +6,27 @@
  *     healthcheck 负责离线扫描（无 refresh 但 token 已过期的边角情况）
  */
 import { logger } from "./logger.js";
-import { microsoftFetch, getMicrosoftBrowserProxy, getMicrosoftProxyEnv } from "./proxy-fetch.js";
+import { microsoftFetch, getMicrosoftProxyEnv } from "./proxy-fetch.js";
 import { spawn } from "child_process";
 import path from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OAUTH_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
+
+// v9.29 Bug C Fix: CF xray ports (10820-10829) cannot reach microsoft.com/link.
+// Use residential SOCKS5 ports (10851-10859) for browser-based device-code OAuth.
+import { execFileSync as _ncExecSync } from "child_process";
+function pickResidentialProxy(): string {
+  const PORTS = [10851, 10853, 10854, 10857, 10859];
+  for (const port of PORTS) {
+    try {
+      _ncExecSync("nc", ["-z", "-w", "1", "127.0.0.1", String(port)], { timeout: 1500, stdio: "ignore" });
+      return `socks5://127.0.0.1:${port}`;
+    } catch { /* try next */ }
+  }
+  return ""; // fallback: direct (risky but better than ERR_CONNECTION_CLOSED)
+}
 
 let _running    = false;
 let _intervalId: ReturnType<typeof setInterval> | null = null;
@@ -71,7 +85,7 @@ async function pollForToken(deviceCode: string, proxy?: string | null, maxAttemp
 async function autoOAuth(acc: { id: number; email: string; password: string }): Promise<boolean> {
   logger.info({ email: acc.email }, "[healthcheck] 开始自动补授权");
 
-  const proxy = getMicrosoftBrowserProxy();
+  const proxy = pickResidentialProxy(); // v9.29: residential proxy for microsoft.com/link
   const dc = await getDeviceCode(acc.email, proxy);
   if (!dc) return false;
 
@@ -88,8 +102,9 @@ async function autoOAuth(acc: { id: number; email: string; password: string }): 
 
   // patchright 完成浏览器端授权
   const autoResult = await new Promise<{ status: string; msg?: string }>((resolve) => {
-    const child = spawn("python3", [scriptPath, payload, proxy], {
-      env: { ...process.env, ...getMicrosoftProxyEnv(proxy), PYTHONUNBUFFERED: "1" },
+    // v9.29b: pass "" so auto_device_code.py calls _pick_residential_proxy() internally
+    const child = spawn("python3", [scriptPath, payload, ""], {
+      env: { ...process.env, PYTHONUNBUFFERED: "1" },
     });
     let out = "";
     child.stdout.on("data", (d: Buffer) => { out += d.toString(); });

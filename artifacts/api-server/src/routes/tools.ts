@@ -730,6 +730,7 @@ router.post("/tools/outlook/messages", async (req, res) => {
   let accessToken = suppliedAccessToken || "";
   let resolvedAccountId: number | null = typeof accountId === "number" ? accountId : null;
   let accountEmail: string | null = null;
+  let acctProxy: string | null = null;
   const mailFolder = folder || "inbox";
   const limit = Math.min(50, Math.max(1, top ?? 20));
   try {
@@ -750,7 +751,7 @@ router.post("/tools/outlook/messages", async (req, res) => {
       resolvedAccountId = account.id;
       accountEmail = account.email;
       accessToken = account.token || "";
-      const acctProxy = await resolveAccountProxy(resolvedAccountId);
+      acctProxy = await resolveAccountProxy(resolvedAccountId);
       if (account.refresh_token) {
         const tr = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
           method: "POST",
@@ -781,7 +782,7 @@ router.post("/tools/outlook/messages", async (req, res) => {
     }
     let url = `https://graph.microsoft.com/v1.0/me/mailFolders/${mailFolder}/messages?$top=${limit}&$select=id,subject,from,receivedDateTime,bodyPreview,isRead&$orderby=receivedDateTime desc`;
     if (search) url += `&$search="${encodeURIComponent(search)}"`;
-    const _msgsProxy = typeof acctProxy !== "undefined" ? acctProxy : undefined;
+    const _msgsProxy = acctProxy ?? undefined;
     const r = await microsoftFetch(url, {
       headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
     }, _msgsProxy);
@@ -3261,8 +3262,8 @@ router.post("/tools/outlook/auto-auth", async (req, res) => {
   if (!accountId) { res.status(400).json({ success: false, error: "accountId 不能为空" }); return; }
   try {
     const { query } = await import("../db.js");
-    const rows = await query<{ id: number; email: string; refresh_token: string | null }>(
-      "SELECT id, email, refresh_token FROM accounts WHERE id=$1 AND platform=\'outlook\'", [accountId]
+    const rows = await query<{ id: number; email: string; refresh_token: string | null; status: string | null; tags: string | null }>(
+      "SELECT id, email, refresh_token, status, tags FROM accounts WHERE id=$1 AND platform=\'outlook\'", [accountId]
     );
     const acc = rows[0];
     if (!acc) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
@@ -4770,7 +4771,7 @@ router.post('/tools/obvious/provision', async (req, res) => {
     // 监听 obvious provision 完成事件，同步写入统一数据库
     const _provJobId = created.jobId;
     const _provLabel = accLabel;
-    jobQueue.once('done', async (doneJob: { jobId: string; exitCode?: number }) => {
+    jobQueue.subscribe('done', (doneJob) => { void (async () => {
       if (doneJob.jobId !== _provJobId || doneJob.exitCode !== 0) return;
       try {
         const _fs = await import('fs');
@@ -4792,7 +4793,7 @@ router.post('/tools/obvious/provision', async (req, res) => {
           _cp.stdin.end();
         }
       } catch (_) {}
-    });
+    })(); });
     res.json({ success: true, jobId: created.jobId, label: accLabel, message: 'obvious账号注册任务已启动' });
   } catch (e: unknown) { res.status(500).json({ success: false, error: String(e) }); }
 });
@@ -5715,8 +5716,8 @@ router.delete("/tools/oxylabs/register/:jobId", (req, res) => {
 // ── 自动检测账号 token 健康状态 ───────────────────────────────────────────
 // 安全策略：只用 refresh_token 换 token（标准 OAuth，不触发封号）
 // 不做 IMAP 登录，不高频，每账号间隔 1.2 秒，跳过已知封禁账号
-router.post("/tools/outlook/auto-check", async (req: Request, res: Response) => {
-  const body = req.body as Record<string, unknown>;
+router.post("/tools/outlook/auto-check", async (req, res) => {
+  const body = req.body as unknown as Record<string, unknown>;
   const limit = Math.min(50, Math.max(1, Number(body.limit ?? 30)));
   try {
     const { query: dbQ, execute: dbEx } = await import("../db.js");

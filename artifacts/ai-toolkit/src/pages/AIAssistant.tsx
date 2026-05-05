@@ -303,7 +303,7 @@ const QUICK = [
   { label:"CF IP池状态", cmd:"curl -s http://localhost:8081/api/tools/cf-pool/status | python3 -m json.tool 2>/dev/null || curl -s http://localhost:8081/api/tools/cf-pool/status" },
 ];
 
-export default function AIAssistant() {
+export default function AIAssistant({ onNavigate }: { onNavigate?: (tab: string) => void } = {}) {
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [imgModal, setImgModal] = useState<{b64:string;mime:string;label:string}|null>(null);
   const [imgPrompt, setImgPrompt] = useState("");
