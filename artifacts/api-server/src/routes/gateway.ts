@@ -2402,19 +2402,17 @@ async function airforceProbeLoop(): Promise<void> {
   const seen = new Set<string>();
   for (const node of afNodes) {
     const sk = node.apiKey ?? "";
-    if (seen.has(sk)) {
-      // 复制主节点的健康状态给同 sk 的兄弟节点
-      continue;
-    }
+    if (seen.has(sk)) continue;
     seen.add(sk);
+
+    // 账号间隔 2s，避免连续请求触发限速
+    await new Promise((r) => setTimeout(r, 2_000));
 
     const { ok, status, error } = await probeOneAirforceNode(node);
     const nowMs = Date.now();
 
     if (ok) {
-      // 探测成功：重置故障计数 & 解封
       afProbeFailCounts.delete(node.id);
-      // 所有同 sk 的节点都解封
       for (const n of afNodes.filter((n2) => n2.apiKey === sk)) {
         if (!n.creditExhaustedAt || nowMs > n.downUntil) {
           n.downUntil = 0;
@@ -2422,29 +2420,30 @@ async function airforceProbeLoop(): Promise<void> {
           n.failures = 0;
         }
       }
-    } else {
+    } else if (status === 429) {
+      // 429 = 限速，不下线节点——等下次轮询自然恢复
+      // 只记录 lastError 供调试，不修改 downUntil
+      for (const n of afNodes.filter((n2) => n2.apiKey === sk)) {
+        n.lastError = `AF探测-限速(跳过): ${error ?? "HTTP 429"}`;
+        n.lastStatus = 429;
+      }
+    } else if (status === 401 || status === 403) {
+      // 封号/凭据失效：下线到 UTC 凌晨，且故障计数++
       const fails = (afProbeFailCounts.get(node.id) ?? 0) + 1;
       afProbeFailCounts.set(node.id, fails);
-
-      let downMs: number;
-      let errTag: string;
-      if (status === 429) {
-        // 限速：退避 5min，不算封号
-        downMs = 5 * 60_000;
-        errTag = `AF探测-限速(${fails}次)`;
-      } else if (status === 401 || status === 403) {
-        // 封号/凭据失效：下线到 UTC 凌晨
-        downMs = msUntilUtcMidnight();
-        errTag = `AF探测-封号HTTP${status}(${fails}次)`;
-      } else {
-        // 网络超时等：指数退避最长2h
-        const steps = [2 * 60_000, 10 * 60_000, 30 * 60_000, 2 * 60 * 60_000];
-        downMs = steps[Math.min(fails - 1, steps.length - 1)]!;
-        errTag = `AF探测-网络错误(${fails}次)`;
+      const errMsg = `AF探测-封号HTTP${status}(${fails}次): ${error ?? ""}`;
+      for (const n of afNodes.filter((n2) => n2.apiKey === sk)) {
+        n.downUntil = nowMs + msUntilUtcMidnight();
+        n.lastError = errMsg;
+        n.lastStatus = status;
       }
-
-      const errMsg = `${errTag}: ${error ?? `HTTP ${status}`}`;
-      // 传播到所有同 sk 节点
+    } else {
+      // 网络超时/未知错误：指数退避，最长 2h
+      const fails = (afProbeFailCounts.get(node.id) ?? 0) + 1;
+      afProbeFailCounts.set(node.id, fails);
+      const steps = [2 * 60_000, 10 * 60_000, 30 * 60_000, 2 * 60 * 60_000];
+      const downMs = steps[Math.min(fails - 1, steps.length - 1)]!;
+      const errMsg = `AF探测-网络错误(${fails}次): ${error ?? `HTTP ${status}`}`;
       for (const n of afNodes.filter((n2) => n2.apiKey === sk)) {
         n.downUntil = nowMs + downMs;
         n.lastError = errMsg;
@@ -2455,7 +2454,7 @@ async function airforceProbeLoop(): Promise<void> {
 }
 
 // 启动后 10s 先探一次，此后每30分钟循环
-setTimeout(() => { void airforceProbeLoop(); }, 10_000);
+setTimeout(() => { void airforceProbeLoop(); }, 5 * 60_000); // 启动后5分钟再探，避免冷启动压测
 setInterval(() => { void airforceProbeLoop(); }, AF_PROBE_INTERVAL_MS);
 
 
