@@ -802,9 +802,25 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
                 except Exception as _ce:
                     print(f"[{email}] abuse_captcha press-hold failed: {_ce}", flush=True)
                 if not _captcha_handled:
-                    result["status"] = "error"
-                    result["msg"] = f"abuse_captcha_required (retryable): {final_url[:100]}"
-                    print(f"[{email}] Abuse page=CAPTCHA not suspension -> error(retryable)", flush=True)
+                    # v9.29: Abuse CAPTCHA = 账号实际已封，直接标 suspended，不重试
+                    result["status"] = "suspended"
+                    result["msg"] = f"abuse_captcha_banned: {final_url[:100]}"
+                    print(f"[{email}] Abuse CAPTCHA = 封号，标记 suspended", flush=True)
+                    try:
+                        import psycopg2 as _pg3
+                        _c3 = _pg3.connect(db_url or DB_URL)
+                        _cu3 = _c3.cursor()
+                        _cu3.execute(
+                            "UPDATE accounts SET status='suspended',"
+                            " tags=CASE WHEN COALESCE(tags,'')='' THEN 'abuse_mode'"
+                            " WHEN tags NOT LIKE '%%abuse_mode%%' THEN tags||',abuse_mode'"
+                            " ELSE tags END, updated_at=NOW() WHERE id=%s",
+                            (account_id,)
+                        )
+                        _c3.commit(); _cu3.close(); _c3.close()
+                        print(f"[{email}] DB 已写入 suspended + abuse_mode tag", flush=True)
+                    except Exception as _dbe3:
+                        print(f"[{email}] DB abuse_mode tag 写入失败: {_dbe3}", flush=True)
             elif _real_suspended_body:
                 result["status"] = "suspended"
                 result["msg"] = f"suspended: {final_url[:100]}"
