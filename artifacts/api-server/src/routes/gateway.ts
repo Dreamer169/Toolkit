@@ -139,32 +139,21 @@ const SUB2API_GROUP_IDS = {
   gemini: 3,
 };
 
-// ── AirForce 全量模型列表（api.airforce，按 /v1/models operational 整理）
+// ── AirForce 免费层已验证模型（free tier，usage.total_tokens > 0 确认）
+// 注意：所有带 -p2g 后缀的模型均为 PAYG-only，需绑卡充值，此处不列入。
 const AIRFORCE_CHAT_MODELS = [
-  // 免费
-  "translategemma-27b", "gemma3-270m:free", "roleplay:free",
-  // $1-20/M
-  "deepseek-v3.2", "char", "char-v2", "gpt-oss-20b", "kimi-k2-thinking",
-  "kimi-k2", "lana", "llama-4-scout", "kimi-k2-0905", "deepseek-v4-flash-p2g",
-  "gpt-oss-120b", "glm-4.5-air", "gemini-3.1-flash-lite-p2g", "kimi-k2.6-thinking",
-  "grok-4.1-fast-non-reasoning", "unmoderated-gpt", "gemini-3-flash",
-  "gpt-4o-mini", "glm-4.7-flash",
-  // $38-80/M
-  "minimax-m2.7", "claude-sonnet-4.6", "glm-4.5", "gemini-2.5-flash",
-  "plutotext-r3-emotional", "minimax-m2.5-sub", "claude-sonnet-4.5-p2g",
-  "grok-4.1-fast-reasoning", "claude-3-7-ch-exp", "claude-4-ch-exp",
-  "kimi-k2.6-p2g", "kimi-k2.5", "gemini-3.1-flash-lite",
-  "gpt-5.4-p2g", "glm-5", "glm-4.7", "glm-5.1", "glm-4.6",
-  "claude-opus-4.5-p2g",
-  // $100-150/M
-  "claude-sonnet-4.6-p2g", "claude-sonnet-4.5-rp", "venice", "nemotron-3-super",
-  "roleplay-exp", "minimax-m2.5", "deepseek-v3-0324", "claude-sonnet-4.6-rp",
-  // $180-250/M
-  "grok-4-heavy", "grok-4.1-mini:free", "grok-4.1-fast", "grok-4.1-thinking",
-  "rnj-1", "claude-opus-4.6-p2g", "claude-opus-4.6-rp",
-  // $300+/M — 旗舰
-  "grok-4.20-beta", "claude-opus-4.5-rp", "claude-opus-4.7",
-  "gpt-5.5-p2g", "bard",
+  // 实测有效（tokens > 0，通过 xray 代理验证）
+  "gpt-4o-mini",
+  "claude-sonnet-4.6",
+  "gemini-2.5-flash",
+  "llama-4-scout",
+  "grok-4-heavy",
+  "glm-5",
+  "claude-4-ch-exp",
+  // 有 rate limit（降频后可用）
+  "deepseek-v3.2",
+  "grok-3",
+  "gemini-3-flash",
 ];
 const AIRFORCE_IMAGE_MODELS = [
   "flux-2-dev", "z-image", "flux-2-klein-9b",
@@ -444,7 +433,7 @@ function createBuiltInNodes(): GatewayNode[] {
     })),
     // B15: 额外 OpenAI 凭据组（每组独立 baseUrl+apiKey，避免单点限流）
     ...EXTRA_OPENAI_SLOTS.flatMap((slot, si) => {
-      // 自动检测 AirForce 节点并绑定全量模型列表（支持 claude-opus-4.7、gpt-5.5-p2g 等）
+      // AirForce 节点：绑定免费层已验证模型列表（PAYG-only 模型不在其中）
       const isAirForce = slot.baseUrl.includes("airforce");
       const slotModels = isAirForce ? AIRFORCE_MODELS : undefined;
       return Array.from({ length: slot.count ?? 2 }, (_, ni) => ({
