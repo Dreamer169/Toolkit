@@ -1,7 +1,7 @@
 # unitool.ai Referral 完整操作手册
 
   > **最后更新**: 2026-05-06
-  > **版本**: v2.0（ref_code 自动激活）
+  > **版本**: v2.1（chain 模式：自动串联多个 ref_code）
   > **适合新人快速接手**
 
   ---
@@ -154,6 +154,37 @@
 
   ```bash
   python3 unitool_ref_pipeline.py --ref-code xjfjk --batch 10 --no-activate-ref
+  ```
+
+  ### 4.6 [v2.1] Chain 模式：无限扩展，跨 ref_code 自动串联
+
+  一个 ref_code 最多邀请 10 人。Chain 模式下，当前 ref_code 跑满后自动切换到
+  本次新激活的 referral 账号的 ref_code 继续注册，直到完成目标数量或耗尽账号。
+
+  ```bash
+  # 跑 50 个 referral（自动串联最多 5 个 ref_code）
+  python3 unitool_ref_pipeline.py --ref-code xjfjk --batch 50 --chain
+
+  # 限制链路深度（最多切换 3 次 ref_code，即最多注册 40 个）
+  python3 unitool_ref_pipeline.py --ref-code xjfjk --batch 50 --chain --max-depth 3
+  ```
+
+  Chain 切换流程：
+  ```
+  ref_code=xjfjk  →  注册10人  →  切换到 referral_1 的 ref_code
+                  →  注册10人  →  切换到 referral_11 的 ref_code
+                  →  注册10人  →  ...
+  ```
+
+  Chain 输出格式：
+  ```
+  [REF_OK]   1|email|ssid...
+  [REF_CODE] 1|email|ref_code_A|https://unitool.ai/ref/ref_code_A
+  ...（10次后）
+  [CHAIN]    1|xjfjk|ref_code_A|email_of_new_master
+  [REF_OK]   11|email2|ssid...
+  ...
+  [DONE]     50/50 ref_code=xjfjk depth=4
   ```
 
   ---
