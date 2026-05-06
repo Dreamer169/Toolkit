@@ -1451,15 +1451,16 @@ router.post("/tools/outlook/register", async (req, res) => {
     args.push("--password", password as string);
   }
   // Auto-recommend workers when not explicitly set (workers==1 default)
-  let resolvedWorkers = Math.min(8, Math.max(1, Math.floor(Number(workers) || 1)));
+  // Hard cap: 16 (memory permitting; each Chrome ~500MB, 16 workers = ~8GB)
+  let resolvedWorkers = Math.min(16, Math.max(1, Math.floor(Number(workers) || 1)));
   if (resolvedWorkers === 1 && n >= 2) {
     // Auto mode: derive optimal worker count from count + proxy availability
     if (effectiveProxyMode === "cf") {
-      // CF pool: cap at 4 workers (each needs its own xray relay slot)
-      resolvedWorkers = Math.min(4, n);
+      // CF pool: auto 6 workers (xray静态端口24个，内存允许时可手动传更高)
+      resolvedWorkers = Math.min(6, n);
     } else if (proxyList.length >= 2) {
-      // Named proxy pool: 1 worker per proxy, cap at 4
-      resolvedWorkers = Math.min(4, n, proxyList.length);
+      // Named proxy pool: 1 worker per proxy, no arbitrary cap
+      resolvedWorkers = Math.min(16, n, proxyList.length);
     }
     // n==1 or single proxy: stay sequential (resolvedWorkers stays 1)
   }
@@ -1819,7 +1820,7 @@ router.post("/tools/outlook/register", async (req, res) => {
       })();
     }
 
-    // AUTO-LINK: outlook/register -> unitool_pipeline.py (missing trigger added)
+    // AUTO-LINK: outlook/register -> unitool_pipeline.py
     if (okCount > 0) {
       try {
         const { spawn: _spawnUT } = await import("child_process");

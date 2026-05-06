@@ -2523,7 +2523,7 @@ def run_parallel(args) -> None:
     import os as _os, sys as _sys, subprocess as _sp, threading as _th, json as _jj, time as _tm
 
     n = args.count
-    w = min(max(1, args.workers), n, 8)
+    w = min(max(1, args.workers), n, 16)
     base, rem = divmod(n, w)
     chunks = [base + (1 if i < rem else 0) for i in range(w)]
 
@@ -2653,7 +2653,7 @@ def main():
     parser.add_argument("--cf-port",         type=int,   default=443,          help="CF 代理端口（默认443）")
     parser.add_argument("--username",        type=str,   default="",           help="指定首个 Outlook 用户名（可带 @outlook.com）")
     parser.add_argument("--password",        type=str,   default="",           help="指定首个 Outlook 密码")
-    parser.add_argument("--workers",         type=int,   default=1,            help="parallel sub-process workers (1=sequential, N=concurrent max 8)")
+    parser.add_argument("--workers",         type=int,   default=1,            help="parallel sub-process workers (1=sequential, N=concurrent, recommended ≤8 per memory)")
     args = parser.parse_args()
 
 
