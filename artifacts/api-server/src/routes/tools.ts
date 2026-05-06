@@ -5956,7 +5956,8 @@ router.post("/tools/unitool/login", async (req, res) => {
     ? ["--accounts", JSON.stringify(accounts), headless ? "--headless" : "--no-headless"]
     : ["--email", email, "--password", password, headless ? "--headless" : "--no-headless"];
 
-  const proc = spawn("python3", [UNITOOL_LOGIN_SCRIPT, ...args], {
+  const { spawn: _spawnUnitoolLogin } = await import("child_process");
+  const proc = _spawnUnitoolLogin("python3", [UNITOOL_LOGIN_SCRIPT, ...args], {
     env: { ...process.env, DISPLAY: ":99", PYTHONUNBUFFERED: "1" },
   });
 
