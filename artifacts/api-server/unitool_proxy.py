@@ -144,19 +144,34 @@ MODEL_ALIASES = {
     "gpt-3.5-turbo-0613":       "chatgpt",
     "gpt-3.5-turbo-16k":        "chatgpt",
     "text-davinci-003":         "chatgpt",
-    # 把 gpt-4o-mini 等没在 NATIVE 里的别名指到 chatgpt
+    # gpt-4o-mini 及未在 NATIVE 里的 → chatgpt 泛型最新版
     "gpt-4o-mini":              "chatgpt",
+    # GPT-5 / ChatGPT-5.5 系列（unitool 暂无专属 service，走 chatgpt 泛型服务）
+    "gpt-5":                    "chatgpt",
+    "gpt-5-turbo":              "chatgpt",
+    "gpt-5.5":                  "chatgpt",
+    "gpt-5.5-turbo":            "chatgpt",
+    "chatgpt-5":                "chatgpt",
+    "chatgpt-5-turbo":          "chatgpt",
+    "chatgpt-5.5":              "chatgpt",
+    "chatgpt-5.5-turbo":        "chatgpt",
+    "o4":                       "o4-mini",
     # Claude 常见别名
     "claude-3-5-sonnet-latest": "claude-3-5-sonnet",
     "claude-3-7-sonnet-latest": "claude-3-7-sonnet",
-    "claude-opus-latest":       "claude-opus-4",
+    "claude-opus-latest":       "claude-opus-4-5",   # 指向最新 Opus
     "claude-sonnet-latest":     "claude-sonnet-4",
-    "claude-sonnet-4-5":        "claude-sonnet-4",   # 修正：原proxy错误别名
+    "claude-sonnet-4-5":        "claude-sonnet-4",   # 原proxy错误别名已修正
+    # Claude Opus 4.6 系列（unitool 暂无独立 service，回退到 claude-opus-4-5）
+    "claude-opus-4-6":          "claude-opus-4-5",
+    "claude-opus-4.6":          "claude-opus-4-5",
+    "claude-opus-4.5":          "claude-opus-4-5",
+    "claude-opus-4-latest":     "claude-opus-4-5",
     # Gemini 别名
     "gemini-2.0-flash-lite":    "gemini-2.0-flash",
     "gemini-ultra":             "gemini-2.5-pro",
-    # 完全自定义别名（用户方便）
-    "gpt-5":                    "o3",      # unitool 没有 gpt-5，o3 最强
+    "gemini-2.5-flash":         "gemini-flash",
+    # 版本化 → 泛型
     "claude-3-sonnet-20240229": "claude-3-sonnet",
     # Grok 别名
     "grok":                     "grok-3",
@@ -164,7 +179,6 @@ MODEL_ALIASES = {
     # xAI generic
     "xai":                      "x-ai",
 }
-
 def _resolve_model(model: str) -> str:
     """把请求的 model 名映射到 unitool service_id"""
     if model in NATIVE_SERVICES:
