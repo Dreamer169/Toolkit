@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v4.4
+unitool.ai → OpenAI 兼容反代 v4.5
 改进:
   - 修复 pool 重复条目 bug（同一 ssid 出现在多个文件时去重）
   - 修复 /add-ssid 推入的条目在文件扫描后不丢失（live entries 保留）
   - 后台余额监控线程：每 30min 检查各账号余额，低余额/耗尽时打印警告
   - /pool-status 包含 balance 字段
-  - 版本: v4.4
+  - 版本: v4.5
 """
 import json, time, uuid, threading, ssl, os, re, sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -166,6 +166,43 @@ NATIVE_SERVICES = {
     "claude-opus-4-6",   # Claude Opus 4.6  ✓
     # gpt-4o → 持续超时暂不 native；gpt-o3-pro → 后端无内容
 }
+
+# 服务降级链：primary 失败时按顺序尝试备选（同家族）
+# 触发条件：service_error / timeout / 500
+FALLBACK_CHAINS: dict[str, list[str]] = {
+    # ── GPT 系 ──
+    "gpt-5":       ["gpt-5.5",   "gpt-5.4",  "gpt4.1",    "gpt-4-1",  "gpt-4o-mini"],
+    "gpt-5.5":     ["gpt-5",     "gpt-5.4",  "gpt-4-1",   "gpt-4o-mini"],
+    "gpt-5.4":     ["gpt-5.5",   "gpt-5",    "gpt-4-1",   "gpt-4o-mini"],
+    "gpt5.1":      ["gpt5.2",    "gpt-5",    "gpt-5.5",   "gpt-4-1"],
+    "gpt5.2":      ["gpt5.1",    "gpt-5",    "gpt-5.5",   "gpt-4-1"],
+    "gpt-4-1":     ["gpt-5.4",   "gpt-5",    "gpt-4o-mini"],
+    "gpt-4o-mini": ["gpt-4-1",   "gpt-5.4",  "gpt-5"],
+    # ── Claude 系 ──
+    "claude-opus-4-6":  ["claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet"],
+    "claude-sonnet-4-6":["claude-sonnet-4-5", "claude-sonnet",     "claude-opus-4-6"],
+    "claude-sonnet-4-5":["claude-sonnet-4-6", "claude-sonnet",     "claude-opus-4-6"],
+    "claude-sonnet":    ["claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-6"],
+}
+
+def _is_retryable_service_error(msg: str) -> bool:
+    """判断 service_error 是否值得切换 service 重试"""
+    RETRYABLE = [
+        "No content returned",
+        "Reasoning is mandatory",
+        "max_tokens",
+        "context_length_exceeded",
+        "overloaded",
+        "rate_limit",
+        "capacity",
+        "unavailable",
+        "timeout",
+        "upstream",
+        "Bad gateway",
+        "Service Unavailable",
+    ]
+    ml = msg.lower()
+    return any(k.lower() in ml for k in RETRYABLE)
 
 MODEL_ALIASES = {
     # ── OpenAI GPT 系 ──
@@ -364,24 +401,8 @@ def _pick_entry(entries: list) -> dict:
         _rr_idx += 1
         return entries[idx]
 
-def _do_chat(model: str, messages: list, ssid_override: str | None = None) -> str:
-    service_id = _resolve_model(model)
-    content = _fmt(messages)
-    print(f"[REQ] {model}→{service_id} msgs={len(messages)}", flush=True)
-
-    if ssid_override and len(ssid_override) > 50:
-        entry = {"ssid": ssid_override, "label": "header",
-                 "dead_until": 0, "chats": {}, "bad_chats": set(), "balance": None}
-        entries = [entry]
-    else:
-        _reload_pool_if_needed()
-        with _lock:
-            live = [e for e in _pool if e["dead_until"] <= time.time()]
-            entries = live if live else _pool[:]
-
-    if not entries:
-        raise Exception("ssid pool empty — please login first")
-
+def _try_service(service_id: str, content: str, entries: list) -> str:
+    """在给定 entries 池中对 service_id 发起请求（含 ssid 轮转 + 单次 chat 重试）"""
     last_err = None
     for _ in range(len(entries) * 2):
         entry = _pick_entry(entries)
@@ -415,8 +436,65 @@ def _do_chat(model: str, messages: list, ssid_override: str | None = None) -> st
         except Exception as e:
             last_err = e
             continue
+    raise Exception(f"all ssids failed for {service_id}: {last_err}")
 
-    raise Exception(f"all ssids failed: {last_err}")
+
+def _do_chat(model: str, messages: list, ssid_override: str | None = None) -> str:
+    primary_id = _resolve_model(model)
+    content = _fmt(messages)
+    print(f"[REQ] {model}→{primary_id} msgs={len(messages)}", flush=True)
+
+    if ssid_override and len(ssid_override) > 50:
+        entry = {"ssid": ssid_override, "label": "header",
+                 "dead_until": 0, "chats": {}, "bad_chats": set(), "balance": None}
+        entries = [entry]
+    else:
+        _reload_pool_if_needed()
+        with _lock:
+            live = [e for e in _pool if e["dead_until"] <= time.time()]
+            entries = live if live else _pool[:]
+
+    if not entries:
+        raise Exception("ssid pool empty — please login first")
+
+    # 构建本次请求的 service 尝试顺序：primary + 该 primary 的降级链
+    chain = [primary_id] + [s for s in FALLBACK_CHAINS.get(primary_id, [])
+                             if s != primary_id]
+
+    last_err = None
+    for idx, service_id in enumerate(chain):
+        if idx > 0:
+            print(f"[FALLBACK] {model}: {chain[idx-1]} → {service_id}", flush=True)
+        try:
+            result = _try_service(service_id, content, entries)
+            if idx > 0:
+                print(f"[FALLBACK] succeeded with {service_id}", flush=True)
+            return result
+        except TimeoutError as e:
+            print(f"[FALLBACK] {service_id} timeout, trying next", flush=True)
+            last_err = e
+            continue
+        except Exception as e:
+            err_msg = str(e)
+            # service_error → 判断是否值得换服务
+            if "service_error:" in err_msg:
+                detail = err_msg.split("service_error:", 1)[-1].strip()
+                if _is_retryable_service_error(detail):
+                    print(f"[FALLBACK] {service_id} svc_err={detail[:80]!r}, trying next", flush=True)
+                    last_err = e
+                    continue
+                else:
+                    # 不可重试的服务错误（如内容违规等）直接抛出
+                    raise
+            # HTTP 500 → 也尝试降级
+            if "500" in err_msg and idx < len(chain) - 1:
+                print(f"[FALLBACK] {service_id} HTTP 500, trying next", flush=True)
+                last_err = e
+                continue
+            # 其他错误（pool 耗尽等）直接抛出
+            raise
+
+    raise Exception(f"all services in chain failed ({chain}): {last_err}")
 
 # ─── HTTP Handler ────────────────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
@@ -599,14 +677,14 @@ class ThreadedServer(HTTPServer):
 
 if __name__ == "__main__":
     _reload_pool_if_needed()
-    print(f"[unitool-proxy v4.4] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v4.5] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     for e in _pool:
         print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     # 启动余额监控后台线程
     t = threading.Thread(target=_balance_monitor_loop, daemon=True)
     t.start()
-    print("[unitool-proxy v4.4] balance monitor started (first check in 2min)", flush=True)
+    print("[unitool-proxy v4.5] balance monitor started (first check in 2min)", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
