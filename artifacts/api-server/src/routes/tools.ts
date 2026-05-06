@@ -5509,10 +5509,7 @@ router.post('/tools/webshare/register', async (req, res) => {
 
   const jobId = `ws_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const job = await jobQueue.create(jobId);
-  job.logs.push({ type: 'start', message: `启动 Webshare 注册 — ${email}` }););
-  } else {
-    job.logs.push({ type: 'log', message: '🆓 免费模式: Xvfb + 服务器直连 IP + 音频 CAPTCHA (不需任何付费服务)' });
-  }
+  job.logs.push({ type: 'start', message: `启动 Webshare 注册 — ${email}` });
   if (proxy) job.logs.push({ type: 'log', message: `代理: ${proxy.replace(/:([^:@]{4})[^:@]*@/, ':****@')}` });
   res.json({ success: true, jobId, message: 'Webshare 注册任务已启动' });
 
@@ -5869,3 +5866,96 @@ router.get("/tools/outlook/screenshot-img/:name", async (req, res) => {
 });
 
 export default router;
+
+
+// ══ unitool.ai 登录 API (v1.0) ═════════════════════════════════════════════════
+// 调用 scripts/unitool_login.py，支持单账号/批量登录
+// POST /tools/unitool/login  — 发起登录任务
+// GET  /tools/unitool/login/:jobId — 轮询结果
+// DELETE /tools/unitool/login/:jobId — 停止任务
+
+const UNITOOL_LOGIN_SCRIPT = "/root/Toolkit/scripts/unitool_login.py";
+
+router.post("/tools/unitool/login", async (req, res) => {
+  const body = req.body as Record<string, unknown>;
+  const email    = String(body.email ?? "").trim();
+  const password = String(body.password ?? "").trim();
+  const accounts = body.accounts as Array<[string,string]> | undefined;
+  const headless = body.headless !== false;
+
+  if (!accounts && (!email || !password)) {
+    res.status(400).json({ success: false, error: "需要 email+password 或 accounts 数组" });
+    return;
+  }
+
+  const jobId = await jobQueue.create("unitool-login", {});
+  res.json({ success: true, jobId });
+
+  const args = accounts
+    ? ["--accounts", JSON.stringify(accounts), headless ? "--headless" : "--no-headless"]
+    : ["--email", email, "--password", password, headless ? "--headless" : "--no-headless"];
+
+  const proc = spawn("python3", [UNITOOL_LOGIN_SCRIPT, ...args], {
+    env: { ...process.env, DISPLAY: ":99", PYTHONUNBUFFERED: "1" },
+  });
+
+  const job = await jobQueue.get(jobId);
+  if (!job) return;
+
+  const results: Array<{ ok: boolean; email: string; ssid?: string; reason?: string; cookies?: unknown[] }> = [];
+
+  proc.stdout.on("data", (d: Buffer) => {
+    const lines = d.toString().split("\n");
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t) continue;
+      job.logs.push({ type: "info", message: t });
+      if (t.startsWith("[OK]")) {
+        const parts = t.slice(5).split("|");
+        const [okEmail, , ssid, cookieJson] = parts;
+        let cookies: unknown[] = [];
+        try { cookies = JSON.parse(cookieJson ?? "[]"); } catch { /* */ }
+        results.push({ ok: true, email: okEmail, ssid, cookies });
+        job.logs.push({ type: "ok", message: `✅ ${okEmail} 登录成功 ssid=${ssid?.slice(0,20)}...` });
+      } else if (t.startsWith("[FAIL]")) {
+        const [failEmail, reason] = t.slice(7).split("|");
+        results.push({ ok: false, email: failEmail, reason });
+        job.logs.push({ type: "error", message: `❌ ${failEmail} 失败: ${reason}` });
+      } else if (t.startsWith("[DONE]")) {
+        job.logs.push({ type: "ok", message: `🏁 ${t}` });
+      }
+    }
+  });
+
+  proc.stderr.on("data", (d: Buffer) => {
+    const t = d.toString().trim();
+    if (t) job.logs.push({ type: "info", message: `[stderr] ${t}` });
+  });
+
+  proc.on("close", async (code) => {
+    (job as any)._unitoolResults = results;
+    const ok = results.filter(r => r.ok).length;
+    const total = results.length;
+    job.logs.push({ type: ok > 0 ? "ok" : "error", message: `完成: ${ok}/${total} 成功` });
+    await jobQueue.finish(jobId, code ?? -1, ok > 0 ? "done" : "failed");
+  });
+});
+
+router.get("/tools/unitool/login/:jobId", async (req, res) => {
+  const job = await jobQueue.get(req.params.jobId);
+  if (!job) { res.status(404).json({ success: false, error: "任务不存在" }); return; }
+  const since = Number(req.query.since ?? 0);
+  res.json({
+    success: true,
+    status: job.status,
+    logs: job.logs.slice(since),
+    nextSince: job.logs.length,
+    results: (job as any)._unitoolResults ?? [],
+    exitCode: job.exitCode,
+  });
+});
+
+router.delete("/tools/unitool/login/:jobId", (req, res) => {
+  const stopped = jobQueue.stop(req.params.jobId);
+  res.json({ success: !!stopped });
+});
