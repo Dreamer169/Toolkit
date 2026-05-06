@@ -6178,7 +6178,7 @@ router.post("/tools/unitool/ref-pipeline", async (req, res) => {
       type: okCount > 0 ? "ok" : "error",
       message: `完成: ${okCount} 人注册成功，串联 ${chainCount} 个 ref_code`,
     });
-    await jobQueue.finish(jobId, code ?? -1, okCount > 0 ? "done" : "failed");
+    await jobQueue.finish(jobIdStr, code ?? -1, okCount > 0 ? "done" : "failed");
   });
 });
 
