@@ -79,10 +79,11 @@ def _reload_pool_if_needed():
                 })
                 print(f"[POOL] added {fn} ssid={ssid[:16]}...", flush=True)
 
-        # 2. 保留不在文件里的条目（/add-ssid 推入的，或已 dead 的）
+        # 2. 保留不在文件里的 dead 条目（暂时 423/expired，等恢复）
         for e in _pool:
             if e["ssid"] not in seen_ssids:
-                new_pool.append(e)
+                if e["dead_until"] > now:
+                    new_pool.append(e)
 
         _pool = new_pool
 
@@ -481,20 +482,30 @@ class Handler(BaseHTTPRequestHandler):
                 added = False
                 updated = False
                 with _lock:
-                    existing_entry = next((e for e in _pool if e["ssid"] == ssid), None)
-                    if existing_entry:
-                        # 用 email label 更新已有的文件标签
-                        if existing_entry["label"] != label and "@" in label:
-                            existing_entry["label"] = label
+                    same_label = next((e for e in _pool if e["label"] == label), None)
+                    same_ssid  = next((e for e in _pool if e["ssid"]  == ssid),  None)
+                    if same_label and same_label["ssid"] != ssid:
+                        # 同账号新 ssid：原地替换，重置状态
+                        same_label["ssid"] = ssid
+                        same_label["dead_until"] = 0
+                        same_label["dead_reason"] = ""
+                        same_label["chats"] = {}
+                        same_label["bad_chats"] = set()
+                        updated = True
+                        print(f"[POOL] /add-ssid UPDATE {label} ssid={ssid[:16]}...", flush=True)
+                    elif same_ssid and not same_label:
+                        # 同 ssid 但 label 变了（文件→email）
+                        if "@" in label:
+                            same_ssid["label"] = label
                             updated = True
-                    else:
+                    elif not same_label and not same_ssid:
                         _pool.append({
                             "ssid": ssid, "label": label,
                             "dead_until": 0, "dead_reason": "",
                             "chats": {}, "bad_chats": set(), "balance": None,
                         })
                         added = True
-                        print(f"[POOL] /add-ssid label={label} ssid={ssid[:16]}...", flush=True)
+                        print(f"[POOL] /add-ssid NEW {label} ssid={ssid[:16]}...", flush=True)
                 self._json(200, {"ok": True, "added": added, "updated": updated,
                                  "pool_size": len(_pool)})
             except Exception as e:
