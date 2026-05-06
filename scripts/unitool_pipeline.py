@@ -74,7 +74,6 @@ def get_pending_account():
           AND refresh_token IS NOT NULL AND refresh_token != ''
           AND tags LIKE '%unitool_verify_pending%'
           AND tags NOT LIKE '%unitool_registered%'
-          AND tags NOT LIKE '%unitool_processing%'
           AND LENGTH(COALESCE(password,'')) >= 8
         ORDER BY updated_at ASC NULLS LAST
         LIMIT 1
