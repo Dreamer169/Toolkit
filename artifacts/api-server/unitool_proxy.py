@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.0
+unitool.ai → OpenAI 兼容反代 v5.2
 ====================================
 改进 (相对 v4.5):
   1. 真实 SSE 流式输出 — 后台线程轮询消息 API，增量推送 delta（不再按空格假分块）
@@ -163,11 +163,24 @@ def _reload_pool_if_needed():
         return
     _rebuild_pool()
 
-def _make_entry(ssid: str, label: str) -> dict:
+MAX_CONCURRENCY_PER_SSID = 2   # 每个 ssid 允许同时最多并发请求数
+
+def _label_to_email(label: str) -> str:
+    """将文件名 label 还原为 email (kmitchellnvh__outlook_com -> kmitchellnvh@outlook.com)"""
+    if "@" in label:
+        return label
+    m = re.match(r"^(.+?)__(.+)$", label)
+    if m:
+        return "{}@{}".format(m.group(1), m.group(2).replace("_", "."))
+    return label
+
+def _make_entry(ssid: str, label: str, email: str = "") -> dict:
     return {"ssid": ssid, "label": label,
+            "_email": email or _label_to_email(label),
             "dead_until": 0, "dead_reason": "",
             "balance": None, "_balance_ts": 0,
-            "_relogin_pending": False}
+            "_relogin_pending": False,
+            "_active": 0}
 
 def _mark_dead(ssid: str, secs: int = 600, reason: str = ""):
     with _lock:
@@ -187,27 +200,33 @@ def _mark_dead(ssid: str, secs: int = 600, reason: str = ""):
 
 # ─── 自动重登 ────────────────────────────────────────────────────────────────
 def _get_password_for_label(label: str) -> str:
-    """从 DB accounts 表查 label(email) 对应密码"""
+    """从 DB 查密码；同时尝试 label 原值和还原的 email 格式"""
+    candidates = list(dict.fromkeys([label, _label_to_email(label)]))
     try:
         conn = psycopg2.connect(DB_URL)
         cur  = conn.cursor()
-        cur.execute("SELECT password FROM accounts WHERE email=%s LIMIT 1", (label,))
-        row = cur.fetchone()
+        for cand in candidates:
+            cur.execute("SELECT password FROM accounts WHERE email=%s LIMIT 1", (cand,))
+            row = cur.fetchone()
+            if row:
+                conn.close()
+                return row[0]
         conn.close()
-        return row[0] if row else ""
+        return ""
     except Exception:
         return ""
 
 def _bg_relogin(label: str):
     """后台线程：用 unitool_login.py 重新登录，成功后推入 pool"""
-    print(f"[RELOGIN] starting for {label}", flush=True)
+    email = _label_to_email(label)   # 还原 email（文件名 label 含下划线编码）
+    print(f"[RELOGIN] starting for {email} (label={label})", flush=True)
     pw = _get_password_for_label(label)
     if not pw:
-        print(f"[RELOGIN] no password found for {label}, skip", flush=True)
+        print(f"[RELOGIN] no password found for {email}/{label}, skip", flush=True)
         return
     try:
         result = subprocess.run(
-            ["python3", LOGIN_SCRIPT, "--email", label, "--password", pw, "--no-headless"],
+            ["python3", LOGIN_SCRIPT, "--email", email, "--password", pw, "--no-headless"],
             capture_output=True, text=True, timeout=180,
             env={**os.environ, "DISPLAY": ":99", "PYTHONUNBUFFERED": "1"}
         )
@@ -277,6 +296,9 @@ def _balance_monitor_loop():
                 entries = list(_pool)
             now = time.time()
             for e in entries:
+                # 跳过 dead 条目（ssid 过期，检查无意义）
+                if e["dead_until"] > now:
+                    continue
                 if now - e.get("_balance_ts", 0) < BALANCE_CHECK_INTERVAL:
                     continue
                 bal = _check_balance(e["ssid"])
@@ -412,6 +434,18 @@ def _send_and_collect(entry: dict, service_id: str, content: str,
     创建新 chat → 发送消息 → 轮询等待完整回复（同时通过 chunk_cb 发送增量）
     chunk_cb(delta: str) 若提供则做真实流式推送
     """
+    # 并发计数 +1（try/finally 保证必然 -1）
+    with _lock:
+        entry["_active"] = entry.get("_active", 0) + 1
+    try:
+        return _send_and_collect_core(entry, service_id, content, chunk_cb, timeout)
+    finally:
+        with _lock:
+            entry["_active"] = max(0, entry.get("_active", 0) - 1)
+
+
+def _send_and_collect_core(entry: dict, service_id: str, content: str,
+                           chunk_cb=None, timeout: int = 180) -> str:
     # 1. 创建新 chat（每请求独立，避免上下文污染）
     chat = _api("POST", "/api/provider-runtime/chats",
                 body={"service_id": service_id, "title": ""}, ssid=entry["ssid"])
@@ -460,6 +494,7 @@ def _send_and_collect(entry: dict, service_id: str, content: str,
                 active_stable += 1
                 if active_stable >= 2:
                     return cur_txt
+            break   # 找到匹配消息后退出 for，防止历史消息错误重置 active_stable
         interval = 1.0
 
     raise TimeoutError(f"timeout chat={chat_id} service={service_id}")
@@ -469,11 +504,17 @@ def _try_service(service_id: str, content: str, entries: list,
     last_err = None
     max_attempts = max(len(entries) * 2, 4)
     for attempt in range(max_attempts):
-        # 动态过滤: 每次循环重新取 live 条目，跳过刚被标死的 ssid
+        # 动态过滤: 跳过 dead + 并发已满的 ssid
         now = time.time()
-        live_now = [e for e in entries if e["dead_until"] <= now]
-        pick_from = live_now if live_now else entries
-        entry = _pick_entry(pick_from)
+        live_now = [
+            e for e in entries
+            if e["dead_until"] <= now
+            and e.get("_active", 0) < MAX_CONCURRENCY_PER_SSID
+        ]
+        if not live_now:
+            # 全部繁忙/死亡：先取 live 忽略并发上限，再兜底全量
+            live_now = [e for e in entries if e["dead_until"] <= now] or entries
+        entry = _pick_entry(live_now)
         try:
             return _send_and_collect(entry, service_id, content, chunk_cb=chunk_cb)
         except HTTPError as e:
@@ -580,6 +621,7 @@ class Handler(BaseHTTPRequestHandler):
                     "dead_reason": e.get("dead_reason", ""),
                     "balance":     e.get("balance"),
                     "relogin":     e.get("_relogin_pending", False),
+                    "active":      e.get("_active", 0),
                 } for e in _pool]
             live = sum(1 for a in info if not a["dead"])
             return self._json(200, {"pool_size": len(_pool), "live": live, "accounts": info})
@@ -715,15 +757,15 @@ class ThreadedServer(HTTPServer):
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.1] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.2] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.1] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.2] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.1] balance monitor started", flush=True)
+    print("[unitool-proxy v5.2] balance monitor started", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
