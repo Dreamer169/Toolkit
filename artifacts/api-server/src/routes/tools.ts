@@ -5865,6 +5865,86 @@ router.get("/tools/outlook/screenshot-img/:name", async (req, res) => {
   createReadStream(fp).pipe(res as any);
 });
 
+
+// ══ unitool.ai 注册 API (v1.0) ═══════════════════════════════════════════════
+// 修复：验证邮件在垃圾邮件(JunkEmail)里，现在同时搜索 Inbox + JunkEmail
+// POST /tools/unitool/register  — 发起注册任务
+// GET  /tools/unitool/register/:jobId — 轮询进度
+// DELETE /tools/unitool/register/:jobId — 停止任务
+
+const UNITOOL_REGISTER_SCRIPT = "/root/Toolkit/scripts/unitool_register.py";
+
+router.post("/tools/unitool/register", async (req, res) => {
+  const { email = "", count = 1, headless = false } = req.body as {
+    email?: string; count?: number; headless?: boolean;
+  };
+
+  const jobId = `unitool_reg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const job = await jobQueue.create(jobId);
+  job.logs.push({ type: "start", message: `启动 unitool.ai 注册 (Inbox+JunkEmail 双重搜索)` });
+  res.json({ success: true, jobId });
+
+  const args = [UNITOOL_REGISTER_SCRIPT, "--count", String(Math.max(1, Number(count) || 1))];
+  if (email) args.push("--email", email);
+  if (!headless) args.push("--headless");   // non-headless by default (DISPLAY=:99)
+
+  const proc = spawn("python3", args, {
+    env: { ...process.env, DISPLAY: ":99", PYTHONUNBUFFERED: "1" },
+  });
+
+  const regResults: Array<{ ok: boolean; email: string; ssid?: string; reason?: string }> = [];
+
+  proc.stdout.on("data", (d: Buffer) => {
+    for (const line of d.toString().split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      job.logs.push({ type: "log", message: t });
+      if (t.startsWith("[OK]")) {
+        const [em, ssid] = t.slice(5).split("|");
+        regResults.push({ ok: true, email: em, ssid });
+        job.logs.push({ type: "ok", message: `✅ ${em} 注册成功` });
+      } else if (t.startsWith("[FAIL]")) {
+        const [em, reason] = t.slice(7).split("|");
+        regResults.push({ ok: false, email: em, reason });
+        job.logs.push({ type: "error", message: `❌ ${em} 失败: ${reason}` });
+      } else if (t.startsWith("[DONE]")) {
+        job.logs.push({ type: "ok", message: `🏁 ${t}` });
+      }
+    }
+  });
+
+  proc.stderr.on("data", (d: Buffer) => {
+    const t = d.toString().trim();
+    if (t) job.logs.push({ type: "log", message: t });
+  });
+
+  proc.on("close", async (code) => {
+    (job as any)._unitoolRegResults = regResults;
+    const ok = regResults.filter(r => r.ok).length;
+    job.logs.push({ type: ok > 0 ? "ok" : "error", message: `完成: ${ok}/${regResults.length} 成功` });
+    await jobQueue.finish(jobId, code ?? -1, ok > 0 ? "done" : "failed");
+  });
+});
+
+router.get("/tools/unitool/register/:jobId", async (req, res) => {
+  const job = await jobQueue.get(req.params.jobId);
+  if (!job) { res.status(404).json({ success: false, error: "任务不存在" }); return; }
+  const since = Number(req.query.since ?? 0);
+  res.json({
+    success: true,
+    status: job.status,
+    logs: job.logs.slice(since),
+    nextSince: job.logs.length,
+    results: (job as any)._unitoolRegResults ?? [],
+    exitCode: job.exitCode,
+  });
+});
+
+router.delete("/tools/unitool/register/:jobId", (req, res) => {
+  const stopped = jobQueue.stop(req.params.jobId);
+  res.json({ success: !!stopped });
+});
+
 export default router;
 
 

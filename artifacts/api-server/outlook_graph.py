@@ -265,10 +265,128 @@ def _extract_verify_url(html: str) -> str | None:
     return None
 
 
+
+# ─────────────────────────────────────────────────────────────
+# 3. unitool.ai 验证邮件（Inbox + JunkEmail 双重搜索）
+# ─────────────────────────────────────────────────────────────
+UNITOOL_KWS     = ("unitool", "verify", "confirm", "activate", "email", "welcome")
+UNITOOL_SENDERS = ("unitool.ai", "noreply", "no-reply", "support")
+
+
+def wait_for_unitool_verify(
+    refresh_token: str,
+    timeout: int = 300,
+    after_ts: float | None = None,
+) -> str | None:
+    """
+    同时轮询 Inbox + JunkEmail，寻找 unitool.ai 的验证邮件。
+    修复：unitool 验证邮件经常落入垃圾邮件(Junk Email)，原代码只搜索 Inbox 会漏掉。
+    """
+    start_ts = after_ts or (time.time() - 30)
+    deadline  = time.time() + timeout
+    seen_ids: set = set()
+
+    print("[unitool_graph] 获取 access_token…", flush=True)
+    try:
+        resp  = _refresh_access_token_raw(refresh_token)
+        token = resp["access_token"]
+    except Exception as e:
+        print(f"[unitool_graph] ❌ 刷新 token 失败: {e}", flush=True)
+        return None
+
+    print(f"[unitool_graph] 开始轮询 Inbox + JunkEmail (最多 {timeout}s)…", flush=True)
+    poll = 0
+    while time.time() < deadline:
+        poll += 1
+        # 同时搜索两个文件夹
+        for folder_id in ("Inbox", "JunkEmail"):
+            try:
+                msgs = _graph_get_with_token(
+                    f"/me/mailFolders/{folder_id}/messages"
+                    "?$top=20&$orderby=receivedDateTime+desc"
+                    "&$select=id,subject,bodyPreview,receivedDateTime,from",
+                    token,
+                )
+                for msg in msgs.get("value", []):
+                    mid = msg["id"]
+                    if mid in seen_ids:
+                        continue
+
+                    recv_str = msg.get("receivedDateTime", "")
+                    if recv_str:
+                        try:
+                            from datetime import datetime
+                            recv_ts = datetime.fromisoformat(
+                                recv_str.replace("Z", "+00:00")).timestamp()
+                            if recv_ts < start_ts - 60:
+                                seen_ids.add(mid)
+                                continue
+                        except Exception:
+                            pass
+
+                    subj   = msg.get("subject", "").lower()
+                    prev   = msg.get("bodyPreview", "").lower()
+                    sender = msg.get("from", {}).get("emailAddress", {}).get("address", "").lower()
+
+                    hit = (
+                        any(k in subj   for k in UNITOOL_KWS)
+                        or any(k in prev   for k in UNITOOL_KWS)
+                        or any(s in sender for s in UNITOOL_SENDERS)
+                        or "unitool" in sender
+                    )
+                    if not hit:
+                        seen_ids.add(mid)
+                        continue
+
+                    print(f"[unitool_graph] [{folder_id}] 候选: {msg.get('subject','')} from={sender}", flush=True)
+                    detail = _graph_get_with_token(f"/me/messages/{mid}?$select=body", token)
+                    body   = detail.get("body", {}).get("content", "") or ""
+                    url    = _extract_unitool_verify_url(body)
+                    if url:
+                        print(f"[unitool_graph] ✅ [{folder_id}] 验证链接: {url[:100]}", flush=True)
+                        return url
+                    seen_ids.add(mid)
+            except Exception as e:
+                print(f"[unitool_graph] {folder_id} 查询异常: {e}", flush=True)
+
+        print(f"[unitool_graph] poll#{poll} 未找到，等 10s…", flush=True)
+        time.sleep(10)
+        try:
+            resp  = _refresh_access_token_raw(refresh_token)
+            token = resp["access_token"]
+        except Exception:
+            pass
+
+    print("[unitool_graph] ⏰ 超时，未收到 unitool 验证邮件", flush=True)
+    return None
+
+
+def _extract_unitool_verify_url(html: str) -> str | None:
+    """从 unitool 邮件 HTML 中提取验证链接"""
+    candidates = re.findall(r'https?://[^\s"\'<>\)]+', html)
+    priority = (
+        "unitool.ai/en/verify", "unitool.ai/verify", "unitool.ai/confirm",
+        "unitool.ai/activate", "unitool.ai/email", "unitool.ai/en/entry?token",
+        "unitool.ai/en/entry?verify",
+    )
+    fallback = ("unitool", "verify", "confirm", "activate", "token")
+    for url in candidates:
+        if any(k in url.lower() for k in priority):
+            return url.rstrip(".,)")
+    for url in candidates:
+        if "unitool.ai" in url.lower() and any(k in url.lower() for k in fallback):
+            return url.rstrip(".,)")
+    for url in candidates:
+        if any(k in url.lower() for k in fallback) and len(url) > 60:
+            return url.rstrip(".,)")
+    return None
+
+
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1:
-        # 测试：传入 refresh_token
+    if len(sys.argv) > 2 and sys.argv[1] == "unitool":
+        print(wait_for_unitool_verify(sys.argv[2], timeout=60))
+    elif len(sys.argv) > 1:
         print(wait_for_replit_verify(sys.argv[1], timeout=60))
     else:
         print(wait_for_cursor_otp(timeout=60))
