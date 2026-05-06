@@ -163,21 +163,27 @@ async def login_one(email: str, password: str, headless: bool = True,
         _log(f"  [{email}] bypassing signin Turnstile...")
         await _bypass_turnstile(tab, "signin", timeout=12)
 
-        # 等 signin token 出现 (captcha_action=login) — 需额外等 iframe 重载
-        await asyncio.sleep(3)
+        # 等 signin token 出现 (captcha_action=login) — 带重试 bypass（最多3轮）
         signin_tok = ""
-        for i in range(40):
-            await asyncio.sleep(1)
-            n  = await _tok_len(tab)
-            ca = _s(await tab.execute_script(
-                "(document.querySelector('[name=\"captcha_action\"]')||{value:'?'}).value",
-                return_by_value=True))
-            if n > 20 and ca == "login":
-                signin_tok = await _get_full_token(tab)
-                _log(f"  [{email}] signin token at {i+1}s len={n} action={ca}")
+        for _bypass_round in range(3):
+            if _bypass_round > 0:
+                _log(f"  [{email}] [round {_bypass_round+1}] retry bypass signin Turnstile...")
+                await _bypass_turnstile(tab, f"signin-r{_bypass_round+1}", timeout=12)
+            await asyncio.sleep(3)
+            for i in range(15):
+                await asyncio.sleep(1)
+                n  = await _tok_len(tab)
+                ca = _s(await tab.execute_script(
+                    "(document.querySelector('[name=\"captcha_action\"]')||{value:'?'}).value",
+                    return_by_value=True))
+                if n > 20 and ca == "login":
+                    signin_tok = await _get_full_token(tab)
+                    _log(f"  [{email}] signin token at round={_bypass_round+1} i={i+1}s len={n} action={ca}")
+                    break
+                if i % 5 == 4:
+                    _log(f"  [{email}]   [r{_bypass_round+1} {i+1}s] waiting signin tok len={n} action={ca}")
+            if signin_tok:
                 break
-            if i % 5 == 4:
-                _log(f"  [{email}]   [{i+1}s] waiting signin tok len={n} action={ca}")
 
         if not signin_tok:
             # 兜底：用当前 form 里任何 token
