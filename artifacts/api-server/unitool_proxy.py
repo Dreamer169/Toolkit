@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.3
+unitool.ai → OpenAI 兼容反代 v5.4
 ====================================
 改进 (相对 v5.2):
   1. 真实 SSE 流式输出 — 后台线程轮询消息 API，增量推送 delta（不再按空格假分块）
@@ -328,11 +328,14 @@ NATIVE_SERVICES = {
     "gpt-4o-mini", "gpt-5.4",
     # [v5.3] gpt-5-nano: unitool backend 禁用 reasoning → 触发 retryable 后降级到 gpt-5
     "gpt-5-nano",
-    # [v5.3] 原生 gemini/grok: unitool 返回 "Unexpected end of JSON input" → retryable 降级
-    "gemini-2.5-pro", "gemini-2.5-flash",
+    # [v5.4] gemini-3.1-pro / grok: 原生支持（需特殊 chat_settings + options）
+    "gemini-3.1-pro",
     "grok",
     "claude-sonnet", "claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-6",
 }
+
+# [v5.4] 需要 reasoning_effort 的服务：chat 创建用 /api/chats + chat_settings, 消息带 options
+REASONING_SERVICES = {"gemini-3.1-pro", "grok"}
 
 FALLBACK_CHAINS: dict[str, list[str]] = {
     "gpt-5":            ["gpt-5.5",   "gpt-5.4",  "gpt-4-1",  "gpt-4o-mini"],
@@ -346,14 +349,9 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
     "claude-sonnet-4-6":["claude-sonnet-4-5", "claude-sonnet",     "claude-opus-4-6"],
     "claude-sonnet-4-5":["claude-sonnet-4-6", "claude-sonnet",     "claude-opus-4-6"],
     "claude-sonnet":    ["claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-6"],
-    # [v5.3] 新增
-    # gpt-5-nano: unitool backend 把 reasoning 禁掉 → "Reasoning is mandatory" → 降级 gpt-5
+    # [v5.3] gpt-5-nano: "Reasoning is mandatory" → 降级 gpt-5
     "gpt-5-nano":       ["gpt-5",        "gpt-5.5",  "gpt-4-1",  "gpt-4o-mini"],
-    # gemini: unitool "Unexpected end of JSON input" → 降级到 gpt-4o-mini
-    "gemini-2.5-pro":   ["gemini-2.5-flash", "gpt-4o-mini", "gpt-4-1", "gpt-5"],
-    "gemini-2.5-flash": ["gemini-2.5-pro",   "gpt-4o-mini", "gpt-4-1", "gpt-5"],
-    # grok: 同上 unitool bug → 降级到 gpt-5.5
-    "grok":             ["gpt-5.5",      "gpt-5",    "gpt-4-1",  "gpt-4o-mini"],
+    # [v5.4] gemini-3.1-pro / grok: 原生修复，用户明确禁止降级 → 无 fallback chain
 }
 
 MODEL_ALIASES = {
@@ -381,13 +379,13 @@ MODEL_ALIASES = {
     "claude-3-sonnet": "claude-sonnet", "claude-3-sonnet-20240229": "claude-sonnet",
     "claude-haiku": "claude-sonnet", "claude-3-5-sonnet-latest": "claude-sonnet",
     "claude-3-7-sonnet-latest": "claude-sonnet", "claude-sonnet-latest": "claude-sonnet",
-    # [v5.3] gemini: 优先尝试原生 gemini-2.5-pro（在 NATIVE_SERVICES 中），
-    #   失败后 FALLBACK_CHAINS 会降级到 gpt-4o-mini；老版本名称直接别名到 gpt-4o-mini
-    "gemini": "gemini-2.5-pro", "gemini-pro": "gemini-2.5-pro",
-    "gemini-flash": "gemini-2.5-flash", "gemini-ultra": "gemini-2.5-pro",
-    "gemini-2.0-pro": "gpt-4o-mini", "gemini-2.0-flash": "gpt-4o-mini",
-    "gemini-1.5-pro": "gpt-4o-mini", "gemini-1.5-flash": "gpt-4o-mini",
-    # [v5.3] grok: 优先尝试原生 grok（NATIVE_SERVICES），失败降级 gpt-5.5
+    # [v5.4] gemini: 所有别名 → gemini-3.1-pro（原生支持）
+    "gemini": "gemini-3.1-pro", "gemini-pro": "gemini-3.1-pro",
+    "gemini-flash": "gemini-3.1-pro", "gemini-ultra": "gemini-3.1-pro",
+    "gemini-2.5-pro": "gemini-3.1-pro", "gemini-2.5-flash": "gemini-3.1-pro",
+    "gemini-2.0-pro": "gemini-3.1-pro", "gemini-2.0-flash": "gemini-3.1-pro",
+    "gemini-1.5-pro": "gemini-3.1-pro", "gemini-1.5-flash": "gemini-3.1-pro",
+    # [v5.4] grok: 原生支持，无降级
     "grok-3": "grok", "grok-3-fast": "grok", "grok-3-mini": "grok",
     "grok-2": "grok", "grok-beta": "grok",
     "deepseek": "gpt-5.5", "deepseek-r1": "gpt-5.5", "deepseek-v3": "gpt-5.5",
@@ -399,8 +397,8 @@ def _resolve_model(model: str) -> str:
     if model in MODEL_ALIASES:    return MODEL_ALIASES[model]
     m = model.lower()
     if "claude" in m:   return "claude-sonnet"
-    if "gemini" in m:   return "gpt-4o-mini"
-    if "grok" in m:     return "gpt-5.5"
+    if "gemini" in m:   return "gemini-3.1-pro"
+    if "grok" in m:     return "grok"
     if "deepseek" in m: return "gpt-5.5"
     return "gpt-5.5"
 
@@ -435,10 +433,10 @@ def _is_retryable(msg: str) -> bool:
     KEYS = ["No content returned","Reasoning is mandatory","max_tokens",
             "context_length_exceeded","overloaded","rate_limit","capacity",
             "unavailable","timeout","upstream","Bad gateway","Service Unavailable",
-            # [v5.3] gemini/grok: unitool 服务端 JSON 解析崩溃
-            "Unexpected end of JSON input",
             # [v5.3] grok 子型号: unitool 明确返回不支持
-            "Unsupported service"]
+            "Unsupported service",
+            # [v5.4] gemini 后端临时维护
+            "currently being maintained"]
     ml = msg.lower()
     return any(k.lower() in ml for k in KEYS)
 
@@ -470,15 +468,25 @@ def _send_and_collect(entry: dict, service_id: str, content: str,
 def _send_and_collect_core(entry: dict, service_id: str, content: str,
                            chunk_cb=None, timeout: int = 180) -> str:
     # 1. 创建新 chat（每请求独立，避免上下文污染）
-    chat = _api("POST", "/api/provider-runtime/chats",
-                body={"service_id": service_id, "title": ""}, ssid=entry["ssid"])
+    # [v5.4] gemini-3.1-pro / grok 需要通过 /api/chats 创建并设置 chat_settings
+    if service_id in REASONING_SERVICES:
+        _rsettings = '{"reasoning_effort":"high","thinking":true}'
+        chat = _api("POST", "/api/chats",
+                    body={"service_id": service_id, "title": "",
+                          "chat_settings": _rsettings},
+                    ssid=entry["ssid"])
+    else:
+        chat = _api("POST", "/api/provider-runtime/chats",
+                    body={"service_id": service_id, "title": ""}, ssid=entry["ssid"])
     chat_id = chat.get("id")
     if not chat_id:
         raise Exception(f"cannot create chat: {chat}")
 
     # 2. 发送用户消息
+    # [v5.4] reasoning services 需要附带 options
+    _msg_opts = '{"reasoning_effort":"high"}' if service_id in REASONING_SERVICES else ""
     result = _api("POST", f"/api/chats/{chat_id}/messages",
-                  body={"content": content, "attachments": [], "options": ""},
+                  body={"content": content, "attachments": [], "options": _msg_opts},
                   ssid=entry["ssid"])
     user_msg_id = result.get("message", {}).get("id")
     if not user_msg_id:
@@ -780,15 +788,15 @@ class ThreadedServer(HTTPServer):
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.2] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.4] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.2] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.4] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.2] balance monitor started", flush=True)
+    print("[unitool-proxy v5.4] balance monitor started", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
