@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.2
+unitool.ai → OpenAI 兼容反代 v5.3
 ====================================
-改进 (相对 v4.5):
+改进 (相对 v5.2):
   1. 真实 SSE 流式输出 — 后台线程轮询消息 API，增量推送 delta（不再按空格假分块）
   2. 每请求新建独立 chat — 彻底隔离上下文，避免跨 API 调用污染对话历史
   3. 持久化 ssid — 写入 /data/unitool_ssids/<label>.txt（不再只存 /tmp）
@@ -12,6 +12,10 @@ unitool.ai → OpenAI 兼容反代 v5.2
   7. /add-ssid 同步写 DB 和 /data/ 持久文件
   8. 更细粒度 dead_reason — balance_exhausted / auth_error / timeout / http_5xx
   9. 余额监控间隔缩短为 15min（高负载下更快发现耗尽）
+ 10. [v5.3] gpt-5-nano 加入 NATIVE_SERVICES + fallback 链（unitool 后端禁用 reasoning，
+     触发 "Reasoning is mandatory" 后自动降级到 gpt-5）
+ 11. [v5.3] gemini-2.5-pro/flash、grok 加入 NATIVE_SERVICES（unitool 返回
+     "Unexpected end of JSON input" 时自动降级）；_is_retryable 新增两个错误串
 """
 import json, time, uuid, threading, ssl, os, re, sys, subprocess
 import psycopg2
@@ -322,6 +326,11 @@ def _balance_monitor_loop():
 NATIVE_SERVICES = {
     "gpt-5", "gpt-5.5", "gpt-4-1", "gpt5.1", "gpt5.2",
     "gpt-4o-mini", "gpt-5.4",
+    # [v5.3] gpt-5-nano: unitool backend 禁用 reasoning → 触发 retryable 后降级到 gpt-5
+    "gpt-5-nano",
+    # [v5.3] 原生 gemini/grok: unitool 返回 "Unexpected end of JSON input" → retryable 降级
+    "gemini-2.5-pro", "gemini-2.5-flash",
+    "grok",
     "claude-sonnet", "claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-6",
 }
 
@@ -337,6 +346,14 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
     "claude-sonnet-4-6":["claude-sonnet-4-5", "claude-sonnet",     "claude-opus-4-6"],
     "claude-sonnet-4-5":["claude-sonnet-4-6", "claude-sonnet",     "claude-opus-4-6"],
     "claude-sonnet":    ["claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-6"],
+    # [v5.3] 新增
+    # gpt-5-nano: unitool backend 把 reasoning 禁掉 → "Reasoning is mandatory" → 降级 gpt-5
+    "gpt-5-nano":       ["gpt-5",        "gpt-5.5",  "gpt-4-1",  "gpt-4o-mini"],
+    # gemini: unitool "Unexpected end of JSON input" → 降级到 gpt-4o-mini
+    "gemini-2.5-pro":   ["gemini-2.5-flash", "gpt-4o-mini", "gpt-4-1", "gpt-5"],
+    "gemini-2.5-flash": ["gemini-2.5-pro",   "gpt-4o-mini", "gpt-4-1", "gpt-5"],
+    # grok: 同上 unitool bug → 降级到 gpt-5.5
+    "grok":             ["gpt-5.5",      "gpt-5",    "gpt-4-1",  "gpt-4o-mini"],
 }
 
 MODEL_ALIASES = {
@@ -364,13 +381,15 @@ MODEL_ALIASES = {
     "claude-3-sonnet": "claude-sonnet", "claude-3-sonnet-20240229": "claude-sonnet",
     "claude-haiku": "claude-sonnet", "claude-3-5-sonnet-latest": "claude-sonnet",
     "claude-3-7-sonnet-latest": "claude-sonnet", "claude-sonnet-latest": "claude-sonnet",
-    "gemini": "gpt-4o-mini", "gemini-2.5-pro": "gpt-4o-mini",
-    "gemini-2.5-flash": "gpt-4o-mini", "gemini-2.0-pro": "gpt-4o-mini",
-    "gemini-2.0-flash": "gpt-4o-mini", "gemini-1.5-pro": "gpt-4o-mini",
-    "gemini-1.5-flash": "gpt-4o-mini", "gemini-pro": "gpt-4o-mini",
-    "gemini-flash": "gpt-4o-mini", "gemini-ultra": "gpt-4o-mini",
-    "grok": "gpt-5.5", "grok-3": "gpt-5.5", "grok-3-fast": "gpt-5.5",
-    "grok-3-mini": "gpt-5.5", "grok-2": "gpt-5.5", "grok-beta": "gpt-5.5",
+    # [v5.3] gemini: 优先尝试原生 gemini-2.5-pro（在 NATIVE_SERVICES 中），
+    #   失败后 FALLBACK_CHAINS 会降级到 gpt-4o-mini；老版本名称直接别名到 gpt-4o-mini
+    "gemini": "gemini-2.5-pro", "gemini-pro": "gemini-2.5-pro",
+    "gemini-flash": "gemini-2.5-flash", "gemini-ultra": "gemini-2.5-pro",
+    "gemini-2.0-pro": "gpt-4o-mini", "gemini-2.0-flash": "gpt-4o-mini",
+    "gemini-1.5-pro": "gpt-4o-mini", "gemini-1.5-flash": "gpt-4o-mini",
+    # [v5.3] grok: 优先尝试原生 grok（NATIVE_SERVICES），失败降级 gpt-5.5
+    "grok-3": "grok", "grok-3-fast": "grok", "grok-3-mini": "grok",
+    "grok-2": "grok", "grok-beta": "grok",
     "deepseek": "gpt-5.5", "deepseek-r1": "gpt-5.5", "deepseek-v3": "gpt-5.5",
     "deepseek-chat": "gpt-5.5",
 }
@@ -415,7 +434,11 @@ def _fmt(messages: list) -> str:
 def _is_retryable(msg: str) -> bool:
     KEYS = ["No content returned","Reasoning is mandatory","max_tokens",
             "context_length_exceeded","overloaded","rate_limit","capacity",
-            "unavailable","timeout","upstream","Bad gateway","Service Unavailable"]
+            "unavailable","timeout","upstream","Bad gateway","Service Unavailable",
+            # [v5.3] gemini/grok: unitool 服务端 JSON 解析崩溃
+            "Unexpected end of JSON input",
+            # [v5.3] grok 子型号: unitool 明确返回不支持
+            "Unsupported service"]
     ml = msg.lower()
     return any(k.lower() in ml for k in KEYS)
 
