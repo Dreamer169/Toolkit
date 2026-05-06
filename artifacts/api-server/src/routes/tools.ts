@@ -5977,8 +5977,7 @@ router.post("/tools/unitool/login", async (req, res) => {
     env: { ...process.env, DISPLAY: ":99", PYTHONUNBUFFERED: "1" },
   });
 
-  const job = await jobQueue.get(jobId);
-  if (!job) return;
+  // job 对象已由 jobQueue.create 返回，无需再 get
 
   const results: Array<{ ok: boolean; email: string; ssid?: string; reason?: string; cookies?: unknown[] }> = [];
 
@@ -6082,33 +6081,45 @@ router.get("/tools/unitool/reflink", async (req, res) => {
 });
 
 // POST /tools/unitool/ref-pipeline
-// Body: { batch?: number, masterEmail?: string, masterSsid?: string, refCode?: string }
+// Body: { batch?, masterEmail?, masterSsid?, refCode?, chain?, maxDepth?, noActivateRef? }
+// v2.1: chain 模式（batch >10 时串联多个 ref_code）
 router.post("/tools/unitool/ref-pipeline", async (req, res) => {
-  const body       = req.body as Record<string, unknown>;
-  const batch      = Math.min(Number(body.batch ?? 10), 10);
-  const masterEmail = String(body.masterEmail ?? body.master_email ?? "").trim();
-  const masterSsid  = String(body.masterSsid  ?? body.master_ssid  ?? "").trim();
-  const masterId    = Number(body.masterId    ?? body.master_id    ?? 0);
-  const refCode     = String(body.refCode     ?? body.ref_code     ?? "").trim();
+  const body          = req.body as Record<string, unknown>;
+  const batch         = Math.min(Number(body.batch ?? 10), 100);
+  const masterEmail   = String(body.masterEmail   ?? body.master_email   ?? "").trim();
+  const masterSsid    = String(body.masterSsid    ?? body.master_ssid    ?? "").trim();
+  const masterId      = Number(body.masterId      ?? body.master_id      ?? 0);
+  const refCode       = String(body.refCode       ?? body.ref_code       ?? "").trim();
+  const chain         = Boolean(body.chain        ?? false);
+  const maxDepth      = Math.min(Number(body.maxDepth ?? body.max_depth ?? 10), 20);
+  const noActivateRef = Boolean(body.noActivateRef ?? body.no_activate_ref ?? false);
 
-  const jobId = await jobQueue.create("unitool-ref-pipeline", {});
-  res.json({ success: true, jobId });
+  const jobIdStr = `unitool-ref-pipeline-${Date.now()}`;
+  const job = await jobQueue.create(jobIdStr);
+  res.json({ success: true, jobId: jobIdStr });
 
   const args: string[] = ["--batch", String(batch)];
-  if (masterEmail) args.push("--master-email", masterEmail);
-  if (masterSsid)  args.push("--master-ssid",  masterSsid);
-  if (masterId)    args.push("--master-id",     String(masterId));
-  if (refCode)     args.push("--ref-code",      refCode);
+  if (masterEmail)   args.push("--master-email",  masterEmail);
+  if (masterSsid)    args.push("--master-ssid",   masterSsid);
+  if (masterId)      args.push("--master-id",      String(masterId));
+  if (refCode)       args.push("--ref-code",       refCode);
+  if (chain)       { args.push("--chain"); args.push("--max-depth", String(maxDepth)); }
+  if (noActivateRef) args.push("--no-activate-ref");
 
   const { spawn: _spawnRef } = await import("child_process");
   const refProc = _spawnRef("python3", [UNITOOL_REF_PIPELINE_SCRIPT, ...args], {
     env: { ...process.env, DISPLAY: ":99", PYTHONUNBUFFERED: "1" },
   });
 
-  const job = await jobQueue.get(jobId);
-  if (!job) return;
+  // job 对象由 jobQueue.create 直接返回，无需 get
 
-  type RefResult = { type: "master" | "ref_ok" | "ref_fail"; email: string; ssid?: string; refCode?: string; refUrl?: string; reason?: string; index?: number };
+  type RefResult =
+    | { type: "master";   email: string; ssid?: string; refCode?: string; refUrl?: string }
+    | { type: "ref_ok";   email: string; ssid?: string; index: number }
+    | { type: "ref_fail"; email: string; reason: string; index: number }
+    | { type: "ref_code"; email: string; refCode: string; refUrl: string; index: number }
+    | { type: "chain";    depth: number; oldRefCode: string; newRefCode: string; newMasterEmail: string };
+
   const results: RefResult[] = [];
 
   refProc.stdout.on("data", (d: Buffer) => {
@@ -6119,21 +6130,36 @@ router.post("/tools/unitool/ref-pipeline", async (req, res) => {
       job.logs.push({ type: "info", message: t });
 
       if (t.startsWith("[MASTER]")) {
-        // [MASTER] email|ssid_prefix|ref_code|ref_url
         const [mEmail, , mRefCode, mRefUrl] = t.slice(9).split("|");
         results.push({ type: "master", email: mEmail, refCode: mRefCode, refUrl: mRefUrl });
         job.logs.push({ type: "ok", message: `🔑 master=${mEmail} ref_code=${mRefCode} url=${mRefUrl}` });
+
       } else if (t.startsWith("[REF_OK]")) {
-        // [REF_OK] index|email|ssid_prefix
         const [idx, rEmail, rSsid] = t.slice(9).split("|");
         results.push({ type: "ref_ok", email: rEmail, ssid: rSsid, index: Number(idx) });
         job.logs.push({ type: "ok", message: `✅ referral #${idx} ${rEmail}` });
+
+      } else if (t.startsWith("[REF_CODE]")) {
+        // [REF_CODE] index|email|ref_code|ref_url
+        const [idx, rEmail, rRefCode, rRefUrl] = t.slice(11).split("|");
+        results.push({ type: "ref_code", email: rEmail, refCode: rRefCode, refUrl: rRefUrl, index: Number(idx) });
+        job.logs.push({ type: "ok", message: `🔗 #${idx} ${rEmail} 激活 ref_code=${rRefCode}` });
+
       } else if (t.startsWith("[REF_FAIL]")) {
-        // [REF_FAIL] index|email|reason
         const [idx, rEmail, reason] = t.slice(11).split("|");
         results.push({ type: "ref_fail", email: rEmail, reason, index: Number(idx) });
         job.logs.push({ type: "error", message: `❌ referral #${idx} ${rEmail} 失败: ${reason}` });
+
+      } else if (t.startsWith("[CHAIN]")) {
+        // [CHAIN] depth|old_ref_code|new_ref_code|new_master_email
+        const [depthStr, oldRc, newRc, newMasterEmail] = t.slice(8).split("|");
+        const depth = Number(depthStr);
+        results.push({ type: "chain", depth, oldRefCode: oldRc, newRefCode: newRc, newMasterEmail });
+        job.logs.push({ type: "ok", message: `🔀 chain depth=${depth}  ${oldRc}→${newRc}  (${newMasterEmail})` });
+
       } else if (t.startsWith("[DONE]")) {
+        const m = t.match(/depth=(\d+)/);
+        if (m) (job as any)._chainDepth = Number(m[1]);
         job.logs.push({ type: "ok", message: `🏁 ${t}` });
       }
     }
@@ -6146,11 +6172,11 @@ router.post("/tools/unitool/ref-pipeline", async (req, res) => {
 
   refProc.on("close", async (code) => {
     (job as any)._refResults = results;
-    const okCount = results.filter(r => r.type === "ref_ok").length;
-    const master  = results.find(r => r.type === "master");
+    const okCount    = results.filter(r => r.type === "ref_ok").length;
+    const chainCount = results.filter(r => r.type === "chain").length;
     job.logs.push({
       type: okCount > 0 ? "ok" : "error",
-      message: `完成: ${okCount} referral 注册成功${master ? ` ref_code=${master.refCode}` : ""}`,
+      message: `完成: ${okCount} 人注册成功，串联 ${chainCount} 个 ref_code`,
     });
     await jobQueue.finish(jobId, code ?? -1, okCount > 0 ? "done" : "failed");
   });
@@ -6160,19 +6186,28 @@ router.post("/tools/unitool/ref-pipeline", async (req, res) => {
 router.get("/tools/unitool/ref-pipeline/:jobId", async (req, res) => {
   const job = await jobQueue.get(req.params.jobId);
   if (!job) { res.status(404).json({ success: false, error: "任务不存在" }); return; }
-  const since = Number(req.query.since ?? 0);
+  const since   = Number(req.query.since ?? 0);
   const results = (job as any)._refResults ?? [];
   const master  = results.find((r: any) => r.type === "master");
+  const chains  = results.filter((r: any) => r.type === "chain");
+  const refCodes = [
+    ...(master?.refCode ? [master.refCode] : []),
+    ...chains.map((c: any) => c.newRefCode),
+  ].filter(Boolean);
   res.json({
-    success: true,
-    status: job.status,
-    logs: job.logs.slice(since),
-    nextSince: job.logs.length,
+    success:      true,
+    status:       job.status,
+    logs:         job.logs.slice(since),
+    nextSince:    job.logs.length,
     results,
-    refCode: master?.refCode ?? "",
-    refUrl:  master?.refUrl  ?? "",
-    okCount: results.filter((r: any) => r.type === "ref_ok").length,
-    exitCode: job.exitCode,
+    refCode:      master?.refCode ?? "",
+    refUrl:       master?.refUrl  ?? "",
+    refCodes,
+    okCount:      results.filter((r: any) => r.type === "ref_ok").length,
+    refCodeCount: results.filter((r: any) => r.type === "ref_code").length,
+    chainDepth:   (job as any)._chainDepth ?? chains.length,
+    chainEvents:  chains,
+    exitCode:     job.exitCode,
   });
 });
 
