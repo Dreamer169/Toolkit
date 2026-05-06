@@ -48,28 +48,17 @@ def _iv(r):
     except: return 0
 
 async def _tok_len(tab, field="cf-turnstile-response") -> int:
-    # querySelectorAll + last element — 页面有 signup/signin 两个 widget，取最后（当前 tab）
-    js = (
-        "(function(){"
-        "var els=document.querySelectorAll('[name=\"" + field + "\"]');"
-        "var el=els[els.length-1]||{value:''};"
-        "return el.value.length;"
-        "})()"
-    )
-    return _iv(await tab.execute_script(js, return_by_value=True))
+    return _iv(await tab.execute_script(
+        f"(document.querySelector('[name=\"{field}\"]')||{{value:''}}).value.length",
+        return_by_value=True))
 async def _get_full_token(tab, field="cf-turnstile-response") -> str:
     n = await _tok_len(tab, field)
     if n < 20: return ""
     parts = []
     for cs in range(0, n + 300, 300):
-        js = (
-            "(function(){"
-            "var els=document.querySelectorAll('[name=\"" + field + "\"]');"
-            "var el=els[els.length-1]||{value:''};"
-            "return el.value.slice(" + str(cs) + "," + str(cs+300) + ");"
-            "})()"
-        )
-        c = _s(await tab.execute_script(js, return_by_value=True))
+        c = _s(await tab.execute_script(
+            f"(document.querySelector('[name=\"{field}\"]')||{{value:''}}).value.slice({cs},{cs+300})",
+            return_by_value=True))
         if c: parts.append(c)
         if not c or cs + 300 >= n: break
     return "".join(parts)
