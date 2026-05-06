@@ -92,6 +92,20 @@ def save_ssid(account_id, email, ssid, all_cookies_json=""):
     conn.commit()
     conn.close()
     log(f"[DB] saved ssid for {email} id={account_id} ssid_len={len(ssid)}")
+    # AUTO-LINK: write ssid to /tmp/unitool_ssidN.txt so proxy auto-picks up within 5s
+    try:
+        _existing = sorted(glob.glob("/tmp/unitool_ssid*.txt"))
+        _idxs = []
+        for _f in _existing:
+            _m = re.search(r"unitool_ssid(\d*)\.txt", _f)
+            _idxs.append(int(_m.group(1)) if _m and _m.group(1) else 1)
+        _next_n = (max(_idxs) + 1) if _idxs else 1
+        _fname = f"/tmp/unitool_ssid{_next_n}.txt"
+        with open(_fname, "w") as _fh:
+            _fh.write(ssid)
+        log(f"[proxy-file] wrote {_fname}")
+    except Exception as _fe:
+        log(f"[proxy-file] warn: {_fe}")
     # AUTO-LINK: tools.ts reads this line to push ssid -> proxy pool
     print(f"[OK] {email} | {ssid}", flush=True)
 
