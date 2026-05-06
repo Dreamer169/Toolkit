@@ -297,7 +297,7 @@ def _fmt(messages: list) -> str:
             parts.append(content)
     return "\n\n".join(parts)
 
-def _send_wait(entry: dict, chat_id, content: str, timeout=90) -> str:
+def _send_wait(entry: dict, chat_id, content: str, timeout=180) -> str:
     result = _api("POST", f"/api/chats/{chat_id}/messages",
                   body={"content": content, "attachments": [], "options": ""},
                   ssid=entry["ssid"])
@@ -311,10 +311,12 @@ def _send_wait(entry: dict, chat_id, content: str, timeout=90) -> str:
         msgs_resp = _api("GET", f"/api/chats/{chat_id}/messages", ssid=entry["ssid"])
         msgs = msgs_resp.get("messages", msgs_resp) if isinstance(msgs_resp, dict) else msgs_resp
         for m in reversed(msgs):
-            if (m.get("role") == "assistant"
-                    and m.get("reply_to") == user_msg_id
-                    and m.get("status") in ("ended", "active", "done")):
-                return m.get("content", "")
+            if m.get("role") == "assistant" and m.get("reply_to") == user_msg_id:
+                status = m.get("status", "")
+                if status == "error":
+                    raise Exception(f"service_error: {m.get('content','')[:300]}")
+                if status in ("ended", "active", "done"):
+                    return m.get("content", "")
     _evict_chat(entry, chat_id)
     raise TimeoutError(f"timeout chat={chat_id}")
 
