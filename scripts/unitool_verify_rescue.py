@@ -89,12 +89,14 @@ def mark_rescue_fail(account_id):
     tags  = row[0] if row and row[0] else ""
     notes = row[1] if row and row[1] else ""
     new_tags = re.sub(r",?unitool_processing", "", tags).strip(",")
+    # Always clean transient noise tags (they have no place in rescue flow)
+    for _noise in ("unitool_fail", "unitool_reg_retry"):
+        new_tags = re.sub(r",?" + _noise, "", new_tags).strip(",")
     # Count previous rescue attempts
     rescue_attempts = notes.count('rescue_fail_at=')
     note_line = '\nrescue_fail_at=' + time.strftime('%Y-%m-%d %H:%M:%S')
     if rescue_attempts >= 2:
         new_tags = re.sub(r",?unitool_verify_pending", "", new_tags).strip(",")
-        new_tags = re.sub(r",?unitool_fail", "", new_tags).strip(",")
         if "unitool_rescue_dead" not in new_tags:
             new_tags = (new_tags + ",unitool_rescue_dead").strip(",")
         log(f"[DB] id={account_id} {rescue_attempts+1} attempts → rescue_dead")
