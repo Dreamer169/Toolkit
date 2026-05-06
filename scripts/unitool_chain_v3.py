@@ -73,8 +73,9 @@ def _atexit_handler():
         tags = row[0] if row and row[0] else ""
         if "unitool_registered" not in tags:
             new_tags = re.sub(r",?unitool_processing", "", tags).strip(",")
-            if "unitool_fail" not in new_tags:
-                new_tags = (new_tags + ",unitool_fail").strip(",")
+            # atexit: 崩溃时用 reg_retry 而非永久 fail
+            if "unitool_reg_retry" not in new_tags and "unitool_registered" not in new_tags:
+                new_tags = (new_tags + ",unitool_reg_retry").strip(",")
             cur.execute(
                 "UPDATE accounts SET tags=%s, updated_at=NOW() WHERE id=%s",
                 (new_tags, _account_id))
@@ -101,6 +102,8 @@ def db_get_fresh_account():
           AND (tags IS NULL OR (
                tags NOT LIKE '%%unitool_registered%%'
            AND tags NOT LIKE '%%unitool_fail%%'
+           AND tags NOT LIKE '%%unitool_already%%'
+           AND (tags NOT LIKE '%%unitool_reg_retry%%' OR updated_at < NOW() - INTERVAL '4 hours')
            AND tags NOT LIKE '%%unitool_processing%%'
            AND tags NOT LIKE '%%unitool_already%%'
            AND tags NOT LIKE '%%unitool_rescue_dead%%'
@@ -120,6 +123,8 @@ def db_count_fresh():
           AND (tags IS NULL OR (
                tags NOT LIKE '%%unitool_registered%%'
            AND tags NOT LIKE '%%unitool_fail%%'
+           AND tags NOT LIKE '%%unitool_already%%'
+           AND (tags NOT LIKE '%%unitool_reg_retry%%' OR updated_at < NOW() - INTERVAL '4 hours')
            AND tags NOT LIKE '%%unitool_processing%%'
            AND tags NOT LIKE '%%unitool_already%%'
            AND tags NOT LIKE '%%unitool_rescue_dead%%'
@@ -140,8 +145,46 @@ def db_lock_account(account_id):
         conn.commit()
     conn.close()
 
+
+# ── 失败分类器 (ref_reg_fail 核心修复) ─────────────────────────────────────
+def classify_reg_fail(reason: str) -> str:
+    """
+    永久  → unitool_already      (already_registered 等账号级错误)
+    待验证 → unitool_verify_pending (注册提交成功但验证邮件未到，交给 verify_rescue)
+    暂态  → unitool_reg_retry     (CF/pydoll 崩溃/超时，4h 后自动重试)
+    """
+    r = reason.lower()
+    if any(p in r for p in ('already_registered','already_reg','already exist',
+                              'user with like email','email_already','already_use')):
+        return 'unitool_already'
+    if any(p in r for p in ('no_verify_email','verify_email_not_found','verify_email')):
+        return 'unitool_verify_pending'
+    return 'unitool_reg_retry'
+
 def db_mark_fail(account_id, reason=""):
-    """注册失败：清除 processing，打 unitool_fail"""
+    """注册失败：按类型分类，避免瞬态错误被永久标为 unitool_fail"""
+    fail_tag = classify_reg_fail(reason)
+    conn = db_connect(); cur = conn.cursor()
+    cur.execute("SELECT tags FROM accounts WHERE id=%s", (account_id,))
+    row = cur.fetchone(); tags = row[0] if row and row[0] else ""
+    new_tags = re.sub(r",?unitool_processing", "", tags).strip(",")
+    if fail_tag == "unitool_already":
+        for t in ("unitool_already", "unitool_fail"):
+            if t not in new_tags:
+                new_tags = (new_tags + "," + t).strip(",")
+    elif fail_tag == "unitool_verify_pending":
+        if "unitool_verify_pending" not in new_tags:
+            new_tags = (new_tags + ",unitool_verify_pending").strip(",")
+    else:
+        # unitool_reg_retry: 4h 后自动重试
+        if "unitool_reg_retry" not in new_tags:
+            new_tags = (new_tags + ",unitool_reg_retry").strip(",")
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    note_line = "\nunitool_fail=" + reason[:120] + " at=" + ts
+    cur.execute("UPDATE accounts SET tags=%s, notes=COALESCE(notes,'') || %s, updated_at=NOW() WHERE id=%s",
+                (new_tags, note_line, account_id))
+    conn.commit(); conn.close()
+    log(f"[db_mark_fail] id={account_id} → {new_tags} reason={reason[:60]}")
     conn = db_connect(); cur = conn.cursor()
     cur.execute("SELECT tags FROM accounts WHERE id=%s", (account_id,))
     row = cur.fetchone(); tags = row[0] if row and row[0] else ""
@@ -247,6 +290,31 @@ def db_get_current_ref_code():
     else:
         log("[ref] DB 无可用 ref_code，将使用 fallback")
     return best_id, best_email, best_rc, best_used
+
+
+def cleanup_stale_processing(max_age_min=30):
+    """
+    模块隔离保障：清理卡死超过 max_age_min 分钟的 unitool_processing 标签。
+    防止 chain_v3 崩溃/超时后账号永久卡死，影响 OAuth 邮件中心等其他模块。
+    """
+    try:
+        conn = db_connect(); cur = conn.cursor()
+        cur.execute("""
+            UPDATE accounts SET
+              tags = TRIM(BOTH ',' FROM regexp_replace(tags, ',?unitool_processing', '', 'g')),
+              updated_at = NOW()
+            WHERE platform='outlook'
+              AND tags LIKE '%%unitool_processing%%'
+              AND tags NOT LIKE '%%unitool_registered%%'
+              AND updated_at < NOW() - INTERVAL '%s minutes'
+            RETURNING id, email
+        """ % max_age_min)
+        cleaned = cur.fetchall()
+        if cleaned:
+            log(f"[stale] 🧹 {len(cleaned)} 个卡死 processing 已自动解锁: {[r[1] for r in cleaned]}")
+        conn.commit(); conn.close()
+    except Exception as e:
+        log(f"[stale] 解锁异常(忽略): {e}")
 
 # ── 水位检查 + 非阻塞 outlook 补充 ───────────────────────────────────────────
 def replenish_if_needed():
@@ -489,7 +557,13 @@ def main():
     log("=" * 60)
     log("=== unitool_chain_v3 start ===")
 
-    # ── Step 0: 水位检查（非阻塞） ─────────────────────────────────────────────
+    # ── Step 0a: 模块隔离 — 清理卡死 processing（>30min 自动解锁）─────────────
+    try:
+        cleanup_stale_processing(30)
+    except Exception as e:
+        log(f"[stale] 异常(忽略): {e}")
+
+    # ── Step 0b: 水位检查（非阻塞） ────────────────────────────────────────────
     try:
         replenish_if_needed()
     except Exception as e:
@@ -561,10 +635,10 @@ def main():
     if new_ref_code:
         db_save_ref_code(account_id, new_ref_code)
         log(f"[main] ✅ ref_code 激活: {new_ref_code} → 下一轮可用")
-        print(f"[CHAIN_OK] {email}|{ssid[:40]}...|{ref_code}|{new_ref_code}", flush=True)
+        print(f"[CHAIN_OK] {email}|{ssid}...|{ref_code}|{new_ref_code}", flush=True)
     else:
         log(f"[main] ⚠ 未能激活 ref_code（ssid 可能未就绪，下次重试）")
-        print(f"[OK] {email}|{ssid[:40]}...|{ref_code}|no_ref_code", flush=True)
+        print(f"[OK] {email}|{ssid}...|{ref_code}|no_ref_code", flush=True)
 
     # ── 追踪 referral 关系（master 账号 notes 里追加 ref_registered=）──────────
     if ref_master_id:

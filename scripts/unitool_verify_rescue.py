@@ -77,18 +77,27 @@ def mark_tag(account_id, tag):
     conn.close()
 
 def mark_rescue_fail(account_id):
-    """rescue失败：移除processing，保留verify_pending（下次继续重试）"""
+    """rescue失败：移除processing，保留verify_pending（下次继续重试）；3次失败后才标rescue_dead"""
     conn = db_connect(); cur = conn.cursor()
-    cur.execute("SELECT tags FROM accounts WHERE id=%s", (account_id,))
-    row = cur.fetchone(); tags = row[0] if row and row[0] else ""
+    cur.execute("SELECT tags, notes FROM accounts WHERE id=%s", (account_id,))
+    row = cur.fetchone()
+    tags  = row[0] if row and row[0] else ""
+    notes = row[1] if row and row[1] else ""
     new_tags = re.sub(r",?unitool_processing", "", tags).strip(",")
-    if "unitool_fail" in new_tags:
+    # Count previous rescue attempts
+    rescue_attempts = notes.count('rescue_fail_at=')
+    note_line = f'
+rescue_fail_at={time.strftime("%Y-%m-%d %H:%M:%S")}'
+    if rescue_attempts >= 2:
         new_tags = re.sub(r",?unitool_verify_pending", "", new_tags).strip(",")
+        new_tags = re.sub(r",?unitool_fail", "", new_tags).strip(",")
         if "unitool_rescue_dead" not in new_tags:
             new_tags = (new_tags + ",unitool_rescue_dead").strip(",")
-        log(f"[DB] id={account_id} already_failed → escalate to rescue_dead")
-    cur.execute("UPDATE accounts SET tags=%s, updated_at=NOW() WHERE id=%s",
-                (new_tags, account_id))
+        log(f"[DB] id={account_id} {rescue_attempts+1} attempts → rescue_dead")
+    else:
+        log(f"[DB] id={account_id} rescue attempt {rescue_attempts+1}/3, will retry")
+    cur.execute("UPDATE accounts SET tags=%s, notes=COALESCE(notes,'') || %s, updated_at=NOW() WHERE id=%s",
+                (new_tags, note_line, account_id))
     conn.commit(); conn.close()
     log(f"[DB] id={account_id} rescue_fail → {new_tags}")
 
@@ -103,7 +112,7 @@ def save_ssid(account_id, email, ssid):
           notes = COALESCE(notes,'') || E'\nunitool_ssid=' || %s || E'\nat=' || %s,
           updated_at = NOW()
         WHERE id=%s
-    """, (ssid[:200], time.strftime("%Y-%m-%d %H:%M:%S"), account_id))
+    """, (ssid, time.strftime("%Y-%m-%d %H:%M:%S"), account_id))
     conn.commit(); conn.close()
     log(f"[DB] ssid saved {email} id={account_id} len={len(ssid)}")
     try:

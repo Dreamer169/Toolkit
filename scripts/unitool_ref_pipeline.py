@@ -107,6 +107,8 @@ def get_fresh_outlook(exclude_emails=None):
           AND (tags IS NULL OR (
                tags NOT LIKE '%%unitool_registered%%'
            AND tags NOT LIKE '%%unitool_fail%%'
+           AND tags NOT LIKE '%%unitool_already%%'
+           AND (tags NOT LIKE '%%unitool_reg_retry%%' OR updated_at < NOW() - INTERVAL '4 hours')
            AND tags NOT LIKE '%%unitool_processing%%'
            AND tags NOT LIKE '%%token_invalid%%'
           ))
@@ -294,6 +296,23 @@ def _run(cmd, timeout=900):
     return proc.stdout, proc.stderr, proc.returncode
 
 
+
+# ── 失败分类 ─────────────────────────────────────────────────────────────────
+def classify_reg_fail(reason: str):
+    """返回 (tag, notes_prefix)。
+    永久: unitool_already
+    待验证: unitool_verify_pending  (注册已提交，验证邮件未到)
+    暂态: unitool_reg_retry         (CF/pydoll崩溃/超时，4h后重试)
+    """
+    r = reason.lower()
+    if any(p in r for p in ('already_registered','already_reg','already exist',
+                              'user with like email','email_already','already_use')):
+        return 'unitool_already', 'already_registered'
+    if any(p in r for p in ('no_verify_email','verify_email_not_found','verify_email')):
+        return 'unitool_verify_pending', 'verify_pending'
+    # CF/pydoll崩溃/超时/no_redirect_no_ssid → 暂态
+    return 'unitool_reg_retry', 'reg_retry'
+
 def run_register_with_ref(email, ref_code):
     """
     调用 unitool_register.py --email <email> --ref-code <ref_code>
@@ -423,7 +442,14 @@ async def run_batch(ref_code, master_id, batch_size, used_emails,
             reason = result.get("reason", "?")
             log(f"[ref {i+1}] FAIL: {reason}")
             print(f"[REF_FAIL] {i+1}|{r_email}|{reason}", flush=True)
-            mark_account(r_id, "unitool_fail", f"ref_reg_fail:{reason[:60]}")
+            _ftag = classify_reg_fail(reason)
+            if _ftag == 'unitool_verify_pending':
+                mark_account(r_id, 'unitool_verify_pending', f'ref_verify_pending:{reason[:60]}')
+            elif _ftag == 'unitool_already':
+                mark_account(r_id, 'unitool_already', f'ref_already:{reason[:60]}')
+                mark_account(r_id, 'unitool_fail', f'ref_reg_fail_perm:{reason[:60]}')
+            else:
+                mark_account(r_id, 'unitool_reg_retry', f'ref_reg_fail:{reason[:60]}')
             if i < remaining - 1:
                 await asyncio.sleep(5)
             continue
@@ -439,7 +465,7 @@ async def run_batch(ref_code, master_id, batch_size, used_emails,
             r_ssid = get_ssid_via_login(r_email, r_password)
 
         log(f"[ref {i+1}] OK {r_email} ssid_len={len(r_ssid) if r_ssid else 0}")
-        ssid_disp = (r_ssid[:40] + "...") if r_ssid else ""
+        ssid_disp = (r_ssid + "...") if r_ssid else ""
         print(f"[REF_OK] {i+1}|{r_email}|{ssid_disp}", flush=True)
 
         # 追踪 referral 关系到 DB
@@ -559,7 +585,7 @@ async def main():
             db_save_ref_code(master_id, ref_code, tag="unitool_ref_master")
             ref_url = f"https://unitool.ai/ref/{ref_code}"
             log(f"[step0] OK master={m_email} ref_code={ref_code}")
-            print(f"[MASTER] {m_email}|{master_ssid[:20]}...|{ref_code}|{ref_url}", flush=True)
+            print(f"[MASTER] {m_email}|{master_ssid}...|{ref_code}|{ref_url}", flush=True)
 
     else:
         log(f"[step0] 使用指定 ref_code={ref_code}")
