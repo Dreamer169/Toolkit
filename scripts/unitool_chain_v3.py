@@ -110,6 +110,7 @@ def db_get_fresh_account():
            AND tags NOT LIKE '%%unitool_processing%%'
            AND tags NOT LIKE '%%unitool_already%%'
            AND tags NOT LIKE '%%unitool_rescue_dead%%'
+           AND tags NOT LIKE '%%unitool_verify_pending%%'
           ))
         ORDER BY RANDOM() LIMIT 1
     """)
@@ -131,6 +132,7 @@ def db_count_fresh():
            AND tags NOT LIKE '%%unitool_processing%%'
            AND tags NOT LIKE '%%unitool_already%%'
            AND tags NOT LIKE '%%unitool_rescue_dead%%'
+           AND tags NOT LIKE '%%unitool_verify_pending%%'
           ))
     """)
     count = cur.fetchone()[0]; conn.close()
@@ -172,9 +174,10 @@ def db_mark_fail(account_id, reason=""):
     row = cur.fetchone(); tags = row[0] if row and row[0] else ""
     new_tags = re.sub(r",?unitool_processing", "", tags).strip(",")
     if fail_tag == "unitool_already":
-        for t in ("unitool_already", "unitool_fail"):
-            if t not in new_tags:
-                new_tags = (new_tags + "," + t).strip(",")
+        if "unitool_already" not in new_tags:
+            new_tags = (new_tags + ",unitool_already").strip(",")
+        # Strip any existing unitool_fail (no place for permanently-registered accounts)
+        new_tags = re.sub(r",?unitool_fail", "", new_tags).strip(",")
     elif fail_tag == "unitool_verify_pending":
         if "unitool_verify_pending" not in new_tags:
             new_tags = (new_tags + ",unitool_verify_pending").strip(",")
