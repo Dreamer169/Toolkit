@@ -489,6 +489,59 @@ module.exports = {
       "max_restarts": 999,
       "watch": false,
       "autorestart": true
+    },
+    {
+      "name": "unitool-proxy",
+      "script": "/data/Toolkit/artifacts/api-server/unitool_proxy.py",
+      "interpreter": "python3",
+      "cwd": "/data/Toolkit/artifacts/api-server",
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      },
+      "restart_delay": 5000,
+      "max_restarts": 999,
+      "watch": false,
+      "autorestart": true
+    },
+    {
+      "name": "unitool_chain_v3",
+      "script": "/data/Toolkit/scripts/unitool_chain_v3.py",
+      "interpreter": "python3",
+      "cwd": "/data/Toolkit/scripts",
+      "env": {
+        "DISPLAY": ":99",
+        "PYTHONUNBUFFERED": "1",
+        "PLAYWRIGHT_BROWSERS_PATH": "/data/cache/ms-playwright",
+        "DATABASE_URL": "postgresql://postgres:postgres@localhost/toolkit"
+      },
+      "out_file": "/tmp/unitool_chain_v3_out.log",
+      "error_file": "/tmp/unitool_chain_v3_err.log",
+      "restart_delay": 3000,
+      "max_restarts": 999,
+      "watch": false,
+      "autorestart": true,
+      "kill_signal": "SIGTERM",
+      "kill_timeout": 15000
+    },
+    {
+      "name": "unitool_verify_rescue",
+      "script": "/data/Toolkit/scripts/unitool_verify_rescue.py",
+      "interpreter": "python3",
+      "cwd": "/data/Toolkit/scripts",
+      "env": {
+        "DISPLAY": ":99",
+        "PYTHONUNBUFFERED": "1",
+        "PLAYWRIGHT_BROWSERS_PATH": "/data/cache/ms-playwright",
+        "DATABASE_URL": "postgresql://postgres:postgres@localhost/toolkit"
+      },
+      "out_file": "/tmp/unitool_verify_rescue_out.log",
+      "error_file": "/tmp/unitool_verify_rescue_err.log",
+      "restart_delay": 3000,
+      "max_restarts": 999,
+      "watch": false,
+      "autorestart": true,
+      "kill_signal": "SIGTERM",
+      "kill_timeout": 15000
     }
   ]
 };
