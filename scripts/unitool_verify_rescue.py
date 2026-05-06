@@ -58,6 +58,11 @@ def get_pending_account():
           AND tags NOT LIKE '%unitool_registered%'
           AND tags NOT LIKE '%unitool_processing%'
           AND tags NOT LIKE '%unitool_rescue_dead%'
+          AND (
+            notes IS NULL
+            OR notes NOT LIKE '%rescue_fail_at=%'
+            OR updated_at < NOW() - INTERVAL '30 minutes'
+          )
         ORDER BY updated_at ASC NULLS LAST
         LIMIT 1
     """)
@@ -270,6 +275,45 @@ def main():
             log("[verify] email verified via curl, no ssid header → will login")
     else:
         log("[graph] no verify link found — try direct login anyway")
+
+    # 如果 notes 含 already_registered → unitool 已有该账号但邮件未验证
+    # 多睡 30s 再扫一次 inbox，给验证邮件多一点到达时间
+    if not ssid:
+        conn_chk = db_connect(); cur_chk = conn_chk.cursor()
+        cur_chk.execute("SELECT notes FROM accounts WHERE id=%s", (account_id,))
+        row_chk = cur_chk.fetchone(); conn_chk.close()
+        notes_chk = row_chk[0] if row_chk and row_chk[0] else ""
+        if "already_registered" in notes_chk and access_token:
+            log("[rescue] already_registered in notes — extra 30s wait + rescan inbox")
+            time.sleep(30)
+            for _fld in ("JunkEmail", "Inbox"):
+                try:
+                    import urllib.request as _ur2
+                    _req2 = _ur2.Request(
+                        "https://graph.microsoft.com/v1.0/me/mailFolders/"
+                        + _fld + "/messages"
+                        "?$filter=from/emailAddress/address eq 'no-reply@unitool.ai'"
+                        "&$orderby=receivedDateTime desc&$top=5"
+                        "&$select=subject,body,receivedDateTime",
+                        headers={"Authorization": "Bearer " + access_token}
+                    )
+                    _resp2 = _ur2.urlopen(_req2, timeout=15)
+                    import json as _jj
+                    _msgs2 = _jj.loads(_resp2.read()).get("value", [])
+                    for _m2 in _msgs2:
+                        _body2 = _m2.get("body", {}).get("content", "")
+                        _urls2 = re.findall(r"https://[^\s"'<>]+verify[^\s"'<>]*", _body2)
+                        if _urls2:
+                            verify_url = _urls2[0]
+                            log("[rescue] rescan found verify url: " + verify_url[:80])
+                            ssid2, _ = click_verify_link(verify_url)
+                            if ssid2:
+                                ssid = ssid2
+                            break
+                    if ssid:
+                        break
+                except Exception as _e2:
+                    log("[rescue] rescan " + _fld + " err: " + str(_e2))
 
     # 登录拿ssid（email验证完成后 / 或之前已验证过）
     if not ssid:
