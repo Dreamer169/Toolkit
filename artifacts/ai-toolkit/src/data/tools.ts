@@ -619,4 +619,22 @@ export const tools: Tool[] = [
     language: "Python",
     difficulty: "中等",
   },
+  {
+    id: "unitool-login",
+    name: "unitool.ai 自动登录",
+    nameEn: "Unitool Login",
+    category: "automation",
+    tags: ["unitool.ai", "自动登录", "Turnstile bypass", "Cookie提取"],
+    description: "unitool.ai 账号自动登录工具，CF Turnstile shadow-DOM bypass，提取 __Secure-unitool-ssid 认证 cookie，支持单账号和批量登录。",
+    features: [
+      "Turnstile 自动绕过 — shadow-DOM bypass",
+      "单账号/批量 — 支持批量并发登录",
+      "Cookie 提取 — 自动提取 ssid 认证凭证",
+    ],
+    techStack: ["Python", "pydoll", "Chromium"],
+    githubPath: "scripts/unitool_login.py",
+    hasWebUI: true,
+    language: "Python",
+    difficulty: "高级",
+  },
 ];

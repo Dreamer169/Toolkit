@@ -116,6 +116,7 @@ import AIAssistant from "@/pages/AIAssistant";
 import ReplitRegister from "@/pages/ReplitRegister";
 import CaptchaRecognition from "@/pages/CaptchaRecognition";
 import WafBypass from "@/pages/WafBypass";
+import UnitoolLogin from "@/pages/UnitoolLogin";
 import NovproxyPanel from "@/pages/NovproxyPanel";
 import SmsCenter from "@/pages/SmsCenter";
 import WebshareRegister from "@/pages/WebshareRegister";
@@ -240,6 +241,7 @@ function App() {
             {tab === "replit-register" && <ReplitRegister />}
             {tab === "captcha" && <CaptchaRecognition />}
             {tab === "waf-bypass" && <WafBypass />}
+            {tab === "unitool-login" && <UnitoolLogin />}
             {tab === "novproxy" && <NovproxyPanel />}
             {tab === "sms-center" && <SmsCenter />}
             {tab === "webshare-register" && <WebshareRegister />}

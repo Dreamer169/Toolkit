@@ -2541,7 +2541,7 @@ def main():
     args = parser.parse_args()
 
     headless = args.headless.lower() != "false"
-    CtrlCls  = (PatchrightController if args.engine == "patchright" elsePlaywrightController)
+    CtrlCls  = (PatchrightController if args.engine == "patchright" else PlaywrightController)
 
     solver = None
 
