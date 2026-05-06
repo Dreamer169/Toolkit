@@ -102,6 +102,10 @@ async def login_one(email: str, password: str, headless: bool = True,
     from pydoll.browser.options import ChromiumOptions
 
     opt = ChromiumOptions()
+    # auto no-headless when Xvfb DISPLAY set (fixes signin Turnstile in headless mode)
+    import os as _os
+    if headless and _os.environ.get('DISPLAY', ''):
+        headless = False
     opt.headless = headless
     if CHROME: opt.binary_location = CHROME
     for a in ["--no-sandbox", "--disable-dev-shm-usage", "--window-size=1440,900",
@@ -286,6 +290,9 @@ async def run_batch(accounts: list, headless: bool = True):
             ok_count += 1
             ck_json = json.dumps(result["cookies"])
             print(f"[OK]   {email}|{password}|{result['ssid']}|{ck_json}", flush=True)
+            try:
+                open('/tmp/unitool_ssid.txt', 'w').write(result['ssid'])
+            except Exception: pass
         else:
             print(f"[FAIL] {email}|{result['reason']}", flush=True)
         await asyncio.sleep(1)
