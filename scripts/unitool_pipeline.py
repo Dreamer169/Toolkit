@@ -19,7 +19,7 @@ unitool_pipeline.py — unitool 注册完整流水线（下游脚本）
 6. 写入 DB（notes 存 ssid，tags 加 unitool_registered）
 """
 
-import asyncio, json, os, re, subprocess, sys, time, urllib.parse, urllib.request
+import asyncio, glob, json, os, re, subprocess, sys, time, urllib.parse, urllib.request
 import psycopg2
 
 DB_URL = "postgresql://postgres:postgres@localhost/toolkit"
