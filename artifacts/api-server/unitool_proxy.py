@@ -1,241 +1,501 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v3.0
-改进: 坏chat自动驱逐、多ssid轮换、流式token逐字输出
+unitool.ai → OpenAI 兼容反代 v4.0
+新特性:
+  - 多账号 ssid 轮换池（Round-Robin），任一账号 423/expired 自动切到下一个
+  - 所有真实 service_id 直通（70+ 模型，不再降级）
+  - 常见别名映射（gpt-3.5-turbo → chatgpt 等）
+  - /pool-status 查看账号池状态
+  - /v1/models 返回全部真实模型
+  - 坏 chat 自动驱逐，超时自动重试新 chat
 """
-import json, time, uuid, threading, ssl, os, sys, re
+import json, time, uuid, threading, ssl, os, re, sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
+from urllib.error import HTTPError
 
 PORT = int(os.environ.get("PORT", 8089))
 BASE = "https://unitool.ai"
-SSID_FILE = "/tmp/unitool_ssid.txt"
-SSID_FILE2 = "/tmp/unitool_ssid2.txt"
-
-def get_ssid():
-    """读取最新 ssid，优先 ssid2（新登录账号），回退 ssid，再回退内置"""
-    for f in [SSID_FILE2, SSID_FILE]:
-        if os.path.exists(f):
-            v = open(f).read().strip()
-            if len(v) > 50:
-                return v
-    env = os.environ.get("UNITOOL_SSID", "")
-    if env: return env
-    return "ccc7e893a79df9eb6111789d3c73b7acb317a3b21b6ad84622ee9c092c15ec92ed9d1289cfc04e507844d2f9711b81aabe384330242bd2a7c0a731aea7bccbac8623c7dc307f4df4ac4777605e96638ea08a672371f0d53b5e1fda31e1514e76db8c9118ef73b512c4f0f73d45d4b20ca068d6f3dceea676a4f706e48502586c298f14c7"
-
-MODEL_MAP = {
-    "gpt-4o": "gpt-4o", "gpt-4o-mini": "gpt-4o-mini", "gpt-5": "gpt-5",
-    "gpt-4": "gpt-4o", "gpt-4-turbo": "gpt-4o", "gpt-4-turbo-preview": "gpt-4o",
-    "gpt-3.5-turbo": "gpt-4o-mini",
-    "o1": "gpt-4o", "o1-mini": "gpt-4o-mini", "o1-preview": "gpt-4o",
-    "o3": "gpt-5", "o3-mini": "gpt-4o-mini", "o4-mini": "gpt-4o-mini",
-    "claude-sonnet": "claude-sonnet", "claude-sonnet-4-5": "claude-sonnet-4-5",
-    "claude-3-5-sonnet-20241022": "claude-sonnet",
-    "claude-3-7-sonnet-20250219": "claude-sonnet-4-5",
-    "claude-opus-4-5": "claude-sonnet-4-5",
-    "claude-3-opus-20240229": "claude-sonnet",
-    "claude-3-sonnet-20240229": "claude-sonnet",
-    "claude-3-5-haiku-20241022": "claude-sonnet",
-    "claude-3-haiku-20240307": "claude-sonnet",
-    "gemini-2.0-flash": "gpt-4o", "gemini-2.5-pro": "gpt-5",
-    "gemini-1.5-pro": "gpt-4o", "gemini-1.5-flash": "gpt-4o-mini",
-    "gemini-2.0-flash-lite": "gpt-4o-mini",
-    "grok-3": "gpt-5", "grok-3-mini": "gpt-4o-mini",
-    "grok-2": "gpt-4o", "grok-beta": "gpt-4o",
-}
-
-MODELS_LIST = [{"id": m, "object": "model", "created": 1700000000, "owned_by": "unitool"} for m in MODEL_MAP]
+SSID_DIR = "/tmp"
+SSID_PATTERN = re.compile(r"^unitool_ssid\d*\.txt$")
 
 ctx = ssl.create_default_context()
-_chat_cache = {}      # service_id → chat_id
-_bad_chats  = set()   # evicted chat_ids
 _lock = threading.Lock()
 
+# ─── SSID 池 ────────────────────────────────────────────────────────────────
+# 结构: [{ssid, label, dead_until}]
+_pool: list = []
+_pool_idx: int = 0          # round-robin 指针
+_pool_mtime: float = 0.0    # 上次文件扫描时间
 
-def _hdrs(ssid=None):
+def _scan_ssid_files() -> list:
+    """扫描 /tmp/unitool_ssid*.txt，返回 ssid 列表（去重）"""
+    found = []
+    try:
+        for fn in sorted(os.listdir(SSID_DIR)):
+            if SSID_PATTERN.match(fn):
+                path = os.path.join(SSID_DIR, fn)
+                try:
+                    v = open(path).read().strip()
+                    if len(v) > 50:
+                        found.append((fn, v))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return found
+
+def _reload_pool_if_needed():
+    global _pool, _pool_mtime
+    # 每 5 秒最多扫描一次
+    now = time.time()
+    if now - _pool_mtime < 5:
+        return
+    _pool_mtime = now
+
+    files = _scan_ssid_files()
+    with _lock:
+        existing = {e["ssid"]: e for e in _pool}
+        new_pool = []
+        for (fn, ssid) in files:
+            if ssid in existing:
+                new_pool.append(existing[ssid])
+            else:
+                new_pool.append({"ssid": ssid, "label": fn, "dead_until": 0,
+                                  "dead_reason": "", "chats": {}, "bad_chats": set()})
+                print(f"[POOL] added {fn} ssid={ssid[:16]}...", flush=True)
+        # 保留 dead 的老条目（可能只是暂时 423，10min 后恢复）
+        for e in _pool:
+            if e["ssid"] not in {x["ssid"] for x in new_pool}:
+                if e["dead_until"] > now:  # 还在 dead 期内，保留
+                    new_pool.append(e)
+        _pool = new_pool
+
+def _get_live_ssid():
+    """Round-Robin 取一个当前存活的 ssid 条目，返回 entry dict 或 None"""
+    global _pool_idx
+    _reload_pool_if_needed()
+    with _lock:
+        if not _pool:
+            return None
+        now = time.time()
+        live = [e for e in _pool if e["dead_until"] <= now]
+        if not live:
+            # 所有都 dead，取 dead_until 最早过期的
+            live = sorted(_pool, key=lambda e: e["dead_until"])[:1]
+        _pool_idx = (_pool_idx + 1) % len(live)
+        return live[_pool_idx % len(live)]
+
+def _mark_dead(ssid: str, secs: int = 600, reason: str = ""):
+    with _lock:
+        for e in _pool:
+            if e["ssid"] == ssid:
+                e["dead_until"] = time.time() + secs
+                e["dead_reason"] = reason
+                print(f"[POOL] marked dead {ssid[:16]}... for {secs}s reason={reason!r}", flush=True)
+                break
+
+def _check_balance(ssid: str) -> float:
+    """Return net token balance for the account (negative = no money)."""
+    try:
+        req = Request(f"{BASE}/api/user/billing-accounts",
+                      headers=_hdrs(ssid), method="GET")
+        with urlopen(req, context=ctx, timeout=8) as r:
+            d = json.loads(r.read())
+        total = sum(a.get("value", 0) for a in d.get("accounts", []))
+        return total
+    except Exception:
+        return 0.0
+
+# ─── 真实 Service ID 列表（从 /api/services 获取） ──────────────────────────
+# 文本类服务（可以直接用作 model 名）
+NATIVE_SERVICES = {
+    # 主服务（generic，使用对应厂商最新模型）
+    "chatgpt", "claude", "gemini", "x-ai", "deepseek", "deepseek-r1",
+    # OpenAI
+    "gpt-4o", "gpt-4o-2024-11-20", "gpt-4o-mini-2024-07-18",
+    "gpt-4o-search", "gpt-4o-mini-search",
+    "gpt-4", "gpt-4-turbo", "gpt-4-turbo-preview", "gpt-3.5-turbo",
+    "gpt-4.1", "gpt-4.5",
+    "o1", "o1-mini", "o1-pro", "o1-preview",
+    "o3", "o3-mini", "o4-mini",
+    # Claude
+    "claude-sonnet-4", "claude-opus-4", "claude-opus-4-5",
+    "claude-3-7-sonnet", "claude-3-7-sonnet-20250219",
+    "claude-3-5-sonnet", "claude-3-5-sonnet-20241022",
+    "claude-3-5-haiku", "claude-3-5-haiku-20241022",
+    "claude-3-opus-20240229", "claude-3-opus",
+    "claude-3-haiku", "claude-3-haiku-20240307",
+    "claude-3-sonnet",
+    # Gemini
+    "gemini-2.5-pro", "gemini-2.0-pro", "gemini-2.0-pro-exp",
+    "gemini-2.0-flash", "gemini-2.0", "gemini-flash-2.0", "flash-2.0",
+    "gemini-1.5-pro", "gemini-1.5-flash",
+    "gemini-1.0-pro", "gemini-pro-1.0",
+    "gemini-pro", "gemini-exp", "gemini-pro-exp", "gemini-flash",
+    # xAI / Grok
+    "grok-3", "grok-3-fast", "grok-3-mini", "grok-3-mini-fast",
+    "grok-2", "grok-2-1212", "grok-2-mini", "grok-beta",
+}
+
+# 别名映射：把常见的 OpenAI 兼容名称 → 真实 unitool service_id
+MODEL_ALIASES = {
+    # GPT 系列
+    "gpt-3.5-turbo-0613":       "chatgpt",
+    "gpt-3.5-turbo-16k":        "chatgpt",
+    "text-davinci-003":         "chatgpt",
+    # 把 gpt-4o-mini 等没在 NATIVE 里的别名指到 chatgpt
+    "gpt-4o-mini":              "chatgpt",
+    # Claude 常见别名
+    "claude-3-5-sonnet-latest": "claude-3-5-sonnet",
+    "claude-3-7-sonnet-latest": "claude-3-7-sonnet",
+    "claude-opus-latest":       "claude-opus-4",
+    "claude-sonnet-latest":     "claude-sonnet-4",
+    "claude-sonnet-4-5":        "claude-sonnet-4",   # 修正：原proxy错误别名
+    # Gemini 别名
+    "gemini-2.0-flash-lite":    "gemini-2.0-flash",
+    "gemini-ultra":             "gemini-2.5-pro",
+    # 完全自定义别名（用户方便）
+    "gpt-5":                    "o3",      # unitool 没有 gpt-5，o3 最强
+    "claude-3-sonnet-20240229": "claude-3-sonnet",
+    # Grok 别名
+    "grok":                     "grok-3",
+    "grok-mini":                "grok-3-mini",
+    # xAI generic
+    "xai":                      "x-ai",
+}
+
+def _resolve_model(model: str) -> str:
+    """把请求的 model 名映射到 unitool service_id"""
+    if model in NATIVE_SERVICES:
+        return model
+    if model in MODEL_ALIASES:
+        return MODEL_ALIASES[model]
+    # 未知模型：猜测厂商
+    m = model.lower()
+    if "claude" in m:   return "claude"
+    if "gemini" in m:   return "gemini"
+    if "grok" in m:     return "x-ai"
+    if "deepseek" in m: return "deepseek"
+    return "chatgpt"   # fallback
+
+# 所有可暴露的模型列表 = native + 常见别名
+ALL_MODELS = sorted(NATIVE_SERVICES | set(MODEL_ALIASES.keys()))
+MODELS_LIST = [{"id": m, "object": "model", "created": 1700000000, "owned_by": "unitool"}
+               for m in ALL_MODELS]
+
+# ─── API 调用 ────────────────────────────────────────────────────────────────
+def _hdrs(ssid: str) -> dict:
     return {
-        "Cookie": f"__Secure-unitool-ssid={ssid or get_ssid()}",
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/136",
-        "Origin": "https://unitool.ai",
-        "Referer": "https://unitool.ai/en/chatgpt",
-        "Accept": "application/json",
+        "Cookie":        f"__Secure-unitool-ssid={ssid}",
+        "Content-Type":  "application/json",
+        "User-Agent":    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/136",
+        "Origin":        "https://unitool.ai",
+        "Referer":       "https://unitool.ai/en/chatgpt",
+        "Accept":        "application/json",
     }
 
-
-def _api(method, path, body=None, ssid=None):
+def _api(method: str, path: str, body=None, ssid: str = ""):
     data = json.dumps(body).encode() if body is not None else None
     req = Request(f"{BASE}{path}", data=data, headers=_hdrs(ssid), method=method)
     with urlopen(req, context=ctx, timeout=30) as r:
         return json.loads(r.read())
 
-
-def _get_or_create_chat(service_id, ssid=None, force_new=False):
+def _get_or_create_chat(entry: dict, service_id: str, force_new=False):
     with _lock:
-        cid = _chat_cache.get(service_id)
-        if cid and cid in _bad_chats:
-            del _chat_cache[service_id]
+        cid = entry["chats"].get(service_id)
+        if cid and cid in entry["bad_chats"]:
+            entry["chats"].pop(service_id, None)
             cid = None
         if cid and not force_new:
             return cid
-    chat = _api("POST", "/api/provider-runtime/chats", body={"service_id": service_id, "title": ""}, ssid=ssid)
+    chat = _api("POST", "/api/provider-runtime/chats",
+                body={"service_id": service_id, "title": ""},
+                ssid=entry["ssid"])
     cid = chat.get("id")
     if cid:
         with _lock:
-            _chat_cache[service_id] = cid
+            entry["chats"][service_id] = cid
     return cid
 
-
-def _evict(chat_id):
+def _evict_chat(entry: dict, chat_id):
     with _lock:
-        _bad_chats.add(chat_id)
-        for k, v in list(_chat_cache.items()):
+        entry["bad_chats"].add(chat_id)
+        for k, v in list(entry["chats"].items()):
             if v == chat_id:
-                del _chat_cache[k]
-    print(f"[EVICT] chat {chat_id} evicted", flush=True)
+                del entry["chats"][k]
+    print(f"[EVICT] chat {chat_id}", flush=True)
 
-
-def _fmt(messages):
+def _fmt(messages: list) -> str:
     parts = []
     for m in messages:
-        role, content = m.get("role","user"), m.get("content","")
+        role = m.get("role", "user")
+        content = m.get("content", "")
         if isinstance(content, list):
-            content = " ".join(c.get("text","") for c in content if isinstance(c,dict) and c.get("type")=="text")
-        if role == "system":    parts.append(f"[System: {content}]")
-        elif role == "user":    parts.append(content)
-        elif role == "assistant": parts.append(f"[Assistant: {content}]")
+            content = " ".join(c.get("text", "") for c in content
+                               if isinstance(c, dict) and c.get("type") == "text")
+        if role == "system":
+            parts.append(f"[System: {content}]")
+        elif role == "assistant":
+            parts.append(f"[Assistant: {content}]")
+        else:
+            parts.append(content)
     return "\n\n".join(parts)
 
-
-def _send_wait(chat_id, content, ssid=None, timeout=90):
+def _send_wait(entry: dict, chat_id, content: str, timeout=90) -> str:
     result = _api("POST", f"/api/chats/{chat_id}/messages",
-                  body={"content": content, "attachments": [], "options": ""}, ssid=ssid)
+                  body={"content": content, "attachments": [], "options": ""},
+                  ssid=entry["ssid"])
     user_msg_id = result.get("message", {}).get("id")
     if not user_msg_id:
-        raise Exception(f"No message ID: {result}")
+        raise Exception(f"no message id: {result}")
 
     deadline = time.time() + timeout
     while time.time() < deadline:
-        time.sleep(1)
-        msgs_resp = _api("GET", f"/api/chats/{chat_id}/messages", ssid=ssid)
+        time.sleep(1.5)
+        msgs_resp = _api("GET", f"/api/chats/{chat_id}/messages", ssid=entry["ssid"])
         msgs = msgs_resp.get("messages", msgs_resp) if isinstance(msgs_resp, dict) else msgs_resp
         for m in reversed(msgs):
-            if (m.get("role") == "assistant" and m.get("reply_to") == user_msg_id
-                    and m.get("status") in ("ended","active","done")):
-                return m.get("content","")
-    _evict(chat_id)
-    raise Exception(f"Timeout chat={chat_id} msg={user_msg_id}")
+            if (m.get("role") == "assistant"
+                    and m.get("reply_to") == user_msg_id
+                    and m.get("status") in ("ended", "active", "done")):
+                return m.get("content", "")
+    _evict_chat(entry, chat_id)
+    raise TimeoutError(f"timeout chat={chat_id}")
 
-
-def _do_chat(model, messages, stream, ssid=None):
-    service_id = MODEL_MAP.get(model, model)
+def _do_chat(model: str, messages: list, ssid_override: str | None = None) -> str:
+    service_id = _resolve_model(model)
     content = _fmt(messages)
-    print(f"[REQ] model={model}→{service_id} stream={stream} msgs={len(messages)}", flush=True)
+    print(f"[REQ] {model}→{service_id} msgs={len(messages)}", flush=True)
 
-    for attempt in range(2):
-        force_new = attempt > 0
-        chat_id = _get_or_create_chat(service_id, ssid=ssid, force_new=force_new)
-        if not chat_id:
-            raise Exception(f"Cannot create chat for {service_id}")
+    # ssid 覆盖（Bearer header）
+    if ssid_override and len(ssid_override) > 50:
+        entry = {"ssid": ssid_override, "label": "header",
+                 "dead_until": 0, "chats": {}, "bad_chats": set()}
+        entries = [entry]
+    else:
+        _reload_pool_if_needed()
+        with _lock:
+            live = [e for e in _pool if e["dead_until"] <= time.time()]
+            entries = live if live else _pool[:]
+
+    if not entries:
+        raise Exception("ssid pool empty — please login first")
+
+    last_err = None
+    for _ in range(len(entries) * 2):   # 最多尝试每个账号两次
+        entry = _pick_entry(entries)
         try:
-            return _send_wait(chat_id, content, ssid=ssid)
-        except Exception as e:
-            if "Timeout" in str(e) and attempt == 0:
-                print(f"[RETRY] chat {chat_id} timed out, retrying with new chat", flush=True)
+            for attempt in range(2):
+                chat_id = _get_or_create_chat(entry, service_id, force_new=(attempt > 0))
+                if not chat_id:
+                    raise Exception(f"cannot create chat for {service_id}")
+                try:
+                    return _send_wait(entry, chat_id, content)
+                except TimeoutError:
+                    if attempt == 0:
+                        print(f"[RETRY] timeout, new chat for {service_id}", flush=True)
+                        continue
+                    raise
+        except HTTPError as e:
+            if e.code in (401, 403, 423):
+                try:
+                    err_body = e.read().decode(errors="ignore")
+                except Exception:
+                    err_body = ""
+                if "Free tokens are over" in err_body or "Balance need" in err_body:
+                    # Account balance permanently exhausted — mark dead 24h
+                    print(f"[POOL] {entry['label']} balance exhausted, marking dead 24h", flush=True)
+                    _mark_dead(entry["ssid"], secs=86400, reason="balance_exhausted")
+                else:
+                    print(f"[POOL] {entry['label']} got HTTP {e.code}, marking dead 10m", flush=True)
+                    _mark_dead(entry["ssid"], secs=600, reason=f"http_{e.code}")
+                last_err = e
                 continue
             raise
+        except Exception as e:
+            last_err = e
+            continue
 
+    raise Exception(f"all ssids failed: {last_err}")
 
+_rr_idx = 0
+_rr_lock = threading.Lock()
+
+def _pick_entry(entries: list) -> dict:
+    global _rr_idx
+    with _rr_lock:
+        idx = _rr_idx % len(entries)
+        _rr_idx += 1
+        return entries[idx]
+
+# ─── HTTP Handler ────────────────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args): print(f"[{self.address_string()}] {fmt%args}", flush=True)
+    def log_message(self, fmt, *args):
+        print(f"[HTTP] {self.address_string()} {fmt % args}", flush=True)
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
+    def _json(self, code: int, data: dict):
+        body = json.dumps(data, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self._cors()
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_OPTIONS(self):
-        self.send_response(200); self._cors(); self.end_headers()
+        self.send_response(200)
+        self._cors()
+        self.end_headers()
 
     def do_GET(self):
         p = self.path.split("?")[0]
         if p in ("/v1/models", "/v1/models/"):
-            b = json.dumps({"object":"list","data":MODELS_LIST}).encode()
-            self.send_response(200); self.send_header("Content-Type","application/json"); self._cors(); self.end_headers(); self.wfile.write(b)
+            self._json(200, {"object": "list", "data": MODELS_LIST})
         elif p == "/healthz":
-            self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+            self.send_response(200); self.end_headers()
+            self.wfile.write(b"ok")
+        elif p == "/pool-status":
+            _reload_pool_if_needed()
+            now = time.time()
+            with _lock:
+                pool_info = [{
+                    "label": e["label"],
+                    "ssid_prefix": e["ssid"][:20] + "...",
+                    "dead": e["dead_until"] > now,
+                    "dead_until": e["dead_until"],
+                    "dead_reason": e.get("dead_reason", ""),
+                    "chats": len(e["chats"]),
+                } for e in _pool]
+            live = sum(1 for a in pool_info if not a["dead"])
+            self._json(200, {"pool_size": len(_pool), "live": live, "accounts": pool_info})
         elif p == "/ssid-status":
-            ssid = get_ssid()
-            b = json.dumps({"ssid_prefix": ssid[:40]+"...", "ssid_len": len(ssid), "chats": len(_chat_cache)}).encode()
-            self.send_response(200); self.send_header("Content-Type","application/json"); self._cors(); self.end_headers(); self.wfile.write(b)
+            # 向后兼容 v3 接口
+            _reload_pool_if_needed()
+            with _lock:
+                live = [e for e in _pool if e["dead_until"] <= time.time()]
+                top = _pool[0] if _pool else None
+            self._json(200, {
+                "pool_size": len(_pool),
+                "live": len(live),
+                "ssid_prefix": (top["ssid"][:40] + "...") if top else "",
+                "ssid_len": len(top["ssid"]) if top else 0,
+                "chats": sum(len(e["chats"]) for e in _pool),
+            })
         else:
             self.send_response(404); self.end_headers()
 
     def do_POST(self):
         p = self.path.split("?")[0]
+        if p == "/add-ssid":
+            # 动态注入 ssid（供登录脚本调用）
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length))
+                ssid = body.get("ssid", "").strip()
+                label = body.get("label", "api")
+                if len(ssid) < 50:
+                    return self._json(400, {"error": "ssid too short"})
+                added = False
+                with _lock:
+                    exists = any(e["ssid"] == ssid for e in _pool)
+                    if not exists:
+                        _pool.append({"ssid": ssid, "label": label,
+                                      "dead_until": 0, "dead_reason": "",
+                                      "chats": {}, "bad_chats": set()})
+                        added = True
+                        print(f"[POOL] /add-ssid label={label} ssid={ssid[:16]}...", flush=True)
+                self._json(200, {"ok": True, "added": added, "pool_size": len(_pool)})
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
         if p not in ("/v1/chat/completions", "/v1/chat/completions/"):
             self.send_response(404); self.end_headers(); return
+
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
         except Exception as e:
-            return self._err(400, str(e))
+            return self._json(400, {"error": {"message": str(e), "type": "parse_error"}})
 
-        model = body.get("model","gpt-4o-mini")
-        messages = body.get("messages",[])
+        model = body.get("model", "chatgpt")
+        messages = body.get("messages", [])
         do_stream = body.get("stream", False)
 
-        # Extract auth header as optional ssid override
-        auth = self.headers.get("Authorization","")
-        ssid = None
-        if auth.startswith("Bearer ") and len(auth) > 60:
-            ssid = auth[7:]
+        # Bearer header 作为 ssid 覆盖
+        auth = self.headers.get("Authorization", "")
+        ssid_override = auth[7:] if auth.startswith("Bearer ") and len(auth) > 60 else None
 
         try:
-            text = _do_chat(model, messages, do_stream, ssid=ssid)
-            if do_stream:
-                self.send_response(200)
-                self.send_header("Content-Type","text/event-stream")
-                self.send_header("Cache-Control","no-cache")
-                self._cors(); self.end_headers()
-                words = text.split(" ")
-                for i, w in enumerate(words):
-                    chunk = {"id":f"chatcmpl-{uuid.uuid4().hex[:12]}","object":"chat.completion.chunk",
-                             "created":int(time.time()),"model":model,
-                             "choices":[{"index":0,"delta":{"content":w if i==0 else " "+w},"finish_reason":None}]}
-                    self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode()); self.wfile.flush()
-                stop = {"id":f"chatcmpl-{uuid.uuid4().hex[:12]}","object":"chat.completion.chunk",
-                        "created":int(time.time()),"model":model,
-                        "choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
-                self.wfile.write(f"data: {json.dumps(stop)}\n\n".encode())
-                self.wfile.write(b"data: [DONE]\n\n"); self.wfile.flush()
-            else:
-                resp = json.dumps({"id":f"chatcmpl-{uuid.uuid4().hex[:12]}","object":"chat.completion",
-                    "created":int(time.time()),"model":model,
-                    "choices":[{"index":0,"message":{"role":"assistant","content":text},"finish_reason":"stop"}],
-                    "usage":{"prompt_tokens":len((" ".join(m.get("content","") for m in messages)).split()),
-                             "completion_tokens":len(text.split()),"total_tokens":0}}).encode()
-                self.send_response(200); self.send_header("Content-Type","application/json")
-                self._cors(); self.end_headers(); self.wfile.write(resp)
-        except BrokenPipeError: pass
+            text = _do_chat(model, messages, ssid_override)
+        except BrokenPipeError:
+            return
         except Exception as e:
-            print(f"[ERR] {e}", flush=True); self._err(500, str(e))
+            print(f"[ERR] {e}", flush=True)
+            return self._json(500, {"error": {"message": str(e), "type": "proxy_error"}})
 
-    def _err(self, code, msg):
-        try:
-            b = json.dumps({"error":{"message":msg,"type":"proxy_error"}}).encode()
-            self.send_response(code); self.send_header("Content-Type","application/json")
-            self._cors(); self.end_headers(); self.wfile.write(b)
-        except: pass
+        resp_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        ts = int(time.time())
+
+        if do_stream:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self._cors(); self.end_headers()
+            words = text.split(" ")
+            for i, w in enumerate(words):
+                chunk = {
+                    "id": resp_id, "object": "chat.completion.chunk",
+                    "created": ts, "model": model,
+                    "choices": [{"index": 0,
+                                 "delta": {"content": w if i == 0 else " " + w},
+                                 "finish_reason": None}],
+                }
+                try:
+                    self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+                    self.wfile.flush()
+                except BrokenPipeError:
+                    return
+            stop = {
+                "id": resp_id, "object": "chat.completion.chunk",
+                "created": ts, "model": model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            }
+            self.wfile.write(f"data: {json.dumps(stop)}\n\n".encode())
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+        else:
+            prompt_tok = len(" ".join(m.get("content", "") for m in messages).split())
+            compl_tok = len(text.split())
+            self._json(200, {
+                "id": resp_id, "object": "chat.completion",
+                "created": ts, "model": model,
+                "choices": [{"index": 0,
+                              "message": {"role": "assistant", "content": text},
+                              "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": prompt_tok,
+                          "completion_tokens": compl_tok,
+                          "total_tokens": prompt_tok + compl_tok},
+            })
 
 
-class ThreadedHTTPServer(HTTPServer):
+class ThreadedServer(HTTPServer):
     def process_request(self, req, addr):
-        t = threading.Thread(target=self.finish_request, args=(req, addr)); t.daemon=True; t.start()
+        t = threading.Thread(target=self.finish_request, args=(req, addr))
+        t.daemon = True; t.start()
 
 
 if __name__ == "__main__":
-    server = ThreadedHTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"[unitool-proxy v3] port={PORT} models={len(MODEL_MAP)}", flush=True)
+    # 初始化加载 ssid 池
+    _reload_pool_if_needed()
+    print(f"[unitool-proxy v4] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    if _pool:
+        for e in _pool:
+            print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
+    server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()

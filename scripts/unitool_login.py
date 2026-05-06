@@ -293,6 +293,19 @@ async def run_batch(accounts: list, headless: bool = True):
             print(f"[OK]   {email}|{password}|{result['ssid']}|{ck_json}", flush=True)
             try:
                 open('/tmp/unitool_ssid.txt', 'w').write(result['ssid'])
+                # Also write numbered file + push to proxy /add-ssid
+                try:
+                    import urllib.request as _ur
+                    _numbered = f"/tmp/unitool_ssid{ok_count}.txt" if ok_count > 1 else "/tmp/unitool_ssid.txt"
+                    open(_numbered, "w").write(result["ssid"])
+                    _jdata = __import__("json").dumps({"ssid": result["ssid"], "label": email}).encode()
+                    _req = _ur.Request("http://localhost:8089/add-ssid", data=_jdata,
+                                       headers={"Content-Type": "application/json"})
+                    with _ur.urlopen(_req, timeout=3) as _r:
+                        _resp = __import__("json").loads(_r.read())
+                    print(f"[POOL] pushed to proxy: {_resp}", flush=True)
+                except Exception as _pe:
+                    print(f"[POOL] warn push: {_pe}", flush=True)
             except Exception: pass
         else:
             print(f"[FAIL] {email}|{result['reason']}", flush=True)
