@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v4.1
+unitool.ai → OpenAI 兼容反代 v4.3
 改进:
   - 修复 pool 重复条目 bug（同一 ssid 出现在多个文件时去重）
   - 修复 /add-ssid 推入的条目在文件扫描后不丢失（live entries 保留）
   - 后台余额监控线程：每 30min 检查各账号余额，低余额/耗尽时打印警告
   - /pool-status 包含 balance 字段
-  - 版本: v4.1
+  - 版本: v4.3
 """
 import json, time, uuid, threading, ssl, os, re, sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -152,29 +152,36 @@ def _balance_monitor_loop():
 
 # ─── 服务 ID & 模型映射 ──────────────────────────────────────────────────────
 NATIVE_SERVICES = {
-    "gpt-5",            # ChatGPT 5 (最新旗舰)
-    "gpt-5.5",          # ChatGPT 5.5 (最新旗舰进阶)
-    "gpt-4o",           # GPT-4o (快速多模态)
-    "claude-sonnet",    # Claude Sonnet 最新版
-    "claude-opus-4-6",  # Claude Opus 4.6 (连字符 service_id，实测可用 ✓)
+    # ── 实测可用 (批量扫描 2026-05-06 确认) ──
+    "gpt-5",             # ChatGPT 5  ✓
+    "gpt-5.5",           # ChatGPT 5.5  ✓
+    "gpt-4-1",           # GPT-4.1 (连字符，实测最快)  ✓
+    "gpt5.1",            # GPT-5.1  ✓
+    "gpt5.2",            # GPT-5.2  ✓
+    "gpt-4o-mini",       # GPT-4o-mini (快速小模型)  ✓
+    "claude-sonnet",     # Claude Sonnet 最新版  ✓
+    "claude-sonnet-4-5", # Claude Sonnet 4.5  ✓
+    "claude-sonnet-4-6", # Claude Sonnet 4.6  ✓
+    "claude-opus-4-6",   # Claude Opus 4.6  ✓
+    # gpt-4o → 持续超时暂不 native；gpt-o3-pro → 后端无内容
 }
 
 MODEL_ALIASES = {
     # ── OpenAI GPT 系 ──
-    "gpt-4":                      "gpt-4o",
-    "gpt-4-turbo":                "gpt-4o",
-    "gpt-4-turbo-preview":        "gpt-4o",
-    "gpt-4.1":                    "gpt-4o",
-    "gpt-4.5":                    "gpt-4o",
-    "gpt-4o-mini":                "gpt-4o",
-    "gpt-4o-2024-11-20":          "gpt-4o",
-    "gpt-4o-mini-2024-07-18":     "gpt-4o",
-    "gpt-4o-search":              "gpt-4o",
-    "gpt-4o-mini-search":         "gpt-4o",
-    "gpt-3.5-turbo":              "gpt-4o",
-    "gpt-3.5-turbo-0613":         "gpt-4o",
-    "gpt-3.5-turbo-16k":          "gpt-4o",
-    "text-davinci-003":           "gpt-4o",
+    "gpt-4":                      "gpt-4-1",     # → native (实测快)
+    "gpt-4-turbo":                "gpt-4-1",
+    "gpt-4-turbo-preview":        "gpt-4-1",
+    "gpt-4.1":                    "gpt-4-1",     # 点号 → 连字符
+    "gpt-4o":                     "gpt-4-1",     # gpt-4o 超时，回退 gpt-4-1
+    "gpt-4o-search":              "gpt-4-1",
+    "gpt-4.5":                    "gpt-4-1",
+    "gpt-4o-2024-11-20":          "gpt-4-1",
+    "gpt-4o-mini-2024-07-18":     "gpt-4o-mini", # → native
+    "gpt-4o-mini-search":         "gpt-4o-mini",
+    "gpt-3.5-turbo":              "gpt-4o-mini", # 轻量 → mini
+    "gpt-3.5-turbo-0613":         "gpt-4o-mini",
+    "gpt-3.5-turbo-16k":          "gpt-4o-mini",
+    "text-davinci-003":           "gpt-4o-mini",
     # Reasoning 系 → gpt-5.5
     "o1":                         "gpt-5.5",
     "o1-mini":                    "gpt-5.5",
@@ -185,8 +192,8 @@ MODEL_ALIASES = {
     "o4-mini":                    "gpt-5.5",
     "o4":                         "gpt-5.5",
     "gpt-5-turbo":                "gpt-5",
-    "chatgpt-5":                  "gpt-5.5",
-    "chatgpt-5-turbo":            "gpt-5.5",
+    "chatgpt-5":                  "gpt-5",       # → gpt-5 (旗舰)
+    "chatgpt-5-turbo":            "gpt-5",
     "chatgpt-5.5":                "gpt-5.5",
     "chatgpt-5.5-turbo":          "gpt-5.5",
     "chatgpt":                    "gpt-5.5",
@@ -205,7 +212,7 @@ MODEL_ALIASES = {
     "claude-3-opus-20240229":     "claude-sonnet",
     "claude":                     "claude-sonnet",
     "claude-sonnet-4":            "claude-sonnet",
-    "claude-sonnet-4-5":          "claude-sonnet",
+    "claude-sonnet-4-5":          "claude-sonnet-4-5",  # native alias
     "claude-3-7-sonnet":          "claude-sonnet",
     "claude-3-7-sonnet-20250219": "claude-sonnet",
     "claude-3-5-sonnet":          "claude-sonnet",
@@ -265,7 +272,7 @@ def _resolve_model(model: str) -> str:
     if model in MODEL_ALIASES:
         return MODEL_ALIASES[model]
     m = model.lower()
-    if "claude" in m:   return "claude-opus-4-6"   # 未知 claude → 最新 Opus
+    if "claude" in m:   return "claude-sonnet"     # 未知 claude → Sonnet (更稳定)
     if "gemini" in m:   return "gpt-4o"
     if "grok" in m:     return "gpt-5.5"
     if "deepseek" in m: return "gpt-5.5"
@@ -591,14 +598,14 @@ class ThreadedServer(HTTPServer):
 
 if __name__ == "__main__":
     _reload_pool_if_needed()
-    print(f"[unitool-proxy v4.2] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v4.3] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     for e in _pool:
         print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     # 启动余额监控后台线程
     t = threading.Thread(target=_balance_monitor_loop, daemon=True)
     t.start()
-    print("[unitool-proxy v4.2] balance monitor started (first check in 2min)", flush=True)
+    print("[unitool-proxy v4.3] balance monitor started (first check in 2min)", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
