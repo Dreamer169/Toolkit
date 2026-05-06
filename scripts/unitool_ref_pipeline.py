@@ -447,7 +447,6 @@ async def run_batch(ref_code, master_id, batch_size, used_emails,
                 mark_account(r_id, 'unitool_verify_pending', f'ref_verify_pending:{reason[:60]}')
             elif _ftag == 'unitool_already':
                 mark_account(r_id, 'unitool_already', f'ref_already:{reason[:60]}')
-                mark_account(r_id, 'unitool_fail', f'ref_reg_fail_perm:{reason[:60]}')
             else:
                 mark_account(r_id, 'unitool_reg_retry', f'ref_reg_fail:{reason[:60]}')
             if i < remaining - 1:

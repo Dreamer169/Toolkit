@@ -74,7 +74,10 @@ def _atexit_handler():
         if "unitool_registered" not in tags:
             new_tags = re.sub(r",?unitool_processing", "", tags).strip(",")
             # atexit: 崩溃时用 reg_retry 而非永久 fail
-            if "unitool_reg_retry" not in new_tags and "unitool_registered" not in new_tags:
+            # already_registered 类账号 (unitool_already) 不加 reg_retry — 永久跳过
+            if ("unitool_reg_retry" not in new_tags
+                    and "unitool_registered" not in new_tags
+                    and "unitool_already" not in new_tags):
                 new_tags = (new_tags + ",unitool_reg_retry").strip(",")
             cur.execute(
                 "UPDATE accounts SET tags=%s, updated_at=NOW() WHERE id=%s",
@@ -185,18 +188,6 @@ def db_mark_fail(account_id, reason=""):
                 (new_tags, note_line, account_id))
     conn.commit(); conn.close()
     log(f"[db_mark_fail] id={account_id} → {new_tags} reason={reason[:60]}")
-    conn = db_connect(); cur = conn.cursor()
-    cur.execute("SELECT tags FROM accounts WHERE id=%s", (account_id,))
-    row = cur.fetchone(); tags = row[0] if row and row[0] else ""
-    new_tags = re.sub(r",?unitool_processing", "", tags).strip(",")
-    if "unitool_fail" not in new_tags:
-        new_tags = (new_tags + ",unitool_fail").strip(",")
-    note_line = f"\nunitool_fail={reason[:120]} at={time.strftime('%Y-%m-%d %H:%M:%S')}"
-    cur.execute("""UPDATE accounts SET tags=%s,
-                   notes=COALESCE(notes,'') || %s, updated_at=NOW() WHERE id=%s""",
-                (new_tags, note_line, account_id))
-    conn.commit(); conn.close()
-    log(f"[DB] id={account_id} → {new_tags} reason={reason[:60]}")
 
 def db_save_ssid_full(account_id, email, ssid):
     """

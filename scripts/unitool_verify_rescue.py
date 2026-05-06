@@ -91,8 +91,7 @@ def mark_rescue_fail(account_id):
     new_tags = re.sub(r",?unitool_processing", "", tags).strip(",")
     # Count previous rescue attempts
     rescue_attempts = notes.count('rescue_fail_at=')
-    note_line = f'
-rescue_fail_at={time.strftime("%Y-%m-%d %H:%M:%S")}'
+    note_line = '\nrescue_fail_at=' + time.strftime('%Y-%m-%d %H:%M:%S')
     if rescue_attempts >= 2:
         new_tags = re.sub(r",?unitool_verify_pending", "", new_tags).strip(",")
         new_tags = re.sub(r",?unitool_fail", "", new_tags).strip(",")
@@ -302,7 +301,7 @@ def main():
                     _msgs2 = _jj.loads(_resp2.read()).get("value", [])
                     for _m2 in _msgs2:
                         _body2 = _m2.get("body", {}).get("content", "")
-                        _urls2 = re.findall(r"https://[^\s"'<>]+verify[^\s"'<>]*", _body2)
+                        _urls2 = re.findall(r'https://[^\s"\'<>]+verify[^\s"\'<>]*', _body2)
                         if _urls2:
                             verify_url = _urls2[0]
                             log("[rescue] rescan found verify url: " + verify_url[:80])
