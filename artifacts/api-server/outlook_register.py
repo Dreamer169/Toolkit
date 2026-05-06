@@ -309,13 +309,20 @@ class BaseController:
                 page.wait_for_timeout(0.05 * self.wait_time)
                 page.locator('[name="BirthDay"]').select_option(value=day)
             except Exception:
-                page.locator('[name="BirthMonth"]').click()
+                # v9.30c: label#BirthMonthDropdown 遮挡按钮，用 force=True 绕过 pointer-events 检测
+                try:
+                    page.locator('[name="BirthMonth"]').click(force=True, timeout=8000)
+                except Exception:
+                    page.evaluate('document.querySelector("[name=BirthMonth]").click()')
                 page.wait_for_timeout(0.02 * self.wait_time)
-                page.locator(date_option_selector(month, "月", is_month=True)).first.click()
+                page.locator(date_option_selector(month, "月", is_month=True)).first.click(force=True)
                 page.wait_for_timeout(0.04 * self.wait_time)
-                page.locator('[name="BirthDay"]').click()
+                try:
+                    page.locator('[name="BirthDay"]').click(force=True, timeout=8000)
+                except Exception:
+                    page.evaluate('document.querySelector("[name=BirthDay]").click()')
                 page.wait_for_timeout(0.03 * self.wait_time)
-                page.locator(date_option_selector(day, "日", is_month=False)).first.click()
+                page.locator(date_option_selector(day, "日", is_month=False)).first.click(force=True)
                 page.locator('[data-testid="primaryButton"]').click(timeout=5000)
 
             # 姓名
