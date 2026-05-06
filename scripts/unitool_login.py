@@ -104,8 +104,19 @@ async def login_one(email: str, password: str, headless: bool = True,
     opt = ChromiumOptions()
     # auto no-headless when Xvfb DISPLAY set (fixes signin Turnstile in headless mode)
     import os as _os
-    if headless and _os.environ.get('DISPLAY', ''):
-        headless = False
+    # Auto-detect Xvfb and force non-headless (Turnstile needs real browser)
+    if headless:
+        display = _os.environ.get('DISPLAY', '')
+        if not display:
+            # detect Xvfb on :99
+            import glob as _glob
+            if _glob.glob('/tmp/.X99-lock') or _glob.glob('/tmp/.X[0-9]-lock'):
+                display = ':99'
+                _os.environ['DISPLAY'] = display
+                _log(f"  [display] auto-set DISPLAY={display}")
+        if display:
+            headless = False
+            _log(f"  [display] headless=False (DISPLAY={display})")
     opt.headless = headless
     if CHROME: opt.binary_location = CHROME
     for a in ["--no-sandbox", "--disable-dev-shm-usage", "--window-size=1440,900",
