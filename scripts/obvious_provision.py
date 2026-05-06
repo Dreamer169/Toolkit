@@ -360,6 +360,8 @@ async def provision(args) -> dict:
             try:
                 idx = json.load(open(registry)) if registry.exists() else []
             except Exception: idx = []
+            # Bug E fix: remove duplicate entries with same label before appending
+            idx = [e for e in idx if e.get("label") != label]
             idx.append({k: manifest[k] for k in ("label","email","userId","workspaceId","projectId","threadId","proxy","egressIp","createdAt")})
             with open(registry, "w") as f: json.dump(idx, f, indent=2)
 

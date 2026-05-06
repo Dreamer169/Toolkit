@@ -217,7 +217,7 @@ def log(msg): print(f"[replit_reg] {msg}", flush=True)
 def is_cf_blocked(title: str, body: str) -> bool:
     # v8.64 ROOT-FIX 2026-04-28: 实测 6 个 SOCKS 出口 (Datacamp/Fourplex/M247/Greenhost/Vultr/Chunghwa) curl 探针
     # 全部命中 replit.com/signup → HTTP 403 5568B <title>Just a moment...</title> CF 交互式 JS 挑战页.
-    # 旧 helper 漏识别此最常见 CF 拦截签名 → 在 attempt_register/attempt_register_camoufox 的 fallback 分支 (L3092/L3459)
+  
     # 把 page-render 阶段的 CF challenge 误归 signup_email_field_timeout → bumpPortCooldown level=0 (5min) 而非
     # cf_ip_banned 应得的 5min 平凡冷却, 更重要是失去了 cf-ip 真因度量, 上层 watchdog/swap 决策都靠错信号.
     # 内联调用点 (L588/L594/L1432/L1524) 早就识别此字符串, 此处补齐统一.
@@ -281,13 +281,10 @@ def is_rate_limited(t: str) -> bool:
     return any(p in t for p in ("too quickly","doing this too quickly","please wait a bit","rate limit","too many requests","wait a bit"))
 
 # ── v8.67 — same-ctx Google activity warmup ─────────────────────────────────
-# Before goto /signup, drive THIS camoufox ctx through youtube + google search +
 # recaptcha demo for ~15-20s. broker warmup seeds google trust cookies into the
 # broker chromium ctx, but those cookies are then injected into a DIFFERENT
-# camoufox ctx (the one doing actual signup). Google reCAPTCHA Enterprise
 # scores ALSO factor "same-ctx-recently-active" signals (page navigation
 # history, viewport timing, mouse/scroll cadence) — those signals do NOT
-# transfer cross-ctx via cookies. So the camoufox ctx looks "newborn" to
 # Google despite having NID cookies. v8.67 fixes that by giving THIS ctx
 # real Google activity right before the score-relevant grecaptcha.execute
 # call inside signup.
@@ -2138,10 +2135,8 @@ async def _complete_via_verify_url(page, verify_url: str, close_fn=None) -> dict
 
 
 # v7.78m — in-page exit-IP probe.
-# register 流程之前用 curl/get_exit_ip(_camoufox) 测的 exit_ip 有 4 种来源歧义:
 # (a) [CDP] curl --interface CloudflareWARP ipify  (broker WARP iface)
 # (b) [CDP] fallback curl ipify                     (VPS 默认路由)
-# (c) get_exit_ip_camoufox(proxy_cfg)               (camoufox + proxy)
 # (d) get_exit_ip(pw, proxy_cfg)                    (playwright + proxy)
 # 这 4 种测出来的 IP 不一定等于 signup HTTP 实际 source IP, 也不一定等于
 # cf_clearance 发放时浏览器看到的 IP (因为 broker 出口 vs new_context 的
@@ -2170,7 +2165,6 @@ async def _probe_inpage_exit_ip(page) -> str:
 async def _probe_inpage_fingerprint(page) -> dict:
     """v7.78o: signup 完成后, 在 page 内 evaluate 拿浏览器实际 navigator/screen
     指纹, 写到 result.fingerprint. CDP/playwright 路径下与 _CTX_FINGERPRINT 一致,
-    camoufox 路径下拿到的是 firefox 真实指纹 (跟硬编码的 chromium 默认不同)."""
     try:
         fp = await page.evaluate("""async () => {
             const n = navigator, s = screen;
@@ -3423,7 +3417,6 @@ async def attempt_register(pw_module, proxy_cfg, stealth_fn, exit_ip: str) -> di
 
 
 def _probe_geoip_ok(proxy_cfg) -> bool:
-    """用代理实际请求 ipify 一次，能拿到 IP 才允许 camoufox geoip=True (避免 InvalidIP 崩溃)"""
     try:
         import requests
         proxies = None
@@ -3438,259 +3431,6 @@ def _probe_geoip_ok(proxy_cfg) -> bool:
     except Exception as e:
         log(f"[geoip-probe] failed via proxy={proxy_cfg}: {e}")
         return False
-
-async def get_exit_ip_camoufox(proxy_cfg) -> str:
-    try:
-        from camoufox.async_api import AsyncCamoufox
-        async with AsyncCamoufox(headless=True, proxy=proxy_cfg or None, geoip=_probe_geoip_ok(proxy_cfg), os="windows") as browser:
-            page = await browser.new_page()
-            await page.goto("https://api.ipify.org/?format=json", timeout=65000)
-            data = json.loads(await page.locator("body").inner_text())
-            return data.get("ip", "")
-    except Exception as e:
-        log(f"get_exit_ip_camoufox err: {e}"); return ""
-
-
-async def attempt_register_camoufox(proxy_cfg, exit_ip: str) -> dict:
-    from camoufox.async_api import AsyncCamoufox
-    result = {"ok": False, "phase": "init", "error": "", "exit_ip": exit_ip}
-    async with AsyncCamoufox(headless=HEADLESS, proxy=proxy_cfg or None, geoip=_probe_geoip_ok(proxy_cfg), os="windows") as browser:
-        page = await browser.new_page()
-        try:
-            await page.add_init_script(_CANVAS_WEBGL_NOISE_JS)
-            log("[camoufox] Canvas 2D noise injected (WebGL/fingerprint natively handled)")
-        except Exception as e:
-            log(f"[camoufox] canvas noise err: {e}")
-        try:
-            result["phase"] = "navigate"
-            try:
-                await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=65000)
-                await page.wait_for_timeout(_random.randint(2500, 4000))
-                await page.goto("https://github.com", wait_until="domcontentloaded", timeout=65000)
-                await page.wait_for_timeout(_random.randint(2000, 3500))
-            except Exception as e:
-                log(f"[pre-nav] err(ignored): {e}")
-            log("[camoufox] opening replit.com/signup ...")
-            # 监听主导航响应：Replit 直接 403 → 立即识别 CF 封 IP，避免硬等到 timeout
-            _nav_status = {"code": 0}
-            def _on_main_nav(resp):
-                try:
-                    if resp.url.startswith("https://replit.com/signup") and resp.request.resource_type == "document":
-                        _nav_status["code"] = resp.status
-                except Exception: pass
-            page.on("response", _on_main_nav)
-            # v8.67 — same-ctx Google activity warmup BEFORE signup goto (lifts reCAPTCHA Enterprise score)
-            try:
-                await _ctx_self_warmup(page, log)
-            except Exception as _wue:
-                log("[v8.67 ctx-warmup] outer err (ignore): " + str(_wue)[:80])
-            try:
-                await page.goto("https://replit.com/signup", wait_until="domcontentloaded", timeout=30000)
-            except Exception as _ge:
-                _code = _nav_status["code"]
-                if _code in (403, 429, 503):
-                    log("[camoufox] navigation status=" + str(_code) + " -> cf_ip_banned (fast-fail)")
-                    result["error"] = "signup_cf_ip_banned"
-                    return result
-                raise
-            _code = _nav_status["code"]
-            if _code in (403, 429, 503):
-                log("[camoufox] navigation status=" + str(_code) + " -> cf_ip_banned (fast-fail)")
-                result["error"] = "signup_cf_ip_banned"
-                return result
-            warmup_task = asyncio.create_task(_human_warmup(page))
-            t0 = await page.title()
-            b0 = (await page.locator("body").inner_text())[:400]
-            log(f"[camoufox] title: {t0!r}")
-            try:
-                wd_val = await page.evaluate("() => navigator.webdriver")
-                log(f"[detect] navigator.webdriver={wd_val}")
-            except Exception:
-                pass
-            if is_cf_blocked(t0, b0):
-                result["error"] = "signup_cf_ip_banned"; warmup_task.cancel(); return result
-            if is_integrity_error(b0):
-                result["error"] = "integrity_check_failed_on_load"; warmup_task.cancel(); return result
-            cf_err = await wait_cf(page)
-            if cf_err:
-                result["error"] = cf_err; warmup_task.cancel(); return result
-            await warmup_task
-            result["phase"] = "click_email_btn"
-            await page.wait_for_timeout(500)
-            for sel in [
-                'button:has-text("Email & password")', 'button:has-text("Continue with email")',
-                'button:has-text("Use email")', 'button:has-text("Email")',
-                '[data-cy="email-signup"]',
-            ]:
-                btn = page.locator(sel)
-                if await btn.count():
-                    await btn.first.click()
-                    log(f"[camoufox] clicked email btn: {sel}")
-                    await page.wait_for_timeout(_random.randint(2800, 4200))
-                    break
-            else:
-                log("[camoufox] email btn not found, form may be shown directly")
-            result["phase"] = "step1_wait"
-            try:
-                await page.wait_for_selector(
-                    'input[name="email"], input[type="email"], input[placeholder*="email" i]',
-                    timeout=15000)
-            except Exception:
-                t2 = await page.title(); b2 = (await page.locator("body").inner_text())[:300]
-                if is_replit_offline_block(t2, b2):
-                    result["error"] = "replit_edge_blocked_offline_page"
-                elif is_cf_blocked(t2, b2):
-                    result["error"] = "signup_cf_ip_banned"
-                elif is_spa_hydration_failed(t2, b2):
-                    result["error"] = "signup_spa_not_hydrated"
-                else:
-                    result["error"] = "signup_email_field_timeout"
-                return result
-            result["phase"] = "fill_step1"
-            err1 = await fill_step1(page)
-            # v7.80: precheck-only 短路 (camoufox path 同样要支持)
-            if PRECHECK_ONLY:
-                _dec = _PRECHECK_RESULT or ("taken" if err1 == "Email already in use on Replit" else "unknown")
-                result.update({
-                    "ok": True, "phase": "precheck", "decision": _dec,
-                    "precheck_raw_err": err1 or "",
-                })
-                log(f"[precheck-only][camoufox] decision={_dec} raw_err={err1!r}")
-                return result
-            if err1 == "captcha_token_invalid":
-                log("[retry] captcha_token_invalid -> audio challenge...")
-                try:
-                    audio_token = await solve_recaptcha_audio(page)
-                    if audio_token:
-                        log(f"[retry] audio token → route-intercept resubmit ({len(audio_token)}chars)")
-                        _tok_r2 = audio_token
-                        async def _signup_intercept_pw(route, request):
-                            try:
-                                import json as _j2
-                                bd = _j2.loads(request.post_data or "{}")
-                                bd["recaptchaToken"] = _tok_r2
-                                log(f"[route-pw] recaptchaToken→audio({len(_tok_r2)}chars)")
-                                await route.continue_(post_data=_j2.dumps(bd))
-                            except Exception as _re:
-                                log(f"[route-pw] err: {_re}")
-                                await route.continue_()
-                        _intercept_fired_pw = [False]
-                        _orig_pw = _signup_intercept_pw
-                        async def _signup_intercept_pw2(route, request):
-                            _intercept_fired_pw[0] = True
-                            await _orig_pw(route, request)
-                        await page.route("**/api/v1/auth/sign-up**", _signup_intercept_pw2)
-                        await page.wait_for_timeout(300)
-                        try:
-                            await page.evaluate("""
-                                () => {
-                                    var btn = document.querySelector('[data-cy="signup-create-account"],button[type="submit"]');
-                                    if (btn) { btn.removeAttribute("disabled"); btn.removeAttribute("aria-disabled"); }
-                                }
-                            """)
-                        except Exception: pass
-                        await page.wait_for_timeout(300)
-                        _s2 = False
-                        for ss in ['[data-cy="signup-create-account"]', 'button:has-text("Create Account")', 'button[type="submit"]']:
-                            bs = page.locator(ss)
-                            if await bs.count():
-                                try: await bs.first.click(timeout=5000)
-                                except: await bs.first.click(force=True, timeout=3000)
-                                _s2 = True; break
-                        if not _s2: await page.keyboard.press("Enter")
-                        await page.wait_for_timeout(3000)
-                        if not _intercept_fired_pw[0]:
-                            log("[retry-pw] route未触发 → 直接fetch提交")
-                            try:
-                                fr2 = await page.evaluate(
-                                    """async ([e,p,t]) => {
-                                        var r=await fetch('/api/v1/auth/sign-up',{method:'POST',
-                                            headers:{'Content-Type':'application/json','Accept':'application/json','X-Requested-With':'XMLHttpRequest'},
-                                            credentials:'include',
-                                            body:JSON.stringify({email:e,password:p,recaptchaToken:t})});
-                                        return {s:r.status,b:(await r.text()).slice(0,300)};
-                                    }""",
-                                    [EMAIL, PASSWORD, _tok_r2])
-                                log(f"[retry-fetch-pw] e={EMAIL!r} s={fr2.get('s')} b={str(fr2.get('b',''))[:120]}")
-                            except Exception as _fe2:
-                                log(f"[retry-fetch-pw] err: {_fe2}")
-                        await page.wait_for_timeout(1500)
-                        try: await page.unroute("**/api/v1/auth/sign-up**", _signup_intercept_pw2)
-                        except Exception: pass
-                        br = (await page.locator("body").inner_text())[:400]
-                        if is_captcha_invalid(br): err1 = "captcha_token_invalid"
-                        elif is_rate_limited(br): err1 = "account_rate_limited"
-                        elif is_integrity_error(br): err1 = "integrity_check_failed_after_step1"
-                        else:
-                            if "signup" not in page.url.lower(): err1 = None
-                            else:
-                                try:
-                                    await page.wait_for_selector('input[name="username"]', timeout=5000); err1 = None
-                                except Exception:
-                                    ba = (await page.locator("body").inner_text())[:400]
-                                    if is_rate_limited(ba): err1 = "account_rate_limited"
-                                    elif is_captcha_invalid(ba): err1 = "captcha_token_invalid"
-                                    else: err1 = None
-                    else:
-                        log("[retry] audio failed -> reload...")
-                        try:
-                            await page.reload(wait_until="domcontentloaded", timeout=25000)
-                            await page.wait_for_timeout(4000)
-                            for sr in ['button:has-text("Email & password")', '[data-cy="email-signup"]']:
-                                br2 = page.locator(sr)
-                                if await br2.count(): await br2.first.click(); await page.wait_for_timeout(3000); break
-                            await page.wait_for_selector('input[name="email"], input[type="email"]', timeout=10000)
-                            err1 = await fill_step1(page)
-                        except Exception as er: log(f"[retry] reload fail: {er}")
-                except Exception as er: log(f"[retry] audio err: {er}")
-            if err1: result["error"] = err1; return result
-            if is_integrity_error((await page.locator("body").inner_text())[:300]):
-                result["error"] = "integrity_check_failed_after_step1"; return result
-            result["phase"] = "step2_wait"
-            step2_appeared = False
-            try:
-                await page.wait_for_selector(
-                    'input[name="username"], input[placeholder*="username" i], #username',
-                    timeout=35000)
-                log("[camoufox] step2 username field appeared"); step2_appeared = True
-            except Exception: log("[camoufox] step2 username not appeared in 35s")
-            if not step2_appeared:
-                bck = (await page.locator("body").inner_text())[:500]
-                url_ck = page.url
-                log(f"[step2-miss] url={url_ck[:80]}")
-                SUCCESS_HINTS = ("verify your email","check your email","we sent","sent you","verification email","confirm your email","sent an email")
-                if any(h in bck.lower() for h in SUCCESS_HINTS):
-                    log("[camoufox][step2-miss] 验证邮件已发送 → 交还 TS orchestrator (Graph API + click-verify-link)")
-                    result["ok"] = True; result["phase"] = "verify_email_sent"
-                    # v7.78m: in-page ground-truth IP probe
-                    await _finalize_exit_ip(result, page)
-                    # 不再 in-python _fetch / _complete, TS Graph API 全权负责
-                    try:
-                        _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path":"verify_email_sent_camoufox","exit_ip_real":result.get("exit_ip_real",""),"exit_ip_source":result.get("exit_ip_source","")})
-                        if _sp: result["state_path"] = _sp
-                    except Exception as _se:
-                        log(f"[camoufox][state] ⚠ {_se}")
-                    return result
-                if is_rate_limited(bck): result["error"] = "account_rate_limited"; return result
-                if is_captcha_invalid(bck): result["error"] = "captcha_token_invalid"; return result
-                result["error"] = "signup_username_field_missing"; return result
-            result["phase"] = "fill_step2"
-            err2 = await fill_step2(page)
-            if err2: result["error"] = err2; return result
-            if is_integrity_error((await page.locator("body").inner_text())[:300]):
-                result["error"] = "integrity_check_failed_at_step2"; return result
-            result["ok"] = True; result["phase"] = "done"
-            log("[camoufox] registration complete (verify email phase)")
-            # v7.78m: in-page ground-truth IP probe
-            await _finalize_exit_ip(result, page)
-            try:
-                _sp = await _save_replit_state(page.context, USERNAME, EMAIL, {"path": "step2_done_camoufox","exit_ip_real":result.get("exit_ip_real",""),"exit_ip_source":result.get("exit_ip_source","")})
-                if _sp: result["state_path"] = _sp
-            except Exception as _se:
-                log(f"[camoufox][state] ⚠ step2-done save_state failed: {_se}")
-        except Exception as e:
-            log(f"[camoufox] attempt err: {e}"); result["error"] = str(e)
-        return result
 
 async def get_exit_ip(pw_module, proxy_cfg) -> str:
     try:
@@ -3775,19 +3515,11 @@ async def run() -> dict:
     if proxy_cfg and not await ensure_tunnel(proxy_cfg):
         log("[run] 代理不可达，直接返回 tunnel_dead")
         return {"ok": False, "phase": "ensure_tunnel", "error": "tunnel_dead", "exit_ip": ""}
-    # v7.32: camoufox primary (Firefox native fingerprint, passes integrity check)
-    camoufox_available = False
-    try:
-        from camoufox.async_api import AsyncCamoufox as _ACF  # noqa
-        camoufox_available = True
-        log("✅ camoufox available (Firefox native fingerprint, passes integrity check)")
-    except ImportError:
-        log("⚠ camoufox not installed -> playwright+stealth fallback")
+  
 
     stealth_fn = None
     pw_ctx_fn  = None
 
-    if not camoufox_available:
         try:
             from playwright.async_api import async_playwright as _apw
             pw_ctx_fn = _apw
@@ -3798,7 +3530,6 @@ async def run() -> dict:
                 pw_ctx_fn = _rapw
                 log("⚠ playwright not installed -> rebrowser fallback")
             except ImportError:
-                final["error"] = "camoufox/playwright/rebrowser none available"
                 return final
         try:
             from playwright_stealth import Stealth
@@ -3809,8 +3540,6 @@ async def run() -> dict:
 
     # exit IP
     try:
-        if camoufox_available:
-            ip = await get_exit_ip_camoufox(proxy_cfg)
         else:
             async with pw_ctx_fn() as pw:
                 ip = await get_exit_ip(pw, proxy_cfg)
@@ -3827,8 +3556,6 @@ async def run() -> dict:
 
     for attempt in range(1, 2):  # v8.56: 砍掉浏览器 3 次内层重试
         log(f"browser attempt {attempt}/1")
-        if camoufox_available:
-            res = await attempt_register_camoufox(proxy_cfg, final["exit_ip"])
         else:
             async with pw_ctx_fn() as pw:
                 res = await attempt_register(pw, proxy_cfg, stealth_fn, final["exit_ip"])

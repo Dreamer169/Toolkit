@@ -28,13 +28,19 @@ def _req(method, path, data=None, token=None, timeout=20):
 def create_account():
     """创建 mail.tm 账号，返回 (address, password, account_id)"""
     chars = string.ascii_lowercase + string.digits
-    login = "".join(secrets.choice(chars) for _ in range(14))
-    address = f"{login}@{DOMAIN}"
-    password = "M@" + secrets.token_hex(10)
-    code, body = _req("POST", "/accounts", {"address": address, "password": password})
-    if code not in (200, 201):
-        raise RuntimeError(f"mail.tm 创建账号失败 {code}: {body}")
-    return address, password, body.get("id", "")
+    for attempt in range(3):
+        login = "".join(secrets.choice(chars) for _ in range(14))
+        address = f"{login}@{DOMAIN}"
+        password = "M@" + secrets.token_hex(10)
+        code, body = _req("POST", "/accounts", {"address": address, "password": password})
+        if code in (200, 201):
+            return address, password, body.get("id", "")
+        if code == 429 and attempt < 2:
+            wait = 20 * (attempt + 1)  # 20s, 40s
+            print(f"  [mail.tm] 429 rate-limit, retry in {wait}s (attempt {attempt+1}/3)", flush=True)
+            time.sleep(wait)
+        else:
+            raise RuntimeError(f"mail.tm 创建账号失败 {code}: {body}")
 
 def get_token(address: str, password: str) -> str:
     """获取 JWT 访问令牌"""

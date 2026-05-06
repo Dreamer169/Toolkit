@@ -27,120 +27,6 @@ TOR_SOCKS             = "socks5h://127.0.0.1:9050"
 
 # ─────────────────────────── 路径 A: Capsolver ───────────────────────────────
 
-def _capsolver_request(endpoint: str, payload: dict) -> dict:
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        f"https://api.capsolver.com/{endpoint}",
-        data=data,
-        headers={"Content-Type": "application/json", "Accept": "application/json"}
-    )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.load(r)
-
-
-def solve_recaptcha_capsolver(api_key: str) -> str:
-    log("  [Capsolver] 提交 reCAPTCHA v2 invisible 任务...")
-    resp = _capsolver_request("createTask", {
-        "clientKey": api_key,
-        "task": {
-            "type": "ReCaptchaV2TaskProxyless",
-            "websiteURL": WEBSHARE_REGISTER_URL,
-            "websiteKey": WEBSHARE_SITE_KEY,
-            "isInvisible": True
-        }
-    })
-    if resp.get("errorId"):
-        raise RuntimeError(f"capsolver createTask 错误: {resp.get('errorDescription','?')}")
-    task_id = resp.get("taskId")
-    log(f"  [Capsolver] taskId={task_id}, 等待结果...")
-    for i in range(40):
-        time.sleep(3)
-        r = _capsolver_request("getTaskResult", {"clientKey": api_key, "taskId": task_id})
-        status = r.get("status")
-        if status == "ready":
-            token = r["solution"]["gRecaptchaResponse"]
-            log(f"  [Capsolver] token 成功 ({i*3+3}s): {token[:40]}...")
-            return token
-        elif status == "failed" or r.get("errorId"):
-            raise RuntimeError(f"capsolver 任务失败: {r.get('errorDescription', r)}")
-        log(f"  [Capsolver] processing... ({i*3+3}s)")
-    raise RuntimeError("capsolver 超时")
-
-
-def register_via_capsolver(email: str, password: str, capsolver_key: str) -> dict:
-    t0 = time.time()
-    result = {"success": False, "email": email, "api_key": "", "error": "", "elapsed": ""}
-    try:
-        token = solve_recaptcha_capsolver(capsolver_key)
-        log("  [Webshare API] 发送注册请求...")
-        payload = {"email": email, "password": password, "recaptcha": token, "tos_accepted": True}
-        req = urllib.request.Request(
-            "https://proxy.webshare.io/api/v2/register/",
-            data=json.dumps(payload).encode(),
-            headers={
-                "Content-Type": "application/json", "Accept": "application/json",
-                "Origin": "https://dashboard.webshare.io",
-                "Referer": "https://dashboard.webshare.io/register",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                status_code = r.getcode(); body = json.load(r)
-        except urllib.error.HTTPError as e:
-            status_code = e.code
-            try: body = json.load(e)
-            except Exception: body = {"error": e.reason}
-        log(f"  [WS_API {status_code}] {json.dumps(body)[:300]}")
-        if status_code in (200, 201):
-            result["success"] = True
-            result["api_key"] = body.get("token", "")
-        else:
-            parts = []
-            for k, v in body.items():
-                if isinstance(v, list) and v:
-                    msg = v[0].get("message", str(v[0])) if isinstance(v[0], dict) else str(v[0])
-                    parts.append(f"{k}: {msg}")
-                else:
-                    parts.append(f"{k}: {v}")
-            result["error"] = "; ".join(parts) if parts else str(body)
-    except Exception as e:
-        result["error"] = str(e); log(f"  capsolver 路径失败: {e}")
-        import traceback; traceback.print_exc()
-    result["elapsed"] = f"{time.time()-t0:.1f}s"
-    return result
-
-
-# ─────────────────────── 路径 B: 浏览器自动化 ────────────────────────────────
-
-class CfProxy:
-    """可选的 CF IP 代理（默认不使用，直连服务器 IP 更好）"""
-    def __init__(self):
-        self.relay = None
-
-    def start(self) -> str:
-        try:
-            sys.path.insert(0, "/root/Toolkit/artifacts/api-server")
-            import cf_ip_pool
-            from xray_relay import XrayRelay
-            import random
-            pool = cf_ip_pool.get_pool_status().get("pool", [])
-            if not pool:
-                return ""
-            ip = random.choice(pool[:15])["ip"]
-            self.relay = XrayRelay(ip)
-            self.relay.start(timeout=10.0)
-            url = f"socks5://127.0.0.1:{self.relay.socks_port}"
-            log(f"  CF IP: {ip} -> {url}")
-            return url
-        except Exception as e:
-            log(f"  CF 代理失败: {e}"); return ""
-
-    def stop(self):
-        if self.relay:
-            try: self.relay.stop()
-            except Exception: pass
-
 
 def transcribe_audio(audio_path: str) -> str:
     try:
@@ -685,13 +571,9 @@ async def register_via_browser(email: str, password: str, proxy: str = "",
 # ─────────────────────────────── 入口 ────────────────────────────────────────
 
 async def register_webshare(email: str, password: str, proxy: str = "",
-                             headless: bool = True, use_cf: bool = False,
-                             capsolver_key: str = "",
+                             headless: bool = True, use_cf: bool = False
                              use_xvfb: bool = True,
                              use_tor_browser: bool = False) -> dict:
-    if capsolver_key:
-        log("  [模式] Capsolver 直接 API")
-        return register_via_capsolver(email, password, capsolver_key)
     else:
         mode = "Xvfb+" if use_xvfb else ""
         if use_tor_browser:
@@ -720,7 +602,6 @@ if __name__ == "__main__":
                     help="禁用 Tor 浏览器代理（默认启用，绕开 IP 频率限制）")
     ap.add_argument("--no-xvfb",       action="store_true",
                     help="禁用 Xvfb 虚拟显示（默认启用以获更好 reCAPTCHA 分数）")
-    ap.add_argument("--capsolver-key", default=os.environ.get("CAPSOLVER_KEY", ""))
     args = ap.parse_args()
 
     headless = args.headless.lower() not in ("false", "0", "no")
@@ -730,7 +611,7 @@ if __name__ == "__main__":
 
     r = asyncio.run(register_webshare(
         args.email, args.password, args.proxy,
-        headless, use_cf, args.capsolver_key, use_xvfb, use_tor_browser
+        headless, use_cf, use_xvfb, use_tor_browser
     ))
     print("\n-- 结果 --")
     print(json.dumps(r, ensure_ascii=False, indent=2))

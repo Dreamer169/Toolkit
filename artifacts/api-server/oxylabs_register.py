@@ -7,7 +7,6 @@ CF Managed Challenge (cType='managed', cFPWv='g') 完整解决方案:
 优先级:
   A. FlareSolverr (本地HTTP服务) — 用于GET/POST, DrissionPage内核
   B. CapSolver AntiCloudflareTask — 需要API key + 公网代理  
-  C. camoufox headed — 人机交互方式绕CF
   D. 手动cf_clearance注入
 
 关键修复 (vs v6):
@@ -40,218 +39,23 @@ LAST_NAMES  = ["Smith","Johnson","Williams","Brown","Jones","Garcia","Miller","D
 def log(msg): print(msg, flush=True)
 
 
-# ─── FlareSolverr solver ────────────────────────────────────────────────────
-async def _flaresolverr_solve(cf_url: str, proxy: str = "") -> dict:
-    """Use FlareSolverr to bypass CF challenge and get cf_clearance"""
-    payload = {
-        "cmd": "request.get",
-        "url": cf_url,
-        "maxTimeout": 30000,
-    }
-    if proxy:
-        payload["proxy"] = {"url": proxy}
-    log(f"  [FlareSolverr] GET {cf_url[:70]}...")
-    try:
-        async with aiohttp.ClientSession() as s:
-            r = await s.post(FLARESOLVERR_URL, json=payload,
-                            timeout=aiohttp.ClientTimeout(total=120))
-            d = await r.json()
-        status = d.get("status","?")
-        solution = d.get("solution",{})
-        cookies = solution.get("cookies",[])
-        cf_clearance = next((c["value"] for c in cookies if c.get("name")=="cf_clearance"), "")
-        ua = solution.get("userAgent","")
-        log(f"  [FlareSolverr] status={status} cf_clearance={'YES' if cf_clearance else 'NO'}")
-        return {"cf_clearance": cf_clearance, "cookies": cookies, "ua": ua, "status": status}
-    except Exception as e:
-        log(f"  [FlareSolverr] Error: {e}")
-        return {}
-
-
-# ─── CapSolver CF Managed Challenge ────────────────────────────────────────
-async def _capsolver_solve(api_key: str, cf_challenge_url: str, proxy: str = "") -> dict:
-    """
-    AntiCloudflareTask: Navigate to CF challenge URL, return cf_clearance.
-    IMPORTANT: Use the fa token URL (specific challenge), not the domain root.
-    """
-    task: dict = {"type": "AntiCloudflareTask", "websiteURL": cf_challenge_url}
-    if proxy:
-        task["proxy"] = proxy
-    log(f"  [CapSolver] Creating task URL={cf_challenge_url[:70]} proxy={proxy or 'none'}...")
-    async with aiohttp.ClientSession() as s:
-        r = await s.post("https://api.capsolver.com/createTask",
-            json={"clientKey": api_key, "task": task},
-            timeout=aiohttp.ClientTimeout(total=30))
-        data = await r.json()
-        if data.get("errorId") or data.get("errorCode"):
-            raise RuntimeError(f"CapSolver createTask: {data.get('errorDescription', data)}")
-        task_id = data.get("taskId")
-        if not task_id:
-            raise RuntimeError(f"CapSolver: no taskId: {data}")
-        log(f"  [CapSolver] taskId={task_id}")
-        for attempt in range(50):
-            await asyncio.sleep(3)
-            rr = await s.post("https://api.capsolver.com/getTaskResult",
-                json={"clientKey": api_key, "taskId": task_id},
-                timeout=aiohttp.ClientTimeout(total=20))
-            result = await rr.json()
-            status = result.get("status","")
-            if status == "ready":
-                sol = result.get("solution",{})
-                cf_clearance = sol.get("cf_clearance","")
-                log(f"  [CapSolver] Solved! cf_clearance={'YES' if cf_clearance else 'NO'}")
-                return sol
-            elif status == "failed":
-                raise RuntimeError(f"CapSolver failed: {result.get('errorDescription', result)}")
-            if attempt % 5 == 4:
-                log(f"  [CapSolver] polling t={attempt*3+3}s")
-    raise RuntimeError("CapSolver timeout (150s)")
 
 
 
-# ─── 2captcha CF bypass ─────────────────────────────────────────────────────
-async def _twocaptcha_solve(api_key: str, cf_challenge_url: str, proxy: str = "") -> dict:
-    """
-    2captcha CloudflareChallenge task.
-    Returns cf_clearance cookie value.
-    Docs: https://2captcha.com/api-docs/cloudflare-challenge
-    """
-    task: dict = {
-        "type": "AntiCloudflareTask",
-        "websiteURL": cf_challenge_url,
-        "version": "Managed",
-    }
-    if proxy:
-        task["proxy"] = proxy
-
-    log(f"  [2captcha] Creating task URL={cf_challenge_url[:70]}...")
-    async with aiohttp.ClientSession() as s:
-        r = await s.post("https://api.2captcha.com/createTask",
-            json={"clientKey": api_key, "task": task},
-            timeout=aiohttp.ClientTimeout(total=30))
-        data = await r.json()
-        if data.get("errorCode") or data.get("errorId"):
-            raise RuntimeError(f"2captcha create: {data.get('errorDescription', data)}")
-        task_id = data.get("taskId")
-        if not task_id:
-            raise RuntimeError(f"2captcha: no taskId: {data}")
-        log(f"  [2captcha] taskId={task_id}")
-        for attempt in range(50):
-            await asyncio.sleep(3)
-            rr = await s.post("https://api.2captcha.com/getTaskResult",
-                json={"clientKey": api_key, "taskId": task_id},
-                timeout=aiohttp.ClientTimeout(total=20))
-            result = await rr.json()
-            status = result.get("status","")
-            if status == "ready":
-                sol = result.get("solution", {})
-                cf_clearance = sol.get("cf_clearance", "")
-                log(f"  [2captcha] Solved! cf_clearance={'YES' if cf_clearance else 'NO'}")
-                return sol
-            elif status == "failed":
-                raise RuntimeError(f"2captcha failed: {result.get('errorDescription', result)}")
-            if attempt % 5 == 4:
-                log(f"  [2captcha] polling t={attempt*3+3}s")
-    raise RuntimeError("2captcha timeout (150s)")
 
 
-# ─── Get CF challenge URL by triggering POST ───────────────────────────────
-async def _get_cf_challenge_url(email: str) -> str:
-    """Quickly trigger POST /api/v1/users, capture CF fa token URL from 403 body"""
-    try:
-        import aiohttp_socks
-        connector = aiohttp_socks.ProxyConnector.from_url("socks5://127.0.0.1:10839")
-    except ImportError:
-        connector = None
-    
-    hdrs = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
-        "Content-Type": "application/json",
-        "Origin": "https://dashboard.oxylabs.io",
-        "Referer": "https://dashboard.oxylabs.io/en/registration",
-        "Accept": "application/json,*/*",
-        "sec-fetch-site": "same-origin",
-        "sec-fetch-mode": "cors",
-    }
-    payload = {"name":"James","surname":"Smith","email":email,"password":"Aa123456x!",
-               "websiteTrackingId":None,"gaClientId":"","region":"Global"}
-    
-    try:
-        async with aiohttp.ClientSession(connector=connector) as s:
-            r = await s.post("https://dashboard.oxylabs.io/api/v1/users",
-                json=payload, headers=hdrs,
-                timeout=aiohttp.ClientTimeout(total=15),
-                allow_redirects=False)
-            body = await r.text()
-            m = re.search(r'"fa":"(/api/v1/users\?__cf_chl_f_tk=[^"]+)"', body)
-            if m:
-                return "https://dashboard.oxylabs.io" + m.group(1)
-    except Exception as e:
-        log(f"  [get_cf_url] {e}")
-    return ""
-
-
-# ─── CF navigate (camoufox headed) ────────────────────────────────────────
-async def _navigate_cf_challenge(cf_url: str, proxy_str: str, display: str) -> str:
-    """
-    Navigate to CF challenge URL in headed camoufox browser.
-    Returns cf_clearance or empty string.
-    """
-    try:
-        from camoufox.async_api import AsyncCamoufox
-    except ImportError:
-        return ""
-    
-    if display:
-        os.environ["DISPLAY"] = display
-    
-    proxy_cfg = {"server": proxy_str} if proxy_str else None
-    try:
-        async with AsyncCamoufox(
-            headless=False, os="windows",
-            geoip=bool(proxy_cfg), proxy=proxy_cfg,
-        ) as browser:
-            page = await browser.new_page()
-            try:
-                await page.goto(cf_url, wait_until="domcontentloaded", timeout=30000)
-            except Exception as e:
-                log(f"  [CF-nav] goto exc: {str(e)[:60]}")
-            
-            for i in range(15):
-                await asyncio.sleep(2)
-                cookies = await page.context.cookies()
-                cf_ck = next((c for c in cookies if c["name"]=="cf_clearance"), None)
-                if cf_ck:
-                    log(f"  [CF-nav] ✅ cf_clearance t={i*2+2}s")
-                    return cf_ck["value"]
-                url = page.url
-                if "__cf_chl_f_tk" not in url and "oxylabs.io" in url:
-                    cookies = await page.context.cookies()
-                    cf_ck = next((c for c in cookies if c["name"]=="cf_clearance"), None)
-                    if cf_ck: return cf_ck["value"]
-                    break
-                if i % 15 == 14:
-                    log(f"  [CF-nav] t={i*2+2}s {url[-40:]}")
-    except Exception as e:
-        log(f"  [CF-nav] Error: {e}")
-    return ""
 
 
 # ─── Main registration ──────────────────────────────────────────────────────
 async def register_oxylabs(
     email: str, password: str,
     first_name: str = "", last_name: str = "",
-    proxy: str = "", headless: bool = True,
-    capsolver_key: str = "",
-    two_captcha_key: str = "",
-    cf_clearance_manual: str = "",
+    proxy: str = "", headless: bool = True
     flaresolverr: bool = True,
 ) -> dict:
     t0 = time.time()
     if not first_name: first_name = random.choice(FIRST_NAMES)
     if not last_name:  last_name  = random.choice(LAST_NAMES)
-    capsolver_key = capsolver_key or os.environ.get("CAPSOLVER_API_KEY","")
-    two_captcha_key = two_captcha_key or os.environ.get("TWOCAPTCHA_API_KEY","")
     proxy = proxy or os.environ.get("OXY_PROXY","socks5://127.0.0.1:10854")
 
     result: dict = {
@@ -269,11 +73,6 @@ async def register_oxylabs(
             display = d; break
     log(f"🖥️  Display: {display or 'none'} | proxy={proxy}")
 
-    # ─ PHASE 1: try camoufox to fill form + get SEON fingerprint ─────────
-    try:
-        from camoufox.async_api import AsyncCamoufox
-    except ImportError:
-        result["error"] = "camoufox not installed"; return result
 
     proxy_cfg = {"server": proxy} if proxy else None
     seon_fp: dict = {}
@@ -418,83 +217,13 @@ async def register_oxylabs(
                                 }])
                             except: pass
 
-            # ─ B. CapSolver ───────────────────────────────────────────
-            if not cf_clearance_value and capsolver_key:
-                log("🔧 CapSolver AntiCloudflareTask...")
-                # CRITICAL: Use CF challenge URL (fa token) not registration page
-                if cf_token_data.get("fa"):
-                    caps_url = "https://dashboard.oxylabs.io" + cf_token_data["fa"]
-                else:
-                    # Get a fresh CF challenge URL
-                    caps_url = await _get_cf_challenge_url(email)
-                    if not caps_url:
-                        caps_url = "https://dashboard.oxylabs.io/en/registration"
-                log(f"  CapSolver URL: {caps_url[:80]}")
-                
-                for pub_proxy in PUBLIC_PROXIES + [""]:
-                    try:
-                        sol = await _capsolver_solve(capsolver_key, caps_url, pub_proxy)
-                        cf_clearance_value = sol.get("cf_clearance","")
-                        if cf_clearance_value:
-                            await page.context.add_cookies([{
-                                "name":"cf_clearance","value":cf_clearance_value,
-                                "domain":"dashboard.oxylabs.io","path":"/","secure":True,
-                            }])
-                            for ck in (sol.get("cookies") or []):
-                                if isinstance(ck,dict) and ck.get("name"):
-                                    try:
-                                        await page.context.add_cookies([{
-                                            "name":ck["name"],"value":ck.get("value",""),
-                                            "domain":ck.get("domain","dashboard.oxylabs.io"),
-                                            "path":ck.get("path","/"),
-                                        }])
-                                    except: pass
-                            break
-                    except Exception as e:
-                        log(f"  CapSolver error ({pub_proxy}): {e}")
-
-            # ─ B2. 2captcha (alternative to CapSolver) ────────────
-            if not cf_clearance_value and two_captcha_key:
-                log("🔧 2captcha AntiCloudflareTask...")
-                if cf_token_data.get("fa"):
-                    caps_url = "https://dashboard.oxylabs.io" + cf_token_data["fa"]
-                else:
-                    caps_url = await _get_cf_challenge_url(email)
-                    if not caps_url: caps_url = "https://dashboard.oxylabs.io/en/registration"
-                for pub_proxy in PUBLIC_PROXIES + [""]:
-                    try:
-                        sol = await _twocaptcha_solve(two_captcha_key, caps_url, pub_proxy)
-                        cf_clearance_value = sol.get("cf_clearance","")
-                        if cf_clearance_value:
-                            await page.context.add_cookies([{
-                                "name":"cf_clearance","value":cf_clearance_value,
-                                "domain":"dashboard.oxylabs.io","path":"/","secure":True,
-                            }])
-                            break
-                    except Exception as e:
-                        log(f"  2captcha error: {e}")
-
-            # ─ C. Headed CF navigation (camoufox WebGL) ──────────────
-            if not cf_clearance_value and cf_token_data.get("fa") and display:
-                log("🌍 Headed CF navigation (WebGL)...")
-                cf_url = "https://dashboard.oxylabs.io" + cf_token_data["fa"]
-                for res_proxy in LOCAL_RESIDENTIAL:
-                    cf_clearance_value = await _navigate_cf_challenge(cf_url, res_proxy, display)
-                    if cf_clearance_value:
-                        await page.context.add_cookies([{
-                            "name":"cf_clearance","value":cf_clearance_value,
-                            "domain":"dashboard.oxylabs.io","path":"/","secure":True,
-                        }])
-                        break
 
             # ─ Give up if no clearance ──────────────────────────────
             if not cf_clearance_value:
                 msg = (
                     "CF Managed Challenge not solved. "
                     f"cType={cf_token_data.get('cType','?')}, cFPWv={cf_token_data.get('cFPWv','?')}. "
-                    "Solutions: (1) Provide CAPSOLVER_API_KEY (~$0.001/solve), "
-                    "(2) Start FlareSolverr (port 8191), "
-                    "(3) Provide cf_clearance cookie manually from your browser."
+                    "Try: Start FlareSolverr (port 8191), or provide cf_clearance cookie manually."
                 )
                 result["error"] = msg
                 result["elapsed"] = f"{time.time()-t0:.1f}s"
@@ -568,21 +297,16 @@ if __name__ == "__main__":
     ap.add_argument("--last",   default="")
     ap.add_argument("--proxy",  default="")
     ap.add_argument("--headless", default="true")
-    ap.add_argument("--capsolver-key", default="", dest="capsolver_key")
-    ap.add_argument("--cf-clearance", default="", dest="cf_clearance")
     ap.add_argument("--company", default="")  # accepted but unused
     ap.add_argument("--phone",   default="")  # accepted but unused
-    ap.add_argument("--twocaptcha-key", default="", dest="two_captcha_key")
     ap.add_argument("--no-flaresolverr", action="store_true")
     args = ap.parse_args()
     r = asyncio.run(register_oxylabs(
         args.email, args.password,
         first_name=args.first, last_name=args.last,
         proxy=args.proxy,
-        headless=args.headless.lower() not in ("false","0","no"),
-        capsolver_key=args.capsolver_key,
-        two_captcha_key=args.two_captcha_key,
-        cf_clearance_manual=args.cf_clearance,
+        headless=args.headless.lower() not in ("false","0","no")
+        two_captcha_key=args.two_captcha_key
         flaresolverr=not args.no_flaresolverr,
     ))
     print(json.dumps(r, indent=2))

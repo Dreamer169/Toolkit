@@ -1360,7 +1360,7 @@ router.post("/tools/outlook/register", async (req, res) => {
   };
 
   const n   = Math.min(999, Math.max(1, Math.floor(Number(count) || 1)));
-  const eng = ["patchright", "playwright", "camoufox"].includes(engine) ? engine : "patchright";
+  const eng = ["patchright", "playwright"].includes(engine) ? engine : "patchright";
   const jobId = `reg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
   // 解析多代理列表（支持换行或逗号分隔）
@@ -5500,8 +5500,7 @@ router.post('/tools/webshare/register', async (req, res) => {
     email, password,
     proxy = '',
     headless = true,
-    capsolverKey = '',
-  } = req.body as { email?: string; password?: string; proxy?: string; headless?: boolean; capsolverKey?: string };
+  } = req.body as { email?: string; password?: string; proxy?: string; headless?: boolean };
 
   if (!email || !password) {
     res.status(400).json({ success: false, error: 'email 和 password 不能为空' });
@@ -5510,9 +5509,7 @@ router.post('/tools/webshare/register', async (req, res) => {
 
   const jobId = `ws_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const job = await jobQueue.create(jobId);
-  job.logs.push({ type: 'start', message: `启动 Webshare 注册 — ${email}` });
-  if (capsolverKey) {
-    job.logs.push({ type: 'log', message: '[Capsolver] 已提供 API Key，使用自动 CAPTCHA 解决方案' });
+  job.logs.push({ type: 'start', message: `启动 Webshare 注册 — ${email}` }););
   } else {
     job.logs.push({ type: 'log', message: '🆓 免费模式: Xvfb + 服务器直连 IP + 音频 CAPTCHA (不需任何付费服务)' });
   }
@@ -5523,10 +5520,8 @@ router.post('/tools/webshare/register', async (req, res) => {
   const scriptPath = new URL('../webshare_register.py', import.meta.url).pathname;
   const args = [scriptPath, '--email', email, '--password', password, '--headless', headless ? 'true' : 'false'];
   if (proxy) args.push('--proxy', proxy);
-  if (capsolverKey) args.push('--capsolver-key', capsolverKey);
 
   const spawnEnv: Record<string, string> = { ...(process.env as Record<string, string>), PYTHONUNBUFFERED: '1' };
-  if (capsolverKey) spawnEnv['CAPSOLVER_KEY'] = capsolverKey;
 
   const child = spawn('python3', args, { env: spawnEnv });
   jobQueue.setChild(jobId, child);
@@ -5612,9 +5607,8 @@ router.post("/tools/oxylabs/register", async (req, res) => {
     first_name = "", last_name = "", company = "", phone = "",
     proxy = "",
     headless = true,
-    capsolverKey = "",
     cfClearance = "",
-  } = req.body as { email?: string; password?: string; first_name?: string; last_name?: string; company?: string; phone?: string; proxy?: string; headless?: boolean; capsolverKey?: string; cfClearance?: string };
+  } = req.body as { email?: string; password?: string; first_name?: string; last_name?: string; company?: string; phone?: string; proxy?: string; headless?: boolean };
 
   if (!email || !password) {
     res.status(400).json({ success: false, error: "email 和 password 不能为空" });
@@ -5624,7 +5618,6 @@ router.post("/tools/oxylabs/register", async (req, res) => {
   const jobId = `oxy_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const job = await jobQueue.create(jobId);
   job.logs.push({ type: "start", message: `启动 Oxylabs 注册 — ${email}` });
-  if (capsolverKey) job.logs.push({ type: "log", message: "[CapSolver] API Key 已提供，启用 CF Managed Challenge 自动解决" });
   if (cfClearance)  job.logs.push({ type: "log", message: `[CF] 手动 cf_clearance 已提供 (len=${cfClearance.length})，跳过 CF 挑战` });
   if (proxy) job.logs.push({ type: "log", message: `代理: ${proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@")}` });
   res.json({ success: true, jobId, message: "Oxylabs 注册任务已启动" });
@@ -5637,11 +5630,9 @@ router.post("/tools/oxylabs/register", async (req, res) => {
   if (last_name)    args.push("--last",         last_name);
   if (company)      args.push("--company",      company);
   if (phone)        args.push("--phone",        phone);
-  if (capsolverKey) args.push("--capsolver-key", capsolverKey);
   if (cfClearance)  args.push("--cf-clearance",   cfClearance);
 
   const spawnEnv: Record<string, string> = { ...(process.env as Record<string, string>), PYTHONUNBUFFERED: "1" };
-  if (capsolverKey) spawnEnv["CAPSOLVER_API_KEY"] = capsolverKey;
 
   const child = spawn("python3", args, { env: spawnEnv });
   jobQueue.setChild(jobId, child);

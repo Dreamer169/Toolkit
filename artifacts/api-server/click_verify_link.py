@@ -361,8 +361,20 @@ try:
             _plabel = _proxy.split("//")[-1]
             print(f"[click_verify] \u6d4f\u89c8\u5668\u4ee3\u7406 #{_pidx+1}/{len(_PROXY_LADDER)}: {_plabel}", flush=True)
             _browser = _pw.chromium.launch(headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-                      "--disable-extensions", "--mute-audio", "--disable-quic"])
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                    # v9.31b OOM 保护（同 auto_device_code.py）
+                    "--disable-gpu",
+                    "--js-flags=--max-old-space-size=256",
+                    "--disable-extensions",
+                    "--disable-background-networking",
+                    "--disable-default-apps",
+                    "--no-first-run",
+                    "--mute-audio",
+                    "--disable-quic",
+                ])
             _ctx_opts = {"user_agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")}

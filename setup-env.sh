@@ -13,7 +13,8 @@ echo "  系统库 OK"
 
 # ── 2. Python 包 ───────────────────────────────────────────────────────────
 echo "[2/6] 安装 Python 包..."
-pip install -q   faker   patchright   playwright   requests   httpx   aiohttp   aiofiles   beautifulsoup4   lxml   Pillow   imapclient   aioimaplib   python-telegram-bot   twocaptcha   capsolver   python-dotenv   dnspython   cryptography   pyOpenSSL   PySocks   stem   chardet 2>&1 | tail -3
+pip install -q   faker   patchright   playwright   requests   httpx   aiohttp   aiofiles   beautifulsoup4   lxml   Pillow   imapclient   aioimaplib   python-telegram-bot \ \
+  python-dotenv   dnspython   cryptography   pyOpenSSL   PySocks   stem   chardet 2>&1 | tail -3
 echo "  Python 包 OK"
 
 # ── 3. 浏览器引擎 ─────────────────────────────────────────────────────────

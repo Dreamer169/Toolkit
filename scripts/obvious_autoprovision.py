@@ -3,14 +3,12 @@
 obvious_autoprovision.py — 自动账号池补充守护进程
 ===================================================
 
-功能
-----
-1. 检测活跃账号数量；当活跃账号 < MIN_POOL 时自动注册新账号
-2. 挑选下一个空闲的 xray SOCKS5 端口（按 index.json 已用端口避开）
-3. 用 mailtm_client.py 创建 deltajohnsons.com 邮箱
-4. 调用 obvious_provision.py（subprocess）完成 Playwright 注册
-5. 新账号自动入 index.json；keepalive 下次循环即可接管
-6. 每次注册前先检测代理出口 IP，确保与已有账号不重复
+修复（v2）
+----------
+1. 启动时清理孤儿 chrome-headless-shell 进程
+2. SIGTERM 处理：通过进程组杀死子进程后再退出
+3. MIN_POOL 上限检测：可用唯一 IP 端口耗尽时停止无效重试
+4. PM2 watch 移除：通过 pm2 start --no-watch 注册
 
 守护模式（watchdog）
 -------------------
@@ -21,7 +19,7 @@ obvious_autoprovision.py — 自动账号池补充守护进程
 ---------
   python3 obvious_autoprovision.py --provision \\
       --label eu-test2 \\
-      [--port 10823]           # 不写则自动选
+      [--port 10823]
 
 环境变量
 --------
@@ -39,8 +37,8 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
-import sys
 import sys
 import time
 import urllib.request
@@ -67,6 +65,54 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 log = logging.getLogger(__name__)
+
+# 当前运行中的 provision 子进程（用于 SIGTERM 时 kill）
+_active_proc: subprocess.Popen | None = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 孤儿清理 & 信号处理
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _cleanup_orphan_chrome() -> None:
+    """启动时清理遗留的 chrome-headless-shell 孤儿进程。"""
+    patterns = ["chrome-headless-shell", "chrome-headless-shell-linux64"]
+    killed = 0
+    for pat in patterns:
+        r = subprocess.run(
+            ["pkill", "-9", "-f", pat],
+            capture_output=True,
+        )
+        if r.returncode == 0:
+            killed += 1
+    if killed:
+        log.info("startup: cleaned orphan chrome-headless-shell processes")
+        time.sleep(1)
+    else:
+        log.info("startup: no orphan chrome-headless-shell found")
+
+
+def _sigterm_handler(signum: int, frame) -> None:
+    """SIGTERM 接收时：先杀子进程组，再清理孤儿 Chrome，最后退出。"""
+    global _active_proc
+    log.info("SIGTERM received — cleaning up child processes")
+    if _active_proc is not None:
+        try:
+            pgid = os.getpgid(_active_proc.pid)
+            os.killpg(pgid, signal.SIGKILL)
+            log.info("killed provision process group pgid=%d", pgid)
+        except Exception as e:
+            log.warning("failed to kill process group: %s", e)
+            try:
+                _active_proc.kill()
+            except Exception:
+                pass
+    _cleanup_orphan_chrome()
+    sys.exit(0)
+
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
+signal.signal(signal.SIGINT,  _sigterm_handler)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -117,6 +163,12 @@ def _used_egress_ips() -> set[str]:
         if ip and ip not in ("?", "err"):
             ips.add(ip)
     return ips
+
+
+def _free_port_count() -> int:
+    """返回可用（未被使用）的代理端口数量。"""
+    used = _used_ports()
+    return sum(1 for p in range(PORT_START, PORT_END + 1) if p not in used)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -189,10 +241,10 @@ def provision_account(label: str | None = None,
                       headless: bool = True) -> dict | None:
     """
     Register a new obvious.ai account using the given (or auto-selected) proxy port.
-
-    Runs obvious_provision.py in a subprocess so Playwright has its own
-    clean event loop.  Returns the manifest dict on success, None on failure.
+    Tracks the subprocess in _active_proc so SIGTERM can kill it.
     """
+    global _active_proc
+
     # 1. Find port + egress IP
     if port is None:
         result = find_free_port(check_unique_ip=True)
@@ -212,7 +264,7 @@ def provision_account(label: str | None = None,
 
     # 3. Build subprocess command
     env = dict(os.environ)
-    env["DISPLAY"] = env.get("DISPLAY", ":99")   # xvfb
+    env["DISPLAY"] = env.get("DISPLAY", ":99")
 
     cmd = [
         sys.executable, str(PROVISION_PY),
@@ -228,32 +280,47 @@ def provision_account(label: str | None = None,
     t0 = time.time()
 
     try:
-        proc = subprocess.run(
-            cmd, env=env, timeout=600,
-            capture_output=True, text=True,
+        # start_new_session=True → 子进程在独立进程组，SIGTERM 时可用 killpg 一次清除
+        proc = subprocess.Popen(
+            cmd, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        log.error("provision subprocess timed out (600s)")
-        return None
+        _active_proc = proc
+
+        try:
+            stdout, stderr = proc.communicate(timeout=600)
+        except subprocess.TimeoutExpired:
+            log.error("provision subprocess timed out (600s) — killing")
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                proc.kill()
+            proc.communicate()
+            _active_proc = None
+            return None
+        finally:
+            _active_proc = None
+
     except Exception as e:
         log.error("provision subprocess error: %s", e)
+        _active_proc = None
         return None
 
     elapsed = round(time.time() - t0, 1)
-    stdout = proc.stdout or ""
-    stderr = proc.stderr or ""
 
-    # Echo output
-    for line in stdout.splitlines():
+    for line in (stdout or "").splitlines():
         log.info("  [provision] %s", line)
-    for line in stderr.splitlines():
+    for line in (stderr or "").splitlines():
         log.warning("  [provision:err] %s", line)
 
     if proc.returncode != 0:
         log.error("provision FAILED (rc=%d) in %.1fs", proc.returncode, elapsed)
+        # 清理可能残留的 chrome 进程
+        _cleanup_orphan_chrome()
         return None
 
-    # 4. Read back the manifest that provision.py wrote
+    # 4. Read back the manifest
     mp = ACC_DIR / label / "manifest.json"
     if not mp.exists():
         log.error("manifest not found at %s — provision may have failed silently", mp)
@@ -263,7 +330,6 @@ def provision_account(label: str | None = None,
     log.info("account provisioned OK: label=%s email=%s sandbox=%s (%.1fs)",
              label, manifest.get("email"), manifest.get("sandboxId"), elapsed)
 
-    # 5. Update egressIp in manifest if provision.py stored "(skipped)"
     if manifest.get("egressIp") in (None, "?", "(skipped)"):
         manifest["egressIp"] = egress_ip
         mp.write_text(json.dumps(manifest, indent=2))
@@ -281,9 +347,12 @@ def check_and_replenish(min_active: int = MIN_POOL,
     """
     If active account count < min_active, provision new ones up to max_provision
     per call to avoid hammering obvious.ai.
-    Returns number of accounts successfully provisioned.
+
+    跳过条件：
+    - active >= min_active（已满足）
+    - 可用代理端口耗尽（避免无效循环）
     """
-    active = _active_accounts()
+    active  = _active_accounts()
     current = len(active)
     need    = max(0, min_active - current)
 
@@ -292,14 +361,26 @@ def check_and_replenish(min_active: int = MIN_POOL,
     if need == 0:
         return 0
 
+    # ── 检查可用端口 ──────────────────────────────────────────────────────────
+    free_ports = _free_port_count()
+    if free_ports == 0:
+        log.warning(
+            "no free proxy ports available (used all %d-%d) — "
+            "skipping provisioning; lower SB_MIN_POOL or expand port range",
+            PORT_START, PORT_END,
+        )
+        return 0
+
+    to_provision = min(need, max_provision, free_ports)
+    log.info("will provision %d account(s) (free_ports=%d)", to_provision, free_ports)
+
     provisioned = 0
-    for i in range(min(need, max_provision)):
-        log.info("provisioning account %d/%d …", i + 1, min(need, max_provision))
+    for i in range(to_provision):
+        log.info("provisioning account %d/%d …", i + 1, to_provision)
         m = provision_account(headless=headless)
         if m:
             provisioned += 1
-            # Small delay between registrations to avoid burst detection
-            if i < need - 1:
+            if i < to_provision - 1:
                 log.info("waiting 90s before next registration …")
                 time.sleep(90)
         else:
@@ -318,27 +399,29 @@ def watchdog(min_active: int = MIN_POOL,
              headless: bool = True) -> None:
     """
     Infinite loop: check pool every `check_interval` seconds.
-    Provision new accounts when pool falls below `min_active`.
-    Designed to run under PM2 (will be restarted on crash).
+    Provisions new accounts when pool falls below `min_active`.
+
+    修复：
+    - 启动时清理孤儿 Chrome
+    - SIGTERM 时通过 signal handler 干净退出
+    - 端口耗尽时跳过注册（不再无限重试）
     """
     log.info("watchdog started min_active=%d interval=%ds headless=%s",
              min_active, check_interval, headless)
+
+    # 启动时清理孤儿 Chrome
+    _cleanup_orphan_chrome()
+
     while True:
         try:
             n = check_and_replenish(min_active=min_active, headless=headless)
             if n:
                 log.info("watchdog provisioned %d new account(s) this cycle", n)
-        except KeyboardInterrupt:
-            log.info("autoprovision watchdog shutdown")
-            sys.exit(0)
         except Exception as e:
             log.exception("watchdog cycle error: %s", e)
+
         log.info("watchdog sleeping %ds …", check_interval)
-        try:
-            time.sleep(check_interval)
-        except KeyboardInterrupt:
-            log.info("autoprovision watchdog shutdown (SIGTERM)")
-            sys.exit(0)
+        time.sleep(check_interval)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

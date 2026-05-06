@@ -100,6 +100,18 @@ async function autoOAuth(acc: { id: number; email: string; password: string }): 
     accountId:       acc.id,
   }]);
 
+  // v9.31 OOM guard: Chrome 需要 ~200MB，内存不足时跳过避免 OOM kill 导致进程崩溃
+  try {
+    const { readFileSync: _memRfs } = await import("fs");
+    const _memAvailKB = parseInt((_memRfs("/proc/meminfo","utf8").match(/MemAvailable:\s+(\d+)/)||[,"0"])[1]??0);
+    const _memAvailMB = Math.floor(_memAvailKB / 1024);
+    if (_memAvailMB < 600) {
+      logger.warn({ email: acc.email, memAvailMB: _memAvailMB }, "[healthcheck] 内存不足(<600MB)，跳过 patchright，待内存恢复后重试");
+      return false;
+    }
+    logger.info({ email: acc.email, memAvailMB: _memAvailMB }, "[healthcheck] 内存充足，启动 patchright");
+  } catch { /* /proc/meminfo not available, proceed anyway */ }
+
   // patchright 完成浏览器端授权
   const autoResult = await new Promise<{ status: string; msg?: string }>((resolve) => {
     // v9.29b: pass "" so auto_device_code.py calls _pick_residential_proxy() internally
@@ -234,8 +246,16 @@ async function runCheck() {
           );
           logger.info({ email: acc.email }, "[healthcheck] needs_oauth_manual 重新授权成功，标签已清除");
         } else {
-          await execute("UPDATE accounts SET status='needs_oauth', updated_at=NOW() WHERE id=$1", [acc.id]);
-          logger.warn({ email: acc.email }, "[healthcheck] needs_oauth_manual 重试仍失败，12h后再试");
+          // v9.31: not_found → suspend；账号在 MS 系统中不存在，无意义无限重试
+          const _freshRow = await query<{ tags: string | null }>("SELECT tags FROM accounts WHERE id=$1", [acc.id]);
+          const _freshTags = _freshRow[0]?.tags ?? "";
+          if (_freshTags.includes("not_found")) {
+            await execute("UPDATE accounts SET status='suspended', updated_at=NOW() WHERE id=$1", [acc.id]);
+            logger.warn({ email: acc.email }, "[healthcheck] MS报告账号不存在(not_found)，已自动暂停，停止重试");
+          } else {
+            await execute("UPDATE accounts SET status='needs_oauth', updated_at=NOW() WHERE id=$1", [acc.id]);
+            logger.warn({ email: acc.email }, "[healthcheck] needs_oauth_manual 重试仍失败，1h后再试");
+          }
         }
       }
     }
