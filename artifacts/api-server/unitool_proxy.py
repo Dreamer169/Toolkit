@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v4.3
+unitool.ai → OpenAI 兼容反代 v4.4
 改进:
   - 修复 pool 重复条目 bug（同一 ssid 出现在多个文件时去重）
   - 修复 /add-ssid 推入的条目在文件扫描后不丢失（live entries 保留）
   - 后台余额监控线程：每 30min 检查各账号余额，低余额/耗尽时打印警告
   - /pool-status 包含 balance 字段
-  - 版本: v4.3
+  - 版本: v4.4
 """
 import json, time, uuid, threading, ssl, os, re, sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -152,13 +152,14 @@ def _balance_monitor_loop():
 
 # ─── 服务 ID & 模型映射 ──────────────────────────────────────────────────────
 NATIVE_SERVICES = {
-    # ── 实测可用 (批量扫描 2026-05-06 确认) ──
+    # ── 实测可用 (批量扫描 2026-05-06 确认（含 gpt-5.4）) ──
     "gpt-5",             # ChatGPT 5  ✓
     "gpt-5.5",           # ChatGPT 5.5  ✓
     "gpt-4-1",           # GPT-4.1 (连字符，实测最快)  ✓
     "gpt5.1",            # GPT-5.1  ✓
     "gpt5.2",            # GPT-5.2  ✓
     "gpt-4o-mini",       # GPT-4o-mini (快速小模型)  ✓
+    "gpt-5.4",           # GPT-5.4  ✓
     "claude-sonnet",     # Claude Sonnet 最新版  ✓
     "claude-sonnet-4-5", # Claude Sonnet 4.5  ✓
     "claude-sonnet-4-6", # Claude Sonnet 4.6  ✓
@@ -598,14 +599,14 @@ class ThreadedServer(HTTPServer):
 
 if __name__ == "__main__":
     _reload_pool_if_needed()
-    print(f"[unitool-proxy v4.3] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v4.4] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     for e in _pool:
         print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     # 启动余额监控后台线程
     t = threading.Thread(target=_balance_monitor_loop, daemon=True)
     t.start()
-    print("[unitool-proxy v4.3] balance monitor started (first check in 2min)", flush=True)
+    print("[unitool-proxy v4.4] balance monitor started (first check in 2min)", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
