@@ -182,7 +182,7 @@ def click_verify_and_get_ssid(verify_url):
     ], capture_output=True, text=True, timeout=35)
     ssid      = ""
     to_entry  = False
-    raw_hdrs  = result.stdout
+    raw_hdrs  = open(hdr_file).read() if os.path.exists(hdr_file) else ""
     # 从响应头找 Set-Cookie: __Secure-unitool-ssid
     for line in raw_hdrs.splitlines():
         if "unitool-ssid" in line.lower() and "set-cookie" in line.lower():
@@ -597,7 +597,7 @@ async def main():
 
     # Graph API 轮询验证邮件（60s，6×10s）
     verify_url = ""
-    if access_token:
+    if access_token and email_sent:  # skip poll when already_reg, no new email
         log("[graph] polling JunkEmail+Inbox (max 60s)...")
         for attempt in range(6):
             await asyncio.sleep(10)
