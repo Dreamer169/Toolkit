@@ -64,6 +64,25 @@ def get_next_account():
     conn.close()
     return row  # (id, email, password, refresh_token) or None
 
+def get_pending_account():
+    """拉一个unitool_verify_pending账号重试"""
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, email, password, refresh_token FROM accounts
+        WHERE platform='outlook' AND status='active'
+          AND refresh_token IS NOT NULL AND refresh_token != ''
+          AND tags LIKE '%unitool_verify_pending%'
+          AND tags NOT LIKE '%unitool_registered%'
+          AND tags NOT LIKE '%unitool_processing%'
+          AND LENGTH(COALESCE(password,'')) >= 8
+        ORDER BY updated_at ASC NULLS LAST
+        LIMIT 1
+    """)
+    row = cur.fetchone()
+    conn.close()
+    return row
+
 def mark_account(account_id, tag, extra_notes=""):
     conn = db_connect()
     cur = conn.cursor()
@@ -477,7 +496,7 @@ async def process_one_account(acct_id, email, password, refresh_token):
     
     if not verify_url:
         log("[step2] 未找到verify链接")
-        mark_account(acct_id, "unitool_fail", "no_verify_email")
+        mark_account(acct_id, "unitool_verify_pending", "no_verify_email")
         return False
     
     # Step 3: 点击verify链接
@@ -508,6 +527,38 @@ async def process_one_account(acct_id, email, password, refresh_token):
         mark_account(acct_id, "unitool_fail", "login_no_ssid")
         return False
 
+async def retry_pending_account(acct_id, email, password, refresh_token):
+    """重试pending账号：跳过step1直接轮询inbox获取verify链接"""
+    log(f"\n{'='*60}")
+    log(f"[retry] 重试 id={acct_id} {email}")
+    conn = db_connect(); cur = conn.cursor()
+    cur.execute(
+        "UPDATE accounts SET tags=REGEXP_REPLACE(tags, E'(,unitool_verify_pending|unitool_verify_pending,|unitool_verify_pending)', '', 'g'), updated_at=NOW() WHERE id=%s",
+        (acct_id,))
+    conn.commit(); conn.close()
+    mark_account(acct_id, "unitool_processing", "retry")
+    log("[retry-step2] 轮询inbox (timeout=300s, 跳过step1)...")
+    verify_url = poll_inbox_for_verify(refresh_token, timeout_sec=300, interval_sec=20)
+    if not verify_url:
+        log("[retry-step2] 仍未找到verify链接，重标pending")
+        mark_account(acct_id, "unitool_verify_pending", "retry_no_email")
+        return False
+    log("[retry-step3] 点击verify链接...")
+    ssid, to_entry = click_verify_link(verify_url)
+    if ssid:
+        log(f"[retry-step3] \u2705 ssid len={len(ssid)}")
+        save_ssid(acct_id, email, ssid)
+        return True
+    log("[retry-step4] 无ssid，pydoll登录...")
+    await asyncio.sleep(3)
+    ssid = await unitool_login_for_ssid(email, password)
+    if ssid:
+        log(f"[retry-step4] \u2705 登录成功 ssid_len={len(ssid)}")
+        save_ssid(acct_id, email, ssid)
+        return True
+    mark_account(acct_id, "unitool_fail", "retry_login_no_ssid")
+    return False
+
 async def main():
     import argparse
     ap = argparse.ArgumentParser()
@@ -517,6 +568,8 @@ async def main():
     ap.add_argument("--account-id", type=int, default=0)
     ap.add_argument("--wait-for-accounts", type=int, default=0,
                     help="等待N秒让outlook注册完成再开始")
+    ap.add_argument("--retry-pending", type=int, default=0,
+                    help="重试N个unitool_verify_pending账号")
     args = ap.parse_args()
     
     open(LOG_FILE, "w").write("")
@@ -531,7 +584,25 @@ async def main():
         row = (args.account_id, args.email, args.password, "")
         await process_one_account(*row)
         return
-    
+
+    if args.retry_pending > 0:
+        log(f"[main] retry-pending 模式，最多重试{args.retry_pending}个账号")
+        ok_count = 0
+        for i in range(args.retry_pending):
+            row = get_pending_account()
+            if not row:
+                log(f"[main] 没有更多pending账号 (已处理{i}个)")
+                break
+            acct_id, email, password, refresh_token = row
+            log(f"\n[main] [{i+1}/{args.retry_pending}] 重试pending: {email}")
+            success = await retry_pending_account(acct_id, email, password, refresh_token)
+            if success:
+                ok_count += 1
+            if i < args.retry_pending - 1:
+                await asyncio.sleep(5)
+        log(f"\n[main] retry-pending完成 成功={ok_count}/{args.retry_pending}")
+        return
+
     ok_count = 0
     for i in range(args.batch):
         row = get_next_account()
