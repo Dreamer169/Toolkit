@@ -6081,7 +6081,7 @@ router.get("/tools/unitool/reflink", async (req, res) => {
 });
 
 // POST /tools/unitool/ref-pipeline
-// Body: { batch?, masterEmail?, masterSsid?, refCode?, chain?, maxDepth?, noActivateRef? }
+// Body: { batch?, masterEmail?, masterSsid?, refCode?, chain?=true, maxDepth?=10, noActivateRef? }
 // v2.1: chain 模式（batch >10 时串联多个 ref_code）
 router.post("/tools/unitool/ref-pipeline", async (req, res) => {
   const body          = req.body as Record<string, unknown>;
@@ -6090,7 +6090,7 @@ router.post("/tools/unitool/ref-pipeline", async (req, res) => {
   const masterSsid    = String(body.masterSsid    ?? body.master_ssid    ?? "").trim();
   const masterId      = Number(body.masterId      ?? body.master_id      ?? 0);
   const refCode       = String(body.refCode       ?? body.ref_code       ?? "").trim();
-  const chain         = Boolean(body.chain        ?? false);
+  const chain         = Boolean(body.chain        ?? true);   // 默认开启 chain，自动串联多个 ref_code
   const maxDepth      = Math.min(Number(body.maxDepth ?? body.max_depth ?? 10), 20);
   const noActivateRef = Boolean(body.noActivateRef ?? body.no_activate_ref ?? false);
 
@@ -6103,7 +6103,7 @@ router.post("/tools/unitool/ref-pipeline", async (req, res) => {
   if (masterSsid)    args.push("--master-ssid",   masterSsid);
   if (masterId)      args.push("--master-id",      String(masterId));
   if (refCode)       args.push("--ref-code",       refCode);
-  if (chain)       { args.push("--chain"); args.push("--max-depth", String(maxDepth)); }
+  args.push("--chain"); args.push("--max-depth", String(maxDepth));  // chain 始终开启
   if (noActivateRef) args.push("--no-activate-ref");
 
   const { spawn: _spawnRef } = await import("child_process");

@@ -396,8 +396,8 @@ async def run_batch(ref_code, master_id, batch_size, used_emails,
     remaining       = min(batch_size, MAX_REFERRALS_PER_CODE - existing_count)
 
     if remaining <= 0:
-        log(f"[batch] ref_code={ref_code} 已达上限 {MAX_REFERRALS_PER_CODE}，跳过")
-        return 0, []
+        log(f"[batch] ref_code={ref_code} 已达上限 {MAX_REFERRALS_PER_CODE}，需要切换")
+        return 0, [], True    # ref_code_full=True
 
     ref_url = f"https://unitool.ai/ref/{ref_code}"
     log(f"[batch] ref_code={ref_code}  url={ref_url}")
@@ -468,7 +468,7 @@ async def run_batch(ref_code, master_id, batch_size, used_emails,
             log("[batch] 间隔 5s...")
             await asyncio.sleep(5)
 
-    return ok_count, newly_activated
+    return ok_count, newly_activated, False  # ref_code_full=False
 
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────
@@ -585,18 +585,20 @@ async def main():
         log(f"[chain depth={chain_depth}] ref_code={cur_ref_code} 目标剩余={remaining}")
 
         this_batch = min(remaining, MAX_REFERRALS_PER_CODE)
-        ok, newly  = await run_batch(
+        ok, newly, ref_code_full = await run_batch(
             cur_ref_code, cur_master_id, this_batch,
             used_emails, activate_ref=activate_ref)
 
         total_ok  += ok
-        remaining -= ok
+        if not ref_code_full:
+            remaining -= ok   # 只有实际尝试过才减
 
         if remaining <= 0:
             break
 
         # chain 模式：切换到新 ref_code
-        if not args.chain:
+        # ref_code 满了必须换（即使非 chain 模式）；非 chain 模式且未满就结束
+        if not ref_code_full and not args.chain:
             log("[main] 非 chain 模式，结束")
             break
 
