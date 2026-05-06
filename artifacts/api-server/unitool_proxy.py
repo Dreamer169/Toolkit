@@ -116,8 +116,7 @@ NATIVE_SERVICES = {
     "gpt-5.5",        # ChatGPT 5.5 (最新旗舰进阶)
     "gpt-4o",         # GPT-4o (快速多模态)
     # Anthropic / Claude
-    "claude-opus",    # Claude Opus 最新版（含 Opus 4 / 4.5 级别）
-    "claude-sonnet",  # Claude Sonnet 最新版（含 Sonnet 4 级别）
+    "claude-sonnet",  # Claude Sonnet 最新版（含 Sonnet 4 / claude-opus 4 级别）
 }
 # 别名映射：把常见的 OpenAI 兼容名称 → 真实 unitool service_id
 MODEL_ALIASES = {
@@ -155,16 +154,19 @@ MODEL_ALIASES = {
     "chatgpt":                  "gpt-5.5",   # 泛型 chatgpt → 最新可用
     # ─── Anthropic Claude 系 ─────────────────────────────────────────────────
     # 所有版本化 Opus → claude-opus (泛型，服务最新 Opus)
-    "claude-opus-4":            "claude-opus",
-    "claude-opus-4-5":          "claude-opus",
-    "claude-opus-4.5":          "claude-opus",
-    "claude-opus-4-6":          "claude-opus",   # 用户请求的 Claude Opus 4.6
-    "claude-opus-4.6":          "claude-opus",
-    "claude-opus-4-latest":     "claude-opus",
-    "claude-opus-latest":       "claude-opus",
-    "claude-3-opus":            "claude-opus",
-    "claude-3-opus-20240229":   "claude-opus",
-    "claude":                   "claude-opus",   # 泛型 claude → Opus
+    # unitool claude-opus 后端 bug: max_tokens 32768 > Claude Opus 4 限制 32000
+    # 全部回退到 claude-sonnet（实际工作），待 unitool 修复后恢复
+    "claude-opus":              "claude-sonnet",  # native已移除，此处回退
+    "claude-opus-4":            "claude-sonnet",
+    "claude-opus-4-5":          "claude-sonnet",
+    "claude-opus-4.5":          "claude-sonnet",
+    "claude-opus-4-6":          "claude-sonnet",  # 用户请求的 Claude Opus 4.6
+    "claude-opus-4.6":          "claude-sonnet",
+    "claude-opus-4-latest":     "claude-sonnet",
+    "claude-opus-latest":       "claude-sonnet",
+    "claude-3-opus":            "claude-sonnet",
+    "claude-3-opus-20240229":   "claude-sonnet",
+    "claude":                   "claude-sonnet",  # 泛型 claude → Sonnet (Opus 损坏中)
     # 所有版本化 Sonnet → claude-sonnet (泛型，服务最新 Sonnet)
     "claude-sonnet-4":          "claude-sonnet",
     "claude-sonnet-4-5":        "claude-sonnet",
