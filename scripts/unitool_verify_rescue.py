@@ -288,12 +288,14 @@ def main():
             for _fld in ("JunkEmail", "Inbox"):
                 try:
                     import urllib.request as _ur2
+                    _filter = "from/emailAddress/address%20eq%20'no-reply@unitool.ai'"
+                    _url2 = ("https://graph.microsoft.com/v1.0/me/mailFolders/"
+                             + _fld + "/messages"
+                             + "?$filter=" + _filter
+                             + "&$orderby=receivedDateTime%20desc&$top=5"
+                             + "&$select=subject,body,receivedDateTime")
                     _req2 = _ur2.Request(
-                        "https://graph.microsoft.com/v1.0/me/mailFolders/"
-                        + _fld + "/messages"
-                        "?$filter=from/emailAddress/address eq 'no-reply@unitool.ai'"
-                        "&$orderby=receivedDateTime desc&$top=5"
-                        "&$select=subject,body,receivedDateTime",
+                        _url2,
                         headers={"Authorization": "Bearer " + access_token}
                     )
                     _resp2 = _ur2.urlopen(_req2, timeout=15)
