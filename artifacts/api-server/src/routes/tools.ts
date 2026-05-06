@@ -6,7 +6,7 @@ import { Router, type IRouter } from "express";
 import { createHash, randomBytes, randomUUID } from "crypto";
 import { execute, query, queryOne } from "../db.js";
 import { existsSync } from "fs";
-import { execFile as _execFile } from "child_process";
+import { execFile as _execFile, spawn } from "child_process";
 import { Socket } from "net";
 import path from "path";
 

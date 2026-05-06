@@ -1,91 +1,173 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v4.5
-改进:
-  - 修复 pool 重复条目 bug（同一 ssid 出现在多个文件时去重）
-  - 修复 /add-ssid 推入的条目在文件扫描后不丢失（live entries 保留）
-  - 后台余额监控线程：每 30min 检查各账号余额，低余额/耗尽时打印警告
-  - /pool-status 包含 balance 字段
-  - 版本: v4.5
+unitool.ai → OpenAI 兼容反代 v5.0
+====================================
+改进 (相对 v4.5):
+  1. 真实 SSE 流式输出 — 后台线程轮询消息 API，增量推送 delta（不再按空格假分块）
+  2. 每请求新建独立 chat — 彻底隔离上下文，避免跨 API 调用污染对话历史
+  3. 持久化 ssid — 写入 /data/unitool_ssids/<label>.txt（不再只存 /tmp）
+  4. 启动时从 DB + /data/ 恢复 ssid 池（重启不丢 ssid）
+  5. 自动重登 — ssid 因 401/403 死亡时后台触发 unitool_login.py（若能找到匹配账号密码）
+  6. /reload-ssids 端点 — 强制重扫文件 + DB
+  7. /add-ssid 同步写 DB 和 /data/ 持久文件
+  8. 更细粒度 dead_reason — balance_exhausted / auth_error / timeout / http_5xx
+  9. 余额监控间隔缩短为 15min（高负载下更快发现耗尽）
 """
-import json, time, uuid, threading, ssl, os, re, sys
+import json, time, uuid, threading, ssl, os, re, sys, subprocess
+import psycopg2
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
-PORT = int(os.environ.get("PORT", 8089))
-BASE = "https://unitool.ai"
-SSID_DIR = "/tmp"
-SSID_PATTERN = re.compile(r"^unitool_ssid\d*\.txt$")
-BALANCE_CHECK_INTERVAL = 1800   # 每个账号每 30 分钟检查一次
-BALANCE_LOW_WARN = 0.5          # 低于此值打警告
+PORT     = int(os.environ.get("PORT", 8089))
+BASE     = "https://unitool.ai"
+SSID_DIR = "/data/unitool_ssids"   # 持久化目录（vdb1 上）
+TMP_DIR  = "/tmp"                  # 兼容旧 /tmp/unitool_ssid*.txt
+DB_URL   = "postgresql://postgres:postgres@localhost/toolkit"
+LOGIN_SCRIPT = "/data/Toolkit/scripts/unitool_login.py"
+BALANCE_CHECK_INTERVAL = 900   # 15 min
+BALANCE_LOW_WARN = 0.5
 
+os.makedirs(SSID_DIR, exist_ok=True)
 ctx = ssl.create_default_context()
 _lock = threading.Lock()
 
 # ─── SSID 池 ────────────────────────────────────────────────────────────────
 _pool: list = []
-_pool_idx: int = 0
 _pool_mtime: float = 0.0
 
-def _scan_ssid_files() -> list:
-    """扫描 /tmp/unitool_ssid*.txt，返回 (filename, ssid) 列表"""
-    found = []
+def _read_ssid_file(path: str) -> str:
+    try:
+        v = open(path).read().strip()
+        return v if len(v) > 50 else ""
+    except Exception:
+        return ""
+
+def _scan_files() -> list[tuple[str, str]]:
+    """扫描 /data/unitool_ssids/ 和 /tmp/unitool_ssid*.txt，返回 (label, ssid) 列表，去重"""
+    found: dict[str, str] = {}  # ssid → label
+    # 1. /data/unitool_ssids/*.txt (label = 文件名 stem)
     try:
         for fn in sorted(os.listdir(SSID_DIR)):
-            if SSID_PATTERN.match(fn):
-                path = os.path.join(SSID_DIR, fn)
-                try:
-                    v = open(path).read().strip()
-                    if len(v) > 50:
-                        found.append((fn, v))
-                except Exception:
-                    pass
+            if fn.endswith(".txt"):
+                ssid = _read_ssid_file(os.path.join(SSID_DIR, fn))
+                if ssid and ssid not in found:
+                    found[ssid] = fn[:-4]   # strip .txt
     except Exception:
         pass
-    return found
+    # 2. /tmp/unitool_ssid*.txt (兼容旧格式)
+    pat = re.compile(r"^unitool_ssid\d*\.txt$")
+    try:
+        for fn in sorted(os.listdir(TMP_DIR)):
+            if pat.match(fn):
+                ssid = _read_ssid_file(os.path.join(TMP_DIR, fn))
+                if ssid and ssid not in found:
+                    found[ssid] = fn[:-4]
+    except Exception:
+        pass
+    return [(label, ssid) for ssid, label in found.items()]
 
-def _reload_pool_if_needed():
-    """
-    重建 pool：
-    1. 文件扫描结果按 ssid 内容去重（同内容多个文件只取一次）
-    2. /add-ssid 推入的 live 条目（不在文件里的）也保留，不再丢弃
-    3. dead 条目（无论来源）在到期前保留
-    """
+def _load_from_db() -> list[tuple[str, str]]:
+    """从 unitool_ssids 表加载 (label/email, ssid)"""
+    try:
+        conn = psycopg2.connect(DB_URL)
+        cur  = conn.cursor()
+        cur.execute("""
+            SELECT COALESCE(source_email, 'db_' || id::text), ssid
+            FROM unitool_ssids
+            WHERE is_valid = true AND ssid IS NOT NULL AND LENGTH(ssid) > 50
+            ORDER BY collected_at DESC
+        """)
+        rows = [(r[0], r[1]) for r in cur.fetchall()]
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"[DB] load error: {e}", flush=True)
+        return []
+
+def _save_to_db(label: str, ssid: str):
+    """把新 ssid 写入 unitool_ssids 表"""
+    try:
+        conn = psycopg2.connect(DB_URL)
+        cur  = conn.cursor()
+        # 先看是否有同 label 的旧记录
+        cur.execute("SELECT id FROM unitool_ssids WHERE source_email=%s LIMIT 1", (label,))
+        row = cur.fetchone()
+        if row:
+            cur.execute("UPDATE unitool_ssids SET ssid=%s, is_valid=true, collected_at=NOW() WHERE id=%s",
+                        (ssid, row[0]))
+        else:
+            cur.execute("""
+                INSERT INTO unitool_ssids (source_email, ssid, is_valid, collected_at)
+                VALUES (%s, %s, true, NOW())
+            """, (label, ssid))
+        conn.commit()
+        conn.close()
+        print(f"[DB] saved ssid for {label}", flush=True)
+    except Exception as e:
+        print(f"[DB] save error: {e}", flush=True)
+
+def _invalidate_in_db(label: str):
+    try:
+        conn = psycopg2.connect(DB_URL)
+        cur  = conn.cursor()
+        cur.execute("UPDATE unitool_ssids SET is_valid=false WHERE source_email=%s", (label,))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def _save_to_file(label: str, ssid: str):
+    """持久化到 /data/unitool_ssids/<label>.txt"""
+    safe = re.sub(r"[^a-zA-Z0-9@._-]", "_", label)
+    path = os.path.join(SSID_DIR, f"{safe}.txt")
+    try:
+        open(path, "w").write(ssid)
+    except Exception as e:
+        print(f"[FILE] save error: {e}", flush=True)
+
+def _rebuild_pool():
     global _pool, _pool_mtime
-    now = time.time()
-    if now - _pool_mtime < 5:
-        return
-    _pool_mtime = now
+    _pool_mtime = time.time()
 
-    files = _scan_ssid_files()
+    # 合并来源：文件 + DB
+    sources: dict[str, str] = {}   # ssid → label
+    for (label, ssid) in _scan_files():
+        if ssid not in sources:
+            sources[ssid] = label
+    for (label, ssid) in _load_from_db():
+        if ssid not in sources:
+            sources[ssid] = label
+
     with _lock:
         existing = {e["ssid"]: e for e in _pool}
         new_pool = []
-        seen_ssids: set = set()
-
-        # 1. 文件来源（按 ssid 内容去重）
-        for (fn, ssid) in files:
-            if ssid in seen_ssids:
-                continue          # 跳过重复内容
-            seen_ssids.add(ssid)
+        seen = set()
+        for ssid, label in sources.items():
+            if ssid in seen:
+                continue
+            seen.add(ssid)
             if ssid in existing:
-                new_pool.append(existing[ssid])   # 保留已有条目（含 email label）
+                new_pool.append(existing[ssid])
             else:
-                new_pool.append({
-                    "ssid": ssid, "label": fn,
-                    "dead_until": 0, "dead_reason": "",
-                    "chats": {}, "bad_chats": set(), "balance": None,
-                })
-                print(f"[POOL] added {fn} ssid={ssid[:16]}...", flush=True)
-
-        # 2. 保留不在文件里的 dead 条目（暂时 423/expired，等恢复）
+                new_pool.append(_make_entry(ssid, label))
+                print(f"[POOL] loaded {label} ssid={ssid[:16]}...", flush=True)
+        # 保留 dead 但还在冷却的旧条目（等恢复或重登）
         for e in _pool:
-            if e["ssid"] not in seen_ssids:
-                if e["dead_until"] > now:
-                    new_pool.append(e)
-
+            if e["ssid"] not in seen and e["dead_until"] > time.time():
+                new_pool.append(e)
         _pool = new_pool
+
+def _reload_pool_if_needed():
+    if time.time() - _pool_mtime < 5:
+        return
+    _rebuild_pool()
+
+def _make_entry(ssid: str, label: str) -> dict:
+    return {"ssid": ssid, "label": label,
+            "dead_until": 0, "dead_reason": "",
+            "balance": None, "_balance_ts": 0,
+            "_relogin_pending": False}
 
 def _mark_dead(ssid: str, secs: int = 600, reason: str = ""):
     with _lock:
@@ -93,9 +175,80 @@ def _mark_dead(ssid: str, secs: int = 600, reason: str = ""):
             if e["ssid"] == ssid:
                 e["dead_until"] = time.time() + secs
                 e["dead_reason"] = reason
-                print(f"[POOL] marked dead {ssid[:16]}... for {secs}s reason={reason!r}", flush=True)
+                print(f"[POOL] dead {e['label']} {secs}s reason={reason!r}", flush=True)
+                # 如果是 auth 错误，触发后台重登
+                if "auth" in reason and not e.get("_relogin_pending"):
+                    e["_relogin_pending"] = True
+                    t = threading.Thread(target=_bg_relogin, args=(e["label"],), daemon=True)
+                    t.start()
+                elif "balance" in reason:
+                    _invalidate_in_db(e["label"])
                 break
 
+# ─── 自动重登 ────────────────────────────────────────────────────────────────
+def _get_password_for_label(label: str) -> str:
+    """从 DB accounts 表查 label(email) 对应密码"""
+    try:
+        conn = psycopg2.connect(DB_URL)
+        cur  = conn.cursor()
+        cur.execute("SELECT password FROM accounts WHERE email=%s LIMIT 1", (label,))
+        row = cur.fetchone()
+        conn.close()
+        return row[0] if row else ""
+    except Exception:
+        return ""
+
+def _bg_relogin(label: str):
+    """后台线程：用 unitool_login.py 重新登录，成功后推入 pool"""
+    print(f"[RELOGIN] starting for {label}", flush=True)
+    pw = _get_password_for_label(label)
+    if not pw:
+        print(f"[RELOGIN] no password found for {label}, skip", flush=True)
+        return
+    try:
+        result = subprocess.run(
+            ["python3", LOGIN_SCRIPT, "--email", label, "--password", pw, "--no-headless"],
+            capture_output=True, text=True, timeout=180,
+            env={**os.environ, "DISPLAY": ":99", "PYTHONUNBUFFERED": "1"}
+        )
+        for line in result.stdout.split("\n"):
+            if line.startswith("[OK]"):
+                parts = line.split("|")
+                if len(parts) >= 3:
+                    new_ssid = parts[2].strip()
+                    print(f"[RELOGIN] ✅ {label} new ssid={new_ssid[:16]}...", flush=True)
+                    _add_ssid_to_pool(label, new_ssid)
+                    return
+        print(f"[RELOGIN] ❌ {label} no OK line found", flush=True)
+        if result.stderr:
+            print(f"[RELOGIN] stderr: {result.stderr[-200:]}", flush=True)
+    except Exception as ex:
+        print(f"[RELOGIN] error: {ex}", flush=True)
+    finally:
+        with _lock:
+            for e in _pool:
+                if e["label"] == label:
+                    e["_relogin_pending"] = False
+                    break
+
+def _add_ssid_to_pool(label: str, ssid: str):
+    """将 ssid 加入/更新 pool，并持久化到文件+DB"""
+    _save_to_file(label, ssid)
+    _save_to_db(label, ssid)
+    with _lock:
+        same_label = next((e for e in _pool if e["label"] == label), None)
+        same_ssid  = next((e for e in _pool if e["ssid"] == ssid), None)
+        if same_label:
+            same_label["ssid"] = ssid
+            same_label["dead_until"] = 0
+            same_label["dead_reason"] = ""
+            same_label["_relogin_pending"] = False
+            print(f"[POOL] updated {label} ssid={ssid[:16]}...", flush=True)
+        elif not same_ssid:
+            _pool.append(_make_entry(ssid, label))
+            print(f"[POOL] added {label} ssid={ssid[:16]}...", flush=True)
+
+# ─── 余额监控 ────────────────────────────────────────────────────────────────
 def _hdrs(ssid: str) -> dict:
     return {
         "Cookie":       f"__Secure-unitool-ssid={ssid}",
@@ -107,22 +260,16 @@ def _hdrs(ssid: str) -> dict:
     }
 
 def _check_balance(ssid: str) -> float | None:
-    """返回账号 token 余额，失败返回 None"""
     try:
         req = Request(f"{BASE}/api/user/billing-accounts",
                       headers=_hdrs(ssid), method="GET")
         with urlopen(req, context=ctx, timeout=10) as r:
             d = json.loads(r.read())
-        accounts = d.get("accounts", [])
-        if not accounts:
-            return None
-        return sum(float(a.get("value", 0)) for a in accounts)
+        return sum(float(a.get("value", 0)) for a in d.get("accounts", []))
     except Exception:
         return None
 
 def _balance_monitor_loop():
-    """后台线程：定期检查所有账号余额，打印告警"""
-    # 启动延迟 2 分钟，避免和启动初始化竞争
     time.sleep(120)
     while True:
         try:
@@ -130,232 +277,107 @@ def _balance_monitor_loop():
                 entries = list(_pool)
             now = time.time()
             for e in entries:
-                # 跳过太快检查的（每账号间隔 BALANCE_CHECK_INTERVAL）
-                last_check = e.get("_balance_ts", 0)
-                if now - last_check < BALANCE_CHECK_INTERVAL:
+                if now - e.get("_balance_ts", 0) < BALANCE_CHECK_INTERVAL:
                     continue
                 bal = _check_balance(e["ssid"])
                 e["_balance_ts"] = now
                 e["balance"] = bal
+                lbl = e["label"]
                 if bal is None:
-                    print(f"[BAL] {e['label']}: check failed", flush=True)
+                    print(f"[BAL] {lbl}: check failed", flush=True)
                 elif bal <= 0:
-                    print(f"[BAL] ⚠ {e['label']}: balance={bal:.3f} EXHAUSTED", flush=True)
+                    print(f"[BAL] ⚠ {lbl}: balance={bal:.3f} EXHAUSTED", flush=True)
                 elif bal < BALANCE_LOW_WARN:
-                    print(f"[BAL] ⚠ {e['label']}: balance={bal:.3f} LOW", flush=True)
+                    print(f"[BAL] ⚠ {lbl}: balance={bal:.3f} LOW", flush=True)
                 else:
-                    print(f"[BAL] ✓ {e['label']}: balance={bal:.3f}", flush=True)
-                time.sleep(2)   # 账号间稍作间隔
+                    print(f"[BAL] ✓ {lbl}: balance={bal:.3f}", flush=True)
+                time.sleep(2)
         except Exception as ex:
             print(f"[BAL] monitor error: {ex}", flush=True)
-        time.sleep(60)   # 每分钟检查一轮（跳过未到期的）
+        time.sleep(60)
 
-# ─── 服务 ID & 模型映射 ──────────────────────────────────────────────────────
+# ─── 服务/模型映射 ────────────────────────────────────────────────────────────
 NATIVE_SERVICES = {
-    # ── 实测可用 (批量扫描 2026-05-06 确认（含 gpt-5.4）) ──
-    "gpt-5",             # ChatGPT 5  ✓
-    "gpt-5.5",           # ChatGPT 5.5  ✓
-    "gpt-4-1",           # GPT-4.1 (连字符，实测最快)  ✓
-    "gpt5.1",            # GPT-5.1  ✓
-    "gpt5.2",            # GPT-5.2  ✓
-    "gpt-4o-mini",       # GPT-4o-mini (快速小模型)  ✓
-    "gpt-5.4",           # GPT-5.4  ✓
-    "claude-sonnet",     # Claude Sonnet 最新版  ✓
-    "claude-sonnet-4-5", # Claude Sonnet 4.5  ✓
-    "claude-sonnet-4-6", # Claude Sonnet 4.6  ✓
-    "claude-opus-4-6",   # Claude Opus 4.6  ✓
-    # gpt-4o → 持续超时暂不 native；gpt-o3-pro → 后端无内容
+    "gpt-5", "gpt-5.5", "gpt-4-1", "gpt5.1", "gpt5.2",
+    "gpt-4o-mini", "gpt-5.4",
+    "claude-sonnet", "claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-6",
 }
 
-# 服务降级链：primary 失败时按顺序尝试备选（同家族）
-# 触发条件：service_error / timeout / 500
 FALLBACK_CHAINS: dict[str, list[str]] = {
-    # ── GPT 系 ──
-    "gpt-5":       ["gpt-5.5",   "gpt-5.4",  "gpt4.1",    "gpt-4-1",  "gpt-4o-mini"],
-    "gpt-5.5":     ["gpt-5",     "gpt-5.4",  "gpt-4-1",   "gpt-4o-mini"],
-    "gpt-5.4":     ["gpt-5.5",   "gpt-5",    "gpt-4-1",   "gpt-4o-mini"],
-    "gpt5.1":      ["gpt5.2",    "gpt-5",    "gpt-5.5",   "gpt-4-1"],
-    "gpt5.2":      ["gpt5.1",    "gpt-5",    "gpt-5.5",   "gpt-4-1"],
-    "gpt-4-1":     ["gpt-5.4",   "gpt-5",    "gpt-4o-mini"],
-    "gpt-4o-mini": ["gpt-4-1",   "gpt-5.4",  "gpt-5"],
-    # ── Claude 系 ──
+    "gpt-5":            ["gpt-5.5",   "gpt-5.4",  "gpt-4-1",  "gpt-4o-mini"],
+    "gpt-5.5":          ["gpt-5",     "gpt-5.4",  "gpt-4-1",  "gpt-4o-mini"],
+    "gpt-5.4":          ["gpt-5.5",   "gpt-5",    "gpt-4-1",  "gpt-4o-mini"],
+    "gpt5.1":           ["gpt5.2",    "gpt-5",    "gpt-5.5",  "gpt-4-1"],
+    "gpt5.2":           ["gpt5.1",    "gpt-5",    "gpt-5.5",  "gpt-4-1"],
+    "gpt-4-1":          ["gpt-5.4",   "gpt-5",    "gpt-4o-mini"],
+    "gpt-4o-mini":      ["gpt-4-1",   "gpt-5.4",  "gpt-5"],
     "claude-opus-4-6":  ["claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet"],
     "claude-sonnet-4-6":["claude-sonnet-4-5", "claude-sonnet",     "claude-opus-4-6"],
     "claude-sonnet-4-5":["claude-sonnet-4-6", "claude-sonnet",     "claude-opus-4-6"],
     "claude-sonnet":    ["claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-6"],
 }
 
-def _is_retryable_service_error(msg: str) -> bool:
-    """判断 service_error 是否值得切换 service 重试"""
-    RETRYABLE = [
-        "No content returned",
-        "Reasoning is mandatory",
-        "max_tokens",
-        "context_length_exceeded",
-        "overloaded",
-        "rate_limit",
-        "capacity",
-        "unavailable",
-        "timeout",
-        "upstream",
-        "Bad gateway",
-        "Service Unavailable",
-    ]
-    ml = msg.lower()
-    return any(k.lower() in ml for k in RETRYABLE)
-
 MODEL_ALIASES = {
-    # ── OpenAI GPT 系 ──
-    "gpt-4":                      "gpt-4-1",     # → native (实测快)
-    "gpt-4-turbo":                "gpt-4-1",
-    "gpt-4-turbo-preview":        "gpt-4-1",
-    "gpt-4.1":                    "gpt-4-1",     # 点号 → 连字符
-    "gpt-4o":                     "gpt-4-1",     # gpt-4o 超时，回退 gpt-4-1
-    "gpt-4o-search":              "gpt-4-1",
-    "gpt-4.5":                    "gpt-4-1",
-    "gpt-4o-2024-11-20":          "gpt-4-1",
-    "gpt-4o-mini-2024-07-18":     "gpt-4o-mini", # → native
-    "gpt-4o-mini-search":         "gpt-4o-mini",
-    "gpt-3.5-turbo":              "gpt-4o-mini", # 轻量 → mini
-    "gpt-3.5-turbo-0613":         "gpt-4o-mini",
-    "gpt-3.5-turbo-16k":          "gpt-4o-mini",
-    "text-davinci-003":           "gpt-4o-mini",
-    # Reasoning 系 → gpt-5.5
-    "o1":                         "gpt-5.5",
-    "o1-mini":                    "gpt-5.5",
-    "o1-pro":                     "gpt-5.5",
-    "o1-preview":                 "gpt-5.5",
-    "o3":                         "gpt-5.5",
-    "o3-mini":                    "gpt-5.5",
-    "o4-mini":                    "gpt-5.5",
-    "o4":                         "gpt-5.5",
-    "gpt-5-turbo":                "gpt-5",
-    "chatgpt-5":                  "gpt-5",       # → gpt-5 (旗舰)
-    "chatgpt-5-turbo":            "gpt-5",
-    "chatgpt-5.5":                "gpt-5.5",
-    "chatgpt-5.5-turbo":          "gpt-5.5",
-    "chatgpt":                    "gpt-5.5",
-    # ── Anthropic Claude 系 ──
-    # claude-opus-4-6 (连字符 service_id) 实测可用 ✓
-    # claude-opus-4.5 / claude-opus-4-5 均不可用，全部指向 4-6
-    "claude-opus":                "claude-opus-4-6",   # 泛型 → 最新可用 Opus
-    "claude-opus-4":              "claude-opus-4-6",
-    "claude-opus-4-5":            "claude-opus-4-6",   # 4-5 不可用，回退 4-6
-    "claude-opus-4.5":            "claude-opus-4-6",
-    "claude-opus-4-6":            "claude-opus-4-6",   # NATIVE (别名冗余兼容)
-    "claude-opus-4.6":            "claude-opus-4-6",   # 点号 → 连字符 service_id
-    "claude-opus-4-latest":       "claude-opus-4-6",
-    "claude-opus-latest":         "claude-opus-4-6",
-    "claude-3-opus":              "claude-sonnet",
-    "claude-3-opus-20240229":     "claude-sonnet",
-    "claude":                     "claude-sonnet",
-    "claude-sonnet-4":            "claude-sonnet",
-    "claude-sonnet-4-5":          "claude-sonnet-4-5",  # native alias
-    "claude-3-7-sonnet":          "claude-sonnet",
-    "claude-3-7-sonnet-20250219": "claude-sonnet",
-    "claude-3-5-sonnet":          "claude-sonnet",
-    "claude-3-5-sonnet-20241022": "claude-sonnet",
-    "claude-3-5-haiku":           "claude-sonnet",
-    "claude-3-5-haiku-20241022":  "claude-sonnet",
-    "claude-3-haiku":             "claude-sonnet",
-    "claude-3-haiku-20240307":    "claude-sonnet",
-    "claude-3-sonnet":            "claude-sonnet",
-    "claude-3-sonnet-20240229":   "claude-sonnet",
-    "claude-haiku":               "claude-sonnet",
-    "claude-3-5-sonnet-latest":   "claude-sonnet",
-    "claude-3-7-sonnet-latest":   "claude-sonnet",
-    "claude-sonnet-latest":       "claude-sonnet",
-    # ── Google Gemini 系 (SSE协议，回退 gpt-4o) ──
-    "gemini":                     "gpt-4o",
-    "gemini-2.5-pro":             "gpt-4o",
-    "gemini-2.5-flash":           "gpt-4o",
-    "gemini-2.0-pro":             "gpt-4o",
-    "gemini-2.0-pro-exp":         "gpt-4o",
-    "gemini-2.0-flash":           "gpt-4o",
-    "gemini-2.0":                 "gpt-4o",
-    "gemini-flash-2.0":           "gpt-4o",
-    "flash-2.0":                  "gpt-4o",
-    "gemini-1.5-pro":             "gpt-4o",
-    "gemini-1.5-flash":           "gpt-4o",
-    "gemini-1.0-pro":             "gpt-4o",
-    "gemini-pro-1.0":             "gpt-4o",
-    "gemini-pro":                 "gpt-4o",
-    "gemini-exp":                 "gpt-4o",
-    "gemini-pro-exp":             "gpt-4o",
-    "gemini-flash":               "gpt-4o",
-    "gemini-ultra":               "gpt-4o",
-    # ── xAI / Grok 系 (回退 gpt-5.5) ──
-    "grok":                       "gpt-5.5",
-    "x-ai":                       "gpt-5.5",
-    "xai":                        "gpt-5.5",
-    "grok-3":                     "gpt-5.5",
-    "grok-3-fast":                "gpt-5.5",
-    "grok-3-mini":                "gpt-5.5",
-    "grok-3-mini-fast":           "gpt-5.5",
-    "grok-2":                     "gpt-5.5",
-    "grok-2-1212":                "gpt-5.5",
-    "grok-2-mini":                "gpt-5.5",
-    "grok-beta":                  "gpt-5.5",
-    "grok-mini":                  "gpt-5.5",
-    # ── DeepSeek 系 ──
-    "deepseek":                   "gpt-5.5",
-    "deepseek-r1":                "gpt-5.5",
-    "deepseek-v3":                "gpt-5.5",
-    "deepseek-chat":              "gpt-5.5",
+    "gpt-4": "gpt-4-1", "gpt-4-turbo": "gpt-4-1", "gpt-4-turbo-preview": "gpt-4-1",
+    "gpt-4.1": "gpt-4-1", "gpt-4o": "gpt-4-1", "gpt-4o-search": "gpt-4-1",
+    "gpt-4.5": "gpt-4-1", "gpt-4o-2024-11-20": "gpt-4-1",
+    "gpt-4o-mini-2024-07-18": "gpt-4o-mini", "gpt-4o-mini-search": "gpt-4o-mini",
+    "gpt-3.5-turbo": "gpt-4o-mini", "gpt-3.5-turbo-0613": "gpt-4o-mini",
+    "gpt-3.5-turbo-16k": "gpt-4o-mini", "text-davinci-003": "gpt-4o-mini",
+    "o1": "gpt-5.5", "o1-mini": "gpt-5.5", "o1-pro": "gpt-5.5",
+    "o1-preview": "gpt-5.5", "o3": "gpt-5.5", "o3-mini": "gpt-5.5",
+    "o4-mini": "gpt-5.5", "o4": "gpt-5.5",
+    "gpt-5-turbo": "gpt-5", "chatgpt-5": "gpt-5", "chatgpt-5-turbo": "gpt-5",
+    "chatgpt-5.5": "gpt-5.5", "chatgpt-5.5-turbo": "gpt-5.5", "chatgpt": "gpt-5.5",
+    "claude-opus": "claude-opus-4-6", "claude-opus-4": "claude-opus-4-6",
+    "claude-opus-4-5": "claude-opus-4-6", "claude-opus-4.5": "claude-opus-4-6",
+    "claude-opus-4.6": "claude-opus-4-6", "claude-opus-4-latest": "claude-opus-4-6",
+    "claude-opus-latest": "claude-opus-4-6",
+    "claude-3-opus": "claude-sonnet", "claude-3-opus-20240229": "claude-sonnet",
+    "claude": "claude-sonnet", "claude-sonnet-4": "claude-sonnet",
+    "claude-3-7-sonnet": "claude-sonnet", "claude-3-7-sonnet-20250219": "claude-sonnet",
+    "claude-3-5-sonnet": "claude-sonnet", "claude-3-5-sonnet-20241022": "claude-sonnet",
+    "claude-3-5-haiku": "claude-sonnet", "claude-3-5-haiku-20241022": "claude-sonnet",
+    "claude-3-haiku": "claude-sonnet", "claude-3-haiku-20240307": "claude-sonnet",
+    "claude-3-sonnet": "claude-sonnet", "claude-3-sonnet-20240229": "claude-sonnet",
+    "claude-haiku": "claude-sonnet", "claude-3-5-sonnet-latest": "claude-sonnet",
+    "claude-3-7-sonnet-latest": "claude-sonnet", "claude-sonnet-latest": "claude-sonnet",
+    "gemini": "gpt-4o-mini", "gemini-2.5-pro": "gpt-4o-mini",
+    "gemini-2.5-flash": "gpt-4o-mini", "gemini-2.0-pro": "gpt-4o-mini",
+    "gemini-2.0-flash": "gpt-4o-mini", "gemini-1.5-pro": "gpt-4o-mini",
+    "gemini-1.5-flash": "gpt-4o-mini", "gemini-pro": "gpt-4o-mini",
+    "gemini-flash": "gpt-4o-mini", "gemini-ultra": "gpt-4o-mini",
+    "grok": "gpt-5.5", "grok-3": "gpt-5.5", "grok-3-fast": "gpt-5.5",
+    "grok-3-mini": "gpt-5.5", "grok-2": "gpt-5.5", "grok-beta": "gpt-5.5",
+    "deepseek": "gpt-5.5", "deepseek-r1": "gpt-5.5", "deepseek-v3": "gpt-5.5",
+    "deepseek-chat": "gpt-5.5",
 }
 
 def _resolve_model(model: str) -> str:
-    if model in NATIVE_SERVICES:
-        return model
-    if model in MODEL_ALIASES:
-        return MODEL_ALIASES[model]
+    if model in NATIVE_SERVICES:  return model
+    if model in MODEL_ALIASES:    return MODEL_ALIASES[model]
     m = model.lower()
-    if "claude" in m:   return "claude-sonnet"     # 未知 claude → Sonnet (更稳定)
-    if "gemini" in m:   return "gpt-4o"
+    if "claude" in m:   return "claude-sonnet"
+    if "gemini" in m:   return "gpt-4o-mini"
     if "grok" in m:     return "gpt-5.5"
     if "deepseek" in m: return "gpt-5.5"
-    return "gpt-5.5"   # 未知模型 → 最强可用
+    return "gpt-5.5"
 
-ALL_MODELS = sorted(NATIVE_SERVICES | set(MODEL_ALIASES.keys()))
-MODELS_LIST = [{"id": m, "object": "model", "created": 1700000000, "owned_by": "unitool"}
-               for m in ALL_MODELS]
+ALL_MODELS   = sorted(NATIVE_SERVICES | set(MODEL_ALIASES.keys()))
+MODELS_LIST  = [{"id": m, "object": "model", "created": 1700000000, "owned_by": "unitool"}
+                for m in ALL_MODELS]
 
-# ─── API 核心 ────────────────────────────────────────────────────────────────
+# ─── 核心 API 调用 ───────────────────────────────────────────────────────────
 def _api(method: str, path: str, body=None, ssid: str = ""):
     data = json.dumps(body).encode() if body is not None else None
-    req = Request(f"{BASE}{path}", data=data, headers=_hdrs(ssid), method=method)
+    req  = Request(f"{BASE}{path}", data=data, headers=_hdrs(ssid), method=method)
     with urlopen(req, context=ctx, timeout=30) as r:
         return json.loads(r.read())
-
-def _get_or_create_chat(entry: dict, service_id: str, force_new=False):
-    with _lock:
-        cid = entry["chats"].get(service_id)
-        if cid and cid in entry["bad_chats"]:
-            entry["chats"].pop(service_id, None)
-            cid = None
-        if cid and not force_new:
-            return cid
-    chat = _api("POST", "/api/provider-runtime/chats",
-                body={"service_id": service_id, "title": ""},
-                ssid=entry["ssid"])
-    cid = chat.get("id")
-    if cid:
-        with _lock:
-            entry["chats"][service_id] = cid
-    return cid
-
-def _evict_chat(entry: dict, chat_id):
-    with _lock:
-        entry["bad_chats"].add(chat_id)
-        for k, v in list(entry["chats"].items()):
-            if v == chat_id:
-                del entry["chats"][k]
-    print(f"[EVICT] chat {chat_id}", flush=True)
 
 def _fmt(messages: list) -> str:
     parts = []
     for m in messages:
-        role = m.get("role", "user")
+        role    = m.get("role", "user")
         content = m.get("content", "")
         if isinstance(content, list):
             content = " ".join(c.get("text", "") for c in content
@@ -368,32 +390,15 @@ def _fmt(messages: list) -> str:
             parts.append(content)
     return "\n\n".join(parts)
 
-def _send_wait(entry: dict, chat_id, content: str, timeout=180) -> str:
-    result = _api("POST", f"/api/chats/{chat_id}/messages",
-                  body={"content": content, "attachments": [], "options": ""},
-                  ssid=entry["ssid"])
-    user_msg_id = result.get("message", {}).get("id")
-    if not user_msg_id:
-        raise Exception(f"no message id: {result}")
+def _is_retryable(msg: str) -> bool:
+    KEYS = ["No content returned","Reasoning is mandatory","max_tokens",
+            "context_length_exceeded","overloaded","rate_limit","capacity",
+            "unavailable","timeout","upstream","Bad gateway","Service Unavailable"]
+    ml = msg.lower()
+    return any(k.lower() in ml for k in KEYS)
 
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        time.sleep(1.5)
-        msgs_resp = _api("GET", f"/api/chats/{chat_id}/messages", ssid=entry["ssid"])
-        msgs = msgs_resp.get("messages", msgs_resp) if isinstance(msgs_resp, dict) else msgs_resp
-        for m in reversed(msgs):
-            if m.get("role") == "assistant" and m.get("reply_to") == user_msg_id:
-                status = m.get("status", "")
-                if status == "error":
-                    raise Exception(f"service_error: {m.get('content','')[:300]}")
-                if status in ("ended", "active", "done"):
-                    return m.get("content", "")
-    _evict_chat(entry, chat_id)
-    raise TimeoutError(f"timeout chat={chat_id}")
-
-_rr_idx = 0
 _rr_lock = threading.Lock()
-
+_rr_idx  = 0
 def _pick_entry(entries: list) -> dict:
     global _rr_idx
     with _rr_lock:
@@ -401,108 +406,145 @@ def _pick_entry(entries: list) -> dict:
         _rr_idx += 1
         return entries[idx]
 
-def _try_service(service_id: str, content: str, entries: list) -> str:
-    """在给定 entries 池中对 service_id 发起请求（含 ssid 轮转 + 单次 chat 重试）"""
+def _send_and_collect(entry: dict, service_id: str, content: str,
+                      chunk_cb=None, timeout: int = 180) -> str:
+    """
+    创建新 chat → 发送消息 → 轮询等待完整回复（同时通过 chunk_cb 发送增量）
+    chunk_cb(delta: str) 若提供则做真实流式推送
+    """
+    # 1. 创建新 chat（每请求独立，避免上下文污染）
+    chat = _api("POST", "/api/provider-runtime/chats",
+                body={"service_id": service_id, "title": ""}, ssid=entry["ssid"])
+    chat_id = chat.get("id")
+    if not chat_id:
+        raise Exception(f"cannot create chat: {chat}")
+
+    # 2. 发送用户消息
+    result = _api("POST", f"/api/chats/{chat_id}/messages",
+                  body={"content": content, "attachments": [], "options": ""},
+                  ssid=entry["ssid"])
+    user_msg_id = result.get("message", {}).get("id")
+    if not user_msg_id:
+        raise Exception(f"no message id: {result}")
+
+    # 3. 轮询等待 assistant 回复
+    deadline        = time.time() + timeout
+    prev_content    = ""
+    active_stable   = 0   # 连续 "active" 且内容不变的次数，到 2 次则视为完成
+    interval        = 1.5
+
+    while time.time() < deadline:
+        time.sleep(interval)
+        msgs_resp = _api("GET", f"/api/chats/{chat_id}/messages", ssid=entry["ssid"])
+        msgs = msgs_resp.get("messages", msgs_resp) if isinstance(msgs_resp, dict) else msgs_resp
+        for m in reversed(msgs if isinstance(msgs, list) else []):
+            if m.get("role") != "assistant" or m.get("reply_to") != user_msg_id:
+                continue
+            status  = m.get("status", "")
+            cur_txt = m.get("content") or ""
+
+            # 增量流式推送
+            if chunk_cb and cur_txt and cur_txt != prev_content:
+                delta = cur_txt[len(prev_content):]
+                if delta:
+                    chunk_cb(delta)
+                active_stable = 0   # 有新内容，重置静止计数
+                prev_content  = cur_txt
+
+            if status == "error":
+                raise Exception(f"service_error: {cur_txt[:300]}")
+            if status in ("ended", "done") and cur_txt:
+                return cur_txt
+            # "active" 且连续 2 轮内容不变 → 视为完成
+            if status == "active" and cur_txt:
+                active_stable += 1
+                if active_stable >= 2:
+                    return cur_txt
+        interval = 1.0
+
+    raise TimeoutError(f"timeout chat={chat_id} service={service_id}")
+
+def _try_service(service_id: str, content: str, entries: list,
+                 chunk_cb=None) -> str:
     last_err = None
-    for _ in range(len(entries) * 2):
-        entry = _pick_entry(entries)
+    max_attempts = max(len(entries) * 2, 4)
+    for attempt in range(max_attempts):
+        # 动态过滤: 每次循环重新取 live 条目，跳过刚被标死的 ssid
+        now = time.time()
+        live_now = [e for e in entries if e["dead_until"] <= now]
+        pick_from = live_now if live_now else entries
+        entry = _pick_entry(pick_from)
         try:
-            for attempt in range(2):
-                chat_id = _get_or_create_chat(entry, service_id, force_new=(attempt > 0))
-                if not chat_id:
-                    raise Exception(f"cannot create chat for {service_id}")
-                try:
-                    return _send_wait(entry, chat_id, content)
-                except TimeoutError:
-                    if attempt == 0:
-                        print(f"[RETRY] timeout, new chat for {service_id}", flush=True)
-                        continue
-                    raise
+            return _send_and_collect(entry, service_id, content, chunk_cb=chunk_cb)
         except HTTPError as e:
+            body_txt = ""
+            try: body_txt = e.read().decode(errors="ignore")
+            except Exception: pass
             if e.code in (401, 403, 423):
-                try:
-                    err_body = e.read().decode(errors="ignore")
-                except Exception:
-                    err_body = ""
-                if "Free tokens are over" in err_body or "Balance need" in err_body:
-                    print(f"[POOL] {entry['label']} balance exhausted, marking dead 24h", flush=True)
+                if "Free tokens are over" in body_txt or "Balance need" in body_txt:
                     _mark_dead(entry["ssid"], secs=86400, reason="balance_exhausted")
                 else:
-                    print(f"[POOL] {entry['label']} got HTTP {e.code}, marking dead 10m", flush=True)
-                    _mark_dead(entry["ssid"], secs=600, reason=f"http_{e.code}")
+                    _mark_dead(entry["ssid"], secs=600,   reason="auth_error")
                 last_err = e
                 continue
             raise
+        except TimeoutError as e:
+            _mark_dead(entry["ssid"], secs=120, reason="timeout")
+            last_err = e
+            continue
         except Exception as e:
             last_err = e
             continue
     raise Exception(f"all ssids failed for {service_id}: {last_err}")
 
-
-def _do_chat(model: str, messages: list, ssid_override: str | None = None) -> str:
+def _do_chat(model: str, messages: list, ssid_override: str | None,
+             chunk_cb=None) -> str:
     primary_id = _resolve_model(model)
-    content = _fmt(messages)
+    content    = _fmt(messages)
     print(f"[REQ] {model}→{primary_id} msgs={len(messages)}", flush=True)
 
     if ssid_override and len(ssid_override) > 50:
-        entry = {"ssid": ssid_override, "label": "header",
-                 "dead_until": 0, "chats": {}, "bad_chats": set(), "balance": None}
-        entries = [entry]
+        entries = [_make_entry(ssid_override, "header")]
     else:
         _reload_pool_if_needed()
         with _lock:
-            live = [e for e in _pool if e["dead_until"] <= time.time()]
-            entries = live if live else _pool[:]
+            live    = [e for e in _pool if e["dead_until"] <= time.time()]
+            entries = live or _pool[:]
 
     if not entries:
         raise Exception("ssid pool empty — please login first")
 
-    # 构建本次请求的 service 尝试顺序：primary + 该 primary 的降级链
-    chain = [primary_id] + [s for s in FALLBACK_CHAINS.get(primary_id, [])
-                             if s != primary_id]
-
+    chain    = [primary_id] + [s for s in FALLBACK_CHAINS.get(primary_id, []) if s != primary_id]
     last_err = None
     for idx, service_id in enumerate(chain):
         if idx > 0:
-            print(f"[FALLBACK] {model}: {chain[idx-1]} → {service_id}", flush=True)
+            print(f"[FALLBACK] {chain[idx-1]} → {service_id}", flush=True)
         try:
-            result = _try_service(service_id, content, entries)
-            if idx > 0:
-                print(f"[FALLBACK] succeeded with {service_id}", flush=True)
-            return result
+            return _try_service(service_id, content, entries, chunk_cb=chunk_cb)
         except TimeoutError as e:
-            print(f"[FALLBACK] {service_id} timeout, trying next", flush=True)
-            last_err = e
-            continue
+            print(f"[FALLBACK] {service_id} timeout", flush=True); last_err = e; continue
         except Exception as e:
-            err_msg = str(e)
-            # service_error → 判断是否值得换服务
-            if "service_error:" in err_msg:
-                detail = err_msg.split("service_error:", 1)[-1].strip()
-                if _is_retryable_service_error(detail):
-                    print(f"[FALLBACK] {service_id} svc_err={detail[:80]!r}, trying next", flush=True)
-                    last_err = e
-                    continue
-                else:
-                    # 不可重试的服务错误（如内容违规等）直接抛出
-                    raise
-            # HTTP 500 → 也尝试降级
-            if "500" in err_msg and idx < len(chain) - 1:
-                print(f"[FALLBACK] {service_id} HTTP 500, trying next", flush=True)
-                last_err = e
-                continue
-            # 其他错误（pool 耗尽等）直接抛出
+            err = str(e)
+            if "service_error:" in err:
+                detail = err.split("service_error:", 1)[-1].strip()
+                if _is_retryable(detail):
+                    print(f"[FALLBACK] {service_id} retryable: {detail[:60]}", flush=True)
+                    last_err = e; continue
+                raise
+            if "500" in err and idx < len(chain) - 1:
+                print(f"[FALLBACK] {service_id} HTTP 500", flush=True)
+                last_err = e; continue
             raise
 
-    raise Exception(f"all services in chain failed ({chain}): {last_err}")
+    raise Exception(f"all services failed ({chain}): {last_err}")
 
-# ─── HTTP Handler ────────────────────────────────────────────────────────────
+# ─── HTTP Handler ─────────────────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print(f"[HTTP] {self.address_string()} {fmt % args}", flush=True)
 
     def _cors(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin",  "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
@@ -510,181 +552,178 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(data, ensure_ascii=False).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
-        self._cors()
-        self.end_headers()
+        self._cors(); self.end_headers()
         self.wfile.write(body)
 
     def do_OPTIONS(self):
-        self.send_response(200)
-        self._cors()
-        self.end_headers()
+        self.send_response(200); self._cors(); self.end_headers()
 
     def do_GET(self):
         p = self.path.split("?")[0]
+
         if p in ("/v1/models", "/v1/models/"):
-            self._json(200, {"object": "list", "data": MODELS_LIST})
-        elif p == "/healthz":
+            return self._json(200, {"object": "list", "data": MODELS_LIST})
+
+        if p == "/healthz":
             self.send_response(200); self.end_headers()
-            self.wfile.write(b"ok")
-        elif p == "/pool-status":
+            self.wfile.write(b"ok"); return
+
+        if p == "/pool-status":
             _reload_pool_if_needed()
             now = time.time()
             with _lock:
-                pool_info = [{
+                info = [{
                     "label":       e["label"],
                     "ssid_prefix": e["ssid"][:20] + "...",
                     "dead":        e["dead_until"] > now,
                     "dead_until":  e["dead_until"],
                     "dead_reason": e.get("dead_reason", ""),
-                    "chats":       len(e["chats"]),
                     "balance":     e.get("balance"),
+                    "relogin":     e.get("_relogin_pending", False),
                 } for e in _pool]
-            live = sum(1 for a in pool_info if not a["dead"])
-            self._json(200, {"pool_size": len(_pool), "live": live, "accounts": pool_info})
-        elif p == "/ssid-status":
+            live = sum(1 for a in info if not a["dead"])
+            return self._json(200, {"pool_size": len(_pool), "live": live, "accounts": info})
+
+        if p == "/reload-ssids":
+            _rebuild_pool()
+            return self._json(200, {"ok": True, "pool_size": len(_pool)})
+
+        if p == "/ssid-status":
             _reload_pool_if_needed()
             with _lock:
                 live = [e for e in _pool if e["dead_until"] <= time.time()]
-                top = _pool[0] if _pool else None
-            self._json(200, {
-                "pool_size": len(_pool),
-                "live": len(live),
+                top  = _pool[0] if _pool else None
+            return self._json(200, {
+                "pool_size": len(_pool), "live": len(live),
                 "ssid_prefix": (top["ssid"][:40] + "...") if top else "",
-                "ssid_len": len(top["ssid"]) if top else 0,
-                "chats": sum(len(e["chats"]) for e in _pool),
+                "ssid_len":    len(top["ssid"]) if top else 0,
             })
-        else:
-            self.send_response(404); self.end_headers()
+
+        self.send_response(404); self.end_headers()
 
     def do_POST(self):
         p = self.path.split("?")[0]
+
+        # ── /add-ssid ────────────────────────────────────────────────────────
         if p == "/add-ssid":
             try:
                 length = int(self.headers.get("Content-Length", 0))
-                body = json.loads(self.rfile.read(length))
-                ssid = body.get("ssid", "").strip()
-                label = body.get("label", "api")
+                body   = json.loads(self.rfile.read(length))
+                ssid   = body.get("ssid", "").strip()
+                label  = body.get("label", "api")
                 if len(ssid) < 50:
                     return self._json(400, {"error": "ssid too short"})
-                added = False
-                updated = False
-                with _lock:
-                    same_label = next((e for e in _pool if e["label"] == label), None)
-                    same_ssid  = next((e for e in _pool if e["ssid"]  == ssid),  None)
-                    if same_label and same_label["ssid"] != ssid:
-                        # 同账号新 ssid：原地替换，重置状态
-                        same_label["ssid"] = ssid
-                        same_label["dead_until"] = 0
-                        same_label["dead_reason"] = ""
-                        same_label["chats"] = {}
-                        same_label["bad_chats"] = set()
-                        updated = True
-                        print(f"[POOL] /add-ssid UPDATE {label} ssid={ssid[:16]}...", flush=True)
-                    elif same_ssid and not same_label:
-                        # 同 ssid 但 label 变了（文件→email）
-                        if "@" in label:
-                            same_ssid["label"] = label
-                            updated = True
-                    elif not same_label and not same_ssid:
-                        _pool.append({
-                            "ssid": ssid, "label": label,
-                            "dead_until": 0, "dead_reason": "",
-                            "chats": {}, "bad_chats": set(), "balance": None,
-                        })
-                        added = True
-                        print(f"[POOL] /add-ssid NEW {label} ssid={ssid[:16]}...", flush=True)
-                self._json(200, {"ok": True, "added": added, "updated": updated,
-                                 "pool_size": len(_pool)})
+                _add_ssid_to_pool(label, ssid)
+                return self._json(200, {"ok": True, "pool_size": len(_pool)})
             except Exception as e:
-                self._json(500, {"error": str(e)})
-            return
+                return self._json(500, {"error": str(e)})
 
         if p not in ("/v1/chat/completions", "/v1/chat/completions/"):
             self.send_response(404); self.end_headers(); return
 
+        # ── /v1/chat/completions ──────────────────────────────────────────────
         try:
             length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
+            body   = json.loads(self.rfile.read(length))
         except Exception as e:
             return self._json(400, {"error": {"message": str(e), "type": "parse_error"}})
 
-        model = body.get("model", "gpt-5.5")
-        messages = body.get("messages", [])
+        model     = body.get("model", "gpt-5.5")
+        messages  = body.get("messages", [])
         do_stream = body.get("stream", False)
-
-        auth = self.headers.get("Authorization", "")
-        ssid_override = auth[7:] if auth.startswith("Bearer ") and len(auth) > 60 else None
-
-        try:
-            text = _do_chat(model, messages, ssid_override)
-        except BrokenPipeError:
-            return
-        except Exception as e:
-            print(f"[ERR] {e}", flush=True)
-            return self._json(500, {"error": {"message": str(e), "type": "proxy_error"}})
+        auth      = self.headers.get("Authorization", "")
+        ssid_ov   = auth[7:] if auth.startswith("Bearer ") and len(auth) > 60 else None
 
         resp_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-        ts = int(time.time())
+        ts      = int(time.time())
 
         if do_stream:
+            # 真实 SSE 流式：通过 chunk_cb 增量推送
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
             self._cors(); self.end_headers()
-            words = text.split(" ")
-            for i, w in enumerate(words):
+
+            def send_chunk(delta: str):
                 chunk = {
                     "id": resp_id, "object": "chat.completion.chunk",
                     "created": ts, "model": model,
                     "choices": [{"index": 0,
-                                 "delta": {"content": w if i == 0 else " " + w},
+                                 "delta": {"content": delta},
                                  "finish_reason": None}],
                 }
                 try:
                     self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
                     self.wfile.flush()
-                except BrokenPipeError:
-                    return
-            stop_chunk = {
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            try:
+                text = _do_chat(model, messages, ssid_ov, chunk_cb=send_chunk)
+            except BrokenPipeError:
+                return
+            except Exception as e:
+                print(f"[ERR] {e}", flush=True)
+                err_chunk = {"error": {"message": str(e), "type": "proxy_error"}}
+                try:
+                    self.wfile.write(f"data: {json.dumps(err_chunk)}\n\n".encode())
+                    self.wfile.write(b"data: [DONE]\n\n"); self.wfile.flush()
+                except Exception:
+                    pass
+                return
+
+            stop = {
                 "id": resp_id, "object": "chat.completion.chunk",
                 "created": ts, "model": model,
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
             }
-            self.wfile.write(f"data: {json.dumps(stop_chunk)}\n\n".encode())
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
+            try:
+                self.wfile.write(f"data: {json.dumps(stop)}\n\n".encode())
+                self.wfile.write(b"data: [DONE]\n\n"); self.wfile.flush()
+            except Exception:
+                pass
+
         else:
-            prompt_tok = len(" ".join(m.get("content", "") for m in messages
-                                      if isinstance(m.get("content"), str)).split())
-            compl_tok = len(text.split())
+            # 非流式：等待完整回复
+            try:
+                text = _do_chat(model, messages, ssid_ov)
+            except BrokenPipeError:
+                return
+            except Exception as e:
+                print(f"[ERR] {e}", flush=True)
+                return self._json(500, {"error": {"message": str(e), "type": "proxy_error"}})
+
+            pt = len(" ".join(m.get("content","") for m in messages
+                              if isinstance(m.get("content"), str)).split())
+            ct = len(text.split())
             self._json(200, {
                 "id": resp_id, "object": "chat.completion",
                 "created": ts, "model": model,
                 "choices": [{"index": 0,
-                              "message": {"role": "assistant", "content": text},
-                              "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": prompt_tok,
-                          "completion_tokens": compl_tok,
-                          "total_tokens": prompt_tok + compl_tok},
+                             "message": {"role": "assistant", "content": text},
+                             "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": pt, "completion_tokens": ct,
+                          "total_tokens": pt + ct},
             })
 
 
 class ThreadedServer(HTTPServer):
     def process_request(self, req, addr):
-        t = threading.Thread(target=self.finish_request, args=(req, addr))
-        t.daemon = True; t.start()
+        t = threading.Thread(target=self.finish_request, args=(req, addr), daemon=True)
+        t.start()
 
 
 if __name__ == "__main__":
-    _reload_pool_if_needed()
-    print(f"[unitool-proxy v4.5] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
-    for e in _pool:
-        print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
+    print(f"[unitool-proxy v5.1] loading ssids...", flush=True)
+    _rebuild_pool()
+    print(f"[unitool-proxy v5.1] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    with _lock:
+        for e in _pool:
+            print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
-    # 启动余额监控后台线程
-    t = threading.Thread(target=_balance_monitor_loop, daemon=True)
-    t.start()
-    print("[unitool-proxy v4.5] balance monitor started (first check in 2min)", flush=True)
+    threading.Thread(target=_balance_monitor_loop, daemon=True).start()
+    print("[unitool-proxy v5.1] balance monitor started", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
