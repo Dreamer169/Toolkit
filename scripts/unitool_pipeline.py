@@ -92,6 +92,8 @@ def save_ssid(account_id, email, ssid, all_cookies_json=""):
     conn.commit()
     conn.close()
     log(f"[DB] saved ssid for {email} id={account_id} ssid_len={len(ssid)}")
+    # AUTO-LINK: tools.ts reads this line to push ssid -> proxy pool
+    print(f"[OK] {email} | {ssid}", flush=True)
 
 # ── Step 1: Graph API token refresh ──────────────────────────────────────────
 
