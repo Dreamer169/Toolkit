@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
 """
-unitool_pipeline.py — 完整流水线
-1. 从DB拉全新outlook账号(有refresh_token, 无unitool标记)
-2. pydoll注册unitool.ai (headless=False, DISPLAY=:99)
-3. Graph API轮询inbox获取verify邮件
-4. curl点击verify链接捕获__Secure-unitool-ssid cookie
-5. 若verify不含ssid → pydoll login获取ssid
-6. 存DB (notes字段存ssid, 标签unitool_registered)
+unitool_pipeline.py — unitool 注册完整流水线（下游脚本）
+=========================================================
+⚠️  上游依赖（必须先跑这一步生成 Outlook 账号入库）:
+    POST /api/tools/outlook/register
+      → outlook_register.py (patchright + 随机指纹 + CF IP 代理)
+      → 成功后 OAuth 拿 refresh_token，一起写入 PostgreSQL accounts 表
+    可通过前端一键触发:
+      GET  /api/tools/workflow/prepare   → 生成身份+密码
+      POST /api/tools/outlook/register  → 注册 Outlook + 入库（含 refresh_token）
+
+本脚本流程（在 Outlook 账号已入库后执行）:
+1. 从 PostgreSQL 拉全新 outlook 账号（有 refresh_token, 无 unitool_registered 标记）
+2. pydoll 打开 unitool.ai/en/entry，Turnstile bypass，填写邮件/密码，提交注册
+3. Graph API 同时轮询 Inbox + JunkEmail 找验证邮件（unitool 邮件常落入垃圾箱！）
+4. curl 点击 verify 链接捕获 __Secure-unitool-ssid cookie
+5. 若 verify 不含 ssid → pydoll login 获取 ssid
+6. 写入 DB（notes 存 ssid，tags 加 unitool_registered）
 """
 
 import asyncio, json, os, re, subprocess, sys, time, urllib.parse, urllib.request

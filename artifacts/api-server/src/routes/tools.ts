@@ -1338,6 +1338,10 @@ interface RegJob {
 // regJobs 已替换为持久化 jobQueue
 
 // 启动注册任务，立即返回 jobId
+// ── 完整工作流 Step 2/2：Outlook 注册主入口 ───────────────────────────────────
+// 执行: outlook_register.py → patchright 随机指纹 + CF IP 代理 → Microsoft 账号注册
+//       注册成功后自动 OAuth → 获取 refresh_token → 写入 PostgreSQL accounts 表
+// 下游: 注册完成的账号由 scripts/unitool_pipeline.py 消费，完成 unitool.ai 注册
 router.post("/tools/outlook/register", async (req, res) => {
   const {
     count    = 1,
@@ -2287,7 +2291,10 @@ router.get("/tools/info-generate", async (req, res) => {
   }
 });
 
-// ── 完整工作流：一键准备 ─────────────────────────────────
+// ── 完整工作流 Step 1/2：身份 + 指纹 + Outlook 账号信息预生成 ──────────────────
+// 调用链: workflow/prepare(Step1) → outlook/register(Step2) → unitool_pipeline.py(下游)
+// 说明: 此接口只生成随机身份数据，不执行任何浏览器操作；
+//       真正注册 Outlook 账号（patchright+指纹+CF代理+OAuth refresh_token 入库）在 Step2。
 router.get("/tools/workflow/prepare", async (req, res) => {
   try {
     // 1. 生成随机身份

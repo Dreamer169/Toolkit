@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """
-obvious_autoprovision.py — 自动账号池补充守护进程
+obvious_autoprovision.py — obvious.ai 沙盒账号池自动补充守护进程
+================================================================
+⚠️  注意: 这里管理的是 obvious.ai 【沙盒账号】，不是 Outlook 账号！
+    obvious.ai 沙盒账号存放在 /root/obvious-accounts/，由 obvious_provision.py 注册。
+    Outlook 账号注册走的是完全不同的链路:
+      → POST /api/tools/outlook/register  (tools.ts → outlook_register.py + patchright)
+
 ===================================================
 
 修复（v2）
