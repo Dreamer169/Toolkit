@@ -1800,6 +1800,59 @@ router.post("/tools/outlook/register", async (req, res) => {
       })();
     }
 
+    // AUTO-LINK: outlook/register -> unitool_pipeline.py (missing trigger added)
+    if (okCount > 0) {
+      try {
+        const { spawn: _spawnUT } = await import("child_process");
+        job.logs.push({ type: "log", message: `🔗 Outlook 注册完成，自动触发 unitool 流水线 (${okCount} 个账号)…` });
+        const _utProc = _spawnUT(
+          "python3",
+          ["/root/Toolkit/scripts/unitool_pipeline.py", "--batch", String(okCount)],
+          {
+            env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: "1", DISPLAY: ":99" },
+            stdio: ["ignore", "pipe", "pipe"],
+          }
+        );
+        _utProc.stdout?.on("data", (d: Buffer) => {
+          for (const line of d.toString().split("\\n").filter(Boolean)) {
+            const lt = line.trim();
+            if (!lt) continue;
+            let ltype = "log";
+            if (lt.startsWith("[OK]"))   ltype = "success";
+            if (lt.startsWith("[FAIL]")) ltype = "warn";
+            if (lt.startsWith("[DONE]")) ltype = "done";
+            job.logs.push({ type: ltype, message: `[unitool] ${lt.slice(0, 300)}` });
+            if (lt.startsWith("[OK]")) {
+              const parts = lt.split("|" );
+              const ssid = (parts[1] ?? "").trim();
+              const label = (parts[0] ?? "").replace("[OK]","").trim() || "unitool";
+              if (ssid.length > 20) {
+                import("http").then(({ request: _hr }) => {
+                  const body = JSON.stringify({ ssid, label });
+                  const rq = _hr({ host:"127.0.0.1", port:8089, path:"/add-ssid", method:"POST",
+                    headers:{"Content-Type":"application/json","Content-Length":Buffer.byteLength(body)} });
+                  rq.write(body); rq.end();
+                  job.logs.push({ type:"success", message:`[unitool] ✅ ssid 已推送 label=${label}` });
+                }).catch(() => {});
+              }
+            }
+          }
+        });
+        _utProc.stderr?.on("data", (d: Buffer) => {
+          const t = d.toString().trim();
+          if (t && t.length > 5 && !t.includes("DeprecationWarning"))
+            job.logs.push({ type: "log", message: `[unitool-sys] ${t.slice(0, 200)}` });
+        });
+        _utProc.on("close", (code: number | null) => {
+          job.logs.push({ type: code === 0 ? "success" : "warn", message: `[unitool] 流水线结束 code=${code}` });
+          PersistenceManager.save(job).catch(() => {});
+        });
+      } catch (_ute) {
+        job.logs.push({ type: "warn", message: `⚠ unitool 流水线触发失败: ${String(_ute).slice(0,120)}` });
+      }
+    }
+
+
     job.logs.push({
       type: "done",
       message: `注册任务完成 · 成功 ${okCount} 个 / 共 ${n} 个` + (okCount > 0 ? ` ✅` : ``),
