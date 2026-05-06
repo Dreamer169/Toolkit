@@ -238,7 +238,7 @@ async def click_verify(tab, url: str) -> bool:
 
 # ── 单账号注册 ────────────────────────────────────────────────────────────────
 async def register_one(email: str, password: str, refresh_token: str,
-                        headless: bool = False) -> dict:
+                        headless: bool = False, ref_code: str = "") -> dict:
     from pydoll.browser import Chrome
     from pydoll.browser.options import ChromiumOptions
 
@@ -270,6 +270,17 @@ async def register_one(email: str, password: str, refresh_token: str,
                     log(f"  [net] signup POST NA={na[:20]}")
             except: pass
         await tab.on("Network.requestWillBeSent", on_req)
+
+        # ── 0. 访问推荐链接（如果有） ────────────────────────────────────────────
+        if ref_code:
+            ref_url = f"https://unitool.ai/ref/{ref_code}"
+            log(f"[{email}] 先访问推荐链接: {ref_url}")
+            await tab.go_to(ref_url)
+            await asyncio.sleep(3)
+            # 记录 cookie
+            ck_after_ref = await tab.get_cookies()
+            ref_ck = [c for c in ck_after_ref if "unitool" in c.get("domain","")]
+            log(f"[{email}] ref页 cookies: {[c.get('name') for c in ref_ck]}")
 
         # ── 1. 加载页面 ──────────────────────────────────────────────────────
         log(f"[{email}] 打开 {TARGET}")
@@ -412,6 +423,7 @@ async def main():
     ap.add_argument("--email",    default="")
     ap.add_argument("--count",    type=int, default=1)
     ap.add_argument("--headless", action="store_true", default=False)
+    ap.add_argument("--ref-code", default="")
     args = ap.parse_args()
 
     ok_count = 0
@@ -424,7 +436,8 @@ async def main():
         log(f"\n{'='*60}")
         log(f"[main] 使用账号: {email}")
         result = await register_one(email, password, refresh_token,
-                                    headless=args.headless)
+                                    headless=args.headless,
+                                    ref_code=getattr(args, "ref_code", ""))
         if result["ok"]:
             ok_count += 1
             ssid = result.get("ssid","")
