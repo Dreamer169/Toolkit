@@ -110,74 +110,115 @@ def _check_balance(ssid: str) -> float:
 # ─── 真实 Service ID 列表（从 /api/services 获取） ──────────────────────────
 # 文本类服务（可以直接用作 model 名）
 NATIVE_SERVICES = {
-    # 主服务（generic，使用对应厂商最新模型）
-    "chatgpt", "claude", "gemini", "x-ai", "deepseek", "deepseek-r1",
-    # OpenAI
-    "gpt-4o", "gpt-4o-2024-11-20", "gpt-4o-mini-2024-07-18",
-    "gpt-4o-search", "gpt-4o-mini-search",
-    "gpt-4", "gpt-4-turbo", "gpt-4-turbo-preview", "gpt-3.5-turbo",
-    "gpt-4.1", "gpt-4.5",
-    "o1", "o1-mini", "o1-pro", "o1-preview",
-    "o3", "o3-mini", "o4-mini",
-    # Claude
-    "claude-sonnet-4", "claude-opus-4", "claude-opus-4-5",
-    "claude-3-7-sonnet", "claude-3-7-sonnet-20250219",
-    "claude-3-5-sonnet", "claude-3-5-sonnet-20241022",
-    "claude-3-5-haiku", "claude-3-5-haiku-20241022",
-    "claude-3-opus-20240229", "claude-3-opus",
-    "claude-3-haiku", "claude-3-haiku-20240307",
-    "claude-3-sonnet",
-    # Gemini
-    "gemini-2.5-pro", "gemini-2.0-pro", "gemini-2.0-pro-exp",
-    "gemini-2.0-flash", "gemini-2.0", "gemini-flash-2.0", "flash-2.0",
-    "gemini-1.5-pro", "gemini-1.5-flash",
-    "gemini-1.0-pro", "gemini-pro-1.0",
-    "gemini-pro", "gemini-exp", "gemini-pro-exp", "gemini-flash",
-    # xAI / Grok
-    "grok-3", "grok-3-fast", "grok-3-mini", "grok-3-mini-fast",
-    "grok-2", "grok-2-1212", "grok-2-mini", "grok-beta",
+    # ── 通过 /api/provider-runtime/chats + /api/chats/{id}/messages 实测可用 ──
+    # OpenAI / ChatGPT
+    "gpt-5",          # ChatGPT 5 (最新旗舰)
+    "gpt-5.5",        # ChatGPT 5.5 (最新旗舰进阶)
+    "gpt-4o",         # GPT-4o (快速多模态)
+    # Anthropic / Claude
+    "claude-opus",    # Claude Opus 最新版（含 Opus 4 / 4.5 级别）
+    "claude-sonnet",  # Claude Sonnet 最新版（含 Sonnet 4 级别）
 }
-
 # 别名映射：把常见的 OpenAI 兼容名称 → 真实 unitool service_id
 MODEL_ALIASES = {
-    # GPT 系列
-    "gpt-3.5-turbo-0613":       "chatgpt",
-    "gpt-3.5-turbo-16k":        "chatgpt",
-    "text-davinci-003":         "chatgpt",
-    # gpt-4o-mini 及未在 NATIVE 里的 → chatgpt 泛型最新版
-    "gpt-4o-mini":              "chatgpt",
-    # GPT-5 / ChatGPT-5.5 系列（unitool 暂无专属 service，走 chatgpt 泛型服务）
-    "gpt-5":                    "chatgpt",
-    "gpt-5-turbo":              "chatgpt",
-    "gpt-5.5":                  "chatgpt",
-    "gpt-5.5-turbo":            "chatgpt",
-    "chatgpt-5":                "chatgpt",
-    "chatgpt-5-turbo":          "chatgpt",
-    "chatgpt-5.5":              "chatgpt",
-    "chatgpt-5.5-turbo":        "chatgpt",
-    "o4":                       "o4-mini",
-    # Claude 常见别名
-    "claude-3-5-sonnet-latest": "claude-3-5-sonnet",
-    "claude-3-7-sonnet-latest": "claude-3-7-sonnet",
-    "claude-opus-latest":       "claude-opus-4-5",   # 指向最新 Opus
-    "claude-sonnet-latest":     "claude-sonnet-4",
-    "claude-sonnet-4-5":        "claude-sonnet-4",   # 原proxy错误别名已修正
-    # Claude Opus 4.6 系列（unitool 暂无独立 service，回退到 claude-opus-4-5）
-    "claude-opus-4-6":          "claude-opus-4-5",
-    "claude-opus-4.6":          "claude-opus-4-5",
-    "claude-opus-4.5":          "claude-opus-4-5",
-    "claude-opus-4-latest":     "claude-opus-4-5",
-    # Gemini 别名
-    "gemini-2.0-flash-lite":    "gemini-2.0-flash",
-    "gemini-ultra":             "gemini-2.5-pro",
-    "gemini-2.5-flash":         "gemini-flash",
-    # 版本化 → 泛型
-    "claude-3-sonnet-20240229": "claude-3-sonnet",
-    # Grok 别名
-    "grok":                     "grok-3",
-    "grok-mini":                "grok-3-mini",
-    # xAI generic
-    "xai":                      "x-ai",
+    # ─── OpenAI GPT 系 ───────────────────────────────────────────────────────
+    # 版本化 GPT → gpt-4o (稳定可用)
+    "gpt-4":                    "gpt-4o",
+    "gpt-4-turbo":              "gpt-4o",
+    "gpt-4-turbo-preview":      "gpt-4o",
+    "gpt-4.1":                  "gpt-4o",
+    "gpt-4.5":                  "gpt-4o",
+    "gpt-4o-mini":              "gpt-4o",
+    "gpt-4o-2024-11-20":        "gpt-4o",
+    "gpt-4o-mini-2024-07-18":   "gpt-4o",
+    "gpt-4o-search":            "gpt-4o",
+    "gpt-4o-mini-search":       "gpt-4o",
+    "gpt-3.5-turbo":            "gpt-4o",
+    "gpt-3.5-turbo-0613":       "gpt-4o",
+    "gpt-3.5-turbo-16k":        "gpt-4o",
+    "text-davinci-003":         "gpt-4o",
+    # Reasoning 系 → gpt-5.5 (最强可用)
+    "o1":                       "gpt-5.5",
+    "o1-mini":                  "gpt-5.5",
+    "o1-pro":                   "gpt-5.5",
+    "o1-preview":               "gpt-5.5",
+    "o3":                       "gpt-5.5",
+    "o3-mini":                  "gpt-5.5",
+    "o4-mini":                  "gpt-5.5",
+    "o4":                       "gpt-5.5",
+    # GPT-5 / ChatGPT-5.5 — 已是 NATIVE，这里为冗余兼容
+    "gpt-5-turbo":              "gpt-5",
+    "chatgpt-5":                "gpt-5.5",
+    "chatgpt-5-turbo":          "gpt-5.5",
+    "chatgpt-5.5":              "gpt-5.5",
+    "chatgpt-5.5-turbo":        "gpt-5.5",
+    "chatgpt":                  "gpt-5.5",   # 泛型 chatgpt → 最新可用
+    # ─── Anthropic Claude 系 ─────────────────────────────────────────────────
+    # 所有版本化 Opus → claude-opus (泛型，服务最新 Opus)
+    "claude-opus-4":            "claude-opus",
+    "claude-opus-4-5":          "claude-opus",
+    "claude-opus-4.5":          "claude-opus",
+    "claude-opus-4-6":          "claude-opus",   # 用户请求的 Claude Opus 4.6
+    "claude-opus-4.6":          "claude-opus",
+    "claude-opus-4-latest":     "claude-opus",
+    "claude-opus-latest":       "claude-opus",
+    "claude-3-opus":            "claude-opus",
+    "claude-3-opus-20240229":   "claude-opus",
+    "claude":                   "claude-opus",   # 泛型 claude → Opus
+    # 所有版本化 Sonnet → claude-sonnet (泛型，服务最新 Sonnet)
+    "claude-sonnet-4":          "claude-sonnet",
+    "claude-sonnet-4-5":        "claude-sonnet",
+    "claude-3-7-sonnet":        "claude-sonnet",
+    "claude-3-7-sonnet-20250219": "claude-sonnet",
+    "claude-3-5-sonnet":        "claude-sonnet",
+    "claude-3-5-sonnet-20241022": "claude-sonnet",
+    "claude-3-5-haiku":         "claude-sonnet",
+    "claude-3-5-haiku-20241022": "claude-sonnet",
+    "claude-3-haiku":           "claude-sonnet",
+    "claude-3-haiku-20240307":  "claude-sonnet",
+    "claude-3-sonnet":          "claude-sonnet",
+    "claude-3-sonnet-20240229": "claude-sonnet",
+    "claude-haiku":             "claude-sonnet",
+    "claude-3-5-sonnet-latest": "claude-sonnet",
+    "claude-3-7-sonnet-latest": "claude-sonnet",
+    "claude-sonnet-latest":     "claude-sonnet",
+    # ─── Google Gemini 系 ────────────────────────────────────────────────────
+    # Gemini service_ids 使用 streaming SSE，目前回退到 gpt-4o 处理
+    "gemini":                   "gpt-4o",
+    "gemini-2.5-pro":           "gpt-4o",
+    "gemini-2.0-pro":           "gpt-4o",
+    "gemini-2.0-pro-exp":       "gpt-4o",
+    "gemini-2.0-flash":         "gpt-4o",
+    "gemini-2.0":               "gpt-4o",
+    "gemini-flash-2.0":         "gpt-4o",
+    "flash-2.0":                "gpt-4o",
+    "gemini-1.5-pro":           "gpt-4o",
+    "gemini-1.5-flash":         "gpt-4o",
+    "gemini-1.0-pro":           "gpt-4o",
+    "gemini-pro-1.0":           "gpt-4o",
+    "gemini-pro":               "gpt-4o",
+    "gemini-exp":               "gpt-4o",
+    "gemini-pro-exp":           "gpt-4o",
+    "gemini-flash":             "gpt-4o",
+    "gemini-2.5-flash":         "gpt-4o",
+    "gemini-ultra":             "gpt-4o",
+    # ─── xAI / Grok 系 ───────────────────────────────────────────────────────
+    # Grok 目前 "Unsupported service"，回退到 gpt-5.5
+    "grok":                     "gpt-5.5",
+    "x-ai":                     "gpt-5.5",
+    "xai":                      "gpt-5.5",
+    "grok-3":                   "gpt-5.5",
+    "grok-3-fast":              "gpt-5.5",
+    "grok-3-mini":              "gpt-5.5",
+    "grok-3-mini-fast":         "gpt-5.5",
+    "grok-2":                   "gpt-5.5",
+    "grok-2-1212":              "gpt-5.5",
+    "grok-2-mini":              "gpt-5.5",
+    "grok-beta":                "gpt-5.5",
+    "grok-mini":                "gpt-5.5",
+    # ─── DeepSeek 系 ─────────────────────────────────────────────────────────
+    "deepseek":                 "gpt-5.5",
+    "deepseek-r1":              "gpt-5.5",
 }
 def _resolve_model(model: str) -> str:
     """把请求的 model 名映射到 unitool service_id"""
