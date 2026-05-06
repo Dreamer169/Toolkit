@@ -120,6 +120,7 @@ async function runOnce() {
          AND COALESCE(status,'') != 'suspended'
          AND COALESCE(tags,'') NOT LIKE '%abuse_mode%'
          AND COALESCE(tags,'') NOT LIKE '%token_invalid%'
+         AND COALESCE(tags,'') NOT LIKE '%replit_used%'
          AND (
            (token IS NOT NULL AND token != '')
            OR (refresh_token IS NOT NULL AND refresh_token != '')
@@ -133,16 +134,7 @@ async function runOnce() {
     // ── 单账号处理（并发调用）────────────────────────────────────────────
     const processOneAccount = async (acc: { id: number; email: string; token: string | null; refresh_token: string | null }) => {
       try {
-        // v8.85 Bug G: 先做 replit-row 廉价 DB 查询门控, 没 pending 直接 return
-        // 省掉 ~95% 无意义的 MS token refresh + Graph API 调用 (旧版每 3s 全量调).
-        const { query: _qGate } = await import("../db.js");
-        const _gateRows = await _qGate<{id:number}>(
-          `SELECT id FROM accounts WHERE platform='replit' AND email=$1
-           AND COALESCE(status,'') IN ('unverified','stale','pending','exists_no_password') LIMIT 1`,
-          [acc.email]
-        ).catch(() => [] as Array<{id:number}>);
-        if (_gateRows.length === 0) { stats.ok++; return; }
-
+        // v9.30 Fix: removed replit-row gate (blocked verify on accts w/o Replit row)
         // v8.86 Bug K: 解析一次代理, 复用于 refreshToken + Graph API 调用
         // (旧版裸 IP 出, 7账号同源高频 → MS 风控聚合特征).
         const _proxy = getMicrosoftBrowserProxy();
@@ -192,11 +184,7 @@ async function runOnce() {
         } catch (e) {
           logger.warn({email: acc.email, err: String(e)}, "[live-verify] replit 行查询失败");
         }
-        if (replitRows.length === 0) {
-          // 没有 pending Replit 注册 → 不点 (避免 oobCode 抢消费 + 误标 replit_used)
-          stats.ok++;
-          return;
-        }
+        // v9.30 Fix: replitRows used for reverse UPDATE only; no longer blocks scanning
         // 拉取 verify 邮件 (未读, 主题含 verify/confirm/Replit)
         let msgs: Array<{id:string;subject:string;receivedDateTime?:string}> = [];
         try {

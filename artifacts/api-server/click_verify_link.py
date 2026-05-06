@@ -320,12 +320,13 @@ else:
     print("[click_verify] 检测到 Replit/Reseek 自定义 action handler，强制走浏览器以触发后端同步", flush=True)
 # ---------------------------------------------------------------------
 
-# v7.90 — 多路径浏览器回退: WARP → Tor(NEWNYM) → Tor(NEWNYM#2) → xray10808
+# v9.30 Fix: 代理梯子重排 — Tor/xray 优先（replit.com 200），WARP 末位（实测 403 Cloudflare）
+# curl 验证: Tor=200, xray10808=200, WARP=403
 _PROXY_LADDER = [
-    replit_browser_proxy or "socks5://127.0.0.1:40000",  # WARP
-    "socks5://127.0.0.1:9050",  # Tor (电路 1)
+    "socks5://127.0.0.1:9050",  # Tor (电路 1) — 实测 replit.com 200 ✅
+    "socks5://127.0.0.1:10808", # xray socks5  — 实测 replit.com 200 ✅
     "socks5://127.0.0.1:9050",  # Tor (电路 2, NEWNYM)
-    "socks5://127.0.0.1:10808", # xray socks5
+    replit_browser_proxy or "socks5://127.0.0.1:40000",  # WARP — 末位（403 CF，仅兜底）
 ]
 
 def _cf_blocked(body_text: str, status: int) -> bool:
