@@ -163,15 +163,16 @@ async def login_one(email: str, password: str, headless: bool = True,
         _log(f"  [{email}] bypassing signin Turnstile...")
         await _bypass_turnstile(tab, "signin", timeout=12)
 
-        # 等 signin token 出现 (captcha_action=login)
+        # 等 signin token 出现 (captcha_action=login) — 需额外等 iframe 重载
+        await asyncio.sleep(3)
         signin_tok = ""
-        for i in range(25):
+        for i in range(40):
             await asyncio.sleep(1)
             n  = await _tok_len(tab)
             ca = _s(await tab.execute_script(
                 "(document.querySelector('[name=\"captcha_action\"]')||{value:'?'}).value",
                 return_by_value=True))
-            if n > 20:
+            if n > 20 and ca == "login":
                 signin_tok = await _get_full_token(tab)
                 _log(f"  [{email}] signin token at {i+1}s len={n} action={ca}")
                 break
