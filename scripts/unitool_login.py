@@ -48,14 +48,13 @@ def _iv(r):
     except: return 0
 
 async def _tok_len(tab, field="cf-turnstile-response") -> int:
-    # querySelectorAll + last — 页面同时存在 signup/signin 两个 Turnstile widget，
-    # querySelector 只返回第一个（signup，已完成），须取最后一个（当前 signin tab）
+    # querySelectorAll + last element — 页面有 signup/signin 两个 widget，取最后（当前 tab）
     js = (
-        f"(function(){{"
-        f"var els=document.querySelectorAll('[name="{field}"]');"
-        f"var el=els[els.length-1]||{{value:''}};"
-        f"return el.value.length;"
-        f"}})()"
+        "(function(){"
+        "var els=document.querySelectorAll('[name=\"" + field + "\"]');"
+        "var el=els[els.length-1]||{value:''};"
+        "return el.value.length;"
+        "})()"
     )
     return _iv(await tab.execute_script(js, return_by_value=True))
 async def _get_full_token(tab, field="cf-turnstile-response") -> str:
@@ -64,11 +63,11 @@ async def _get_full_token(tab, field="cf-turnstile-response") -> str:
     parts = []
     for cs in range(0, n + 300, 300):
         js = (
-            f"(function(){{"
-            f"var els=document.querySelectorAll('[name="{field}"]');"
-            f"var el=els[els.length-1]||{{value:''}};"
-            f"return el.value.slice({cs},{cs+300});"
-            f"}})()"
+            "(function(){"
+            "var els=document.querySelectorAll('[name=\"" + field + "\"]');"
+            "var el=els[els.length-1]||{value:''};"
+            "return el.value.slice(" + str(cs) + "," + str(cs+300) + ");"
+            "})()"
         )
         c = _s(await tab.execute_script(js, return_by_value=True))
         if c: parts.append(c)
