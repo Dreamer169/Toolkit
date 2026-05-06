@@ -174,7 +174,8 @@ def click_verify_link(verify_url):
         verify_url
     ], capture_output=True, text=True, timeout=35)
     ssid     = ""; to_entry = False
-    raw_hdrs = r.stdout
+    raw_hdrs = open(hdr).read() if os.path.exists(hdr) else ""
+    # headers in hdr file, NOT r.stdout (body)
     for line in raw_hdrs.splitlines():
         if "unitool-ssid" in line.lower() and "set-cookie" in line.lower():
             m2 = re.search(r"unitool-ssid=([^;\s]+)", line, re.I)
