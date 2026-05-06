@@ -4,7 +4,7 @@ unitool_reg_v2.py — unitool 注册 v2（持续循环版）
 流程: 选账号 → 锁定 → Graph token → Chrome注册 → JunkEmail轮询(60s) → curl点击 → pydoll登录
 PM2持续运行，无账号时sleep 120s，资源不足时sleep 60s
 """
-import asyncio, atexit, glob, json, os, re, subprocess, time
+import asyncio, atexit, glob, json, os, re, subprocess, sys, time
 import urllib.parse, urllib.request
 import psycopg2
 
@@ -375,10 +375,173 @@ async def do_register(tab, email, password, proxy_port):
     return email_sent, already_reg
 
 # ── 主循环 ────────────────────────────────────────────────────────────────────
+
+# ── 账号池自动补充（IP独占 + 指纹隔离） ──────────────────────────────────────
+# 安全策略：
+#   · 每账号独占一个 CF IP（cf_ip_pool.acquire_ip 排他锁）
+#   · 每浏览器独立指纹（gen_profile 随机 UA/WebGL/Canvas/Audio/TZ/Screen）
+#   · 最多 2 workers 并发，保留内存给 unitool 本身（Chrome ~300-400MB/实例）
+#   · 15 分钟冷却窗口，防止 CF IP 池短时间被大量消耗
+#   · 触发前校验 CF 池余量，保留 ≥20 IP 给其他任务
+#   · 锁文件 + PID 存活检测，防止并发重复触发
+
+POOL_LOW_WATERMARK = 5    # fresh 账号低于此值时触发补充
+POOL_BATCH_SIZE    = 6    # 单次补充目标数量（受 CF 池余量约束）
+POOL_COOLDOWN_S    = 900  # 两次触发最短间隔（秒）= 15 分钟
+POOL_LOCK_FILE     = "/tmp/outlook_replenish.lock"
+REPLENISH_LOG      = "/tmp/outlook_replenish.log"
+API_BASE           = "http://localhost:8081/api"
+CF_POOL_RESERVE    = 20   # CF 池至少保留这么多 IP 给其他用途
+CF_IP_PER_ACCOUNT  = 4    # 每账号最多消耗（含重试）IP 数
+
+def count_fresh_accounts():
+    """统计可立即分配给 unitool_reg_v2 的新鲜账号数"""
+    conn = db_connect(); cur = conn.cursor()
+    cur.execute("""
+        SELECT COUNT(*) FROM accounts
+        WHERE platform='outlook' AND status='active'
+          AND refresh_token IS NOT NULL AND refresh_token != ''
+          AND LENGTH(COALESCE(password,'')) >= 8
+          AND (tags IS NULL OR (
+               tags NOT LIKE '%unitool_registered%'
+           AND tags NOT LIKE '%unitool_fail%'
+           AND tags NOT LIKE '%unitool_processing%'
+           AND tags NOT LIKE '%unitool_already%'
+           AND tags NOT LIKE '%unitool_rescue_dead%'
+          ))
+    """)
+    count = cur.fetchone()[0]; conn.close()
+    return count
+
+def _rlog(msg):
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}"
+    log(line)
+    try:
+        with open(REPLENISH_LOG, "a") as f: f.write(line + "\n")
+    except Exception:
+        pass
+
+def _read_replenish_lock():
+    try:
+        data = json.loads(open(POOL_LOCK_FILE).read())
+        return data.get("pid"), float(data.get("ts", 0)), data.get("batch", 0)
+    except Exception:
+        return None, 0.0, 0
+
+def _write_replenish_lock(pid, batch):
+    try:
+        open(POOL_LOCK_FILE, "w").write(json.dumps({
+            "pid": pid, "ts": time.time(), "batch": batch
+        }))
+    except Exception as e:
+        _rlog(f"[replenish] warn: lock write failed: {e}")
+
+def _clear_replenish_lock():
+    try: os.remove(POOL_LOCK_FILE)
+    except: pass
+
+def replenish_pool_if_needed():
+    """
+    检查账号池水位，不足时自动触发 Outlook 批量注册补充。
+    IP/指纹安全：每账号独占独立 CF IP + 独立浏览器指纹，
+    由 outlook_register.py 内部的 cf_ip_pool + gen_profile 保证。
+    """
+    fresh = count_fresh_accounts()
+    _rlog(f"[replenish] 水位检查: fresh={fresh} watermark={POOL_LOW_WATERMARK}")
+
+    if fresh >= POOL_LOW_WATERMARK:
+        return  # 池子充足
+
+    # ── 冷却检查 ──────────────────────────────────────────────────────────────
+    pid, ts, last_batch = _read_replenish_lock()
+    now = time.time()
+    if ts and (now - ts) < POOL_COOLDOWN_S:
+        remaining = int(POOL_COOLDOWN_S - (now - ts))
+        _rlog(f"[replenish] 冷却中 {remaining}s，上次补充 batch={last_batch}，跳过")
+        return
+
+    # ── 检查锁中 PID 是否仍在运行 ─────────────────────────────────────────────
+    if pid:
+        try:
+            os.kill(int(pid), 0)   # 0 = 仅检测，不发信号
+            _rlog(f"[replenish] 补充进程 pid={pid} 仍在运行，跳过")
+            return
+        except (OSError, ProcessLookupError):
+            _rlog(f"[replenish] 旧锁 pid={pid} 已结束，清除后继续")
+            _clear_replenish_lock()
+
+    # ── 内存检查（补充注册每 worker 约 400-600MB）─────────────────────────────
+    try:
+        for line in open("/proc/meminfo"):
+            if "MemAvailable" in line:
+                mb = int(line.split()[1]) // 1024
+                if mb < 800:
+                    _rlog(f"[replenish] 内存不足 {mb}MB < 800MB，跳过本轮补充")
+                    return
+                break
+    except Exception:
+        pass
+
+    # ── CF 池余量检查 ─────────────────────────────────────────────────────────
+    target  = POOL_BATCH_SIZE
+    workers = 2
+    try:
+        _cf_path = "/data/Toolkit/artifacts/api-server"
+        if _cf_path not in sys.path:
+            sys.path.insert(0, _cf_path)
+        import cf_ip_pool as _cfp
+        avail = _cfp.get_pool_status().get("available", 0)
+        # 可用于补充的 IP 上限：(avail - RESERVE) / IP_PER_ACCOUNT
+        max_accounts = max(1, (avail - CF_POOL_RESERVE) // CF_IP_PER_ACCOUNT)
+        target  = max(1, min(POOL_BATCH_SIZE, max_accounts))
+        workers = min(2, target)  # 最多 2 并发（节省内存给 unitool 本身）
+        _rlog(f"[replenish] CF池 avail={avail} → batch={target} workers={workers}")
+    except Exception as e:
+        _rlog(f"[replenish] CF池检查失败: {e}，使用默认 batch={target}")
+
+    if target == 0:
+        _rlog("[replenish] CF池余量不足（保留量后 =0），跳过本轮")
+        return
+
+    # ── 触发 api-server 注册任务 ──────────────────────────────────────────────
+    _rlog(f"[replenish] 🚀 触发补充注册 fresh={fresh} batch={target} workers={workers}")
+    try:
+        payload = json.dumps({
+            "count":     target,
+            "headless":  True,
+            "proxyMode": "cf",
+            "engine":    "patchright",
+            "wait":      11,
+            "retries":   2,
+            "workers":   workers,
+        }).encode()
+        req = urllib.request.Request(
+            f"{API_BASE}/tools/outlook/register",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        resp = json.loads(urllib.request.urlopen(req, timeout=15).read())
+        if resp.get("success"):
+            job_id = resp.get("jobId", "")
+            _rlog(f"[replenish] ✅ 注册任务已启动 jobId={job_id}")
+            _write_replenish_lock(os.getpid(), target)
+        else:
+            _rlog(f"[replenish] ❌ 任务启动失败: {resp}")
+    except Exception as e:
+        _rlog(f"[replenish] ❌ HTTP 请求异常: {e}")
+
 async def main():
     global _account_id, _success_flag
     open(LOG, "w").write("")
     log("=== unitool_reg_v2 start ===")
+
+    # ── 账号池水位检查：不足时自动触发 Outlook 补充注册 ────────────────────
+    try:
+        replenish_pool_if_needed()
+    except Exception as _replenish_err:
+        log(f"[replenish] 检查异常(忽略): {_replenish_err}")
 
     if not check_resources():
         log("[main] resources low → sleep 60s")
