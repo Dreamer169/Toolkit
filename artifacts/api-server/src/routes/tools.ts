@@ -1357,10 +1357,11 @@ router.post("/tools/outlook/register", async (req, res) => {
     cfPort    = 443,
     username  = "",               // v9.23: 预生成用户名
     password  = "",               // v9.23: 预生成密码
+    workers  = 1,                   // parallel sub-process count
   } = req.body as {
     count?: number; proxy?: string; proxies?: string; headless?: boolean; delay?: number;
     engine?: string; wait?: number; retries?: number; autoProxy?: boolean;
-    proxyMode?: string; cfPort?: number; username?: string; password?: string;
+    proxyMode?: string; cfPort?: number; username?: string; password?: string; workers?: number;
   };
 
   const n   = Math.min(999, Math.max(1, Math.floor(Number(count) || 1)));
@@ -1448,6 +1449,12 @@ router.post("/tools/outlook/register", async (req, res) => {
   }
   if (password) {
     args.push("--password", password as string);
+  }
+  // Concurrent sub-process workers (1=sequential)
+  const numWorkers = Math.min(8, Math.max(1, Math.floor(Number(workers) || 1)));
+  if (numWorkers > 1) {
+    args.push("--workers", String(numWorkers));
+    job.logs.push({ type: "log", message: `[parallel] ${numWorkers} workers concurrent registration` });
   }
   const _spawnEnv: Record<string, string> = {
     ...process.env as Record<string, string>,

@@ -2510,6 +2510,121 @@ def make_pool_skip_result(i: int, args, engine_name: str, error: str) -> dict:
 
 
 # ─── 入口 ─────────────────────────────────────────────────────────────────────
+
+
+
+
+def run_parallel(args) -> None:
+    """Concurrent registration: split count across workers sub-processes.
+    Each sub-process runs with --workers 1 to prevent recursion.
+    Uses threads only to multiplex stdout from sub-processes.
+    Avoids sync_playwright thread-safety issues entirely.
+    """
+    import os as _os, sys as _sys, subprocess as _sp, threading as _th, json as _jj, time as _tm
+
+    n = args.count
+    w = min(max(1, args.workers), n, 8)
+    base, rem = divmod(n, w)
+    chunks = [base + (1 if i < rem else 0) for i in range(w)]
+
+    # Distribute proxy list across workers (strict 1-IP-per-account)
+    proxy_list = []
+    if args.proxies:
+        proxy_list = [p.strip() for p in args.proxies.split(",") if p.strip()]
+    elif args.proxy:
+        proxy_list = [args.proxy.strip()]
+
+    proxy_slices = [[] for _ in range(w)]
+    if proxy_list and getattr(args, "proxy_mode", "") != "cf":
+        idx = 0
+        for wi2, chunk2 in enumerate(chunks):
+            proxy_slices[wi2] = proxy_list[idx: idx + chunk2]
+            idx += chunk2
+            if idx >= len(proxy_list):
+                break
+
+    all_results = []
+    lock = _th.Lock()
+
+    sep = "-" * 60
+    print("", flush=True)
+    print("[parallel] workers=%d  accounts=%d  per-worker=%s" % (w, n, chunks), flush=True)
+    print(sep, flush=True)
+
+    def worker_fn(wi, chunk_count, proxies_slice):
+        if chunk_count == 0:
+            return
+        cmd = [
+            _sys.executable, _os.path.abspath(__file__),
+            "--count",   str(chunk_count),
+            "--engine",  args.engine,
+            "--headless", args.headless,
+            "--wait",    str(args.wait),
+            "--retries", str(args.retries),
+            "--delay",   str(args.delay),
+            "--workers", "1",
+        ]
+        if getattr(args, "proxy_mode", "") == "cf":
+            cmd += ["--proxy-mode", "cf", "--cf-port", str(args.cf_port)]
+        elif len(proxies_slice) > 1:
+            cmd += ["--proxies", ",".join(proxies_slice)]
+        elif len(proxies_slice) == 1:
+            cmd += ["--proxy", proxies_slice[0]]
+        if wi == 0:
+            if getattr(args, "username", ""):
+                cmd += ["--username", args.username]
+            if getattr(args, "password", ""):
+                cmd += ["--password", args.password]
+
+        env = {**_os.environ, "PYTHONUNBUFFERED": "1"}
+        proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True, env=env)
+
+        json_buf = ""
+        in_json = False
+        for raw_line in proc.stdout:
+            line = raw_line.rstrip()
+            if "JSON" in line and ("--" in line or "results" in line.lower()) or in_json:
+                in_json = True
+                json_buf += raw_line
+                continue
+            with lock:
+                print("[W%d] %s" % (wi + 1, line), flush=True)
+
+        proc.wait()
+        try:
+            start = json_buf.find("[")
+            if start >= 0:
+                parsed = _jj.loads(json_buf[start:].strip())
+                with lock:
+                    all_results.extend(parsed)
+        except Exception as e:
+            with lock:
+                print("[W%d] JSON parse error: %s" % (wi + 1, e), flush=True)
+
+    threads = []
+    for wi in range(w):
+        t = _th.Thread(target=worker_fn, args=(wi, chunks[wi], proxy_slices[wi]))
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join()
+
+    ok  = [r for r in all_results if r.get("success")]
+    bad = [r for r in all_results if not r.get("success")]
+    print("", flush=True)
+    print(sep, flush=True)
+    print("OK: %d / %d" % (len(ok), len(all_results)), flush=True)
+    for r in ok:
+        print("  %s  pw: %s" % (r.get("email", ""), r.get("password", "")), flush=True)
+    if bad:
+        print("FAIL: %d" % len(bad), flush=True)
+        for r in bad:
+            print("  %s: %s" % (r.get("email", ""), r.get("error", "")), flush=True)
+    print("", flush=True)
+    print("-- JSON results --", flush=True)
+    import json as _jjj
+    print(_jjj.dumps(all_results, ensure_ascii=False, indent=2), flush=True)
+
 def main():
     # —— 磁盘健康校验（exit 2 阻止启动；warn 仅打印不阻塞）——
     try:
@@ -2538,8 +2653,14 @@ def main():
     parser.add_argument("--cf-port",         type=int,   default=443,          help="CF 代理端口（默认443）")
     parser.add_argument("--username",        type=str,   default="",           help="指定首个 Outlook 用户名（可带 @outlook.com）")
     parser.add_argument("--password",        type=str,   default="",           help="指定首个 Outlook 密码")
+    parser.add_argument("--workers",         type=int,   default=1,            help="parallel sub-process workers (1=sequential, N=concurrent max 8)")
     args = parser.parse_args()
 
+
+    # Concurrent mode: spawn N sub-processes when workers > 1
+    if args.workers > 1:
+        run_parallel(args)
+        return
     headless = args.headless.lower() != "false"
     CtrlCls  = (PatchrightController if args.engine == "patchright" else PlaywrightController)
 
