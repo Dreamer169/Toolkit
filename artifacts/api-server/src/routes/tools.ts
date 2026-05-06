@@ -5926,9 +5926,6 @@ router.get("/tools/outlook/screenshot-img/:name", async (req, res) => {
 });
 
 
-export default router;
-
-
 // ══ unitool.ai 登录 API (v1.0) ═════════════════════════════════════════════════
 // 调用 scripts/unitool_login.py，支持单账号/批量登录
 // POST /tools/unitool/login  — 发起登录任务
@@ -6021,3 +6018,5 @@ router.delete("/tools/unitool/login/:jobId", (req, res) => {
   const stopped = jobQueue.stop(req.params.jobId);
   res.json({ success: !!stopped });
 });
+
+export default router;
