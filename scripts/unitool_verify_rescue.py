@@ -57,6 +57,7 @@ def get_pending_account():
           AND tags LIKE '%unitool_verify_pending%'
           AND tags NOT LIKE '%unitool_registered%'
           AND tags NOT LIKE '%unitool_processing%'
+          AND tags NOT LIKE '%unitool_rescue_dead%'
         ORDER BY updated_at ASC NULLS LAST
         LIMIT 1
     """)
@@ -81,6 +82,11 @@ def mark_rescue_fail(account_id):
     cur.execute("SELECT tags FROM accounts WHERE id=%s", (account_id,))
     row = cur.fetchone(); tags = row[0] if row and row[0] else ""
     new_tags = re.sub(r",?unitool_processing", "", tags).strip(",")
+    if "unitool_fail" in new_tags:
+        new_tags = re.sub(r",?unitool_verify_pending", "", new_tags).strip(",")
+        if "unitool_rescue_dead" not in new_tags:
+            new_tags = (new_tags + ",unitool_rescue_dead").strip(",")
+        log(f"[DB] id={account_id} already_failed → escalate to rescue_dead")
     cur.execute("UPDATE accounts SET tags=%s, updated_at=NOW() WHERE id=%s",
                 (new_tags, account_id))
     conn.commit(); conn.close()
