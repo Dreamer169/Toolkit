@@ -152,10 +152,11 @@ def _balance_monitor_loop():
 
 # ─── 服务 ID & 模型映射 ──────────────────────────────────────────────────────
 NATIVE_SERVICES = {
-    "gpt-5",          # ChatGPT 5 (最新旗舰)
-    "gpt-5.5",        # ChatGPT 5.5 (最新旗舰进阶)
-    "gpt-4o",         # GPT-4o (快速多模态)
-    "claude-sonnet",  # Claude Sonnet 最新版
+    "gpt-5",            # ChatGPT 5 (最新旗舰)
+    "gpt-5.5",          # ChatGPT 5.5 (最新旗舰进阶)
+    "gpt-4o",           # GPT-4o (快速多模态)
+    "claude-sonnet",    # Claude Sonnet 最新版
+    "claude-opus-4-6",  # Claude Opus 4.6 (连字符 service_id，实测可用 ✓)
 }
 
 MODEL_ALIASES = {
@@ -190,16 +191,16 @@ MODEL_ALIASES = {
     "chatgpt-5.5-turbo":          "gpt-5.5",
     "chatgpt":                    "gpt-5.5",
     # ── Anthropic Claude 系 ──
-    # unitool claude-opus 后端 bug: max_tokens 32768 > Claude Opus 4 限制 32000
-    # 全部回退到 claude-sonnet，待 unitool 修复后恢复
-    "claude-opus":                "claude-sonnet",
-    "claude-opus-4":              "claude-sonnet",
-    "claude-opus-4-5":            "claude-sonnet",
-    "claude-opus-4.5":            "claude-sonnet",
-    "claude-opus-4-6":            "claude-sonnet",
-    "claude-opus-4.6":            "claude-sonnet",
-    "claude-opus-4-latest":       "claude-sonnet",
-    "claude-opus-latest":         "claude-sonnet",
+    # claude-opus-4-6 (连字符 service_id) 实测可用 ✓
+    # claude-opus-4.5 / claude-opus-4-5 均不可用，全部指向 4-6
+    "claude-opus":                "claude-opus-4-6",   # 泛型 → 最新可用 Opus
+    "claude-opus-4":              "claude-opus-4-6",
+    "claude-opus-4-5":            "claude-opus-4-6",   # 4-5 不可用，回退 4-6
+    "claude-opus-4.5":            "claude-opus-4-6",
+    "claude-opus-4-6":            "claude-opus-4-6",   # NATIVE (别名冗余兼容)
+    "claude-opus-4.6":            "claude-opus-4-6",   # 点号 → 连字符 service_id
+    "claude-opus-4-latest":       "claude-opus-4-6",
+    "claude-opus-latest":         "claude-opus-4-6",
     "claude-3-opus":              "claude-sonnet",
     "claude-3-opus-20240229":     "claude-sonnet",
     "claude":                     "claude-sonnet",
@@ -264,7 +265,7 @@ def _resolve_model(model: str) -> str:
     if model in MODEL_ALIASES:
         return MODEL_ALIASES[model]
     m = model.lower()
-    if "claude" in m:   return "claude-sonnet"
+    if "claude" in m:   return "claude-opus-4-6"   # 未知 claude → 最新 Opus
     if "gemini" in m:   return "gpt-4o"
     if "grok" in m:     return "gpt-5.5"
     if "deepseek" in m: return "gpt-5.5"
@@ -590,14 +591,14 @@ class ThreadedServer(HTTPServer):
 
 if __name__ == "__main__":
     _reload_pool_if_needed()
-    print(f"[unitool-proxy v4.1] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v4.2] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     for e in _pool:
         print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     # 启动余额监控后台线程
     t = threading.Thread(target=_balance_monitor_loop, daemon=True)
     t.start()
-    print("[unitool-proxy v4.1] balance monitor started (first check in 2min)", flush=True)
+    print("[unitool-proxy v4.2] balance monitor started (first check in 2min)", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
