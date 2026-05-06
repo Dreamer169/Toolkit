@@ -1450,11 +1450,23 @@ router.post("/tools/outlook/register", async (req, res) => {
   if (password) {
     args.push("--password", password as string);
   }
-  // Concurrent sub-process workers (1=sequential)
-  const numWorkers = Math.min(8, Math.max(1, Math.floor(Number(workers) || 1)));
+  // Auto-recommend workers when not explicitly set (workers==1 default)
+  let resolvedWorkers = Math.min(8, Math.max(1, Math.floor(Number(workers) || 1)));
+  if (resolvedWorkers === 1 && n >= 2) {
+    // Auto mode: derive optimal worker count from count + proxy availability
+    if (effectiveProxyMode === "cf") {
+      // CF pool: cap at 4 workers (each needs its own xray relay slot)
+      resolvedWorkers = Math.min(4, n);
+    } else if (proxyList.length >= 2) {
+      // Named proxy pool: 1 worker per proxy, cap at 4
+      resolvedWorkers = Math.min(4, n, proxyList.length);
+    }
+    // n==1 or single proxy: stay sequential (resolvedWorkers stays 1)
+  }
+  const numWorkers = resolvedWorkers;
   if (numWorkers > 1) {
     args.push("--workers", String(numWorkers));
-    job.logs.push({ type: "log", message: `[parallel] ${numWorkers} workers concurrent registration` });
+    job.logs.push({ type: "log", message: `[parallel] auto-parallel: ${numWorkers} workers for ${n} accounts` });
   }
   const _spawnEnv: Record<string, string> = {
     ...process.env as Record<string, string>,

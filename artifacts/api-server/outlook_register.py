@@ -2583,7 +2583,7 @@ def run_parallel(args) -> None:
         in_json = False
         for raw_line in proc.stdout:
             line = raw_line.rstrip()
-            if "JSON" in line and ("--" in line or "results" in line.lower()) or in_json:
+            if "JSON" in line and ("\u2500\u2500" in line or "--" in line or "results" in line.lower()) or in_json:
                 in_json = True
                 json_buf += raw_line
                 continue
@@ -2621,7 +2621,7 @@ def run_parallel(args) -> None:
         for r in bad:
             print("  %s: %s" % (r.get("email", ""), r.get("error", "")), flush=True)
     print("", flush=True)
-    print("-- JSON results --", flush=True)
+    print("\n── JSON 结果 ──", flush=True)
     import json as _jjj
     print(_jjj.dumps(all_results, ensure_ascii=False, indent=2), flush=True)
 
