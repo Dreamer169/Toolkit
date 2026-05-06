@@ -6019,4 +6019,149 @@ router.delete("/tools/unitool/login/:jobId", (req, res) => {
   res.json({ success: !!stopped });
 });
 
+
+
+// ══ unitool.ai Referral Pipeline API ═══════════════════════════════════════════
+// GET  /tools/unitool/reflink          — 获取账号 ref_code（via /api/auth/session）
+// POST /tools/unitool/ref-pipeline     — 启动 referral 注册流水线
+// GET  /tools/unitool/ref-pipeline/:id — 轮询任务进度
+// DELETE /tools/unitool/ref-pipeline/:id — 停止任务
+
+const UNITOOL_REFLINK_SCRIPT   = "/root/Toolkit/scripts/unitool_reflink.py";
+const UNITOOL_REF_PIPELINE_SCRIPT = "/root/Toolkit/scripts/unitool_ref_pipeline.py";
+
+// GET /tools/unitool/reflink?ssid=&email=&accountId=
+router.get("/tools/unitool/reflink", async (req, res) => {
+  const ssid      = String(req.query.ssid      ?? "").trim();
+  const email     = String(req.query.email     ?? "").trim();
+  const accountId = String(req.query.accountId ?? "").trim();
+
+  const args: string[] = [];
+  if (ssid)      args.push("--ssid",       ssid);
+  if (email)     args.push("--email",      email);
+  if (accountId) args.push("--account-id", accountId);
+
+  try {
+    const { execFile } = await import("child_process");
+    const { promisify } = await import("util");
+    const execFileP = promisify(execFile);
+    const { stdout } = await execFileP(
+      "python3", [UNITOOL_REFLINK_SCRIPT, ...args],
+      { env: { ...process.env, DISPLAY: ":99", PYTHONUNBUFFERED: "1" }, timeout: 30_000 }
+    );
+    const okLine = stdout.split("\n").find(l => l.startsWith("[OK]"));
+    if (okLine) {
+      const [refCode, refUrl, refEmail, unitoolUserId] = okLine.slice(5).split("|");
+      res.json({ success: true, refCode, refUrl, email: refEmail, unitoolUserId });
+    } else {
+      const failLine = stdout.split("\n").find(l => l.startsWith("[FAIL]")) ?? "";
+      res.status(500).json({ success: false, error: failLine.slice(7) || "no_ref_code", logs: stdout });
+    }
+  } catch (e: any) {
+    res.status(500).json({ success: false, error: String(e?.message ?? e) });
+  }
+});
+
+// POST /tools/unitool/ref-pipeline
+// Body: { batch?: number, masterEmail?: string, masterSsid?: string, refCode?: string }
+router.post("/tools/unitool/ref-pipeline", async (req, res) => {
+  const body       = req.body as Record<string, unknown>;
+  const batch      = Math.min(Number(body.batch ?? 10), 10);
+  const masterEmail = String(body.masterEmail ?? body.master_email ?? "").trim();
+  const masterSsid  = String(body.masterSsid  ?? body.master_ssid  ?? "").trim();
+  const masterId    = Number(body.masterId    ?? body.master_id    ?? 0);
+  const refCode     = String(body.refCode     ?? body.ref_code     ?? "").trim();
+
+  const jobId = await jobQueue.create("unitool-ref-pipeline", {});
+  res.json({ success: true, jobId });
+
+  const args: string[] = ["--batch", String(batch)];
+  if (masterEmail) args.push("--master-email", masterEmail);
+  if (masterSsid)  args.push("--master-ssid",  masterSsid);
+  if (masterId)    args.push("--master-id",     String(masterId));
+  if (refCode)     args.push("--ref-code",      refCode);
+
+  const { spawn: _spawnRef } = await import("child_process");
+  const refProc = _spawnRef("python3", [UNITOOL_REF_PIPELINE_SCRIPT, ...args], {
+    env: { ...process.env, DISPLAY: ":99", PYTHONUNBUFFERED: "1" },
+  });
+
+  const job = await jobQueue.get(jobId);
+  if (!job) return;
+
+  type RefResult = { type: "master" | "ref_ok" | "ref_fail"; email: string; ssid?: string; refCode?: string; refUrl?: string; reason?: string; index?: number };
+  const results: RefResult[] = [];
+
+  refProc.stdout.on("data", (d: Buffer) => {
+    const lines = d.toString().split("\n");
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t) continue;
+      job.logs.push({ type: "info", message: t });
+
+      if (t.startsWith("[MASTER]")) {
+        // [MASTER] email|ssid_prefix|ref_code|ref_url
+        const [mEmail, , mRefCode, mRefUrl] = t.slice(9).split("|");
+        results.push({ type: "master", email: mEmail, refCode: mRefCode, refUrl: mRefUrl });
+        job.logs.push({ type: "ok", message: `🔑 master=${mEmail} ref_code=${mRefCode} url=${mRefUrl}` });
+      } else if (t.startsWith("[REF_OK]")) {
+        // [REF_OK] index|email|ssid_prefix
+        const [idx, rEmail, rSsid] = t.slice(9).split("|");
+        results.push({ type: "ref_ok", email: rEmail, ssid: rSsid, index: Number(idx) });
+        job.logs.push({ type: "ok", message: `✅ referral #${idx} ${rEmail}` });
+      } else if (t.startsWith("[REF_FAIL]")) {
+        // [REF_FAIL] index|email|reason
+        const [idx, rEmail, reason] = t.slice(11).split("|");
+        results.push({ type: "ref_fail", email: rEmail, reason, index: Number(idx) });
+        job.logs.push({ type: "error", message: `❌ referral #${idx} ${rEmail} 失败: ${reason}` });
+      } else if (t.startsWith("[DONE]")) {
+        job.logs.push({ type: "ok", message: `🏁 ${t}` });
+      }
+    }
+  });
+
+  refProc.stderr.on("data", (d: Buffer) => {
+    const t = d.toString().trim();
+    if (t) job.logs.push({ type: "info", message: `[err] ${t}` });
+  });
+
+  refProc.on("close", async (code) => {
+    (job as any)._refResults = results;
+    const okCount = results.filter(r => r.type === "ref_ok").length;
+    const master  = results.find(r => r.type === "master");
+    job.logs.push({
+      type: okCount > 0 ? "ok" : "error",
+      message: `完成: ${okCount} referral 注册成功${master ? ` ref_code=${master.refCode}` : ""}`,
+    });
+    await jobQueue.finish(jobId, code ?? -1, okCount > 0 ? "done" : "failed");
+  });
+});
+
+// GET /tools/unitool/ref-pipeline/:jobId
+router.get("/tools/unitool/ref-pipeline/:jobId", async (req, res) => {
+  const job = await jobQueue.get(req.params.jobId);
+  if (!job) { res.status(404).json({ success: false, error: "任务不存在" }); return; }
+  const since = Number(req.query.since ?? 0);
+  const results = (job as any)._refResults ?? [];
+  const master  = results.find((r: any) => r.type === "master");
+  res.json({
+    success: true,
+    status: job.status,
+    logs: job.logs.slice(since),
+    nextSince: job.logs.length,
+    results,
+    refCode: master?.refCode ?? "",
+    refUrl:  master?.refUrl  ?? "",
+    okCount: results.filter((r: any) => r.type === "ref_ok").length,
+    exitCode: job.exitCode,
+  });
+});
+
+// DELETE /tools/unitool/ref-pipeline/:jobId
+router.delete("/tools/unitool/ref-pipeline/:jobId", (req, res) => {
+  const stopped = jobQueue.stop(req.params.jobId);
+  res.json({ success: !!stopped });
+});
+
+
 export default router;
