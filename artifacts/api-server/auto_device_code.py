@@ -1,15 +1,11 @@
 """
-自动完成 Microsoft 设备码授权流程
-v8.96 修复:
-  - [根因修复] token 兑换 + DB 写入移进 Python 同一 CF proxy 环境。
-    之前 close handler 在 Node.js（VPS 直连 45.205.27.69）兑换 token，
-    MS 检测到 auth IP != token IP → 触发「New app(s) connected」安全邮件。
-    现在浏览器授权 + token POST + DB INSERT 全在同一个 CF proxy 出口 IP 上。
-  - 兑换逻辑: httpx AsyncClient + socks5 proxy → MS /oauth2/v2.0/token
-  - DB 写入: psycopg2 写 localhost PostgreSQL（DB 在本地，无需走代理）
-  - payload 每项新增可选字段 deviceCode / dbUrl（不传则跳过 token 兑换）
-  - React-safe 邮箱填写: nativeInputValueSetter + dispatchEvent
-  - 自动 CF IP 代理: 无 proxy 参数时从 /tmp/cf_pool_state.json 随机取
+自动完成 Microsoft 设备码 OAuth 授权流程。
+
+浏览器授权 → token 兑换 → DB 写入全在同一 CF proxy 出口 IP 上，
+避免 MS 因 auth IP != token IP 触发安全告警邮件。
+
+如调用方传入注册时的 cookies_json（storage_state），浏览器将以已登录状态进入授权页，
+跳过 email/password 步骤，直接 device-confirm → consent。
 """
 import asyncio, json, sys, os, random
 
@@ -282,25 +278,59 @@ async def _poll_real_done(page, email: str, max_wait: int = 30) -> bool:
 
 
 async def _react_safe_fill_email(page, email: str) -> bool:
+    """
+    JS-evaluate value injection doesn't update React's internal fiber state.
+    Use native click+type as PRIMARY to always trigger React event system correctly.
+    Returns True when field value is confirmed to equal email.
+    """
+    sel = 'input[name="loginfmt"], input[type="email"]'
+    # Primary: click(click_count=3) select-all + type() character-by-character
+    try:
+        el = await page.query_selector(sel)
+        if el:
+            await el.click(click_count=3)
+            await asyncio.sleep(0.1)
+            await el.type(email, delay=35)
+            val = await el.input_value()
+            if val == email:
+                return True
+    except Exception:
+        pass
+    # Fallback: JS native setter + full event chain
     try:
         filled = await page.evaluate(r"""(email) => {
             const inp = document.querySelector('input[name="loginfmt"], input[type="email"]');
             if (!inp) return false;
+            inp.focus();
             const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
             setter.call(inp, email);
-            inp.dispatchEvent(new Event('input',  {bubbles: true}));
-            inp.dispatchEvent(new Event('change', {bubbles: true}));
-            return true;
+            inp.dispatchEvent(new Event('focus',           {bubbles: true}));
+            inp.dispatchEvent(new KeyboardEvent('keydown', {bubbles: true, key: 'a'}));
+            inp.dispatchEvent(new Event('input',           {bubbles: true}));
+            inp.dispatchEvent(new KeyboardEvent('keyup',   {bubbles: true, key: 'a'}));
+            inp.dispatchEvent(new Event('change',          {bubbles: true}));
+            inp.dispatchEvent(new Event('blur',            {bubbles: true}));
+            return inp.value === email;
         }""", email)
-        return bool(filled)
+        if filled:
+            return True
     except Exception:
-        return False
+        pass
+    return False
 
 
 async def authorize_one(email: str, password: str, user_code: str, account_id: int,
                         proxy: str = "", sem=None,
                         device_code: str = "", db_url: str = DB_URL,
-                        remove_tag: str = "", verification_uri: str = ""):
+                        remove_tag: str = "", verification_uri: str = "",
+                        cookies_json: str = ""):
+    """
+    完成一个账号的设备码 OAuth 授权并通过同一 CF proxy 兑换 token 写入 DB。
+
+    cookies_json: 注册时保存的 storage_state JSON 字符串（可选）。
+    加载后浏览器已是登录状态，microsoft.com/link 上无需再填 email/password，
+    直接进入 device-confirm → consent 环节。
+    """
     from patchright.async_api import async_playwright
     result = {"accountId": account_id, "email": email, "status": "error", "msg": ""}
 
@@ -350,7 +380,18 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
             browser = await p.chromium.launch(**launch_opts)
             ctx = await browser.new_context(**ctx_opts)
 
-            # v8.98: 在浏览器上下文内部申请设备码，保证 申请IP == 授权IP（共享代理连接）
+            # 如果调用方传入了注册时的 storage_state（cookies_json），加载进浏览器 ctx。
+            # 这样浏览器已是登录状态：microsoft.com/link 上只需输入 user_code，
+            # 无需再填 email/password，直接进入 device-confirm/consent 环节。
+            if cookies_json:
+                try:
+                    import json as _cj
+                    _state = _cj.loads(cookies_json)
+                    await ctx.add_cookies(_state.get("cookies", []))
+                    print(f"[{email}] 🍪 已加载注册 session cookies ({len(_state.get('cookies',[]))} 个)", flush=True)
+                except Exception as _ce:
+                    print(f"[{email}] ⚠ cookies 加载失败（跳过，继续正常 email/password 流）: {_ce}", flush=True)
+
             if _need_self_dc:
                 print(f"[{email}] v8.98 浏览器内部申请设备码 proxy={proxy or 'DIRECT'}", flush=True)
                 _scope_enc = DEVICE_CODE_SCOPE.replace(" ", "+")
@@ -492,41 +533,60 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
 
             await _safe_shot(page, email, "03_email")
 
-            # v9.27 BUG2-FIX: detect "We couldn't find a Microsoft account" after email submit
+            # Gate "not_found" check: only fire if password field has NOT appeared AND email field is still visible.
+            # This avoids false-positives when MS navigates to CAPTCHA/security page after email submission.
+            _pw_appeared_early = False
             try:
-                _body03 = (await page.inner_text("body")).lower()
-                _not_found = [
-                    "couldn't find a microsoft account",
-                    "couldn't find an account",
-                    "we couldn't find an account with that username",
-                    "that microsoft account doesn't exist",
-                    "no microsoft account found",
-                    "account doesn't exist",
-                    "we didn't find an account",
-                    "\u8be5\u8d26\u6237\u4e0d\u5b58\u5728",
-                    "\u627e\u4e0d\u5230\u6b64 microsoft \u8d26\u6237",
-                ]
-                if any(p in _body03 for p in _not_found):
-                    print(f"[{email}] \u274c MS \u62a5\u544a\u8d26\u53f7\u4e0d\u5b58\u5728 URL={page.url[:100]}", flush=True)
-                    result["status"] = "not_found"
-                    result["msg"] = "account_not_found_in_microsoft"
-                    try:
-                        import psycopg2 as _pg2
-                        _c2 = _pg2.connect(db_url or DB_URL)
-                        _cu2 = _c2.cursor()
-                        _cu2.execute(
-                            "UPDATE accounts SET tags=CASE WHEN COALESCE(tags,'')='' THEN 'not_found'"
-                            " WHEN tags NOT LIKE '%%not_found%%' THEN tags||',not_found' ELSE tags END,"
-                            " updated_at=NOW() WHERE id=%s",
-                            (account_id,)
-                        )
-                        _c2.commit(); _cu2.close(); _c2.close()
-                    except Exception as _dbe2:
-                        print(f"[{email}] DB not_found tag err: {_dbe2}", flush=True)
-                    await browser.close()
-                    return result
+                _pw_el_early = await page.query_selector('input[type="password"], input[name="passwd"]')
+                if _pw_el_early and await _pw_el_early.is_visible():
+                    _pw_appeared_early = True
+                    print(f"[{email}] \u2705 \u90ae\u7b71\u63d0\u4ea4\u540e\u5bc6\u7801\u6846\u5df2\u51fa\u73b0\uff0c\u8df3\u8fc7 not_found \u68c0\u67e5", flush=True)
             except Exception:
                 pass
+
+            if not _pw_appeared_early:
+                _still_on_email_step = False
+                try:
+                    _em_check = await page.locator('input[name="loginfmt"], input[type="email"]').first.is_visible(timeout=1000)
+                    _still_on_email_step = bool(_em_check)
+                except Exception:
+                    pass
+
+                if _still_on_email_step:
+                    try:
+                        _body03 = (await page.inner_text("body")).lower()
+                        _not_found = [
+                            "couldn't find a microsoft account",
+                            "couldn't find an account",
+                            "we couldn't find an account with that username",
+                            "that microsoft account doesn't exist",
+                            "no microsoft account found",
+                            "account doesn't exist",
+                            "we didn't find an account",
+                            "\u8be5\u8d26\u6237\u4e0d\u5b58\u5728",
+                            "\u627e\u4e0d\u5230\u6b64 microsoft \u8d26\u6237",
+                        ]
+                        if any(p in _body03 for p in _not_found):
+                            print(f"[{email}] \u274c MS \u62a5\u544a\u8d26\u53f7\u4e0d\u5b58\u5728 URL={page.url[:100]}", flush=True)
+                            result["status"] = "not_found"
+                            result["msg"] = "account_not_found_in_microsoft"
+                            try:
+                                import psycopg2 as _pg2
+                                _c2 = _pg2.connect(db_url or DB_URL)
+                                _cu2 = _c2.cursor()
+                                _cu2.execute(
+                                    "UPDATE accounts SET tags=CASE WHEN COALESCE(tags,'')='' THEN 'not_found'"
+                                    " WHEN tags NOT LIKE '%%not_found%%' THEN tags||',not_found' ELSE tags END,"
+                                    " updated_at=NOW() WHERE id=%s",
+                                    (account_id,)
+                                )
+                                _c2.commit(); _cu2.close(); _c2.close()
+                            except Exception as _dbe2:
+                                print(f"[{email}] DB not_found tag err: {_dbe2}", flush=True)
+                            await browser.close()
+                            return result
+                    except Exception:
+                        pass
 
             # Step 3: 密码
             for _pw in range(3):
@@ -881,12 +941,13 @@ async def main():
     tasks = [
         authorize_one(
             a["email"], a["password"],
-            a.get("userCode", ""),   # v8.97: 可为空，由 authorize_one 自申请
+            a.get("userCode", ""),
             a.get("accountId", 0), proxy, sem,
             device_code=a.get("deviceCode", ""),
             db_url=a.get("dbUrl", db_url),
             remove_tag=a.get("removeTag", ""),
-            verification_uri=a.get("verificationUri", ""),  # v8.99: 从调用方透传
+            verification_uri=a.get("verificationUri", ""),
+            cookies_json=a.get("cookiesJson", ""),
         )
         for a in accounts
     ]

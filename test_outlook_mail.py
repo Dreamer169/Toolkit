@@ -15,7 +15,7 @@ import argparse, json, os, sys, time, urllib.request, urllib.parse, urllib.error
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@localhost/toolkit")
 
 CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
-TENANT    = "common"
+TENANT    = "consumers"
 SCOPE     = "offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read"
 
 

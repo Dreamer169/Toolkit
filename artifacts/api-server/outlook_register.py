@@ -78,7 +78,11 @@ POST_NAV_TIMEOUT = int(os.environ.get("POST_NAV_TIMEOUT_MS", "60000"))
 # 微软注册成功后必然下发的 auth/profile cookies (任意一个出现 → 注册已生效)
 SUCCESS_COOKIE_NAMES = (
     "RPSAuth", "MSPAuth", "MSPProf", "ESTSAUTH", "ESTSAUTHPERSISTENT",
-    "PPAuth", "WLSSC", "MSCC", "MUID", "ANON",
+    "PPAuth", "WLSSC", "MSCC",
+    # MUID and ANON intentionally excluded: they are tracking cookies that MS
+    # sets on ANY page visit including CAPTCHA challenge pages.  Keeping them
+    # caused false-positive "registration complete" when Arkose CAPTCHA fired
+    # and set MUID/ANON, while the actual signup form never submitted.
 )
 # 成功 URL 关键词 (扩展原列表 — 命中任一即视为成功)
 SUCCESS_URL_KEYWORDS = (
@@ -358,6 +362,151 @@ class BaseController:
             if not captcha_ok:
                 return False, "验证码处理失败", email
 
+            # ── v9.41 CAPTCHA-content-clear wait ─────────────────────────────
+            # handle_captcha early-detection fires when px-captcha container clears,
+            # but the Arkose outer frame may still be on-screen showing CAPTCHA.
+            # Poll until CAPTCHA text is gone OR page navigates away (max 120s, 2s poll).
+            _cap_text_cleared = False
+            _CAPTCHA_HINTS = ("let's prove you're human", "prove you're human", "press and hold the button")
+            _cap_reattempt_done = False
+            for _cc_i in range(60):
+                try:
+                    _cur_url = page.url or ""
+                    if "signup.live.com" not in _cur_url:
+                        _cap_text_cleared = True
+                        print(f"[register] [captcha-clear] page left signup URL -> {_cur_url[:80]}", flush=True)
+                        break
+                    try:
+                        _cc_body = (page.inner_text("body") or "").lower()
+                    except Exception:
+                        _cap_text_cleared = True
+                        break
+                    if not any(h in _cc_body for h in _CAPTCHA_HINTS):
+                        _cap_text_cleared = True
+                        print(f"[register] [captcha-clear] CAPTCHA content cleared after {_cc_i*2}s", flush=True)
+                        break
+                    # ── v9.42 Patch H: re-attempt press-and-hold at 30s if CAPTCHA still showing ──
+                    # Arkose resets the challenge after the first press-hold clears px-captcha.
+                    # At 30s we try one more a11y-click + press-hold cycle before the 120s timeout.
+                    if _cc_i == 15 and not _cap_reattempt_done:
+                        _cap_reattempt_done = True
+                        print("[register] [captcha-clear] v9.42 Patch-H: CAPTCHA at 30s, retrying px-captcha via frames", flush=True)
+                        try:
+                            import random as _rnd_h
+                            _h_done = False
+                            for _hfr in page.frames:
+                                try:
+                                    _px_b = _hfr.locator("#px-captcha").first.bounding_box(timeout=2000)
+                                    if _px_b and _px_b.get("width", 0) > 0:
+                                        _phx = _px_b["x"] + _px_b["width"] / 2 + _rnd_h.randint(-8, 8)
+                                        _phy = _px_b["y"] + _px_b["height"] / 2 + _rnd_h.randint(-4, 4)
+                                        print(f"[register] [captcha-clear] Patch-H: found #px-captcha hold PAGE=({_phx:.0f},{_phy:.0f})", flush=True)
+                                        _hld = PatchrightController._human_press_hold(page, _phx, _phy, 4400, 5300)
+                                        print(f"[register] [captcha-clear] Patch-H: held {_hld/1000:.1f}s", flush=True)
+                                        _h_done = True
+                                        break
+                                except Exception:
+                                    pass
+                            if not _h_done:
+                                print("[register] [captcha-clear] Patch-H: no #px-captcha found", flush=True)
+                        except Exception as _patch_h_err:
+                            print(f"[register] [captcha-clear] Patch-H err (ignored): {_patch_h_err}", flush=True)
+                    # -- end Patch H
+                    if _cc_i % 5 == 0:
+                        print(f"[register] [captcha-clear] waiting {_cc_i*2}s for CAPTCHA to clear", flush=True)
+                    page.wait_for_timeout(2000)
+                except Exception as _cce:
+                    print(f"[register] [captcha-clear] poll error (ignored): {_cce}", flush=True)
+                    _cap_text_cleared = True
+                    break
+            if not _cap_text_cleared:
+                try:
+                    page.screenshot(path=f"/tmp/outlook_captcha_stuck_{email}.png")
+                except Exception:
+                    pass
+                print("[register] CAPTCHA content not cleared after 120s", flush=True)
+                return False, "验证码处理失败(CAPTCHA内容120s未消失)", email
+
+            # ── Post-CAPTCHA: detect phone-verification / stall page ──────────
+            # MS sometimes shows a phone-number entry page after CAPTCHA instead
+            # of completing registration.  Detect and fail explicitly so the
+            # retry logic can pick a new IP instead of logging a ghost account.
+            try:
+                _post_cap_url = page.url or ""
+                _post_cap_body = (page.inner_text("body") or "").lower()
+                print(f"[register] [post-captcha] url={_post_cap_url[:120]}", flush=True)
+                print(f"[register] [post-captcha] body={_post_cap_body[:300]}", flush=True)
+                _phone_page = (
+                    page.locator('input[type="tel"], input[name="PhoneNumber"], input[id*="phone" i]').count() > 0
+                    or any(k in _post_cap_body for k in (
+                        "add your phone number", "phone number", "add a phone",
+                        "enter your phone", "mobile number", "verify with phone",
+                        "添加手机号", "手机号码", "电话号码",
+                    ))
+                )
+                if _phone_page:
+                    try:
+                        page.screenshot(path=f"/tmp/outlook_phone_page_{email}.png")
+                    except Exception:
+                        pass
+                    print(f"[register] ⚠ 注册后出现手机验证页，当前IP被MS要求手机验证，放弃此次注册", flush=True)
+                    return False, "phone_verification_required", email
+            except Exception as _ppex:
+                print(f"[register] phone-page check err (ignored): {_ppex}", flush=True)
+
+            # ── v9.40 Post-CAPTCHA submit: Arkose 通过后尝试点击 primaryButton ──────
+            # Arkose px-captcha 清空 = PerimeterX check passed,  but the MS SPA signup
+            # form may still be on the last field page waiting for a manual "Next/Submit"
+            # click.  Try up to 3 times with 2s gaps before entering the 60s URL wait.
+            try:
+                _pcap_url_before = page.url or ""
+                _pcap_body_before = ""
+                try:
+                    _pcap_body_before = (page.inner_text("body") or "")[:400].lower()
+                except Exception:
+                    pass
+                print(f"[register] [post-captcha] url={_pcap_url_before[:120]}", flush=True)
+                print(f"[register] [post-captcha] body={_pcap_body_before[:300]}", flush=True)
+                # If page is still on signup.live.com, try clicking the primary button
+                # to advance the form (handles "review" / last-step pages)
+                for _pci in range(3):
+                    if any(k in (page.url or "") for k in ("outlook.live.com", "account.live", "login.live.com/oauth")):
+                        break  # already navigated away — done
+                    _pb_sel = '[data-testid="primaryButton"]'
+                    try:
+                        _pb = page.locator(_pb_sel).first
+                        if _pb.is_visible(timeout=1500):
+                            _pb.click(timeout=3000)
+                            print(f"[register] [post-captcha] clicked primaryButton (attempt {_pci+1})", flush=True)
+                            page.wait_for_timeout(2000)
+                        else:
+                            break
+                    except Exception as _pbe:
+                        print(f"[register] [post-captcha] primaryButton attempt {_pci+1}: {_pbe}", flush=True)
+                        break
+                # Detect phone-verification page (both inline signup and post-signup)
+                try:
+                    _pp_body = (page.inner_text("body") or "").lower()
+                    _pp_inp = page.locator('input[type="tel"], input[name="PhoneNumber"], input[id*="phone" i]').count() > 0
+                    _pp_txt = any(k in _pp_body for k in (
+                        "add your phone number", "phone number", "add a phone",
+                        "enter your phone", "mobile number", "verify with phone",
+                        "phone verification", "verify your phone",
+                        "we need a bit more info", "more information",
+                        "添加手机号", "手机号码", "电话号码", "手机验证",
+                    ))
+                    if _pp_inp or _pp_txt:
+                        try:
+                            page.screenshot(path=f"/tmp/outlook_phone_page_{email}.png")
+                        except Exception:
+                            pass
+                        print(f"[register] ⚠ 注册后出现手机验证页(inline), url={page.url[:80]}", flush=True)
+                        return False, "phone_verification_required", email
+                except Exception as _pp2e:
+                    print(f"[register] inline phone-page check err: {_pp2e}", flush=True)
+            except Exception as _pcape:
+                print(f"[register] post-captcha-submit err: {_pcape}", flush=True)
+
             # ── 验证注册真正完成 ── v8.22 CAPTCHA 误判修复 (POST_NAV_TIMEOUT) ──
             # 微软注册成功后链路: captcha-pass → consent/terms → account.live → outlook.live/mail
             # 在 datacenter ASN + xray/CF/SOCKS 加层下整链路常 25-50s, 30s 不够.
@@ -427,7 +576,13 @@ class BaseController:
                     page.screenshot(path=f"/tmp/outlook_captcha_done_{email}.png")
                 except Exception:
                     pass
-                return False, f"CAPTCHA 已点击但页面未跳转到成功页（当前: {cur_url[:80]}）", email
+                _body_snip = ""
+                try:
+                    _body_snip = (page.inner_text("body") or "")[:200].replace("\n", " ")
+                except Exception:
+                    pass
+                print(f"[register] [stuck] url={cur_url} body={_body_snip[:200]}", flush=True)
+                return False, f"注册后页面未跳转到成功页（url={cur_url[:80]}）body={_body_snip[:80]}", email
 
         except Exception as e:
             import traceback
@@ -2007,10 +2162,7 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None, password:
             pass
 
     try:
-        # v8.43 ROOT-FIX 2026-04-28: 歧义 bug — glob "**/nativeclient**" 同样会匹配 authorize 页
-        # (URL 中 redirect_uri=https%3A%2F%2F...%2Fnativeclient 的 query value 含 nativeclient 子串)
-        # → route.abort() 中止真正的 authorize 导航 → OAuth 流程基础不稳定.
-        # 改用 path-only 正则: 只匹配 URL path 含 /nativeclient, 完全绕开 query value.
+        # 用 path-only 正则拦截 nativeclient redirect，避免 redirect_uri query value 中的 nativeclient 子串被误匹配
         _NC_PATH_RE = re.compile(r"^https?://[^/]+/[^?]*nativeclient", re.IGNORECASE)
         page.route(_NC_PATH_RE, _intercept_nativeclient)
     except Exception as _re:
@@ -2065,7 +2217,7 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None, password:
                     continue
             return False
 
-        # v8.73 Bug1: 卡 URL 早退 + 强力按钮兜底 (避免 7 轮空轮 65s 浪费)
+        # 检测页面卡住：连续多轮 URL 不变且无可点쓱钮时提前退出
         _stuck_same_url_count = 0
         _last_url = ''
         for _poll_round in range(5):
@@ -2074,55 +2226,69 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None, password:
             _last_url = _poll_url
             _stuck_same_url_count = (_stuck_same_url_count + 1) if _is_same else 0
             print(f'[oauth] 轮询 round={_poll_round+1} url={_poll_url[:80]} stuck={_stuck_same_url_count}', flush=True)
-            # v8.78 Bug K: 检测到 sign-in/login 页 (注册 cookie 缺失 → OAuth 要求重新登录) 立即 bail
-            # 实测 elizabethcollins675 case: 5 轮 Next click 在 sign-in 页死循环, 浪费 35s
-            # bail 后 device-code fallback 接管 (~10s), 比死循环快 25s
-            if 'oauth20_authorize.srf' in _poll_url and _poll_round >= 1:
+            # 若 OAuth 页重新要求登录（注册 session cookie 失效），有密码则填入，否则 bail 到设备码 fallback
+            if 'oauth20_authorize.srf' in _poll_url and _poll_round >= 0:  # check from round 0
                 try:
-                    _signin_marker = page.evaluate("""()=>{const t=document.body?.innerText||'';return (t.includes('Use your Microsoft account')||t.includes('使用 Microsoft 帐户'))&&!!document.querySelector('input[type=email],input[name=loginfmt]');}""")
+                    _signin_marker = page.evaluate("""()=>{const t=document.body?.innerText||'';return (t.includes('Use your Microsoft account')||t.includes('\u4f7f\u7528 Microsoft \u5e10\u6237')||t.includes('Sign in'))&&!!document.querySelector('input[type=email],input[name=loginfmt]');}""")
                     if _signin_marker:
                         if password:
-                            print("[oauth] v9.33 sign-in page detected, filling email+password...", flush=True)
+                            print('[oauth] \u68c0\u6d4b\u5230 sign-in \u9875\uff0c\u586b email \u2192 Next \u2192 \u7b49\u5f85 password...', flush=True)
                             try:
-                                _em_sel = "input[type=email],input[name=loginfmt]"
+                                _em_sel = 'input[type=email],input[name=loginfmt]'
                                 page.wait_for_selector(_em_sel, timeout=5000)
-                                page.fill(_em_sel, email)
+                                _em_el = page.locator(_em_sel).first
+                                _em_el.click(click_count=3)
+                                _em_el.type(email, delay=40)
                                 page.wait_for_timeout(400)
-                                for _ns in ["button[data-testid=\'primaryButton\']", "input[type=submit]", "button[type=submit]"]:
+                                for _ns in ["button[data-testid='primaryButton']", 'input[type=submit]', 'button[type=submit]', '#idSIButton9']:
                                     try:
-                                        _nb = page.query_selector(_ns)
-                                        if _nb and _nb.is_visible(): _nb.click(); break
+                                        _nb = page.locator(_ns).first
+                                        if _nb.is_visible(timeout=800): _nb.click(); break
                                     except Exception: continue
-                                page.wait_for_timeout(2000)
-                                _pw_sel = "input[type=password],input[name=passwd]"
-                                try: page.wait_for_selector(_pw_sel, timeout=8000)
-                                except Exception: pass
-                                if page.query_selector(_pw_sel):
-                                    page.fill(_pw_sel, password)
-                                    page.wait_for_timeout(400)
-                                    for _ps in ["button[data-testid=\'primaryButton\']", "input[type=submit]", "button[type=submit]"]:
+                                # Wait for password field (max 12 s, every 2 s).
+                                # Do NOT call _skip_ms_interrupts here: its secondaryButton /
+                                # #idBtn_Back selectors revert the SPA to the email step, so
+                                # the password field never appears.
+                                _pw_sel = 'input[type=password],input[name=passwd]'
+                                _pw_found = False
+                                for _wi in range(6):
+                                    page.wait_for_timeout(2000)
+                                    try:
+                                        if page.locator(_pw_sel).first.is_visible(timeout=500):
+                                            _pw_found = True
+                                            break
+                                    except Exception:
+                                        pass
+                                    if _wi % 2 == 1:
                                         try:
-                                            _pb = page.query_selector(_ps)
-                                            if _pb and _pb.is_visible(): _pb.click(); break
+                                            print(f'[oauth] pw-wait _wi={_wi} url={page.url[:80]}', flush=True)
+                                        except Exception:
+                                            pass
+                                if _pw_found:
+                                    page.locator(_pw_sel).first.fill(password)
+                                    page.wait_for_timeout(300)
+                                    for _ps in ["button[data-testid='primaryButton']", 'input[type=submit]', 'button[type=submit]']:
+                                        try:
+                                            _pb = page.locator(_ps).first
+                                            if _pb.is_visible(timeout=800): _pb.click(); break
                                         except Exception: continue
-                                    try: page.wait_for_load_state("networkidle", timeout=12000)
-                                    except Exception: page.wait_for_timeout(5000)
-                                    print("[oauth] v9.33 email+password submitted, continuing poll...", flush=True)
-                                    _poll_round += 1
-                                    _prev_url = _poll_url
-                                    continue
+                                    try: page.wait_for_load_state('networkidle', timeout=10000)
+                                    except Exception: page.wait_for_timeout(4000)
+                                    print('[oauth] \u2705 sign-in email+password \u5df2\u63d0\u4ea4\uff0c\u7ee7\u7eed\u8f6e\u8be2...', flush=True)
+                                    _last_url = ''
                                 else:
-                                    print("[oauth] v9.33 no password field appeared, bail", flush=True)
+                                    print('[oauth] \u26a0 \u5bc6\u7801\u6846\u672a\u51fa\u73b0\uff0cbail \u5230\u8bbe\u5907\u7801 fallback', flush=True)
                                     break
                             except Exception as _sign_e:
-                                print(f"[oauth] v9.33 sign-in fill error: {_sign_e}, bail", flush=True)
+                                print(f'[oauth] sign-in \u586b\u5199\u5f02\u5e38: {_sign_e}\uff0cbail', flush=True)
                                 break
                         else:
-                            print("[oauth] v9.33 sign-in page, no password, bail to device-code", flush=True)
+                            print('[oauth] sign-in \u9875\u4e14\u65e0\u5bc6\u7801\uff0cbail \u5230\u8bbe\u5907\u7801 fallback', flush=True)
                             break
                 except Exception:
                     pass
-            # v8.77 oauth 卡页探针: 每轮截图 + dump 可见按钮文本, 用于事后 visual debugging
+
+            # 每轮截图并记录可见按钮，便于事后排查 OAuth 卡页问题
             try:
                 _shot_p = f"/tmp/oauth_round_{email}_{_poll_round+1}.png"
                 page.screenshot(path=_shot_p)
@@ -2132,15 +2298,8 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None, password:
             except Exception as _shote:
                 print(f'[oauth] ⚠ round{_poll_round+1} 探针失败: {_shote}', flush=True)
 
-            # v8.41 ROOT-FIX 2026-04-28 — 删除"已到达终止页"误导判定
-            # 原 v8.36/v8.37 判定 (基于 parse_qs 解析 query 名 + 排除 oauth20_authorize) 实证 reg_1777341248972 仍误命中 → break → wait_for_url 30s 超时 → no_redirect.
-            # 真终止 = nativeclient redirect 已发生 (OAuth 标准 callback URI).
-            # nativeclient 检测下移到 elif 链里 (精确, 不参与终止页"判定"); 其他真终止靠循环外 wait_for_url 兜底.
-
-            # nativeclient redirect 已捕获 → OAuth code 拿到, 退出循环
-            # v8.42 ROOT-FIX 2026-04-28: 'nativeclient' 子串会被 redirect_uri query value 误命中
-            # (REDIRECT_URI='https://login.microsoftonline.com/common/oauth2/nativeclient' URL-encoded 进 query → page.url 含 nativeclient 子串)
-            # 必须用 urlparse 提取 path 单独判定.
+            # nativeclient redirect 已捕获 → OAuth code 已拿到，退出循环
+            # 用 urlparse 提取 URL path 判定，防止 redirect_uri query value 中的子串误命中
             try:
                 from urllib.parse import urlparse as _urpX
                 _path_X = _urpX(_poll_url).path or ''
@@ -2165,7 +2324,7 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None, password:
                     page.wait_for_timeout(5000)
 
             # 重 CAPTCHA 页（仅 signup.live.com）：handler 后重导航
-            # v8.41 ROOT-FIX: 移除 'login.live.com/oauth' 子串 — 它会匹配 oauth20_authorize.srf 正常 OAuth 中间页 → 误判为重 CAPTCHA → 调 handler 失败 → 失去 round 浪费.
+            # 重 CAPTCHA 页仅在 signup.live.com 触发（login.live.com 是正常 OAuth 中间页，不应触发）
             elif 'signup.live.com' in _poll_url:
                 print(f'[oauth] ⚠ 重CAPTCHA页 (signup.live.com)，调用处理器 (round={_poll_round+1})...', flush=True)
                 if captcha_handler:
@@ -2175,7 +2334,7 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None, password:
                     except Exception as _ce:
                         print(f'[oauth] CAPTCHA处理异常: {_ce}', flush=True)
                 _after_url = page.url or ''
-                # v8.42 ROOT-FIX 2026-04-28: 子串匹配会被 query value 误命中 (nativeclient/oauth20_authorize/authorize 都在 redirect_uri query 里) → 全用 path 判定
+                # URL 解析用 path 判定，防止 redirect_uri query value 误命中
                 try:
                     from urllib.parse import urlparse as _urp2, parse_qs as _pqs2
                     _parsed2 = _urp2(_after_url) if _after_url else None
@@ -2210,12 +2369,10 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None, password:
             # 其他页（login、interrupt、未知）：驱散中断 → 强力按钮 → 早退
             else:
                 _clicked = _skip_ms_interrupts(page, label=f'oauth-poll-{_poll_round}')
-                # v8.73 Bug1: 卡在 oauth20_authorize.srf / login.live.com 时, 尝试常见 forward 按钮
-                # v8.76 Bug D: 加 [data-testid="primaryButton"] (MS React UI 标准按钮, Next/Continue/Accept 都用同一 testid)
-                #              加 [data-testid="secondaryButton"] 在 stuck>=1 时启用 (跳过 passkey/recovery 等可选步)
+                # 尝试点击 primary/secondary 按钮推进页面（Next/Continue/Accept/Skip 等）
                 if not _clicked:
                     _primary_sels = (
-                        '[data-testid="primaryButton"]',  # v8.76 Bug D: MS React UI primary
+                        '[data-testid="primaryButton"]',  # MS React UI primary (Next/Continue/Accept)
                         'input[type="submit"][value="Yes"]',
                         'button:has-text("Yes")', 'button:has-text("是")',
                         'input[type="submit"][value="Continue"]',
@@ -2227,7 +2384,7 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None, password:
                         'button:has-text("Approve")', 'button:has-text("允许")',
                         '#idSIButton9', '[data-report-event="Signin_Submit"]',
                     )
-                    # v8.76 Bug D: stuck>=1 → primary 已点过没用 → 启用 secondary 跳过 (Skip/Maybe later/Cancel)
+                    # stuck>=1 意味着 primary 按钮无效，改用 secondary 跳过可选中断页（Skip/Maybe later/Cancel）
                     _secondary_sels = (
                         '[data-testid="secondaryButton"]',
                         'button:has-text("Skip for now")',
@@ -2250,24 +2407,22 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None, password:
                                 break
                         except Exception:
                             continue
-                # v8.76 Bug D: 成功 click 但 URL 不变 ≠ 真 stuck (MS React UI 是 SPA 内部翻页, URL 不动)
-                # 重置 stuck 计数, 给 SPA 多轮翻页机会; 只有"既无按钮可点 又 URL 不动"才算真 stuck
+                # MS React SPA 翻页时 URL 不变 — click 成功则重置 stuck 计数，不算卡住
                 if _clicked and _stuck_same_url_count > 0:
                     print(f'[oauth] ↻ click 成功 → 重置 stuck 计数 (SPA 内部翻页, URL 不变)', flush=True)
                     _stuck_same_url_count = 0
                     _last_url = ''  # 下轮不会被判同 URL
-                # v8.73 Bug1 / v8.76 Bug D: 真 stuck (无按钮 + URL 不变 2 轮) → 早退
+                # 真 stuck（无可点按钮且 URL 连续 2 轮不变）→ 提前退出
                 if (not _clicked) and _stuck_same_url_count >= 2:
                     print(f'[oauth] ⏭ URL 连续 {_stuck_same_url_count+1} 轮未变且无可点按钮 → 早退', flush=True)
                     break
                 page.wait_for_timeout(2000)
         # ────────────────────────────────────────────────────────────────────────
 
-        # 使用 wait_for_url 等待 nativeclient 重定向（最多30s）
-        # v8.37 ROOT-FIX: 与 v8.36 同源 — 子串 'code=' 会被 'response_type=code' 误命中
+        # 循环后兜底：用 wait_for_url 等待 nativeclient redirect（最多 8s）
         if not captured['code'] and not captured['error']:
             def _is_terminal(u: str) -> bool:
-                # v8.42 ROOT-FIX 2026-04-28: 子串匹配会被 query value 误命中 → 全用 path
+                # 用 urlparse 提取 path 判定，防止 query value 误命中
                 if not u:
                     return False
                 try:
@@ -2284,7 +2439,7 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None, password:
                     return False
                 return ('code' in _qs3) or ('error' in _qs3)
             try:
-                page.wait_for_url(_is_terminal, timeout=8000)  # v8.73 Bug1: 30s→8s
+                page.wait_for_url(_is_terminal, timeout=8000)
             except Exception:
                 pass
 
@@ -2403,8 +2558,7 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
         if ok:
             # 跳过微软注册后中断页（passkey / 保持登录 / 恢复邮箱等）
             _skip_ms_interrupts(page, label='post-register')
-            print("[register] v9.24: wait 15s for MS session propagation (avoid OAuth re-login)...", flush=True)
-            time.sleep(15)  # v9.24: post-reg propagation wait
+            # 注册完成后 session cookie 已在浏览器中，MS 无需传播延迟，直接 OAuth
             # ── in-browser OAuth2 authorization_code 授权 ──────────────
             try:
                 _tokens = get_oauth_token_in_browser(
@@ -2418,52 +2572,6 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
                 print(f"[oauth] 捕获异常: {_oe}", flush=True)
                 result["access_token"]  = ""
                 result["refresh_token"] = ""
-            # ── v9.26 BUG-FIX: 用 GetCredentialType API 替代浏览器登录页验证 ──
-            # 原 v8.90~v9.00 缺陷:
-            #  1) 浏览器新页面无注册cookie → MS路由不同 → 文本判断极不稳定 → 误报"不存在"
-            #  2) _MAX_PROP=5 × sleep(15s) = 最多浪费75s
-            # 新方案: GetCredentialType API 单次HTTP POST ~0.5s，IfExistsResult=0即账号存在
-            if not result.get("access_token") and not result.get("refresh_token"):
-                try:
-                    import urllib.request as _ur2, json as _jj2, time as _time
-                    _MAX_PROP  = 2   # 最多2次: 首次+1次5s重试，总计最多~6s
-                    _gct_url   = "https://login.microsoftonline.com/common/GetCredentialType"
-                    _gct_body  = _jj2.dumps({
-                        "username": f"{actual_email}@outlook.com",
-                        "isOtherIdpSupported": True, "checkPhones": False,
-                        "isRemoteNGCSupported": False, "isCookieBannerShown": False,
-                        "isFidoSupported": False, "originalRequest": "", "flowToken": "",
-                    }).encode()
-                    _gct_hdrs  = {
-                        "Content-Type": "application/json",
-                        "User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                        "Origin":       "https://login.microsoftonline.com",
-                    }
-                    for _pa in range(_MAX_PROP):
-                        try:
-                            _req2  = _ur2.Request(_gct_url, data=_gct_body,
-                                                  headers=_gct_hdrs, method="POST")
-                            _resp2 = _jj2.loads(_ur2.urlopen(_req2, timeout=8).read())
-                            _ier   = _resp2.get("IfExistsResult", -1)
-                            # 0=存在  1=不存在  4=未知/需验证  5=重定向其他IdP(也算存在)
-                            _exists = _ier == 0 or _ier == 4 or _ier == 5
-                            print(f"[register] 登录验证 ({_pa+1}/{_MAX_PROP}): IfExistsResult={_ier} exists={_exists}", flush=True)
-                        except Exception as _ge:
-                            print(f"[register] GetCredentialType 调用失败({_pa+1}/{_MAX_PROP}): {_ge}", flush=True)
-                            _exists = True   # 调用失败时保守认为账号存在，避免误报
-                            break
-                        if _exists:
-                            print(f"[register] \u2705 登录验证通过: 账号已存在 (IfExistsResult={_ier})", flush=True)
-                            break
-                        else:
-                            if _pa < _MAX_PROP - 1:
-                                print(f"[register] \u26a0 账号尚未扩散 (IfExistsResult={_ier}), 等待5s再次验证 ({_pa+1}/{_MAX_PROP})\u2026", flush=True)
-                                _time.sleep(5)
-                            else:
-                                print(f"[register] \u26a0 登录验证: 账号 {actual_email}@outlook.com 扩散超时，保留成功标记", flush=True)
-                                result["propagation_pending"] = True  # 账号已创建(cookie确认)，扩散尚未完成
-                except Exception as _ve:
-                    print(f"[register] \u26a0 登录验证异常(忽略): {_ve}", flush=True)
             # ───────────────────────────────────────────────────────────
             try:
                 page.screenshot(path=f"/tmp/outlook_ok_{actual_email}.png")
@@ -2939,6 +3047,7 @@ def main():
                 or "Consent" in _err_str
                 or "ERR_CONNECTION" in _err_str
                 or "net::ERR" in _err_str
+                or "注册后页面未跳转" in _err_str
             )
             if (not r["success"] and use_cf_pool and ip_info and _cf_pool
                     and _should_retry

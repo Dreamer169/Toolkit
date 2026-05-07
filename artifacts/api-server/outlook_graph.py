@@ -7,8 +7,8 @@ outlook_graph.py — Microsoft Graph API 邮件读取工具
 """
 import json, time, re, urllib.request, urllib.parse, urllib.error
 
-CLIENT_ID  = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
-TENANT     = "common"
+CLIENT_ID  = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+TENANT     = "consumers"
 TOKEN_FILE = "/tmp/ms_tokens.json"
 
 
@@ -18,7 +18,7 @@ def _refresh_access_token_raw(refresh_token: str) -> dict:
         "client_id": CLIENT_ID,
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
-        "scope": "offline_access Mail.Read",
+        "scope": "offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read",
     }).encode()
     req = urllib.request.Request(
         f"https://login.microsoftonline.com/{TENANT}/oauth2/v2.0/token",
@@ -382,10 +382,159 @@ def _extract_unitool_verify_url(html: str) -> str | None:
     return None
 
 
+# ─── MS account 6-digit OTP (suspicious login / new device / account recovery) ───
+MS_OTP_SUBJ_KWS = (
+    "microsoft account", "security code", "verification code",
+    "verify your", "confirm your", "unusual sign",
+    "microsoft 帐户", "安全代码", "验证码", "确认",
+)
+MS_OTP_BODY_KWS = (
+    "security code", "verification code", "is your microsoft",
+    "安全代码", "验证码",
+)
+
+
+def wait_for_ms_otp(
+    refresh_token: str,
+    timeout: int = 180,
+    after_ts: float | None = None,
+) -> str | None:
+    """Poll Inbox + JunkEmail for a Microsoft 6-digit OTP email.
+
+    Use cases: suspicious-login safety check, new-device verification,
+    account-recovery email code.
+
+    after_ts: Unix timestamp before which emails are ignored (prevents
+              reading a stale OTP that arrived before registration started).
+    Returns: 6-digit string, or None on timeout.
+    """
+    start_ts = after_ts or (time.time() - 60)
+    deadline = time.time() + timeout
+    seen_ids: set = set()
+
+    print("[ms_otp] refreshing access_token...", flush=True)
+    try:
+        resp = _refresh_access_token_raw(refresh_token)
+        token = resp["access_token"]
+    except Exception as e:
+        print(f"[ms_otp] ERROR refreshing token: {e}", flush=True)
+        return None
+
+    print(f"[ms_otp] polling Inbox + JunkEmail (max {timeout}s)...", flush=True)
+    poll = 0
+    while time.time() < deadline:
+        poll += 1
+        for folder_id in ("Inbox", "JunkEmail"):
+            try:
+                msgs = _graph_get_with_token(
+                    f"/me/mailFolders/{folder_id}/messages"
+                    "?$top=20&$orderby=receivedDateTime+desc"
+                    "&$select=id,subject,bodyPreview,receivedDateTime,from",
+                    token,
+                )
+                for msg in msgs.get("value", []):
+                    mid = msg["id"]
+                    if mid in seen_ids:
+                        continue
+                    # Skip emails that arrived before registration
+                    recv_str = msg.get("receivedDateTime", "")
+                    if recv_str:
+                        try:
+                            from datetime import datetime
+                            recv_ts = datetime.fromisoformat(
+                                recv_str.replace("Z", "+00:00")).timestamp()
+                            if recv_ts < start_ts - 30:
+                                seen_ids.add(mid)
+                                continue
+                        except Exception:
+                            pass
+                    subj = msg.get("subject", "").lower()
+                    prev = msg.get("bodyPreview", "").lower()
+                    sender = (
+                        msg.get("from", {})
+                        .get("emailAddress", {})
+                        .get("address", "")
+                        .lower()
+                    )
+                    # Accept: official Microsoft sender domains
+                    is_ms = (
+                        "microsoft.com" in sender
+                        or "account.microsoft" in sender
+                        or "accountprotection" in sender
+                        or "msa" in sender
+                    )
+                    # Accept: subject/preview contains OTP keywords
+                    has_kw = any(k in subj for k in MS_OTP_SUBJ_KWS) or any(
+                        k in prev for k in MS_OTP_BODY_KWS
+                    )
+                    if not (is_ms or has_kw):
+                        seen_ids.add(mid)
+                        continue
+                    print(
+                        f"[ms_otp] [{folder_id}] candidate: "
+                        f"{msg.get('subject','')} from={sender}",
+                        flush=True,
+                    )
+                    detail = _graph_get_with_token(
+                        f"/me/messages/{mid}?$select=body", token
+                    )
+                    body = (detail.get("body") or {}).get("content", "") or ""
+                    otp = _extract_ms_otp(body or prev)
+                    if otp:
+                        print(f"[ms_otp] [{folder_id}] OTP: {otp}", flush=True)
+                        return otp
+                    seen_ids.add(mid)
+            except Exception as e:
+                print(f"[ms_otp] {folder_id} error: {e}", flush=True)
+        remaining = int(deadline - time.time())
+        print(f"[ms_otp] poll#{poll} not found, sleeping 10s (remaining {remaining}s)", flush=True)
+        time.sleep(10)
+        # Refresh token every ~60 s to prevent expiry during long waits
+        if poll % 6 == 0:
+            try:
+                resp = _refresh_access_token_raw(refresh_token)
+                token = resp["access_token"]
+            except Exception:
+                pass
+    print("[ms_otp] timeout: no Microsoft OTP email received", flush=True)
+    return None
+
+
+def _extract_ms_otp(text: str) -> str | None:
+    """Extract a 6-digit Microsoft OTP from email body (HTML or plain text).
+
+    Prioritizes codes adjacent to known OTP keywords.
+    Excludes year-like patterns (19xx/20xx).
+    """
+    import re as _re
+    if not text:
+        return None
+    # Strip HTML tags to simplify matching
+    plain = _re.sub(r"<[^>]+>", " ", text)
+    # Priority: keyword immediately followed by / preceding a 6-digit number
+    priority = [
+        r"(?:security code|verification code|安全代码|验证码)[^\d]{0,30}(\d{6})(?!\d)",
+        r"(\d{6})(?!\d)[^\d]{0,30}(?:is your|Microsoft)",
+        r"(?:code is|code:)\s*(\d{6})(?!\d)",
+    ]
+    for pat in priority:
+        m = _re.search(pat, plain, _re.IGNORECASE)
+        if m:
+            return m.group(1)
+    # Fallback: any isolated 6-digit sequence; exclude year-like values
+    for c in _re.findall(r"(?<!\d)(\d{6})(?!\d)", plain):
+        if c[:2] in ("19", "20") and int(c[2:]) < 100:
+            continue
+        return c
+    return None
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 2 and sys.argv[1] == "unitool":
         print(wait_for_unitool_verify(sys.argv[2], timeout=60))
+    elif len(sys.argv) > 2 and sys.argv[1] == "ms_otp":
+        print(wait_for_ms_otp(sys.argv[2], timeout=120))
     elif len(sys.argv) > 1:
         print(wait_for_replit_verify(sys.argv[1], timeout=60))
     else:
