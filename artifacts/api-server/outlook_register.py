@@ -2452,6 +2452,96 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None, password:
             elif 'error' in params:
                 captured['error']             = params['error'][0]
                 captured['error_description'] = params.get('error_description', [''])[0]
+
+        # ── 住宅代理兜底：CF VLESS 无法稳定到达 login.microsoftonline.com ────────
+        # 根因: auto_device_code.py 注释明确 "CF VLESS xray relay CANNOT reach Microsoft
+        #       URLs (ERR_CONNECTION_CLOSED)"，导致 poll 轮询全程看到空白页。
+        # 修复: 参考 auto_device_code.py _pick_residential_proxy() —— 检测到未捕获 code
+        #       时，保存 session cookies，在同一浏览器新开住宅 SOCKS5 context 重走流程。
+        if not captured['code'] and not captured['error']:
+            _RES_PORTS = [10851, 10853, 10854, 10857, 10859]
+            import socket as _sock_res
+            _res_proxy = ''
+            for _rp in _RES_PORTS:
+                try:
+                    _s = _sock_res.socket(_sock_res.AF_INET, _sock_res.SOCK_STREAM)
+                    _s.settimeout(1.5)
+                    _s.connect(('127.0.0.1', _rp))
+                    _s.close()
+                    _res_proxy = f'socks5://127.0.0.1:{_rp}'
+                    break
+                except Exception:
+                    pass
+            if _res_proxy:
+                print(f'[oauth] ⚡ CF代理未捕获code，切换住宅代理 {_res_proxy} 重试...', flush=True)
+                try:
+                    # 保存注册 session cookies（浏览器已登录状态）
+                    _saved_state = page.context.storage_state()
+                    # 在同一浏览器实例上开新 context，使用住宅代理
+                    _res_ctx = page.context.browser.new_context(
+                        proxy={'server': _res_proxy},
+                    )
+                    try:
+                        # 恢复 session cookies → 浏览器已登录，无需重新 email/password
+                        try:
+                            _res_ctx.add_cookies(_saved_state.get('cookies', []))
+                            print(f'[oauth] 🍪 住宅ctx恢复 {len(_saved_state.get("cookies",[]))} 个 cookies', flush=True)
+                        except Exception as _ce:
+                            print(f'[oauth] ⚠ cookies恢复失败(继续): {_ce}', flush=True)
+                        # 在新 context 上安装路由拦截器
+                        _res_ctx.route(_NC_PATH_RE, _intercept_nativeclient)
+                        _res_page = _res_ctx.new_page()
+                        try:
+                            try:
+                                _res_page.goto(auth_url, timeout=25000, wait_until='domcontentloaded')
+                            except Exception:
+                                pass  # nativeclient redirect 或网络错误均属正常
+                            _res_page.wait_for_timeout(4000)
+                            # 截图留档（住宅代理轮）
+                            try:
+                                _res_page.screenshot(path=f'/tmp/oauth_round_{email}_res.png')
+                            except Exception:
+                                pass
+                            # 尝试点击 Accept/同意 按鈕
+                            for _sel2 in _CONSENT_ACCEPT_SELS:
+                                try:
+                                    _b2 = _res_page.locator(_sel2).first
+                                    if _b2.is_visible(timeout=2000):
+                                        _b2.click()
+                                        print(f'[oauth] ✅ 住宅ctx Accept: {_sel2}', flush=True)
+                                        _res_page.wait_for_timeout(3000)
+                                        break
+                                except Exception:
+                                    continue
+                            # 等待 nativeclient redirect（最多 15s）
+                            if not captured['code']:
+                                try:
+                                    _res_page.wait_for_url(
+                                        lambda u: 'nativeclient' in (_up.urlparse(u).path if u else ''),
+                                        timeout=15000,
+                                    )
+                                except Exception:
+                                    pass
+                            # 从当前 URL 再次尝试捕获 code
+                            if not captured['code']:
+                                _res_cur = _res_page.url or ''
+                                if '?' in _res_cur:
+                                    _res_params = _up.parse_qs(_up.urlparse(_res_cur).query)
+                                    if 'code' in _res_params:
+                                        captured['code'] = _res_params['code'][0]
+                                        print(f'[oauth] ✅ 住宅ctx URL捕获code ({captured["code"][:12]}...)', flush=True)
+                        finally:
+                            try: _res_page.close()
+                            except Exception: pass
+                    finally:
+                        try: _res_ctx.close()
+                        except Exception: pass
+                except Exception as _res_e:
+                    print(f'[oauth] ⚠ 住宅代理重试异常: {_res_e}', flush=True)
+            else:
+                print('[oauth] ⚠ 无可用住宅代理端口，跳过住宅兑底', flush=True)
+        # ────────────────────────────────────────────────────────────────────────
+
     except Exception as e:
         print(f'[oauth] 授权导航异常: {e}', flush=True)
         return {}
