@@ -1084,6 +1084,16 @@ router.get("/data/unitool-stats", async (req, res) => {
       const { readFileSync: rfs } = await import("fs");
       convCache = JSON.parse(rfs("/tmp/unitool_ref_code_cache.json", "utf8"));
     } catch {}
+    // Read token balance cache (populated by unitool_token_stats.py)
+    let tokenCache: Record<string, { regular?: number; bonus?: number }> = {};
+    try {
+      const { readFileSync: rfs_t } = await import("fs");
+      tokenCache = JSON.parse(rfs_t("/tmp/unitool_token_cache.json", "utf8"));
+    } catch {}
+    const tokenRegular  = Object.values(tokenCache).reduce((s, v) => s + (v.regular ?? 0), 0);
+    const tokenBonus    = Object.values(tokenCache).reduce((s, v) => s + (v.bonus   ?? 0), 0);
+    const tokenZeroAccs = Object.values(tokenCache).filter(v => (v.regular ?? 0) === 0).length;
+
     // Read rotation index
     let rotateIdx = 0;
     try {
@@ -1222,6 +1232,7 @@ router.get("/data/unitool-stats", async (req, res) => {
       }),
       chain:        { status: chainStatus, last_run: chainLastRun, brief: chainBrief },
       fail_reasons: failReasons.map(r => ({ reason: r.reason, count: Number(r.cnt) })),
+      token: { total_regular: tokenRegular, total_bonus: tokenBonus, zero_accounts: tokenZeroAccs, cached_accounts: Object.keys(tokenCache).length },
       ts: new Date().toISOString(),
     });
   } catch (e) { res.status(500).json({ success: false, error: String(e) }); }

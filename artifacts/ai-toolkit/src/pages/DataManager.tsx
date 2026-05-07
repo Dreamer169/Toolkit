@@ -45,6 +45,7 @@ interface UnitoolStats {
   recent:       { id: number; email: string; ssid_prefix: string; ssid_len: number; updated_at: string }[];
   chain:        { status: string; last_run: string; brief: string };
   fail_reasons: { reason: string; count: number }[];
+  token?:       { total_regular: number; total_bonus: number; zero_accounts: number; cached_accounts: number };
   ts:           string;
 }
 
@@ -172,6 +173,45 @@ function StatsPanel() {
               <div className="text-xs text-gray-600">{uStats.ref.total_slots ?? 0} 个余额（每注册 -1）</div>
             </div>
           </div>
+
+          {/* Token 余额汇总卡 */}
+          {uStats.token && (
+            <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold text-gray-300">🪙 AI Chat Token 余额</h3>
+                <span className="text-xs text-gray-600">已缓存 {uStats.token.cached_accounts} 个账号</span>
+              </div>
+              <div className="grid grid-cols-3 gap-4 text-center">
+                <div>
+                  <div className={`text-2xl font-bold ${uStats.token.total_regular === 0 ? "text-red-400" : "text-emerald-400"}`}>
+                    {uStats.token.total_regular}
+                  </div>
+                  <div className="text-xs text-gray-400 mt-1">主力 token</div>
+                  <div className="text-xs text-gray-600">regular 池合计</div>
+                </div>
+                <div>
+                  <div className="text-2xl font-bold text-amber-400">{uStats.token.total_bonus}</div>
+                  <div className="text-xs text-gray-400 mt-1">赠送 bonus</div>
+                  <div className="text-xs text-gray-600">bonus 池合计</div>
+                </div>
+                <div>
+                  <div className={`text-2xl font-bold ${uStats.token.zero_accounts > 0 ? "text-orange-400" : "text-gray-400"}`}>
+                    {uStats.token.zero_accounts}
+                  </div>
+                  <div className="text-xs text-gray-400 mt-1">零余额账号</div>
+                  <div className="text-xs text-gray-600">regular = 0</div>
+                </div>
+              </div>
+              <div className="mt-3 flex justify-end">
+                <button
+                  onClick={() => fetch(`${API}/tools/unitool/token-stats?refresh=1`).then(() => loadUStats())}
+                  className="text-xs px-3 py-1 bg-[#21262d] border border-[#30363d] rounded text-gray-400 hover:text-white hover:border-amber-400 transition-colors"
+                >
+                  ↺ 刷新 token 余额
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Outlook 账号水位进度条 */}
           <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">

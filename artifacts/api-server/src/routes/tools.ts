@@ -6225,4 +6225,30 @@ router.get("/tools/unitool/ref-stats", async (req, res) => {
 });
 
 
+
+// ══ GET /tools/unitool/token-stats ════════════════════════════════════════════
+// 查询所有 unitool 账号的 AI chat token 余额（/api/user/billing-accounts + 4h缓存）
+// Query: ?refresh=1 强制刷新缓存
+const UNITOOL_TOKEN_STATS_SCRIPT = "/root/Toolkit/scripts/unitool_token_stats.py";
+
+router.get("/tools/unitool/token-stats", async (req, res) => {
+  const forceRefresh = req.query.refresh === "1";
+  const args: string[] = [UNITOOL_TOKEN_STATS_SCRIPT];
+  if (forceRefresh) args.push("--refresh");
+  try {
+    const { execFile } = await import("child_process");
+    const { promisify } = await import("util");
+    const execFileP = promisify(execFile);
+    const { stdout } = await execFileP(
+      "python3", args,
+      { env: { ...process.env, PYTHONUNBUFFERED: "1" }, timeout: 300_000 }
+    );
+    const data = JSON.parse(stdout);
+    res.json({ success: true, ...data });
+  } catch (e: any) {
+    res.status(500).json({ success: false, error: String((e as any)?.message ?? e) });
+  }
+});
+
+
 export default router;
