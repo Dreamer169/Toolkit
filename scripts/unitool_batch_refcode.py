@@ -22,6 +22,25 @@ LOG_FILE    = "/tmp/unitool_batch_refcode.log"
 
 RESI_PORTS  = [10822, 10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
 
+
+CACHE_FILE = "/tmp/unitool_ref_code_cache.json"
+
+def cache_write_ref_code(account_id: int, code: str, conversions: int = 0):
+    """写入 chain_v3 的 ref_code 缓存，避免重复 API 验证"""
+    try:
+        try:
+            cache = json.loads(open(CACHE_FILE).read())
+        except Exception:
+            cache = {}
+        cache[str(account_id)] = {
+            "code": code,
+            "conversions": conversions,
+            "ts": time.time(),
+        }
+        open(CACHE_FILE, "w").write(json.dumps(cache))
+    except Exception:
+        pass
+
 def log(*a):
     ts   = time.strftime("%H:%M:%S")
     line = f"[{ts}] " + " ".join(str(x) for x in a)
@@ -148,6 +167,7 @@ def main():
             log(f"  ✅ API 已有 ref_code={existing}，写入 DB")
             if not args.dry_run:
                 db_save_ref_code(acc_id, existing)
+                cache_write_ref_code(acc_id, existing)
             already_count += 1
             time.sleep(1)
             continue

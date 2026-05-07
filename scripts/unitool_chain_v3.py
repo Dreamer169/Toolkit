@@ -374,8 +374,15 @@ def db_get_all_ref_codes() -> list:
                 used = local_used  # API 失败，保守降级
                 log(f"[ref] id={acc_id} {acc_email} API failed, fallback local={local_used}")
             elif not api_rc:
-                log(f"[ref] id={acc_id} {acc_email} API=null (DB rc={rc} is dirty), skip")
-                continue
+                # API=null: ssid 可能过期或账号无自己的码
+                # unitool_ref_activated = 脚本显式 POST 创建，可信（ssid 过期不等于码不存在）
+                # unitool_ref_master (without ref_activated) = 旧脏数据路径，跳过
+                if "unitool_ref_activated" in (tags or "") and "unitool_ref_master" not in (tags or ""):
+                    used = local_used  # ssid 过期，信任 DB 码 + 本地计数
+                    log(f"[ref] id={acc_id} {acc_email} ssid_expired/null but ref_activated, local={local_used}")
+                else:
+                    log(f"[ref] id={acc_id} {acc_email} API=null + ref_master, skip dirty inviter code")
+                    continue
             else:
                 if api_rc != rc:
                     log(f"[ref] id={acc_id} API rc={api_rc} != DB rc={rc}, use API")
