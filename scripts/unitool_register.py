@@ -1,490 +1,675 @@
 #!/usr/bin/env python3
 """
-unitool_register.py — unitool.ai 全流程注册 v1.0
-==============================================
-流程:
-  1. 从 DB 取未注册 outlook 账号（有 refresh_token）
-  2. pydoll 打开 unitool.ai/en/entry，Turnstile bypass，填写信息，提交注册
-  3. Graph API 同时轮询 Inbox + JunkEmail 找验证邮件（修复：原只搜索 inbox）
-  4. 点击验证链接，提取 ssid cookie，写入 DB tags
+unitool_pipeline.py — unitool 注册完整流水线（下游脚本）
+=========================================================
+⚠️  上游依赖（必须先跑这一步生成 Outlook 账号入库）:
+    POST /api/tools/outlook/register
+      → outlook_register.py (patchright + 随机指纹 + CF IP 代理)
+      → 成功后 OAuth 拿 refresh_token，一起写入 PostgreSQL accounts 表
+    可通过前端一键触发:
+      GET  /api/tools/workflow/prepare   → 生成身份+密码
+      POST /api/tools/outlook/register  → 注册 Outlook + 入库（含 refresh_token）
 
-输出:
-  [OK]   email|ssid
-  [FAIL] email|reason
-  [DONE] ok/total
+本脚本流程（在 Outlook 账号已入库后执行）:
+1. 从 PostgreSQL 拉全新 outlook 账号（有 refresh_token, 无 unitool_registered 标记）
+2. pydoll 打开 unitool.ai/en/entry，Turnstile bypass，填写邮件/密码，提交注册
+3. Graph API 同时轮询 Inbox + JunkEmail 找验证邮件（unitool 邮件常落入垃圾箱！）
+4. curl 点击 verify 链接捕获 __Secure-unitool-ssid cookie
+5. 若 verify 不含 ssid → pydoll login 获取 ssid
+6. 写入 DB（notes 存 ssid，tags 加 unitool_registered）
 """
-import asyncio, re, json, os, sys, time, argparse, re
-import urllib.request, urllib.parse
 
-# ── Chrome 路径 ────────────────────────────────────────────────────────────────
+import asyncio, glob, json, os, random, re, socket, subprocess, sys, time, urllib.parse, urllib.request
+import psycopg2
+
+DB_URL = "postgresql://postgres:postgres@localhost/toolkit"
+CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+DISPLAY = ":99"
 CHROME = None
-for _p in [
-    "/data/cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
-    "/root/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
-]:
-    if os.path.exists(_p):
-        CHROME = _p; break
+for p in ["/data/cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
+          "/root/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
+          "/data/cache/ms-playwright/chromium-1169/chrome-linux64/chrome"]:
+    if os.path.exists(p): CHROME = p; break
 
-TARGET   = "https://unitool.ai/en/entry"
-AUTH_COOKIE = "__Secure-unitool-ssid"
-DB_URL   = "postgresql://postgres:postgres@localhost/toolkit"
+LOG_FILE = "/tmp/unitool_pipeline.log"
 
-def log(*a): print(*a, flush=True)
+def _free_port(lo: int = 12000, hi: int = 29999) -> int:
+    """找一个当前未被占用的 TCP 端口，避免 pydoll randint(9223,9322) 碰撞。"""
+    tried: set = set()
+    while len(tried) < (hi - lo):
+        p = random.randint(lo, hi)
+        if p in tried:
+            continue
+        tried.add(p)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if s.connect_ex(('127.0.0.1', p)) != 0:
+                return p
+    raise RuntimeError('no free port found')
+SIGNUP_NA = "602b5c42ffedec9865ca902b033d188b22c575dfd5"
+LOGIN_NA  = "60e02e33f743e14f5dab1dc42181ba1e746fd4d925"
 
-# ── DB helpers ────────────────────────────────────────────────────────────────
-def db_get_account(email=None):
-    import psycopg2
-    conn = psycopg2.connect(DB_URL)
-    cur  = conn.cursor()
-    if email:
-        cur.execute(
-            "SELECT id,email,password,refresh_token FROM accounts WHERE email=%s", (email,))
-    else:
-        cur.execute("""
-            SELECT id,email,password,refresh_token FROM accounts
-            WHERE platform='outlook' AND status='active'
-              AND (tags IS NULL OR tags NOT LIKE '%unitool%')
-              AND refresh_token IS NOT NULL AND refresh_token != ''
-            ORDER BY id LIMIT 1
-        """)
-    row = cur.fetchone(); conn.close(); return row
+def log(msg):
+    ts = time.strftime("%H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line, flush=True)
+    with open(LOG_FILE, "a") as f: f.write(line + "\n")
 
-def db_tag_unitool(account_id: int, ssid: str):
-    import psycopg2
-    conn = psycopg2.connect(DB_URL)
-    cur  = conn.cursor()
+def db_connect(): return psycopg2.connect(DB_URL)
+
+def get_next_account():
+    """拉一个有refresh_token、未做unitool的全新outlook账号"""
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, email, password, refresh_token FROM accounts
+        WHERE platform='outlook' AND status='active'
+          AND refresh_token IS NOT NULL AND refresh_token != ''
+          AND (tags IS NULL OR (
+               tags NOT LIKE '%unitool_registered%'
+            AND tags NOT LIKE '%unitool_fail%'
+            AND tags NOT LIKE '%token_invalid%'
+          ))
+          AND LENGTH(COALESCE(password,'')) >= 12
+        ORDER BY created_at DESC NULLS LAST
+        LIMIT 1
+    """)
+    row = cur.fetchone()
+    conn.close()
+    return row  # (id, email, password, refresh_token) or None
+
+def get_account_by_email(email):
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        'SELECT id, email, password, refresh_token FROM accounts WHERE email=%s',
+        (email,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+def get_pending_account():
+    """拉一个unitool_verify_pending账号重试"""
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, email, password, refresh_token FROM accounts
+        WHERE platform='outlook' AND status='active'
+          AND refresh_token IS NOT NULL AND refresh_token != ''
+          AND tags LIKE '%unitool_verify_pending%'
+          AND tags NOT LIKE '%unitool_registered%'
+          AND LENGTH(COALESCE(password,'')) >= 8
+        ORDER BY updated_at ASC NULLS LAST
+        LIMIT 1
+    """)
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+def mark_account(account_id, tag, extra_notes=""):
+    conn = db_connect()
+    cur = conn.cursor()
     cur.execute("""
         UPDATE accounts SET
-          tags = CASE WHEN tags IS NULL THEN 'unitool'
-                      WHEN tags NOT LIKE '%unitool%' THEN tags || ',unitool'
-                      ELSE tags END,
-          notes = COALESCE(notes,'') || ' | unitool_ssid=' || %s
+            tags = CASE WHEN COALESCE(tags,'')='' THEN %s
+                        ELSE tags || ',' || %s END,
+            notes = COALESCE(notes,'') || E'\n' || %s,
+            updated_at = NOW()
         WHERE id = %s
-    """, (ssid, account_id))
-    conn.commit(); conn.close()
+    """, (tag, tag, f"{tag} at={time.strftime('%Y-%m-%d %H:%M:%S')} {extra_notes}", account_id))
+    conn.commit()
+    conn.close()
 
-# ── Graph API helpers ─────────────────────────────────────────────────────────
-CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
+def save_ssid(account_id, email, ssid, all_cookies_json=""):
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE accounts SET
+            tags = CASE WHEN COALESCE(tags,'')='' THEN 'unitool_registered'
+                        ELSE tags || ',unitool_registered' END,
+            notes = COALESCE(notes,'') || E'\nunitool_ssid=' || %s || E'\nat=' || %s,
+            updated_at = NOW()
+        WHERE id = %s
+    """, (ssid[:200], time.strftime("%Y-%m-%d %H:%M:%S"), account_id))
+    conn.commit()
+    conn.close()
+    log(f"[DB] saved ssid for {email} id={account_id} ssid_len={len(ssid)}")
+    # AUTO-LINK: write ssid to /tmp/unitool_ssidN.txt so proxy auto-picks up within 5s
+    try:
+        _existing = sorted(glob.glob("/tmp/unitool_ssid*.txt"))
+        _idxs = []
+        for _f in _existing:
+            _m = re.search(r"unitool_ssid(\d*)\.txt", _f)
+            _idxs.append(int(_m.group(1)) if _m and _m.group(1) else 1)
+        _next_n = (max(_idxs) + 1) if _idxs else 1
+        _fname = f"/tmp/unitool_ssid{_next_n}.txt"
+        with open(_fname, "w") as _fh:
+            _fh.write(ssid)
+        log(f"[proxy-file] wrote {_fname}")
+    except Exception as _fe:
+        log(f"[proxy-file] warn: {_fe}")
+    # AUTO-LINK: tools.ts reads this line to push ssid -> proxy pool
+    print(f"[OK] {email} | {ssid}", flush=True)
 
-def _refresh_token(refresh_token: str) -> str:
+# ── Step 1: Graph API token refresh ──────────────────────────────────────────
+
+def refresh_ms_token(refresh_token):
     data = urllib.parse.urlencode({
-        "client_id": CLIENT_ID, "grant_type": "refresh_token",
-        "refresh_token": refresh_token, "scope": "offline_access Mail.Read",
+        "grant_type": "refresh_token",
+        "client_id": CLIENT_ID,
+        "refresh_token": refresh_token,
+        "scope": "https://graph.microsoft.com/Mail.Read offline_access",
     }).encode()
     req = urllib.request.Request(
         "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-        data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
-    resp = json.loads(urllib.request.urlopen(req, timeout=20).read())
-    if "access_token" not in resp:
-        raise ValueError(f"token refresh failed: {resp}")
-    return resp["access_token"]
+        data=data, method="POST"
+    )
+    r = urllib.request.urlopen(req, timeout=20)
+    return json.loads(r.read())
 
-def _graph_get(path: str, token: str) -> dict:
-    if "?" in path:
-        base, qs = path.split("?", 1)
-        qs = urllib.parse.quote(qs, safe="=&$/'")
-        url = f"https://graph.microsoft.com/v1.0{base}?{qs}"
-    else:
-        url = f"https://graph.microsoft.com/v1.0{path}"
-    req = urllib.request.Request(url, headers={
-        "Authorization": f"Bearer {token}", "Accept": "application/json"})
-    return json.loads(urllib.request.urlopen(req, timeout=20).read())
-
-UNITOOL_KWS     = ("unitool", "verify", "confirm", "activate", "email")
-UNITOOL_SENDERS = ("unitool.ai", "noreply", "no-reply", "support")
-
-def _extract_verify_url(html: str) -> str | None:
-    candidates = re.findall(r'https?://[^\s"\'<>\)]+', html)
-    priority = ("unitool.ai/en/verify", "unitool.ai/verify", "unitool.ai/confirm",
-                "unitool.ai/activate", "unitool.ai/email", "unitool.ai/en/entry?token",
-                "unitool.ai/en/entry?verify")
-    fallback = ("unitool", "verify", "confirm", "activate", "token")
-    for url in candidates:
-        u = url.lower()
-        if any(k in u for k in priority):
-            return url.rstrip(".,)")
-    for url in candidates:
-        u = url.lower()
-        if "unitool.ai" in u and any(k in u for k in fallback):
-            return url.rstrip(".,)")
-    for url in candidates:
-        if any(k in url.lower() for k in fallback) and len(url) > 60:
-            return url.rstrip(".,)")
-    return None
-
-def wait_for_unitool_verify(refresh_token: str, timeout: int = 300,
-                             after_ts: float | None = None) -> str | None:
-    """
-    同时轮询 Inbox + JunkEmail（修复：unitool 验证邮件落入垃圾邮件）
-    返回验证 URL 或 None
-    """
-    start_ts = after_ts or (time.time() - 30)
-    deadline  = time.time() + timeout
-    seen_ids: set = set()
-
-    log("[graph] 获取 access_token…")
-    try:
-        token = _refresh_token(refresh_token)
-    except Exception as e:
-        log(f"[graph] ❌ token 刷新失败: {e}"); return None
-
-    log(f"[graph] 开始轮询 Inbox + JunkEmail (最多 {timeout}s)…")
-    poll = 0
-    while time.time() < deadline:
-        poll += 1
-        for folder in ("Inbox", "JunkEmail"):
-            try:
-                msgs = _graph_get(
-                    f"/me/mailFolders/{folder}/messages"
-                    "?$top=20&$orderby=receivedDateTime+desc"
-                    "&$select=id,subject,bodyPreview,receivedDateTime,from",
-                    token)
-                for msg in msgs.get("value", []):
-                    mid = msg["id"]
-                    if mid in seen_ids: continue
-
-                    recv_str = msg.get("receivedDateTime", "")
-                    if recv_str:
-                        try:
-                            from datetime import datetime
-                            recv_ts = datetime.fromisoformat(
-                                recv_str.replace("Z", "+00:00")).timestamp()
-                            if recv_ts < start_ts - 60:
-                                seen_ids.add(mid); continue
-                        except Exception: pass
-
-                    subj   = msg.get("subject", "").lower()
-                    prev   = msg.get("bodyPreview", "").lower()
-                    sender = msg.get("from", {}).get("emailAddress", {}).get("address", "").lower()
-
-                    hit = (any(k in subj for k in UNITOOL_KWS)
-                           or any(k in prev for k in UNITOOL_KWS)
-                           or any(s in sender for s in UNITOOL_SENDERS)
-                           or "unitool" in sender)
-                    if not hit:
-                        seen_ids.add(mid); continue
-
-                    log(f"[graph] 📧 [{folder}] {msg.get('subject','')} from={sender}")
-                    detail = _graph_get(f"/me/messages/{mid}?$select=body", token)
-                    body   = detail.get("body", {}).get("content", "") or ""
-                    url    = _extract_verify_url(body)
-                    if url:
-                        log(f"[graph] ✅ [{folder}] 验证链接: {url[:100]}")
-                        return url
-                    seen_ids.add(mid)
-            except Exception as e:
-                log(f"[graph] {folder} 查询失败: {e}")
-
-        log(f"[graph] poll#{poll} 未找到，等 10s…")
-        time.sleep(10)
+def read_inbox_for_unitool(access_token, max_msgs=20):
+    """读 Inbox + JunkEmail 找unitool验证邮件，返回最新verify URL (或空串)
+    修复: unitool验证邮件经常落入垃圾邮件文件夹，原代码只搜索Inbox会漏掉。"""
+    params = urllib.parse.urlencode({
+        "$top": str(max_msgs),
+        "$select": "id,subject,from,receivedDateTime,bodyPreview",
+        "$orderby": "receivedDateTime desc"
+    })
+    verify_urls = []
+    # 同时搜索 Inbox 和 JunkEmail — 修复: unitool验证邮件常落入垃圾邮件
+    for folder in ("inbox", "JunkEmail"):
         try:
-            token = _refresh_token(refresh_token)
-        except Exception: pass
-
-    log("[graph] ⏰ 超时"); return None
-
-# ── pydoll helpers ─────────────────────────────────────────────────────────────
-def _s(r):
-    if not isinstance(r, dict): return str(r) if r else ""
-    inner = r.get("result", r)
-    if isinstance(inner, dict): inner = inner.get("result", inner)
-    return str(inner.get("value", "")) if isinstance(inner, dict) else str(inner)
-
-async def _fill(tab, sel: str, val: str) -> bool:
-    r = _s(await tab.execute_script(f"""(function(){{
-        var el=document.querySelector({json.dumps(sel)});
-        if(!el) return 'NOT_FOUND';
-        el.focus(); document.execCommand('selectAll'); document.execCommand('delete');
-        var ok=document.execCommand('insertText',false,{json.dumps(val)});
-        return 'ok='+ok+' len='+el.value.length;
-    }})()""", return_by_value=True))
-    log(f"  fill {sel}: {r}"); return "ok=true" in r
-
-async def _bypass(tab, label="", timeout=18):
-    for att in range(3):
-        try:
-            await tab._bypass_cloudflare({}, time_to_wait_captcha=timeout)
-            log(f"  [{label}] bypass OK"); return True
+            url = f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder}/messages?{params}"
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {access_token}"})
+            r = urllib.request.urlopen(req, timeout=15)
+            msgs = json.loads(r.read()).get("value", [])
+            log(f"  [{folder}] 共{len(msgs)}封邮件")
         except Exception as e:
-            log(f"  [{label}] bypass att{att+1}: {e}")
-            await asyncio.sleep(2)
-    return False
+            log(f"  [{folder}] 读取失败: {e}")
+            continue
 
-async def _tok_len(tab) -> int:
+        for m in msgs:
+            subj    = m.get("subject", "")
+            preview = m.get("bodyPreview", "")
+            sender  = m.get("from", {}).get("emailAddress", {}).get("address", "").lower()
+            if ("unitool" not in subj.lower() and "unitool" not in preview.lower()
+                    and "unitool" not in sender and "noreply" not in sender
+                    and "verify" not in subj.lower()):
+                continue
+            mid = m["id"]
+            try:
+                req2 = urllib.request.Request(
+                    f"https://graph.microsoft.com/v1.0/me/messages/{mid}?$select=body,receivedDateTime",
+                    headers={"Authorization": f"Bearer {access_token}"}
+                )
+                r2 = urllib.request.urlopen(req2, timeout=15)
+                msg_data = json.loads(r2.read())
+            except Exception as e:
+                log(f"  [{folder}] 获取body失败: {e}")
+                continue
+            body    = msg_data.get("body", {}).get("content", "")
+            recv_dt = msg_data.get("receivedDateTime", "")
+
+            PAT1 = r"https://unitool[.]ai/api/auth/email[?]token=[^\s<>\"]+"
+            PAT2 = r"https://unitool[.]ai/[^\s<>\"]*token=[^\s<>\"]+"
+            links = re.findall(PAT1, body)
+            if not links:
+                links = re.findall(PAT2, body)
+            for link in links:
+                try:
+                    payload_b64 = link.split("token=")[1].split(".")[1]
+                    pad = 4 - len(payload_b64) % 4
+                    import base64 as _b64
+                    payload = json.loads(_b64.urlsafe_b64decode(payload_b64 + "=" * pad))
+                    exp = payload.get("exp", 0)
+                    now = int(time.time())
+                    if exp > now:
+                        verify_urls.append((exp, recv_dt, link))
+                        log(f"  [{folder}] valid URL expires_in={exp-now}s")
+                    else:
+                        log(f"  [{folder}] expired URL")
+                except Exception:
+                    verify_urls.append((0, recv_dt, link))
+
+    if not verify_urls:
+        return ""
+    verify_urls.sort(reverse=True)
+    return verify_urls[0][2]
+
+def poll_inbox_for_verify(refresh_token, timeout_sec=300, interval_sec=20):
+    """轮询inbox直到找到有效verify URL，超时返回空串"""
+    log(f"[inbox+junk] 开始轮询Inbox+JunkEmail验证邮件 (timeout={timeout_sec}s)...")
+    deadline = time.time() + timeout_sec
+    access_token = ""
+    
+    while time.time() < deadline:
+        try:
+            if not access_token:
+                resp = refresh_ms_token(refresh_token)
+                access_token = resp.get("access_token", "")
+                if not access_token:
+                    log(f"  [inbox] token刷新失败: {resp.get('error_description','?')[:80]}")
+                    time.sleep(interval_sec)
+                    continue
+                log(f"  [inbox] token刷新成功 len={len(access_token)}")
+            
+            url = read_inbox_for_unitool(access_token)
+            if url:
+                log(f"  [inbox] 找到验证链接!")
+                return url
+            
+            remaining = int(deadline - time.time())
+            log(f"  [inbox+junk] 未找到，剩余{remaining}s，{interval_sec}s后重试...")
+            time.sleep(interval_sec)
+        except Exception as e:
+            log(f"  [inbox] 读取异常: {e}")
+            access_token = ""  # 强制刷新token
+            time.sleep(interval_sec)
+    
+    log(f"  [inbox+junk] 超时，未找到验证邮件")
+    return ""
+
+def click_verify_link(verify_url):
+    """用curl访问验证链接，捕获__Secure-unitool-ssid cookie"""
+    cookie_file = "/tmp/unitool_verify_cookies.txt"
+    log(f"[verify] 点击链接: {verify_url[:80]}...")
+    
+    result = subprocess.run([
+        "curl", "-s", "-D", "-",
+        "-c", cookie_file, "-b", cookie_file,
+        "-L", "--max-redirs", "5",
+        "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+        "-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "-H", "Accept-Language: en-US,en;q=0.5",
+        "-o", "/tmp/unitool_verify_resp.html",
+        verify_url
+    ], capture_output=True, text=True, timeout=30)
+    
+    headers = result.stdout
+    log(f"  [verify] curl status: {result.returncode}")
+    
+    # 从headers找Set-Cookie: __Secure-unitool-ssid
+    ssid_from_header = ""
+    for line in headers.split("\n"):
+        if "__Secure-unitool-ssid" in line and "Set-Cookie" in line:
+            m = re.search(r"__Secure-unitool-ssid=([^;]+)", line)
+            if m:
+                ssid_from_header = m.group(1)
+                log(f"  [verify] ssid from header: {ssid_from_header[:40]}...")
+    
+    # 从cookie文件读取
+    ssid_from_file = ""
     try:
-        return int(_s(await tab.execute_script(
-            "(document.querySelector('[name=\"cf-turnstile-response\"]')||{value:''}).value.length",
-            return_by_value=True)))
-    except: return 0
+        with open(cookie_file) as f:
+            for line in f:
+                if "__Secure-unitool-ssid" in line:
+                    parts = line.strip().split("\t")
+                    if parts:
+                        ssid_from_file = parts[-1]
+                        log(f"  [verify] ssid from cookie file: {ssid_from_file[:40]}...")
+    except: pass
+    
+    ssid = ssid_from_header or ssid_from_file
+    
+    # 检查final URL（是否重定向到entry = 失败）
+    final_redirected_to_entry = False
+    if "/entry" in headers:
+        final_redirected_to_entry = True
+        log(f"  [verify] WARNING: redirected to /entry (token may be invalid)")
+    
+    return ssid, final_redirected_to_entry
 
-# ── 点击验证链接 ───────────────────────────────────────────────────────────────
-async def click_verify(tab, url: str) -> bool:
-    log(f"  [verify] 打开: {url[:100]}")
-    try:
-        await tab.go_to(url)
-        await asyncio.sleep(5)
-        page_txt = _s(await tab.execute_script(
-            "document.body ? document.body.innerText.slice(0,400) : ''", return_by_value=True))
-        log(f"  [verify] body: {page_txt[:200]}")
-        low = page_txt.lower()
-        if any(k in low for k in ("verified", "success", "confirmed", "welcome", "dashboard", "activated")):
-            return True
-        # 已验证也算成功
-        if any(k in low for k in ("already verified", "already confirmed", "already activated")):
-            return True
-        return False
-    except Exception as e:
-        log(f"  [verify] err: {e}"); return False
+# ── Step 2: pydoll注册unitool ────────────────────────────────────────────────
 
-# ── 单账号注册 ────────────────────────────────────────────────────────────────
-async def register_one(email: str, password: str, refresh_token: str,
-                        headless: bool = False, ref_code: str = "") -> dict:
+async def unitool_register(email, password, ref_code=""):
+    """用pydoll在unitool.ai注册账号，返回(success, error_msg)"""
     from pydoll.browser import Chrome
     from pydoll.browser.options import ChromiumOptions
-
+    
+    log(f"[unitool_reg] 开始注册: {email}")
     opt = ChromiumOptions()
-    # Auto-detect Xvfb -> force non-headless (like unitool_login.py)
-    import glob as _glob, os as _os
-    if headless:
-        _display = _os.environ.get('DISPLAY', '')
-        if not _display:
-            if _glob.glob('/tmp/.X99-lock') or _glob.glob('/tmp/.X[0-9]-lock'):
-                _display = ':99'
-                _os.environ['DISPLAY'] = _display
-        if _display:
-            headless = False
-            log(f'[display] headless=False (DISPLAY={_display})')
-    opt.headless = headless
+    opt.headless = False
     if CHROME: opt.binary_location = CHROME
     for a in ["--no-sandbox","--disable-dev-shm-usage","--window-size=1440,900",
                "--disable-gpu","--lang=en-US","--disable-blink-features=AutomationControlled"]:
         opt.add_argument(a)
+    
+    env_backup = os.environ.get("DISPLAY", "")
+    os.environ["DISPLAY"] = DISPLAY
+    
+    def s(r):
+        if not isinstance(r, dict): return str(r) if r else ""
+        inner = r.get("result", r)
+        if isinstance(inner, dict): inner = inner.get("result", inner)
+        return str(inner.get("value","")) if isinstance(inner, dict) else str(inner)
+    
+    async def tok_len(tab):
+        return int(s(await tab.execute_script(
+            "(document.querySelector('[name=\"cf-turnstile-response\"]')||{value:''}).value.length",
+            return_by_value=True)) or 0)
+    
+    try:
+        async with Chrome(options=opt, connection_port=_free_port()) as browser:
+            tab = await browser.start()
+            await tab.enable_network_events()
+            
+            reg_success = False
+            reg_error = ""
+            
+            if ref_code:
+                log(f"[unitool_reg] 先访问推荐链接: https://unitool.ai/ref/{ref_code}")
+                await tab.go_to(f"https://unitool.ai/ref/{ref_code}")
+                await asyncio.sleep(4)
+            log("[unitool_reg] goto https://unitool.ai/en/entry")
+            await tab.go_to("https://unitool.ai/en/entry")
+            await asyncio.sleep(4)
+            
+            # bypass Turnstile
+            log("[unitool_reg] bypass Turnstile...")
+            for attempt in range(3):
+                try:
+                    await tab._bypass_cloudflare({}, time_to_wait_captcha=20)
+                    log(f"  bypass OK (attempt {attempt+1})")
+                    break
+                except Exception as e:
+                    log(f"  bypass attempt {attempt+1}: {e}")
+                    await asyncio.sleep(2)
+            
+            # 等token
+            for i in range(25):
+                await asyncio.sleep(1)
+                n = await tok_len(tab)
+                if n > 20:
+                    log(f"  token ready at {i+1}s len={n}")
+                    break
+                if i % 5 == 4: log(f"  [{i+1}s] waiting token len={n}")
+            
+            n = await tok_len(tab)
+            if n < 20:
+                return False, f"Turnstile failed (len={n})"
+            
+            # 填email
+            r = s(await tab.execute_script(f"""(function(){{
+                var el=document.querySelector('input[name="email"]')||document.querySelector('input[type="email"]');
+                if(!el) return 'NOT_FOUND';
+                el.focus(); document.execCommand('selectAll'); document.execCommand('delete');
+                document.execCommand('insertText',false,{json.dumps(email)});
+                return 'val='+el.value;
+            }})()""", return_by_value=True))
+            log(f"  email: {r}")
+            await asyncio.sleep(0.3)
+            
+            # 填password
+            r2 = s(await tab.execute_script(f"""(function(){{
+                var el=document.querySelector('input[type="password"]');
+                if(!el) return 'NOT_FOUND';
+                el.focus(); document.execCommand('selectAll'); document.execCommand('delete');
+                document.execCommand('insertText',false,{json.dumps(password)});
+                return 'len='+el.value.length;
+            }})()""", return_by_value=True))
+            log(f"  password: {r2}")
+            await asyncio.sleep(0.5)
+            
+            # 等按钮enabled
+            btn_ready = False
+            for i in range(25):
+                await asyncio.sleep(1)
+                r3 = s(await tab.execute_script("""JSON.stringify(
+                    Array.from(document.querySelectorAll('button'))
+                    .filter(b=>b.innerText.trim()==='Join Unitool').map(b=>b.disabled)
+                )""", return_by_value=True))
+                try:
+                    dl = json.loads(r3)
+                    if dl and not any(dl):
+                        btn_ready = True
+                        log(f"  Join btn enabled at {i+1}s")
+                        break
+                except: pass
+                if i % 5 == 4: log(f"  [{i+1}s] btn disabled={r3}")
+            
+            if not btn_ready:
+                # 检查是否已存在
+                pg = s(await tab.execute_script("document.body.innerText.slice(0,300)", return_by_value=True))
+                if re.search(r'email.{0,30}already|already.{0,20}registered|already.{0,20}exist|user with like email existed', pg, re.I):
+                    return False, "email_already_registered"
+                log(f"  btn_never_enabled page={pg[:200]}")
+                return False, "btn_never_enabled"
+            
+            # 提交
+            sub = s(await tab.execute_script("""(function(){
+                var btns=Array.from(document.querySelectorAll('button'));
+                for(var b of btns){
+                    if(b.innerText.trim()==='Join Unitool'&&!b.disabled){b.click();return 'CLICKED';}
+                }
+                return 'NO_BTN';
+            })()""", return_by_value=True))
+            log(f"  submit: {sub}")
+            
+            # 等待响应（email verification message）
+            for t in range(30):
+                await asyncio.sleep(1)
+                pg = s(await tab.execute_script("document.body.innerText.slice(0,500)", return_by_value=True))
+                cur_url = s(await tab.execute_script("location.href", return_by_value=True))
+                
+                if "sent link to your" in pg.lower() or "follow the link" in pg.lower():
+                    log(f"  [✓] 'sent link' at {t+1}s → email verification pending")
+                    reg_success = True
+                    break
+                if re.search(r'email.{0,30}already|already.{0,20}registered|already.{0,20}exist|user with like email existed', pg, re.I):
+                    log(f"  [!!] email_already_registered page={pg[:200]}")
+                    reg_error = "email_already_registered"
+                    break
+                log(f"  [{t+1}s] body={pg[:180].replace(chr(10), ' | ')}")
+                if "entry" not in cur_url and "unitool.ai" in cur_url:
+                    log(f"  [✓] redirect to {cur_url} at {t+1}s → registered+autologin?")
+                    reg_success = True
+                    break
+                if t % 10 == 9: log(f"  [{t+1}s] url={cur_url}")
+            
+            if not reg_success and not reg_error:
+                reg_error = "timeout_no_confirmation"
+            
+            return reg_success, reg_error
+    except Exception as e:
+        return False, str(e)[:200]
+    finally:
+        if env_backup:
+            os.environ["DISPLAY"] = env_backup
 
-    reg_start = time.time()
+async def unitool_login_for_ssid(email, password):
+    """用pydoll登录unitool.ai，返回ssid cookie"""
+    login_script = "/root/Toolkit/scripts/unitool_login.py"
+    log(f"[unitool_login] 登录: {email}")
+    
+    env = {**os.environ, "DISPLAY": DISPLAY, "PYTHONUNBUFFERED": "1"}
+    result = subprocess.run(
+        ["python3", login_script, "--email", email, "--password", password, "--no-headless"],
+        capture_output=True, text=True, timeout=180, env=env
+    )
+    for line in result.stdout.split("\n"):
+        if line.startswith("[OK]"):
+            parts = line.split("|")
+            if len(parts) >= 3:
+                ssid = parts[2]
+                log(f"  [login] ssid: {ssid[:40]}...")
+                return ssid
+        if line.startswith("[FAIL]"):
+            log(f"  [login] FAIL: {line}")
+    
+    if result.stderr:
+        log(f"  [login] stderr: {result.stderr[-300:]}")
+    return ""
 
-    async with Chrome(options=opt) as browser:
-        tab = await browser.start()
-        await tab.enable_auto_solve_cloudflare_captcha()
-        await tab.enable_network_events()
+# ── 完整pipeline ─────────────────────────────────────────────────────────────
 
-        # Track submission result
-        submitted_na = None
-        async def on_req(ev):
-            nonlocal submitted_na
-            try:
-                req = ev.get("params",{}).get("request",{})
-                if "unitool.ai/en/entry" not in req.get("url",""): return
-                hd = req.get("headers",{})
-                na = hd.get("next-action") or hd.get("Next-Action","")
-                # Known signup NA patterns (not login NA)
-                if na and na != "60e02e33f743e14f5dab1dc42181ba1e746fd4d925":
-                    submitted_na = na
-                    log(f"  [net] signup POST NA={na[:20]}")
-            except: pass
-        await tab.on("Network.requestWillBeSent", on_req)
+async def process_one_account(acct_id, email, password, refresh_token, ref_code=""):
+    log(f"\n{'='*60}")
+    log(f"[pipeline] 处理账号 id={acct_id} {email}")
+    
+    # Step 1: unitool注册
+    log("[step1] unitool注册...")
+    reg_ok, reg_err = await unitool_register(email, password, ref_code=ref_code)
+    
+    if not reg_ok:
+        log(f"[step1] 注册失败: {reg_err}")
+        mark_account(acct_id, "unitool_fail", f"reg_err={reg_err[:80]}")
+        return False
+    
+    log("[step1] 注册成功（邮件已发送）")
+    
+    # Step 2: 轮询inbox找verify链接
+    log("[step2] 轮询inbox...")
+    verify_url = poll_inbox_for_verify(refresh_token, timeout_sec=300, interval_sec=20)
+    
+    if not verify_url:
+        log("[step2] 未找到verify链接")
+        mark_account(acct_id, "unitool_verify_pending", "no_verify_email")
+        return False
+    
+    # Step 3: 点击verify链接
+    log("[step3] 点击verify链接...")
+    ssid, to_entry = click_verify_link(verify_url)
+    
+    if ssid:
+        log(f"[step3] ✅ verify成功，ssid获取！ssid_len={len(ssid)}")
+        save_ssid(acct_id, email, ssid)
+        return True
+    
+    if to_entry:
+        log("[step3] verify重定向到/entry，token可能已过期或需要另行登录")
+    else:
+        log("[step3] verify完成但无ssid cookie，尝试独立登录")
+    
+    # Step 4: pydoll登录获取ssid
+    log("[step4] pydoll登录获取ssid...")
+    await asyncio.sleep(3)
+    ssid = await unitool_login_for_ssid(email, password)
+    
+    if ssid:
+        log(f"[step4] ✅ 登录成功，ssid获取！ssid_len={len(ssid)}")
+        save_ssid(acct_id, email, ssid)
+        return True
+    else:
+        log("[step4] 登录失败，无ssid")
+        mark_account(acct_id, "unitool_fail", "login_no_ssid")
+        return False
 
-        # ── 0. 访问推荐链接（如果有） ────────────────────────────────────────────
-        if ref_code:
-            ref_url = f"https://unitool.ai/ref/{ref_code}"
-            log(f"[{email}] 先访问推荐链接: {ref_url}")
-            await tab.go_to(ref_url)
-            await asyncio.sleep(5)
-            cur_ref_url = str(await tab.execute_script("location.href", return_by_value=True) or "")
-            log(f"[{email}] ref跳转后 url={cur_ref_url[:80]}")
-            # 记录 cookie
-            ck_after_ref = await tab.get_cookies()
-            ref_ck = [c for c in ck_after_ref if "unitool" in c.get("domain","")]
-            log(f"[{email}] ref页 cookies: {[c.get('name') for c in ref_ck]}")
-            # Early-exit: ref 页已给出 ssid（账号直接登录）
-            ssid_early = next((c["value"] for c in ref_ck if c.get("name") == AUTH_COOKIE), "")
-            if ssid_early:
-                log(f"[{email}] ✅ ref页直接获得 ssid_len={len(ssid_early)}")
-                return {"ok": True, "email": email, "ssid": ssid_early, "needs_verify": False}
-            # 如果 ref 页把我们重定向到登录/注册页，继续流程
-            # 如果已在 unitool.ai 首页（表示 ref 链接自动注册了），检查 ssid
-            if "entry" not in cur_ref_url and "unitool.ai" in cur_ref_url and cur_ref_url != ref_url:
-                extra_ck = await tab.get_cookies()
-                ssid_from_redirect = next((c["value"] for c in extra_ck if c.get("name") == AUTH_COOKIE), "")
-                if ssid_from_redirect:
-                    log(f"[{email}] ✅ ref跳转后获得 ssid_len={len(ssid_from_redirect)}")
-                    return {"ok": True, "email": email, "ssid": ssid_from_redirect, "needs_verify": False}
+async def retry_pending_account(acct_id, email, password, refresh_token):
+    """重试pending账号：跳过step1直接轮询inbox获取verify链接"""
+    log(f"\n{'='*60}")
+    log(f"[retry] 重试 id={acct_id} {email}")
+    conn = db_connect(); cur = conn.cursor()
+    cur.execute(
+        "UPDATE accounts SET tags=REGEXP_REPLACE(tags, E'(,unitool_verify_pending|unitool_verify_pending,|unitool_verify_pending)', '', 'g'), updated_at=NOW() WHERE id=%s",
+        (acct_id,))
+    conn.commit(); conn.close()
+    mark_account(acct_id, "unitool_processing", "retry")
+    log("[retry-step2] 轮询inbox (timeout=300s, 跳过step1)...")
+    verify_url = poll_inbox_for_verify(refresh_token, timeout_sec=300, interval_sec=20)
+    if not verify_url:
+        log("[retry-step2] 仍未找到verify链接，重标pending")
+        mark_account(acct_id, "unitool_verify_pending", "retry_no_email")
+        return False
+    log("[retry-step3] 点击verify链接...")
+    ssid, to_entry = click_verify_link(verify_url)
+    if ssid:
+        log(f"[retry-step3] \u2705 ssid len={len(ssid)}")
+        save_ssid(acct_id, email, ssid)
+        return True
+    log("[retry-step4] 无ssid，pydoll登录...")
+    await asyncio.sleep(3)
+    ssid = await unitool_login_for_ssid(email, password)
+    if ssid:
+        log(f"[retry-step4] \u2705 登录成功 ssid_len={len(ssid)}")
+        save_ssid(acct_id, email, ssid)
+        return True
+    mark_account(acct_id, "unitool_fail", "retry_login_no_ssid")
+    return False
 
-        # ── 1. 加载页面 ──────────────────────────────────────────────────────
-        log(f"[{email}] 打开 {TARGET}")
-        await tab.go_to(TARGET)
-        await asyncio.sleep(4)
-
-        # ── 2. bypass 初始 Turnstile（signup tab） ───────────────────────────
-        log(f"[{email}] waiting for Turnstile auto-solve...")
-        for _wi in range(35):
-            await asyncio.sleep(1)
-            _tl = await _tok_len(tab)
-            if _tl > 20:
-                log(f"[{email}] token ready at {_wi+1}s len={_tl}"); break
-            if _wi % 5 == 4: log(f"[{email}] [{_wi+1}s] cfLen={_tl} waiting...")
-
-        # ── 3. 确认在 New account tab ───────────────────────────────────────
-        # 检查是否需要点 "New account" tab
-        tab_clicked = _s(await tab.execute_script("""(function(){
-            for(var b of document.querySelectorAll('button,[role="tab"]')){
-                var t=b.innerText.trim().toLowerCase();
-                if(t==='new account'){b.click();return 'clicked:'+t;}
-            }
-            return 'no-tab-needed';
-        })()""", return_by_value=True))
-        log(f"[{email}] tab: {tab_clicked}")
-        if "clicked" in tab_clicked:
-            await asyncio.sleep(3)
-            log(f"[{email}] new-account tab: auto-solve re-triggering...")
-
-        await asyncio.sleep(1)
-
-        # ── 4. 填写 email / password ─────────────────────────────────────────
-        log(f"[{email}] 填写注册信息…")
-        ok_e = await _fill(tab, 'input[name="email"]', email)
-        if not ok_e: ok_e = await _fill(tab, 'input[type="email"]', email)
-
-        ok_p = await _fill(tab, 'input[type="password"]', password)
-        await asyncio.sleep(0.5)
-
-        if not (ok_e and ok_p):
-            return {"ok": False, "email": email, "reason": "fill_failed"}
-
-        # ── 5. 等 Join Unitool 按钮 enabled ──────────────────────────────────
-        for i in range(20):
-            await asyncio.sleep(1)
-            r = _s(await tab.execute_script("""JSON.stringify(
-                Array.from(document.querySelectorAll('button'))
-                .filter(b=>['join unitool','sign up','create account'].includes(b.innerText.trim().toLowerCase()))
-                .map(b=>b.disabled)
-            )""", return_by_value=True))
-            try:
-                dl = json.loads(r)
-                if dl and not any(dl):
-                    log(f"[{email}] button enabled at {i+1}s"); break
-            except: pass
-
-        # ── 6. 截图 page state ───────────────────────────────────────────────
-        pg = _s(await tab.execute_script("""JSON.stringify({
-            cfLen:(document.querySelector('[name="cf-turnstile-response"]')||{value:''}).value.length,
-            ca:(document.querySelector('[name="captcha_action"]')||{value:'?'}).value,
-            body:document.body.innerText.slice(0,300)
-        })""", return_by_value=True))
-        log(f"[{email}] page state: {pg[:400]}")
-
-        _cf_now = await _tok_len(tab)
-        log(f"[{email}] pre-submit cfLen={_cf_now}")
-        if _cf_now == 0:
-            log(f"[{email}] turnstile_failed: cfLen=0 before submit")
-            return {"ok": False, "email": email, "reason": "turnstile_failed"}
-        # ── 7. 提交 ──────────────────────────────────────────────────────────
-        sub = _s(await tab.execute_script("""(function(){
-            var kws=['join unitool','sign up','create account','register'];
-            var btns=Array.from(document.querySelectorAll('button'));
-            for(var b of btns){if(kws.includes(b.innerText.trim().toLowerCase())&&!b.disabled){b.click();return 'NATURAL';}}
-            var form=document.querySelector('form');
-            if(form){form.requestSubmit();return 'FORM_SUBMIT';}
-            return 'NO_BTN_ENABLED';
-        })()""", return_by_value=True))
-        log(f"[{email}] submit: {sub}")
-
-        # ── 8. 等待结果（检查 URL 变化 or "verify email" 提示） ──────────────
-        needs_verify = False
-        reg_success  = False
-        already_reg  = False
-        for t in range(30):
-            await asyncio.sleep(2)
-            cur_url = _s(await tab.execute_script("location.href", return_by_value=True))
-            body_txt = _s(await tab.execute_script(
-                "document.body ? document.body.innerText.slice(0,600) : ''",
-                return_by_value=True))
-            low = body_txt.lower()
-            log(f"[{email}] [{(t+1)*2}s] url={cur_url[:80]}")
-
-            if "entry" not in cur_url and "unitool.ai" in cur_url:
-                log(f"[{email}] ✅ 重定向成功: {cur_url}"); reg_success = True; break
-            if any(k in low for k in ("verify your email","check your email","verification email","sent you an email")):
-                log(f"[{email}] 📧 需要邮件验证"); needs_verify = True; break
-            # v1.1 FIX: 精确匹配 (原条件误报: 注册页面静态文本含 already+email)
-            if t >= 1 and re.search(
-                r"email.{0,30}already|already.{0,20}registered|already.{0,20}exist|user with like email existed",
-                body_txt, re.I):
-                log(f"[{email}] ⚠ 邮箱已注册 body={body_txt[:200]}"); already_reg = True; break
-            if "something went wrong" in low or "error" in low:
-                log(f"[{email}] ❌ 错误: {body_txt[:200]}"); break
-
-        if already_reg:
-            return {"ok": False, "email": email, "reason": "already_registered"}
-
-        # ── 9. 获取 cookies ──────────────────────────────────────────────────
-        all_ck = await tab.get_cookies()
-        ut_ck  = [c for c in all_ck if "unitool" in c.get("domain","")]
-        ssid   = next((c["value"] for c in ut_ck if c.get("name") == AUTH_COOKIE), "")
-
-        if ssid:
-            log(f"[{email}] ✅ 注册成功，ssid_len={len(ssid)}")
-            return {"ok": True, "email": email, "ssid": ssid, "needs_verify": needs_verify}
-
-        if not needs_verify and not reg_success:
-            return {"ok": False, "email": email, "reason": "no_redirect_no_ssid"}
-
-        # ── 10. 邮件验证流程（Inbox + JunkEmail） ────────────────────────────
-        log(f"[{email}] 🔍 等待验证邮件（同时搜索 Inbox + JunkEmail）…")
-        verify_url = wait_for_unitool_verify(
-            refresh_token, timeout=300, after_ts=reg_start - 10)
-
-        if not verify_url:
-            return {"ok": False, "email": email, "reason": "verify_email_not_found"}
-
-        log(f"[{email}] 点击验证链接: {verify_url[:100]}")
-        ok_v = await click_verify(tab, verify_url)
-        log(f"[{email}] verify result: {ok_v}")
-
-        # 再次获取 cookies
-        all_ck2 = await tab.get_cookies()
-        ut_ck2  = [c for c in all_ck2 if "unitool" in c.get("domain","")]
-        ssid2   = next((c["value"] for c in ut_ck2 if c.get("name") == AUTH_COOKIE), "")
-
-        if ssid2:
-            return {"ok": True, "email": email, "ssid": ssid2, "verified": True}
-        if ok_v:
-            return {"ok": True, "email": email, "ssid": "", "verified": True, "note": "no_ssid_after_verify"}
-        return {"ok": False, "email": email, "reason": "verify_click_failed"}
-
-# ── CLI ────────────────────────────────────────────────────────────────────────
 async def main():
+    import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--email",    default="")
-    ap.add_argument("--count",    type=int, default=1)
+    ap.add_argument("--batch", type=int, default=1)
+    ap.add_argument("--email", default="")
+    ap.add_argument("--password", default="")
+    ap.add_argument("--account-id", type=int, default=0)
+    ap.add_argument("--wait-for-accounts", type=int, default=0,
+                    help="等待N秒让outlook注册完成再开始")
+    ap.add_argument("--retry-pending", type=int, default=0,
+                    help="重试N个unitool_verify_pending账号")
     ap.add_argument("--headless", action="store_true", default=False)
     ap.add_argument("--ref-code", default="")
     args = ap.parse_args()
 
-    ok_count = 0
-    for _ in range(args.count):
-        row = db_get_account(args.email if args.email else None)
+    open(LOG_FILE, "w").write("")
+    log(f"[main] unitool pipeline启动 batch={args.batch} ref_code={args.ref_code or '(无)'}")
+
+    if args.wait_for_accounts > 0:
+        log(f"[main] 等待{args.wait_for_accounts}s让outlook账号注册完成...")
+        time.sleep(args.wait_for_accounts)
+
+    # chain_v3 传 --email 时：按邮箱精确查 DB
+    if args.email and not args.account_id:
+        row = get_account_by_email(args.email)
         if not row:
-            log("[main] ❌ 没有可用账号"); break
-        acc_id, email, password, refresh_token = row
+            log(f"[main] DB 找不到账号: {args.email}")
+            print(f"[FAIL] {args.email}|account_not_found", flush=True)
+            return
+        acct_id, email, password, refresh_token = row
+        log(f"[main] 处理账号: {email}")
+        mark_account(acct_id, "unitool_processing", "")
+        success = await process_one_account(
+            acct_id, email, password, refresh_token, ref_code=args.ref_code)
+        if not success:
+            print(f"[FAIL] {email}|pipeline_failed", flush=True)
+        return
 
-        log(f"\n{'='*60}")
-        log(f"[main] 使用账号: {email}")
-        result = await register_one(email, password, refresh_token,
-                                    headless=args.headless,
-                                    ref_code=getattr(args, "ref_code", ""))
-        if result["ok"]:
+    if args.email and args.account_id:
+        row = (args.account_id, args.email, args.password, "")
+        await process_one_account(*row)
+        return
+
+    if args.retry_pending > 0:
+        log(f"[main] retry-pending 模式，最多重试{args.retry_pending}个账号")
+        ok_count = 0
+        for i in range(args.retry_pending):
+            row = get_pending_account()
+            if not row:
+                log(f"[main] 没有更多pending账号 (已处理{i}个)")
+                break
+            acct_id, email, password, refresh_token = row
+            log(f"\n[main] [{i+1}/{args.retry_pending}] 重试pending: {email}")
+            success = await retry_pending_account(acct_id, email, password, refresh_token)
+            if success:
+                ok_count += 1
+            if i < args.retry_pending - 1:
+                await asyncio.sleep(5)
+        log(f"\n[main] retry-pending完成 成功={ok_count}/{args.retry_pending}")
+        return
+
+    ok_count = 0
+    for i in range(args.batch):
+        row = get_next_account()
+        if not row:
+            log(f"[main] 没有更多可用账号 (已处理{i}个)")
+            break
+        acct_id, email, password, refresh_token = row
+        log(f"\n[main] [{i+1}/{args.batch}] 账号: {email}")
+        
+        # 先标记"正在处理"防止重复拉取
+        mark_account(acct_id, "unitool_processing", "")
+        
+        success = await process_one_account(acct_id, email, password, refresh_token)
+        if success:
             ok_count += 1
-            ssid = result.get("ssid","")
-            if ssid:
-                try: db_tag_unitool(acc_id, ssid)
-                except Exception as e: log(f"[DB] tag err: {e}")
-                try: open('/tmp/unitool_ssid2.txt','w').write(ssid)
-                except Exception: pass
-            print(f"[OK]   {email}|{ssid}", flush=True)
         else:
-            print(f"[FAIL] {email}|{result.get('reason','?')}", flush=True)
-        await asyncio.sleep(2)
+            print(f"[FAIL] {email}|pipeline_failed", flush=True)
 
-    print(f"[DONE] {ok_count}/{args.count}", flush=True)
+        if i < args.batch - 1:
+            log("[main] 间隔10s...")
+            await asyncio.sleep(10)
+    
+    log(f"\n[main] 完成 成功={ok_count}/{args.batch}")
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

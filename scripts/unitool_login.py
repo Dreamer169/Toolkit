@@ -19,7 +19,7 @@ unitool_login.py — unitool.ai 自动登录模块 v1.0
   [FAIL] email|reason
   [DONE] ok/total
 """
-import asyncio, json, os, sys, time, argparse
+import asyncio, random, json, os, sys, time, socket, argparse
 
 CHROME = None
 for _p in [
@@ -46,6 +46,20 @@ def _s(r):
 def _iv(r):
     try: return int(_s(r))
     except: return 0
+
+
+def _free_port(lo: int = 12000, hi: int = 29999) -> int:
+    tried = set()
+    while len(tried) < (hi - lo):
+        p = random.randint(lo, hi)
+        if p in tried:
+            continue
+        tried.add(p)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if s.connect_ex(('127.0.0.1', p)) != 0:
+                return p
+    raise RuntimeError('no free port found')
 
 async def _tok_len(tab, field="cf-turnstile-response") -> int:
     return _iv(await tab.execute_script(
@@ -123,7 +137,7 @@ async def login_one(email: str, password: str, headless: bool = True,
 
     t0 = time.time()
 
-    async with Chrome(options=opt) as browser:
+    async with Chrome(options=opt, connection_port=_free_port()) as browser:
         tab = await browser.start()
         await tab.enable_network_events()
 
