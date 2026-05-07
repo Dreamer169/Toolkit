@@ -1762,17 +1762,20 @@ router.post("/tools/outlook/register", async (req, res) => {
                 .filter((s: BatchOAuthSession) => s.status === "pending")
                 .map((s: BatchOAuthSession) => {
                   const row = pendingOAuthRows.find(r => r.email === s.email);
-                  // v8.96: pass deviceCode+dbUrl so Python exchanges token via same CF proxy
+                  // Pass deviceCode+dbUrl (token exchange inside Python via CF proxy).
+                  // Pass cookiesJson so the browser loads the registration session and
+                  // skips email/password, going straight to device-confirm → consent.
+                  const _idn = identityMap.get(s.email);
                   return { accountId: s.accountId, email: s.email, password: row?.password || '', userCode: s.userCode,
-                    deviceCode: s.deviceCode, dbUrl: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost/toolkit' };
+                    deviceCode: s.deviceCode, dbUrl: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost/toolkit',
+                    cookiesJson: _idn?.cookies_json || '' };
                 })
                 .filter((x: { password: string }) => x.password);
               if (autoPayload.length > 0) {
                 const { spawn: spawnAuto } = await import('child_process');
                 const autoScript = new URL('../auto_device_code.py', import.meta.url).pathname;
-                // v8.75 Bug C: 动态 xray 已被 kill → TCP probe 决定 fallback
-                // 优先用 per-account port 保 IP 严格一致; dead 则用 Pool A 10820
-                // (同 AS13335 CF Workers, MS 视为同 /16 不触发警告; 比 10809 全局口好得多)
+                // Proxy selection: prefer the per-account CF port used during registration
+                // (strict IP consistency); fall back to Python's _pick_cf_proxy() if dead.
                 const _net = await import('net');
                 const _probePort = (port: number, timeoutMs = 1500): Promise<boolean> => new Promise((resolve) => {
                   const sock = _net.createConnection({ host: '127.0.0.1', port, timeout: timeoutMs });
@@ -6243,6 +6246,31 @@ router.get("/tools/unitool/ref-pipeline/:jobId", async (req, res) => {
 router.delete("/tools/unitool/ref-pipeline/:jobId", (req, res) => {
   const stopped = jobQueue.stop(req.params.jobId);
   res.json({ success: !!stopped });
+});
+
+
+// ══ GET /tools/unitool/ref-stats ══════════════════════════════════════════════
+// 实时查询所有 unitool 已注册账号的 ref_code conversions/earnings（API + 30min缓存）
+// Query: ?refresh=1 强制刷新缓存
+const UNITOOL_REF_STATS_SCRIPT = "/root/Toolkit/scripts/unitool_ref_stats.py";
+
+router.get("/tools/unitool/ref-stats", async (req, res) => {
+  const forceRefresh = req.query.refresh === "1";
+  const args: string[] = [UNITOOL_REF_STATS_SCRIPT];
+  if (forceRefresh) args.push("--refresh");
+  try {
+    const { execFile } = await import("child_process");
+    const { promisify } = await import("util");
+    const execFileP = promisify(execFile);
+    const { stdout } = await execFileP(
+      "python3", args,
+      { env: { ...process.env, PYTHONUNBUFFERED: "1" }, timeout: 120_000 }
+    );
+    const data = JSON.parse(stdout);
+    res.json({ success: true, ...data });
+  } catch (e: any) {
+    res.status(500).json({ success: false, error: String((e as any)?.message ?? e) });
+  }
 });
 
 

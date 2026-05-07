@@ -254,11 +254,32 @@ def db_save_ref_code(account_id, ref_code):
     conn.commit(); conn.close()
     log(f"[DB] ref_code 保存 id={account_id} ref_code={ref_code}")
 
-def _api_check_ref_code(ssid: str) -> tuple:
+REF_CODE_CACHE_FILE = "/tmp/unitool_ref_code_cache.json"
+REF_CODE_CACHE_TTL  = 1800  # 30 分钟
+
+def _load_ref_cache() -> dict:
+    try:
+        return json.loads(open(REF_CODE_CACHE_FILE).read())
+    except Exception:
+        return {}
+
+def _save_ref_cache(cache: dict) -> None:
+    try:
+        open(REF_CODE_CACHE_FILE, "w").write(json.dumps(cache))
+    except Exception:
+        pass
+
+def _api_check_ref_code(ssid: str, account_id: int = 0) -> tuple:
     """
     FIX G helper: 调 GET /api/user/ref-code 获取真实 conversions 计数。
-    返回 (ref_code, conversions) 或 ("", -1) 表示失败/null。
+    带 30min 文件缓存（key=account_id），减少每轮 18×API 开销。
+    返回 (ref_code, conversions) 或 ("", -1) 表示失败。
     """
+    key = str(account_id) if account_id else ssid[:16]
+    cache = _load_ref_cache()
+    entry = cache.get(key, {})
+    if entry and (time.time() - entry.get("ts", 0)) < REF_CODE_CACHE_TTL:
+        return (entry.get("code", ""), entry.get("conversions", 0))
     try:
         r = subprocess.run(
             ["curl", "-s", "-b", f"__Secure-unitool-ssid={ssid}",
@@ -267,9 +288,17 @@ def _api_check_ref_code(ssid: str) -> tuple:
             capture_output=True, text=True, timeout=12)
         raw = r.stdout.strip()
         if raw == "null" or not raw:
+            cache[key] = {"code": "", "conversions": 0, "ts": time.time()}
+            _save_ref_cache(cache)
             return ("", 0)
         data = json.loads(raw)
-        return (data.get("code", ""), int(data.get("conversions", 0)))
+        code = data.get("code", "")
+        conv = int(data.get("conversions", 0))
+        cache[key] = {"code": code, "conversions": conv,
+                      "earnings": data.get("earnings", 0),
+                      "clicks": data.get("clicks", 0), "ts": time.time()}
+        _save_ref_cache(cache)
+        return (code, conv)
     except Exception:
         return ("", -1)
 
@@ -345,7 +374,7 @@ def db_get_current_ref_code():
         #           API 返回真实码 → 用 API 的码和 conversions（即使 DB 存的是旧的 xjfjk）
         ssid_m = re.search(r"unitool_ssid=([0-9a-f]{40,})", notes)
         if ssid_m:
-            api_rc, api_conv = _api_check_ref_code(ssid_m.group(1))
+            api_rc, api_conv = _api_check_ref_code(ssid_m.group(1), acc_id)
             if api_conv < 0:
                 # API 失败（网络/超时），降级用本地计数，保守估计
                 used = local_used
