@@ -40,7 +40,7 @@ interface Stats {
 
 interface UnitoolStats {
   outlook:      { fresh: number; registered: number; fail: number; processing: number; total: number };
-  ref:          { master: string; ref_code: string; used: number; limit: number; pool_total: number; pool_available: number; pool_exhausted: number; total_slots: number };
+  ref:          { master: string; ref_code: string; used: number; limit: number; pool_total: number; pool_available: number; pool_exhausted: number; total_slots: number; total_earnings: number; total_conversions: number; total_clicks: number };
   pool:         { total: number; live: number; dead: number; ssid_len: number };
   recent:       { id: number; email: string; ssid_prefix: string; ssid_len: number; updated_at: string }[];
   chain:        { status: string; last_run: string; brief: string };
@@ -229,6 +229,14 @@ function StatsPanel() {
                 <div className="flex justify-between text-xs">
                   <span className="text-gray-500">池总剩余名额</span>
                   <span className="text-amber-400 font-bold">{uStats.ref.total_slots ?? 0} 个</span>
+                </div>
+                <div className="flex justify-between text-xs pt-1 border-t border-[#21262d] mt-1">
+                  <span className="text-gray-500">总收益 / 总转化</span>
+                  <span className="text-white font-mono">
+                    <b className="text-emerald-400">${uStats.ref.total_earnings ?? 0}</b>
+                    <span className="text-gray-600"> / </span>
+                    <b className="text-blue-400">{uStats.ref.total_conversions ?? 0} 人</b>
+                  </span>
                 </div>
                 {/* 可用码进度条 */}
                 <div className="h-2 bg-[#0d1117] rounded-full overflow-hidden mt-1">
