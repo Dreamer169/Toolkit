@@ -639,11 +639,9 @@ class PatchrightController(BaseController):
                 "--mute-audio",
                 # v9.43: OOM 保护 — 限制 JS 堆 + renderer 进程数，防止 TargetClosedError
                 "--js-flags=--max-old-space-size=384",
-                "--renderer-process-limit=1",
                 "--disable-renderer-backgrounding",
-                # v9.45: 额外内存节省
-                "--disable-site-isolation-trials",
-                "--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints",
+                # v9.45: 安全内存节省（不干扰多进程架构）
+                "--disable-features=Translate,BackForwardCache,OptimizationHints",
             ],
             proxy=self._build_proxy_cfg(),
         )

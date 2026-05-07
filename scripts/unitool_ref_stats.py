@@ -16,7 +16,7 @@ import psycopg2
 
 DB_URL             = "postgresql://postgres:postgres@localhost/toolkit"
 CACHE_FILE         = "/tmp/unitool_ref_code_cache.json"
-CACHE_TTL          = 1800   # 30 min
+CACHE_TTL          = 14400  # 4 hours（防封：降低调用频率）
 AUTH_COOKIE        = "__Secure-unitool-ssid"
 MAX_CONVERSIONS    = 10
 
@@ -32,17 +32,40 @@ def save_cache(c: dict) -> None:
     except Exception:
         pass
 
+# RESI 代理配置（防止 VPS 同一 IP 调多个账号被封）
+RESI_HOST  = "proxy.residential.blazingseollc.com"
+RESI_USER  = "customer-resi1-sessid-resi7-sesstime-60"
+RESI_PASS  = "HdRzAi5Bqx"
+RESI_PORTS = [10822, 10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
+
+_resi_idx = 0   # 全局轮转索引
+
+def _next_resi_port() -> int:
+    global _resi_idx
+    port = RESI_PORTS[_resi_idx % len(RESI_PORTS)]
+    _resi_idx += 1
+    return port
+
 def api_fetch(ssid: str) -> dict | None:
+    """通过 RESI 住宅代理调用 Unitool API，避免 VPS IP 被封。"""
+    port = _next_resi_port()
     try:
         r = subprocess.run(
-            ["curl", "-s", "-b", f"{AUTH_COOKIE}={ssid}",
-             "-H", "Accept: application/json", "--max-time", "8",
+            ["curl", "-s",
+             "-x", f"http://{RESI_HOST}:{port}",
+             "-U", f"{RESI_USER}:{RESI_PASS}",
+             "-b", f"{AUTH_COOKIE}={ssid}",
+             "-H", "Accept: application/json",
+             "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+             "--max-time", "12",
              "https://unitool.ai/api/user/ref-code"],
-            capture_output=True, text=True, timeout=12)
+            capture_output=True, text=True, timeout=18)
         raw = r.stdout.strip()
         if raw == "null" or not raw:
             return None
-        return json.loads(raw)
+        if raw.startswith("{"):
+            return json.loads(raw)
+        return None
     except Exception:
         return None
 
@@ -97,7 +120,7 @@ def main():
         cached  = bool(entry) and (now - entry.get("ts", 0)) < CACHE_TTL
         if not cached:
             data = api_fetch(ssid)
-            time.sleep(0.2)   # 限速
+            time.sleep(2.0)   # 限速：每个账号间隔 2s，避免 RESI 被封
             if data:
                 entry = {
                     "code":        data.get("code", ""),

@@ -1078,7 +1078,6 @@ router.get("/data/unitool-stats", async (req, res) => {
     );
     let refMasterEmail = "", currentRefCode = "", currentRefUsed = 0;
     let refPoolTotal = 0, refPoolAvailable = 0, refPoolExhausted = 0, refTotalSlots = 0;
-    let refTotalEarnings = 0, refTotalConversions = 0, refTotalClicks = 0;
     // Read API cache for actual conversion counts
     let convCache: Record<string, { code?: string; conversions?: number }> = {};
     try {
@@ -1107,11 +1106,6 @@ router.get("/data/unitool-stats", async (req, res) => {
         ? cachedEntry.conversions
         : ((row.notes ?? "").match(/ref_registered=/g) ?? []).length;
       codeList.push({ code, used, email: row.email });
-      const cachedEarnings = typeof cachedEntry?.earnings === "number" ? cachedEntry.earnings : 0;
-      const cachedClicks   = typeof cachedEntry?.clicks   === "number" ? cachedEntry.clicks   : 0;
-      refTotalEarnings += cachedEarnings;
-      refTotalConversions += used;
-      refTotalClicks += cachedClicks;
       refPoolTotal++;
       if (used >= 10) { refPoolExhausted++; }
       else { refPoolAvailable++; refTotalSlots += (10 - used); }
@@ -1212,7 +1206,7 @@ router.get("/data/unitool-stats", async (req, res) => {
         processing: Number(ol?.processing ?? 0),
         total:      Number(ol?.total ?? 0),
       },
-      ref: { master: refMasterEmail, ref_code: currentRefCode, used: currentRefUsed, limit: 10, pool_total: refPoolTotal, pool_available: refPoolAvailable, pool_exhausted: refPoolExhausted, total_slots: refTotalSlots, total_earnings: refTotalEarnings, total_conversions: refTotalConversions, total_clicks: refTotalClicks },
+      ref: { master: refMasterEmail, ref_code: currentRefCode, used: currentRefUsed, limit: 10, pool_total: refPoolTotal, pool_available: refPoolAvailable, pool_exhausted: refPoolExhausted, total_slots: refTotalSlots },
       pool,
       recent: recent.map(r => {
         const m2 = r.notes?.match(/unitool_ssid=([a-f0-9]+)/);
