@@ -17,7 +17,7 @@ import threading
 import time
 from typing import Optional
 
-sys.path.insert(0, "/data/Toolkit/artifacts/api-server/airforce")
+sys.path.insert(0, "/root/Toolkit/artifacts/api-server/airforce")
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -553,8 +553,8 @@ def _pipeline_worker(email_workers: int, reg_workers: int, target: int, min_cred
             "reg_ok": 0, "reg_fail": 0, "logs": [],
         })
     try:
-        sys.path.insert(0, "/data/Toolkit/artifacts/api-server/airforce/core")
-        sys.path.insert(0, "/data/Toolkit/scripts")
+        sys.path.insert(0, "/root/Toolkit/artifacts/api-server/airforce/core")
+        sys.path.insert(0, "/root/Toolkit/scripts")
         from obvious_pipeline import run_pipeline
         def _cb(r):
             with _pipeline_lock:
