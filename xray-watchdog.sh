@@ -8,7 +8,8 @@
 mkdir -p /tmp/toolkit_logs
 LOG=/tmp/toolkit_logs/xray-watchdog.log
 XRAY_CFG=/root/Toolkit/xray.json
-DOMAIN=iam.jimhacker.qzz.io
+DOMAIN_PRIMARY=iam.jimhacker.qzz.io
+DOMAIN_BACKUP=iam.jimhacker.eu.cc
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $1" | tee -a $LOG; }
 
