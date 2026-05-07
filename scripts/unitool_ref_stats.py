@@ -32,10 +32,8 @@ def save_cache(c: dict) -> None:
     except Exception:
         pass
 
-# RESI 代理配置（防止 VPS 同一 IP 调多个账号被封）
-RESI_HOST  = "proxy.residential.blazingseollc.com"
-RESI_USER  = "customer-resi1-sessid-resi7-sesstime-60"
-RESI_PASS  = "HdRzAi5Bqx"
+# 本地 Xray SOCKS5 代理端口（Xray 管理，每个 port 是不同住宅 IP 出口）
+# 与 chain_v3 / unitool_batch_refcode 保持一致
 RESI_PORTS = [10822, 10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
 
 _resi_idx = 0   # 全局轮转索引
@@ -47,27 +45,43 @@ def _next_resi_port() -> int:
     return port
 
 def api_fetch(ssid: str) -> dict | None:
-    """通过 RESI 住宅代理调用 Unitool API，避免 VPS IP 被封。"""
+    """通过本地 Xray SOCKS5 代理调用 Unitool API，防止 VPS IP 被封。
+    代理格式: --socks5-hostname 127.0.0.1:{port}（与 chain_v3/batch 一致）
+    失败时降级为直连（GET 请求封号风险较低）。
+    """
     port = _next_resi_port()
-    try:
-        r = subprocess.run(
-            ["curl", "-s",
-             "-x", f"http://{RESI_HOST}:{port}",
-             "-U", f"{RESI_USER}:{RESI_PASS}",
-             "-b", f"{AUTH_COOKIE}={ssid}",
-             "-H", "Accept: application/json",
-             "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-             "--max-time", "12",
-             "https://unitool.ai/api/user/ref-code"],
-            capture_output=True, text=True, timeout=18)
-        raw = r.stdout.strip()
-        if raw == "null" or not raw:
+    for use_proxy in (True, False):   # 先走代理，失败降级直连
+        try:
+            cmd = ["curl", "-s",
+                   "-b", f"{AUTH_COOKIE}={ssid}",
+                   "-H", "Accept: application/json",
+                   "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                   "--max-time", "10",
+                   "https://unitool.ai/api/user/ref-code"]
+            if use_proxy:
+                cmd = ["curl", "-s",
+                       "--socks5-hostname", f"127.0.0.1:{port}",
+                       "-b", f"{AUTH_COOKIE}={ssid}",
+                       "-H", "Accept: application/json",
+                       "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                       "--max-time", "12",
+                       "https://unitool.ai/api/user/ref-code"]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=18)
+            raw = r.stdout.strip()
+            if raw == "null" or not raw:
+                if use_proxy:
+                    continue   # 代理失败 → 降级直连
+                return None
+            if raw.startswith("{"):
+                return json.loads(raw)
+            if use_proxy:
+                continue
             return None
-        if raw.startswith("{"):
-            return json.loads(raw)
-        return None
-    except Exception:
-        return None
+        except Exception:
+            if use_proxy:
+                continue
+            return None
+    return None
 
 def api_session(ssid: str) -> dict:
     try:

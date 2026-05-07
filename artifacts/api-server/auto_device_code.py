@@ -360,7 +360,6 @@ async def authorize_one(email: str, password: str, user_code: str, account_id: i
             # v9.31b: OOM 保护（去掉 --single-process，太不稳定，会导致 MS 登录页 JS 崩溃
             # 误报 code_invalid_or_expired；改用更保守的内存限制组合）
             "--disable-gpu",
-            "--js-flags=--max-old-space-size=256",  # V8 堆限制 256MB（128 不够渲染 MS 登录页）
             "--disable-extensions",
             "--disable-background-networking",
             "--disable-default-apps",

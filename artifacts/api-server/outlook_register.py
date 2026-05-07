@@ -638,7 +638,6 @@ class PatchrightController(BaseController):
                 "--metrics-recording-only",
                 "--mute-audio",
                 # v9.43: OOM 保护 — 限制 JS 堆 + renderer 进程数，防止 TargetClosedError
-                "--js-flags=--max-old-space-size=384",
                 "--disable-renderer-backgrounding",
                 # v9.45: 安全内存节省（不干扰多进程架构）
                 "--disable-features=Translate,BackForwardCache,OptimizationHints",

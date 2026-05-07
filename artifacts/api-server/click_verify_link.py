@@ -367,7 +367,6 @@ try:
                     "--disable-blink-features=AutomationControlled",
                     # v9.31b OOM 保护（同 auto_device_code.py）
                     "--disable-gpu",
-                    "--js-flags=--max-old-space-size=256",
                     "--disable-extensions",
                     "--disable-background-networking",
                     "--disable-default-apps",
