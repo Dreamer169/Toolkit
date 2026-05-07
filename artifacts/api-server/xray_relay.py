@@ -27,7 +27,7 @@ _STATIC_PORTS = [
     10835, 10836, 10837, 10838, 10839,           # in-socks-15~19 (备用)
 ]
 _static_lock  = threading.Lock()
-_port_cursor  = 0   # round-robin 游标
+_port_cursor  = os.getpid() % max(1, len(_STATIC_PORTS))   # v9.31 Fix: 进程唯一起点，避免多 worker 子进程全部从0开始争同一端口
 
 def _is_port_alive(port: int, timeout: float = 2.0) -> bool:
     """TCP connect + SOCKS5 握手探针，确认端口在线"""
@@ -112,8 +112,9 @@ class XrayRelay:
     回退路径: 动态 xray 实例（原 VLESS/WS/TLS → CF Worker 方式）。
     """
 
-    def __init__(self, cf_ip: str):
-        self.cf_ip       = cf_ip
+    def __init__(self, cf_ip: str, force_dynamic: bool = False):
+        self.cf_ip         = cf_ip
+        self.force_dynamic = force_dynamic  # True = 跳过static端口，直接用动态CF VLESS隧道
         self.socks_port  = 0
         self.socks5_url  = ""
         self._proc       = None
@@ -123,17 +124,20 @@ class XrayRelay:
     # ------------------------------------------------------------------
     def start(self, timeout: float = 8.0) -> bool:
         """
-        1) 尝试从静态端口池取一个存活端口（快，~2s）
-        2) 若全部失败，fallback 到动态 xray 实例（原逻辑）
+        1) 若 force_dynamic=False: 尝试从静态端口池取一个存活端口（快，~2s）
+        2) 若 force_dynamic=True 或静态全失败: 启动动态 xray 实例（CF VLESS/WS/TLS → CF Worker）
         """
-        # ── 优先：静态端口 ─────────────────────────────────────────
-        static_port = _pick_static_port()
-        if static_port:
-            self.socks_port = static_port
-            self.socks5_url = f"socks5://127.0.0.1:{static_port}"
-            self._is_static = True
-            print(f"[xray_relay] ✅ 静态端口 {static_port} (cf_ip={self.cf_ip} 已跳过，Worker降级模式)", flush=True)
-            return True
+        # ── 优先：静态端口（仅在非force_dynamic时）─────────────────
+        if not self.force_dynamic:
+            static_port = _pick_static_port()
+            if static_port:
+                self.socks_port = static_port
+                self.socks5_url = f"socks5://127.0.0.1:{static_port}"
+                self._is_static = True
+                print(f"[xray_relay] ✅ 静态端口 {static_port} (cf_ip={self.cf_ip} 已跳过，Worker降级模式)", flush=True)
+                return True
+        else:
+            print(f"[xray_relay] 🚀 force_dynamic=True，跳过静态端口，直接启动 CF VLESS 隧道 cf_ip={self.cf_ip}", flush=True)
 
         # ── 回退：动态 xray 实例 ───────────────────────────────────
         print(f"[xray_relay] ⚠ 静态端口全部失败，启动动态 xray 实例 cf_ip={self.cf_ip}", flush=True)

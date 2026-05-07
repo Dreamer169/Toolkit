@@ -13,7 +13,7 @@ unitool_register.py — unitool.ai 全流程注册 v1.0
   [FAIL] email|reason
   [DONE] ok/total
 """
-import asyncio, json, os, sys, time, argparse, re
+import asyncio, re, json, os, sys, time, argparse, re
 import urllib.request, urllib.parse
 
 # ── Chrome 路径 ────────────────────────────────────────────────────────────────
@@ -243,6 +243,17 @@ async def register_one(email: str, password: str, refresh_token: str,
     from pydoll.browser.options import ChromiumOptions
 
     opt = ChromiumOptions()
+    # Auto-detect Xvfb -> force non-headless (like unitool_login.py)
+    import glob as _glob, os as _os
+    if headless:
+        _display = _os.environ.get('DISPLAY', '')
+        if not _display:
+            if _glob.glob('/tmp/.X99-lock') or _glob.glob('/tmp/.X[0-9]-lock'):
+                _display = ':99'
+                _os.environ['DISPLAY'] = _display
+        if _display:
+            headless = False
+            log(f'[display] headless=False (DISPLAY={_display})')
     opt.headless = headless
     if CHROME: opt.binary_location = CHROME
     for a in ["--no-sandbox","--disable-dev-shm-usage","--window-size=1440,900",
@@ -253,6 +264,7 @@ async def register_one(email: str, password: str, refresh_token: str,
 
     async with Chrome(options=opt) as browser:
         tab = await browser.start()
+        await tab.enable_auto_solve_cloudflare_captcha()
         await tab.enable_network_events()
 
         # Track submission result
@@ -303,13 +315,13 @@ async def register_one(email: str, password: str, refresh_token: str,
         await asyncio.sleep(4)
 
         # ── 2. bypass 初始 Turnstile（signup tab） ───────────────────────────
-        log(f"[{email}] bypass signup Turnstile…")
-        await _bypass(tab, "signup", timeout=20)
-        for _ in range(15):
+        log(f"[{email}] waiting for Turnstile auto-solve...")
+        for _wi in range(35):
             await asyncio.sleep(1)
-            if await _tok_len(tab) > 20:
-                log(f"[{email}] signup token ready len={await _tok_len(tab)}")
-                break
+            _tl = await _tok_len(tab)
+            if _tl > 20:
+                log(f"[{email}] token ready at {_wi+1}s len={_tl}"); break
+            if _wi % 5 == 4: log(f"[{email}] [{_wi+1}s] cfLen={_tl} waiting...")
 
         # ── 3. 确认在 New account tab ───────────────────────────────────────
         # 检查是否需要点 "New account" tab
@@ -322,8 +334,8 @@ async def register_one(email: str, password: str, refresh_token: str,
         })()""", return_by_value=True))
         log(f"[{email}] tab: {tab_clicked}")
         if "clicked" in tab_clicked:
-            await asyncio.sleep(2)
-            await _bypass(tab, "new-account", timeout=15)
+            await asyncio.sleep(3)
+            log(f"[{email}] new-account tab: auto-solve re-triggering...")
 
         await asyncio.sleep(1)
 
@@ -360,15 +372,19 @@ async def register_one(email: str, password: str, refresh_token: str,
         })""", return_by_value=True))
         log(f"[{email}] page state: {pg[:400]}")
 
+        _cf_now = await _tok_len(tab)
+        log(f"[{email}] pre-submit cfLen={_cf_now}")
+        if _cf_now == 0:
+            log(f"[{email}] turnstile_failed: cfLen=0 before submit")
+            return {"ok": False, "email": email, "reason": "turnstile_failed"}
         # ── 7. 提交 ──────────────────────────────────────────────────────────
         sub = _s(await tab.execute_script("""(function(){
             var kws=['join unitool','sign up','create account','register'];
             var btns=Array.from(document.querySelectorAll('button'));
             for(var b of btns){if(kws.includes(b.innerText.trim().toLowerCase())&&!b.disabled){b.click();return 'NATURAL';}}
-            for(var b of btns){if(kws.includes(b.innerText.trim().toLowerCase())){b.disabled=false;b.click();return 'FORCE';}}
             var form=document.querySelector('form');
             if(form){form.requestSubmit();return 'FORM_SUBMIT';}
-            return 'NO_BTN';
+            return 'NO_BTN_ENABLED';
         })()""", return_by_value=True))
         log(f"[{email}] submit: {sub}")
 
@@ -389,8 +405,11 @@ async def register_one(email: str, password: str, refresh_token: str,
                 log(f"[{email}] ✅ 重定向成功: {cur_url}"); reg_success = True; break
             if any(k in low for k in ("verify your email","check your email","verification email","sent you an email")):
                 log(f"[{email}] 📧 需要邮件验证"); needs_verify = True; break
-            if "already" in low and ("registered" in low or "exists" in low or "email" in low):
-                log(f"[{email}] ⚠ 邮箱已注册"); already_reg = True; break
+            # v1.1 FIX: 精确匹配 (原条件误报: 注册页面静态文本含 already+email)
+            if t >= 1 and re.search(
+                r"email.{0,30}already|already.{0,20}registered|already.{0,20}exist|user with like email existed",
+                body_txt, re.I):
+                log(f"[{email}] ⚠ 邮箱已注册 body={body_txt[:200]}"); already_reg = True; break
             if "something went wrong" in low or "error" in low:
                 log(f"[{email}] ❌ 错误: {body_txt[:200]}"); break
 

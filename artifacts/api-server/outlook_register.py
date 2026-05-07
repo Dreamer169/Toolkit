@@ -1968,7 +1968,7 @@ def _skip_ms_interrupts(page, label="") -> bool:
     return clicked
 
 
-def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
+def get_oauth_token_in_browser(page, email: str, captcha_handler=None, password: str = "") -> dict:
     """
     在已登录的浏览器 session 中做 OAuth2 authorization_code 授权。
     使用 prompt=consent（新账号首次授权必须经过 consent，prompt=none 会返回 consent_required）。
@@ -2081,8 +2081,45 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None) -> dict:
                 try:
                     _signin_marker = page.evaluate("""()=>{const t=document.body?.innerText||'';return (t.includes('Use your Microsoft account')||t.includes('使用 Microsoft 帐户'))&&!!document.querySelector('input[type=email],input[name=loginfmt]');}""")
                     if _signin_marker:
-                        print(f'[oauth] ⛔ 检测到 sign-in 页 (注册 cookie 失效 / OAuth 要求重新登录) → 立即 bail, 由设备码 fallback 接管', flush=True)
-                        break
+                        if password:
+                            print("[oauth] v9.33 sign-in page detected, filling email+password...", flush=True)
+                            try:
+                                _em_sel = "input[type=email],input[name=loginfmt]"
+                                page.wait_for_selector(_em_sel, timeout=5000)
+                                page.fill(_em_sel, email)
+                                page.wait_for_timeout(400)
+                                for _ns in ["button[data-testid=\'primaryButton\']", "input[type=submit]", "button[type=submit]"]:
+                                    try:
+                                        _nb = page.query_selector(_ns)
+                                        if _nb and _nb.is_visible(): _nb.click(); break
+                                    except Exception: continue
+                                page.wait_for_timeout(2000)
+                                _pw_sel = "input[type=password],input[name=passwd]"
+                                try: page.wait_for_selector(_pw_sel, timeout=8000)
+                                except Exception: pass
+                                if page.query_selector(_pw_sel):
+                                    page.fill(_pw_sel, password)
+                                    page.wait_for_timeout(400)
+                                    for _ps in ["button[data-testid=\'primaryButton\']", "input[type=submit]", "button[type=submit]"]:
+                                        try:
+                                            _pb = page.query_selector(_ps)
+                                            if _pb and _pb.is_visible(): _pb.click(); break
+                                        except Exception: continue
+                                    try: page.wait_for_load_state("networkidle", timeout=12000)
+                                    except Exception: page.wait_for_timeout(5000)
+                                    print("[oauth] v9.33 email+password submitted, continuing poll...", flush=True)
+                                    _poll_round += 1
+                                    _prev_url = _poll_url
+                                    continue
+                                else:
+                                    print("[oauth] v9.33 no password field appeared, bail", flush=True)
+                                    break
+                            except Exception as _sign_e:
+                                print(f"[oauth] v9.33 sign-in fill error: {_sign_e}, bail", flush=True)
+                                break
+                        else:
+                            print("[oauth] v9.33 sign-in page, no password, bail to device-code", flush=True)
+                            break
                 except Exception:
                     pass
             # v8.77 oauth 卡页探针: 每轮截图 + dump 可见按钮文本, 用于事后 visual debugging
@@ -2373,6 +2410,7 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
                 _tokens = get_oauth_token_in_browser(
                     page, f"{actual_email}@outlook.com",
                     captcha_handler=ctrl.handle_captcha,
+                    password=password,
                 )
                 result["access_token"]  = _tokens.get("access_token", "")
                 result["refresh_token"] = _tokens.get("refresh_token", "")
@@ -2534,8 +2572,54 @@ def run_parallel(args) -> None:
     elif args.proxy:
         proxy_list = [args.proxy.strip()]
 
-    proxy_slices = [[] for _ in range(w)]
-    if proxy_list and getattr(args, "proxy_mode", "") != "cf":
+    proxy_slices  = [[] for _ in range(w)]
+    _pre_relays   = []   # (job_id, XrayRelay_or_None, ip_str)  — cleanup after join
+
+    # v9.31 Fix: CF 池模式下，父进程统一预分配所有 IP 并启动 xray 中继，
+    # 将 SOCKS5 URL 切片分发给各 worker（消除跨进程竞态 + 静态端口共享两个 bug）
+    if getattr(args, "proxy_mode", "") == "cf":
+        _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+        try:
+            import cf_ip_pool as _cf_par
+            from xray_relay import XrayRelay as _XR_par
+        except ImportError as _e:
+            print("[parallel-cf] import error: %s — 回退子进程 CF 池模式" % _e, flush=True)
+            _cf_par = None
+        if _cf_par is not None:
+            _all_socks = []
+            print("[parallel-cf] 父进程预分配 %d 个独立 CF IP..." % n, flush=True)
+            for _pi in range(n):
+                _jid = "par_pre_%d_%d" % (_pi, int(_tm.time()))
+                _ip_info = _cf_par.acquire_ip(_jid, auto_refresh=False)
+                if not _ip_info:
+                    print("[parallel-cf] 第%d个IP分配失败，CF池不足，停止预分配" % _pi, flush=True)
+                    break
+                _relay = _XR_par(_ip_info["ip"], force_dynamic=True)  # v9.32: 强制动态CF VLESS隧道，绕过residential
+                if _relay.start(timeout=15.0):  # 动态模式需要更多启动时间
+                    _all_socks.append(_relay.socks5_url)
+                    _pre_relays.append((_jid, _relay, _ip_info["ip"]))
+                    print("[parallel-cf]   [%d/%d] CF=%s -> %s" % (
+                        _pi+1, n, _ip_info["ip"], _relay.socks5_url), flush=True)
+                else:
+                    _cf_par.ban_ip(_ip_info["ip"])
+                    _cf_par.release_ip(_jid)
+                    print("[parallel-cf]   [%d/%d] CF=%s xray 启动失败，已 ban" % (
+                        _pi+1, n, _ip_info["ip"]), flush=True)
+            if _all_socks:
+                # 覆盖 proxy_mode，让 worker 用 --proxies 而非 --proxy-mode cf
+                args.proxy_mode = ""
+                proxy_list = _all_socks
+                idx = 0
+                for wi2, chunk2 in enumerate(chunks):
+                    proxy_slices[wi2] = proxy_list[idx: idx + chunk2]
+                    idx += chunk2
+                    if idx >= len(proxy_list):
+                        break
+                print("[parallel-cf] 预分配完成: %d 个唯一 SOCKS5 端口分发给 %d workers" % (
+                    len(_all_socks), w), flush=True)
+            else:
+                print("[parallel-cf] 预分配全部失败，各 worker 独立走 CF 池模式（原逻辑回退）", flush=True)
+    elif proxy_list and getattr(args, "proxy_mode", "") != "cf":
         idx = 0
         for wi2, chunk2 in enumerate(chunks):
             proxy_slices[wi2] = proxy_list[idx: idx + chunk2]
@@ -2608,6 +2692,18 @@ def run_parallel(args) -> None:
         threads.append(t)
     for t in threads:
         t.join()
+
+    # v9.31 Fix: 父进程预分配的 xray relay 全部 stop + release
+    for (_jid, _relay, _cf_ip) in _pre_relays:
+        try:
+            _relay.stop()
+        except Exception:
+            pass
+        try:
+            import cf_ip_pool as _cf_cleanup
+            _cf_cleanup.release_ip(_jid)
+        except Exception:
+            pass
 
     ok  = [r for r in all_results if r.get("success")]
     bad = [r for r in all_results if not r.get("success")]

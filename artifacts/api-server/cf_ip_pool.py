@@ -50,21 +50,42 @@ def _read_state():
         return {}
 
 
-def _save_state(extra_banned: list | None = None):
+def _save_state_nolock(extra_banned: list | None = None):
+    """在已持有文件锁时调用（不再重复 flock，否则死锁）。"""
     try:
+        import tempfile as _tmp, shutil as _shu
         if extra_banned:
             _banned_ips.update([x for x in extra_banned if x])
-        hist = list(dict.fromkeys(_used_history))[-2000:]
-        banned = list(dict.fromkeys(_banned_ips))[-2000:]
+        hist      = list(dict.fromkeys(_used_history))[-2000:]
+        banned    = list(dict.fromkeys(_banned_ips))[-2000:]
         available = _normalise_available(_available)
-        with open(POOL_STATE_FILE, 'w') as f:
-            json.dump({
-                'available': available,
-                'used_history': hist,
-                'history': hist,
-                'history_count': len(hist),
-                'banned': banned,
-            }, f)
+        payload   = {
+            "available": available,
+            "used_history": hist,
+            "history": hist,
+            "history_count": len(hist),
+            "banned": banned,
+        }
+        fd_tmp, tmp_path = _tmp.mkstemp(
+            dir=os.path.dirname(POOL_STATE_FILE) or ".", suffix=".tmp")
+        with os.fdopen(fd_tmp, "w") as f:
+            json.dump(payload, f)
+        _shu.move(tmp_path, POOL_STATE_FILE)
+    except Exception:
+        pass
+
+
+def _save_state(extra_banned: list | None = None):
+    # v9.31 Fix: flock + 原子 replace，仅在外部直接调用时加锁
+    try:
+        import fcntl
+        lock_path = POOL_STATE_FILE + ".lock"
+        with open(lock_path, "a") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                _save_state_nolock(extra_banned)
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
     except Exception:
         pass
 
@@ -163,31 +184,32 @@ def refresh_pool(generate_count: int = 60, target_valid: int = 20, threads: int 
 
 
 def acquire_ip(job_id: str, auto_refresh: bool = False, log_cb=None) -> dict | None:
+    # v9.31: 跨进程安全由 Fix2(父进程统一预分配) 保证；同进程用 threading.Lock 即可。
+    # _save_state 已加 flock 原子写，此处无需额外 flock。
     with _pool_lock:
         _available[:] = _normalise_available(_available)
         if _available:
             ip_info = _available.pop(0)
             _in_use[job_id] = ip_info
-            if ip_info['ip'] not in _used_history:
-                _used_history.append(ip_info['ip'])
-            _save_state()
+            if ip_info["ip"] not in _used_history:
+                _used_history.append(ip_info["ip"])
+            _save_state_nolock()
             return ip_info
 
     if auto_refresh:
         if log_cb:
-            log_cb('CF 池为空，按需刷新…')
+            log_cb("CF 池为空，按需刷新…")
         refresh_pool(log_cb=log_cb)
         with _pool_lock:
             _available[:] = _normalise_available(_available)
             if _available:
                 ip_info = _available.pop(0)
                 _in_use[job_id] = ip_info
-                if ip_info['ip'] not in _used_history:
-                    _used_history.append(ip_info['ip'])
-                _save_state()
+                if ip_info["ip"] not in _used_history:
+                    _used_history.append(ip_info["ip"])
+                _save_state_nolock()
                 return ip_info
     return None
-
 
 def release_ip(job_id: str):
     with _pool_lock:

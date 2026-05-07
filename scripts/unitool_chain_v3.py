@@ -490,11 +490,13 @@ def run_register(email, ref_code):
             return {"ok": True, "ssid": ssid}
         if line.startswith("[FAIL]"):
             reason = line[7:].split("|")[-1].strip() if "|" in line else line[7:].strip()
+            for _l in stdout.splitlines()[-60:]: log(f"[reg_out] {_l}")
             log(f"[register] ❌ FAIL reason={reason}")
             return {"ok": False, "ssid": "", "reason": reason}
 
-    # 无 [OK]/[FAIL] 行
-    log(f"[register] 无结果行 rc={rc} stderr={stderr[-200:]}")
+    # 无 [OK]/[FAIL] 行 — dump full stdout for debug
+    for _l in stdout.splitlines()[-50:]: log(f"[reg_out] {_l}")
+    log(f"[register] 无结果行 rc={rc} stderr={stderr[-300:]}")
     return {"ok": False, "ssid": "", "reason": f"no_output rc={rc}"}
 
 def run_login(email, password):
