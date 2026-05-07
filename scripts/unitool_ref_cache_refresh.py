@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-unitool_ref_cache_refresh.py — 后台定时刷新 ref_code 余额缓存
-================================================================
-每 25 分钟用 subprocess 调用 unitool_ref_stats.py --refresh
-更新 /tmp/unitool_ref_code_cache.json
+unitool_ref_cache_refresh.py -- backend timer to refresh ref_code balance cache
+Every 25 minutes calls unitool_ref_stats.py via subprocess to update /tmp/unitool_ref_code_cache.json
 
 Usage:
   python3 unitool_ref_cache_refresh.py [--once]
@@ -14,9 +12,9 @@ STATS_SCRIPT = "/root/Toolkit/scripts/unitool_ref_stats.py"
 LOG_FILE     = "/tmp/unitool_ref_cache_refresh.log"
 INTERVAL     = 25 * 60   # 25 min
 
-def log(msg: str):
+def log(msg):
     ts = time.strftime("%H:%M:%S")
-    line = f"[{ts}] {msg}"
+    line = "[{}] {}".format(ts, msg)
     print(line, flush=True)
     try:
         with open(LOG_FILE, "a") as f:
@@ -25,7 +23,7 @@ def log(msg: str):
         pass
 
 def do_refresh():
-    log("开始刷新 ref_code 余额缓存...")
+    log("\u5f00\u59cb\u5237\u65b0 ref_code \u4f59\u989d\u7f13\u5b58...")
     t0 = time.time()
     try:
         r = subprocess.run(
@@ -34,38 +32,40 @@ def do_refresh():
         )
         elapsed = int(time.time() - t0)
         if r.returncode != 0:
-            log(f"❌ 脚本退出码 {r.returncode} ({elapsed}s): {r.stderr.strip()[:200]}")
+            log("\u274c \u811a\u672c\u9000\u51fa\u7801 {} ({}s): {}".format(r.returncode, elapsed, r.stderr.strip()[:200]))
             return
         raw = r.stdout.strip()
-        # 找到第一个 { 开始的 JSON（防止脚本有非 JSON 前置输出）
         json_start = raw.find("{")
         if json_start == -1:
-            log(f"❌ 无 JSON 输出 ({elapsed}s), stdout={raw[:100]}")
+            log("\u274c \u65e0 JSON \u8f93\u51fa ({}s), stdout={}".format(elapsed, raw[:100]))
             return
         data = json.loads(raw[json_start:])
         summary = data.get("summary", {})
-        log(f"✅ 刷新完成 ({elapsed}s): {summary.get(with_own_code, 0)} 个码, "
-            f"slots={summary.get(available_slots, 0)}, "
-            f"earnings=${summary.get(total_earnings, 0)}")
+        log("\u2705 \u5237\u65b0\u5b8c\u6210 ({}s): {} \u4e2a\u7801, slots={}, earnings=${}".format(
+            elapsed,
+            summary.get("with_own_code", 0),
+            summary.get("available_slots", 0),
+            summary.get("total_earnings", 0)
+        ))
     except subprocess.TimeoutExpired:
-        log(f"❌ 超时 (300s)")
+        log("\u274c \u8d85\u65f6 (600s)")
     except Exception as e:
         elapsed = int(time.time() - t0)
-        log(f"❌ 刷新异常 ({elapsed}s): {e}")
+        log("\u274c \u5237\u65b0\u5f02\u5e38 ({}s): {}".format(elapsed, e))
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--once", action="store_true", help="只刷新一次后退出")
+    ap.add_argument("--once", action="store_true")
     args = ap.parse_args()
 
     if args.once:
         do_refresh()
         return
 
-    log("=== unitool_ref_cache_refresh 启动 (25min 循环) ===")
+    log("=== unitool_ref_cache_refresh \u542f\u52a8 (25min \u5faa\u73af) ===")
     while True:
         do_refresh()
-        log(f"下次刷新在 {INTERVAL//60} 分钟后...")
+        log("\u4e0b\u6b21\u5237\u65b0\u5728 {} \u5206\u949f\u540e...".format(INTERVAL // 60))
         time.sleep(INTERVAL)
 
 if __name__ == "__main__":
