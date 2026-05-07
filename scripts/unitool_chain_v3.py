@@ -37,7 +37,7 @@ PROXY_PORT     = 8089                    # unitool_proxy.py 监听端口
 API_BASE       = "http://localhost:8081/api"  # api-server 地址
 
 MAX_REF_SLOTS   = 10    # unitool 每个 ref_code 最多邀请人数
-RESI_PORTS = [10822, 10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
+RESI_PORTS = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
 WATERMARK       = 5     # fresh 账号低于此值时触发 outlook 补充
 REPLENISH_CNT   = 5     # 单次补充目标数量
 COOLDOWN_S      = 300   # 水位补充冷却（15 分钟）
@@ -765,8 +765,8 @@ def main():
     # ── Step 3: 取一个新鲜 outlook 账号 ────────────────────────────────────────
     row = db_get_fresh_account()
     if not row:
-        log("[main] 无可用账号 → sleep 120s")
-        time.sleep(120); return
+        log("[main] 无可用账号 → sleep 300s")
+        time.sleep(300); return
 
     account_id, email, password, refresh_token = row
     _account_id = account_id

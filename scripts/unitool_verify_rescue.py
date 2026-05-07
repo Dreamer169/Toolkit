@@ -266,8 +266,8 @@ def main():
 
     row = get_pending_account()
     if not row:
-        log("[main] no pending account → sleep 60s")
-        import time as _t; _t.sleep(60); return
+        log("[main] no pending account → sleep 180s")
+        import time as _t; _t.sleep(180); return
 
     account_id, email, password, refresh_token = row
     _account_id = account_id
