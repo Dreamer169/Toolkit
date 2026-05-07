@@ -1583,13 +1583,19 @@ router.post("/tools/outlook/register", async (req, res) => {
     // 兼容: 老代码可能用 tokenMap, 提供别名
     const tokenMap = identityMap;
 
-    const okCount = job.accounts.length;
+    // v9.30 BUG-FIX: stdout 误捕防护 — 只持久化 JSON 确认成功的账号（identityMap 里有的）
+    // 根因: 子进程打印 ✅ 行 → stdout handler 立即 push job.accounts →
+    //       进程崩溃/超时导致 JSON 块未输出 → identityMap 为空 →
+    //       okCount 仍 >0 → DB 写入"幽灵账号" status=active →
+    //       auto_device_code.py OAuth → MS 报 not_found → 写 not_found tag
+    const confirmedAccounts = job.accounts.filter(acc => identityMap.has(acc.email));
+    const okCount = confirmedAccounts.length;
 
     // ── 持久化到数据库 + 立即 ROPC 自动授权 ────────────────────────────────
     if (okCount > 0) {
       await (async () => {
         const pendingOAuthRows: { id: number; email: string; password: string }[] = [];
-        for (const acc of job.accounts) {
+        for (const acc of confirmedAccounts) {
           let accountRow: { id: number } | null = null;
           // 1. 保存到账号库（失败则跳过该账号）
           try {
