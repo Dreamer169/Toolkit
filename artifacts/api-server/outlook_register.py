@@ -641,19 +641,40 @@ class PatchrightController(BaseController):
                 "--disable-renderer-backgrounding",
                 # v9.45: 安全内存节省（不干扰多进程架构）
                 "--disable-features=Translate,BackForwardCache,OptimizationHints",
+                # v9.46: (reverted - disable-site-isolation caused renderer crashes)
             ],
             proxy=self._build_proxy_cfg(),
         )
-        # v9.45: 降低 Chrome OOM score (默认300=优先被杀) → -200 让内核先杀其他进程
-        try:
-            for _pid in _os.listdir("/proc"):
-                if not _pid.isdigit(): continue
-                _comm = open(f"/proc/{_pid}/comm").read().strip() if _os.path.exists(f"/proc/{_pid}/comm") else ""
-                if "chrome" in _comm.lower():
-                    with open(f"/proc/{_pid}/oom_score_adj", "w") as _f:
-                        _f.write("-200\n")
-        except Exception:
-            pass
+        # v9.46: 后台守护线程持续将所有 chrome 进程的 oom_score_adj 设为 -200
+        # 原因: Chrome 自身会把 renderer 子进程 reset 到 100-300, 一次性设置无效
+        import threading as _th2
+        def _oom_guard():
+            import time as _t3
+            while True:
+                try:
+                    for _pp in _os.listdir("/proc"):
+                        if not _pp.isdigit():
+                            continue
+                        _cf = f"/proc/{_pp}/comm"
+                        if not _os.path.exists(_cf):
+                            continue
+                        try:
+                            _cm = open(_cf).read().strip()
+                        except Exception:
+                            continue
+                        if "chrome" in _cm.lower() or "chromium" in _cm.lower():
+                            _af = f"/proc/{_pp}/oom_score_adj"
+                            try:
+                                _cur = int(open(_af).read().strip())
+                                if _cur > -200:
+                                    open(_af, "w").write("-200\n")
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                _t3.sleep(2)
+        _gt = _th2.Thread(target=_oom_guard, daemon=True, name="oom-guard")
+        _gt.start()
         return p, b
 
     def _try_enter_challenge_patchright(self, page) -> bool:
@@ -736,6 +757,14 @@ class PatchrightController(BaseController):
         失败后回退到 Enter 键法（等待视觉 CAPTCHA blob URL）作为兜底。
         历史教训保留：如果未来发现无障碍法被风控，可调回 Enter 键先序。
         """
+        # v9.46: CAPTCHA 前主动释放 page cache，为 Arkose iframe 腾出内存
+        try:
+            import subprocess as _sp2, os as _os2
+            _sp2.run(["sync"], check=False, timeout=2)
+            with open("/proc/sys/vm/drop_caches", "w") as _d2:
+                _d2.write("1\n")
+        except Exception:
+            pass
         # ── [早期拦截] 在所有交互前安装网络请求拦截器 ──────────────────────
         # Arkose Labs 音频通过 XHR fetch，DOM 里 audio.src 始终为空
         # 必须在按住按钮前就开始监听，才能捕获到音频下载请求
