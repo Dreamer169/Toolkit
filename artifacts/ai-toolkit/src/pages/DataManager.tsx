@@ -38,6 +38,16 @@ interface Stats {
   byPlatform: { platform: string; count: number }[];
 }
 
+interface UnitoolStats {
+  outlook:      { fresh: number; registered: number; fail: number; processing: number; total: number };
+  ref:          { master: string; ref_code: string; used: number; limit: number };
+  pool:         { total: number; live: number; dead: number; ssid_len: number };
+  recent:       { id: number; email: string; ssid_prefix: string; ssid_len: number; updated_at: string }[];
+  chain:        { status: string; last_run: string; brief: string };
+  fail_reasons: { reason: string; count: number }[];
+  ts:           string;
+}
+
 const PLATFORM_COLORS: Record<string, string> = {
   outlook: "text-blue-400", chatgpt: "text-emerald-400", claude: "text-amber-400",
   gemini: "text-purple-400", cursor: "text-cyan-400", grok: "text-pink-400",
@@ -52,14 +62,41 @@ function formatDate(s: string) {
 
 // ─── Stats ──────────────────────────────────────────────────────────────────
 function StatsPanel() {
-  const [stats, setStats] = useState<Stats | null>(null);
+  const [stats, setStats]           = useState<Stats | null>(null);
+  const [uStats, setUStats]         = useState<UnitoolStats | null>(null);
+  const [uLastRefresh, setULastRefresh] = useState<string>("");
+
+  const loadUStats = () => {
+    fetch(`${API}/data/unitool-stats`).then(r => r.json()).then(d => {
+      if (d.success) { setUStats(d); setULastRefresh(new Date().toLocaleTimeString("zh-CN")); }
+    }).catch(() => {});
+  };
+
   useEffect(() => {
     fetch(`${API}/data/stats`).then(r => r.json()).then(d => d.success && setStats(d)).catch(() => {});
+    loadUStats();
+    const t = setInterval(loadUStats, 30000);
+    return () => clearInterval(t);
   }, []);
+
   if (!stats) return <p className="text-gray-500 text-center py-12">加载中…</p>;
   const proxyTotal = (stats.proxies?.idle ?? 0) + (stats.proxies?.active ?? 0) + (stats.proxies?.banned ?? 0);
+
+  // Unitool 链路辅助
+  const ol       = uStats?.outlook;
+  const olTotal  = ol ? (ol.fresh + ol.registered + ol.fail + ol.processing) : 0;
+  const pct      = (n: number) => olTotal ? Math.round(n / olTotal * 100) : 0;
+  const chainColor: Record<string, string> = { success:"text-emerald-400", waiting:"text-amber-400", running:"text-blue-400", unknown:"text-gray-500" };
+  const chainDot:   Record<string, string> = { success:"bg-emerald-400", waiting:"bg-amber-400 animate-pulse", running:"bg-blue-400 animate-pulse", unknown:"bg-gray-600" };
+  const failColorMap: Record<string, string> = {
+    ref_reg_fail:"text-orange-400", no_redirect_no_ssid:"text-red-400",
+    no_verify_email:"text-yellow-400", already_registered:"text-gray-400",
+    fill_failed:"text-pink-400", other:"text-gray-500",
+  };
+
   return (
     <div className="space-y-6">
+      {/* ── 通用统计卡片 ── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
           { label:"AI服务池", value: stats.accounts.total, sub:`${stats.accounts.active} 个有效`, color:"text-blue-400" },
@@ -75,22 +112,199 @@ function StatsPanel() {
           </div>
         ))}
       </div>
+
+      {/* ── 平台分布 ── */}
       {stats.byPlatform.length > 0 && (
         <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">
           <h3 className="text-sm font-semibold text-gray-400 mb-3">按平台分布</h3>
           <div className="space-y-2">
             {stats.byPlatform.map(({ platform, count }) => {
-              const pct = stats.accounts.total ? Math.round(count / stats.accounts.total * 100) : 0;
+              const p = stats.accounts.total ? Math.round(count / stats.accounts.total * 100) : 0;
               return (
                 <div key={platform} className="flex items-center gap-3">
                   <span className={`text-xs w-16 ${PLATFORM_COLORS[platform] ?? "text-gray-400"}`}>{platform}</span>
                   <div className="flex-1 h-2 bg-[#0d1117] rounded-full overflow-hidden">
-                    <div className="h-full bg-emerald-600 rounded-full" style={{ width: `${pct}%` }} />
+                    <div className="h-full bg-emerald-600 rounded-full" style={{ width: `${p}%` }} />
                   </div>
                   <span className="text-xs text-gray-400 w-10 text-right">{count}</span>
                 </div>
               );
             })}
+          </div>
+        </div>
+      )}
+
+      {/* ══ Unitool 全链路实时监控 ══ */}
+      {uStats && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-base font-semibold text-white flex items-center gap-2">
+              <span className="text-lg">⛓</span> Unitool 全链路监控
+            </h2>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-600">刷新: {uLastRefresh}</span>
+              <button onClick={loadUStats} className="text-xs px-2 py-1 bg-[#21262d] border border-[#30363d] rounded text-gray-400 hover:text-white">↺</button>
+            </div>
+          </div>
+
+          {/* 顶部 4 指标卡 */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="bg-[#0d1117] border border-[#30363d] rounded-lg p-3 text-center">
+              <div className="text-2xl font-bold text-blue-400">{ol?.fresh ?? 0}</div>
+              <div className="text-xs text-gray-400 mt-1">Outlook 待处理</div>
+              <div className="text-xs text-gray-600">fresh 账号</div>
+            </div>
+            <div className="bg-[#0d1117] border border-[#30363d] rounded-lg p-3 text-center">
+              <div className="text-2xl font-bold text-emerald-400">{ol?.registered ?? 0}</div>
+              <div className="text-xs text-gray-400 mt-1">Unitool 已注册</div>
+              <div className="text-xs text-gray-600">ssid 已入池</div>
+            </div>
+            <div className="bg-[#0d1117] border border-[#30363d] rounded-lg p-3 text-center">
+              <div className="text-2xl font-bold text-emerald-400">{uStats.pool.live}</div>
+              <div className="text-xs text-gray-400 mt-1">反代池 live</div>
+              <div className="text-xs text-gray-600">共 {uStats.pool.total} 个 ssid</div>
+            </div>
+            <div className="bg-[#0d1117] border border-[#30363d] rounded-lg p-3 text-center">
+              <div className={`text-2xl font-bold ${uStats.ref.used >= uStats.ref.limit ? "text-red-400" : "text-amber-400"}`}>
+                {uStats.ref.used}<span className="text-base text-gray-600">/{uStats.ref.limit}</span>
+              </div>
+              <div className="text-xs text-gray-400 mt-1">ref_code 已用</div>
+              <div className="text-xs text-gray-600 font-mono">{uStats.ref.ref_code || "—"}</div>
+            </div>
+          </div>
+
+          {/* Outlook 账号水位进度条 */}
+          <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-gray-300">Outlook 账号水位</h3>
+              <span className="text-xs text-gray-500">共 {olTotal} 个</span>
+            </div>
+            <div className="h-4 bg-[#0d1117] rounded-full overflow-hidden flex">
+              <div className="bg-blue-600 h-full transition-all" style={{ width: `${pct(ol?.fresh ?? 0)}%` }} title={`fresh: ${ol?.fresh}`} />
+              <div className="bg-emerald-600 h-full transition-all" style={{ width: `${pct(ol?.registered ?? 0)}%` }} title={`registered: ${ol?.registered}`} />
+              <div className="bg-amber-500 h-full transition-all" style={{ width: `${pct(ol?.processing ?? 0)}%` }} title={`processing: ${ol?.processing}`} />
+              <div className="bg-red-700 h-full transition-all" style={{ width: `${pct(ol?.fail ?? 0)}%` }} title={`fail: ${ol?.fail}`} />
+            </div>
+            <div className="flex flex-wrap gap-4 mt-2 text-xs">
+              {[
+                { label:"待处理", val: ol?.fresh ?? 0,      color:"bg-blue-600" },
+                { label:"已注册", val: ol?.registered ?? 0, color:"bg-emerald-600" },
+                { label:"处理中", val: ol?.processing ?? 0, color:"bg-amber-500" },
+                { label:"失败",   val: ol?.fail ?? 0,       color:"bg-red-700" },
+              ].map(({ label, val, color }) => (
+                <span key={label} className="flex items-center gap-1 text-gray-400">
+                  <span className={`w-2 h-2 rounded-full inline-block ${color}`} />
+                  {label} <b className="text-white">{val}</b>
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {/* ref_code + chain_v3 状态 + proxy pool */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {/* ref_code 详情 */}
+            <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">
+              <h3 className="text-sm font-semibold text-gray-300 mb-3">ref_code 使用情况</h3>
+              <div className="space-y-2">
+                <div className="flex justify-between text-xs">
+                  <span className="text-gray-500">master 账号</span>
+                  <span className="text-gray-300 font-mono truncate max-w-[180px]">{uStats.ref.master || "—"}</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-gray-500">ref_code</span>
+                  <span className="text-emerald-400 font-mono font-bold">{uStats.ref.ref_code || "—"}</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-gray-500">已使用 / 上限</span>
+                  <span className={uStats.ref.used >= uStats.ref.limit ? "text-red-400 font-bold" : "text-white"}>
+                    {uStats.ref.used} / {uStats.ref.limit}
+                  </span>
+                </div>
+                {/* 使用量进度条 */}
+                <div className="h-2 bg-[#0d1117] rounded-full overflow-hidden mt-1">
+                  <div
+                    className={`h-full rounded-full transition-all ${uStats.ref.used >= uStats.ref.limit ? "bg-red-600" : uStats.ref.used >= 7 ? "bg-amber-500" : "bg-emerald-600"}`}
+                    style={{ width: `${Math.min(100, uStats.ref.used / uStats.ref.limit * 100)}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* chain_v3 状态 */}
+            <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">
+              <h3 className="text-sm font-semibold text-gray-300 mb-3">chain_v3 运行状态</h3>
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 text-xs">
+                  <span className={`w-2 h-2 rounded-full inline-block ${chainDot[uStats.chain.status] ?? "bg-gray-600"}`} />
+                  <span className={`font-semibold ${chainColor[uStats.chain.status] ?? "text-gray-400"}`}>
+                    {uStats.chain.status === "success" ? "✅ 上次成功"
+                     : uStats.chain.status === "waiting" ? "⏳ 等待账号"
+                     : uStats.chain.status === "running" ? "🔄 运行中"
+                     : "⚪ 未知"}
+                  </span>
+                  <span className="text-gray-600 ml-auto">上次: {uStats.chain.last_run}</span>
+                </div>
+                {uStats.chain.brief && (
+                  <p className="text-xs text-gray-600 font-mono leading-5 break-all line-clamp-3">
+                    {uStats.chain.brief.split(" | ").slice(-2).join(" | ")}
+                  </p>
+                )}
+                <div className="flex justify-between text-xs mt-1">
+                  <span className="text-gray-500">proxy ssid 长度</span>
+                  <span className={uStats.pool.ssid_len === 264 ? "text-emerald-400" : uStats.pool.ssid_len > 0 ? "text-amber-400" : "text-gray-600"}>
+                    {uStats.pool.ssid_len > 0 ? `${uStats.pool.ssid_len} chars` : "未检测"}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* 最近注册 + 24h 失败原因 */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {/* 最近5条注册 */}
+            <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">
+              <h3 className="text-sm font-semibold text-gray-300 mb-3">最近成功注册</h3>
+              {uStats.recent.length === 0
+                ? <p className="text-xs text-gray-600 text-center py-4">暂无记录</p>
+                : <div className="space-y-2">
+                    {uStats.recent.map(r => (
+                      <div key={r.id} className="flex items-center gap-2 text-xs">
+                        <span className="text-emerald-500">✓</span>
+                        <span className="text-gray-300 font-mono truncate flex-1">{r.email}</span>
+                        <span className={`font-mono text-gray-600 shrink-0 ${r.ssid_len >= 264 ? "text-emerald-600" : r.ssid_len > 0 ? "text-amber-600" : ""}`}>
+                          {r.ssid_len > 0 ? `${r.ssid_len}c` : "—"}
+                        </span>
+                        <span className="text-gray-700 shrink-0">{new Date(r.updated_at).toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"})}</span>
+                      </div>
+                    ))}
+                  </div>
+              }
+            </div>
+
+            {/* 24h 失败分析 */}
+            <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">
+              <h3 className="text-sm font-semibold text-gray-300 mb-3">24h 失败原因分析</h3>
+              {uStats.fail_reasons.length === 0
+                ? <p className="text-xs text-gray-600 text-center py-4">暂无失败记录</p>
+                : <div className="space-y-2">
+                    {uStats.fail_reasons.map(({ reason, count }) => {
+                      const total24h = uStats.fail_reasons.reduce((s, r) => s + r.count, 0);
+                      const p2 = total24h ? Math.round(count / total24h * 100) : 0;
+                      return (
+                        <div key={reason}>
+                          <div className="flex justify-between text-xs mb-1">
+                            <span className={failColorMap[reason] ?? "text-gray-400"}>{reason}</span>
+                            <span className="text-gray-400">{count} ({p2}%)</span>
+                          </div>
+                          <div className="h-1.5 bg-[#0d1117] rounded-full overflow-hidden">
+                            <div className="h-full bg-red-700/60 rounded-full" style={{ width: `${p2}%` }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+              }
+            </div>
           </div>
         </div>
       )}

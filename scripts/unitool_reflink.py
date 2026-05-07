@@ -57,9 +57,11 @@ def db_save_ref_code(account_id, ref_code):
     cur.execute("""
         UPDATE accounts SET
           notes = COALESCE(notes,'') || E'\nunitool_ref_code=' || %s,
-          tags  = CASE WHEN COALESCE(tags,'') NOT LIKE '%%unitool_ref_master%%'
-                       THEN COALESCE(NULLIF(tags,''),'') || ',unitool_ref_master'
-                       ELSE tags END,
+          tags  = CASE
+                    WHEN COALESCE(tags,'') LIKE '%%unitool_ref_master%%' THEN tags
+                    WHEN COALESCE(tags,'') LIKE '%%unitool_ref_activated%%' THEN tags
+                    ELSE COALESCE(NULLIF(tags,''),'') || ',unitool_ref_activated'
+                  END,
           updated_at = NOW()
         WHERE id = %s
     """, (ref_code, account_id))

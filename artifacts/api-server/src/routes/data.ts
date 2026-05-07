@@ -1041,4 +1041,155 @@ router.get("/data/proxies/maintenance/status", (_req, res) => {
   res.json({ success: true, lastRun: lastMaintenanceResult });
 });
 
+
+// ══ unitool 链路实时统计 ════════════════════════════════════════════════════════
+router.get("/data/unitool-stats", async (req, res) => {
+  try {
+    // 1. Outlook 账号分布
+    const ol = await queryOne<{ fresh:string; registered:string; fail:string; processing:string; total:string }>(
+      `SELECT
+        COUNT(*) FILTER(WHERE tags IS NULL OR (
+          tags NOT LIKE '%unitool_registered%'
+          AND tags NOT LIKE '%unitool_fail%'
+          AND tags NOT LIKE '%unitool_processing%'
+          AND tags NOT LIKE '%unitool_already%'
+          AND tags NOT LIKE '%unitool_rescue_dead%'
+          AND tags NOT LIKE '%unitool_verify_pending%'
+          AND (tags NOT LIKE '%unitool_reg_retry%' OR updated_at < NOW() - INTERVAL '4 hours')
+        )) as fresh,
+        COUNT(*) FILTER(WHERE tags LIKE '%unitool_registered%') as registered,
+        COUNT(*) FILTER(WHERE tags LIKE '%unitool_fail%') as fail,
+        COUNT(*) FILTER(WHERE tags LIKE '%unitool_processing%') as processing,
+        COUNT(*) as total
+       FROM accounts WHERE platform='outlook' AND status='active'
+         AND refresh_token IS NOT NULL AND refresh_token != ''
+         AND LENGTH(COALESCE(password,''))>=8`
+    );
+
+    // 2. ref_code 信息
+    const refRow = await queryOne<{ email:string; notes:string }>(
+      `SELECT email, notes FROM accounts
+       WHERE platform='outlook' AND (tags LIKE '%unitool_ref_master%' OR notes LIKE '%unitool_ref_code=%')
+       ORDER BY updated_at DESC LIMIT 1`
+    );
+    let refCode = "", refMasterEmail = "";
+    if (refRow?.notes) {
+      refCode        = (refRow.notes.match(/unitool_ref_code=([a-z0-9]+)/) ?? [])[1] ?? "";
+      refMasterEmail = refRow.email ?? "";
+    }
+    // refUsed: count ref_registered= occurrences in master account notes (authoritative)
+    const refUsed = refRow?.notes
+      ? (refRow.notes.match(/ref_registered=/g) ?? []).length
+      : 0;
+
+    // 3. proxy 池状态
+    let pool = { total:0, live:0, dead:0, ssid_len:0 };
+    try {
+      const { get } = await import("http");
+      const poolRaw = await new Promise<string>((resolve, reject) => {
+        const r2 = get({ host:"127.0.0.1", port:8089, path:"/pool-status", timeout:3000 }, (r) => {
+          let d = ""; r.on("data", (c:Buffer) => { d += c; }); r.on("end", () => resolve(d));
+        });
+        r2.on("error", reject);
+      });
+      const pd = JSON.parse(poolRaw) as { pool_size:number; live:number; accounts?:unknown[] };
+      // ssid_len: 读取实际 ssid 文件字节数（所有文件固定 264 chars）
+      let ssid_len = 0;
+      try {
+        const { readdirSync, readFileSync } = await import("fs");
+        const ssidFiles = readdirSync("/data/unitool_ssids").filter((f:string) => f.endsWith(".txt"));
+        if (ssidFiles.length > 0) {
+          ssid_len = readFileSync(`/data/unitool_ssids/${ssidFiles[0]}`).length;
+        }
+      } catch {}
+      pool = { total: pd.pool_size, live: pd.live, dead: pd.pool_size - pd.live, ssid_len };
+    } catch {}
+
+    // 4. 最近5条成功注册
+    const recent = await query<{ id:number; email:string; notes:string; updated_at:string }>(
+      `SELECT id, email, notes, updated_at FROM accounts
+       WHERE platform='outlook' AND tags LIKE '%unitool_registered%'
+       ORDER BY updated_at DESC LIMIT 5`
+    );
+    // ssid_len 权威源: unitool_ssids 表 (比 notes regex 准确)
+    const ssidLenMap: Record<string, number> = {};
+    if (recent.length > 0) {
+      const emails = recent.map(r => r.email);
+      try {
+        const ssidRows = await query<{ source_email:string; ssid_len:string }>(
+          `SELECT DISTINCT ON (source_email) source_email, LENGTH(ssid) as ssid_len
+           FROM unitool_ssids WHERE source_email = ANY($1)
+           ORDER BY source_email, collected_at DESC`,
+          [emails]
+        );
+        for (const s of ssidRows) ssidLenMap[s.source_email] = Number(s.ssid_len);
+      } catch {}
+    }
+
+    // 5. chain_v3 日志摘要
+    let chainStatus = "unknown", chainLastRun = "", chainBrief = "";
+    try {
+      const { readFileSync } = await import("fs");
+      const logLines = readFileSync("/tmp/unitool_chain_v3_out.log", "utf8").split("\n").filter(Boolean);
+      const startLines = logLines.filter(l => l.includes("=== unitool_chain_v3 start ==="));
+      if (startLines.length > 0) {
+        const m = startLines[startLines.length - 1].match(/\[(\d{2}:\d{2}:\d{2})\]/);
+        chainLastRun = m?.[1] ?? "";
+      }
+      const last20 = logLines.slice(-20);
+      if (last20.some(l => l.includes("✅") && l.includes("ssid"))) chainStatus = "success";
+      else if (last20.some(l => l.includes("sleep"))) chainStatus = "waiting";
+      else if (last20.some(l => l.includes("[main]"))) chainStatus = "running";
+      chainBrief = last20
+        .filter(l => l.includes("[main]") || l.includes("✅") || l.includes("[ref]") || l.includes("[watermark]"))
+        .slice(-4).map(l => l.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, "")).join(" | ");
+    } catch {}
+
+    // 6. 最近24h 失败原因分布
+    const failReasons = await query<{ reason:string; cnt:string }>(
+      `SELECT
+        CASE
+          WHEN notes LIKE '%no_redirect_no_ssid%' THEN 'no_redirect_no_ssid'
+          WHEN notes LIKE '%fill_failed%' THEN 'fill_failed'
+          WHEN notes LIKE '%no_verify_email%' THEN 'no_verify_email'
+          WHEN notes LIKE '%ref_reg_fail%' THEN 'ref_reg_fail'
+          WHEN notes LIKE '%already_registered%' THEN 'already_registered'
+          ELSE 'other'
+        END as reason,
+        COUNT(*) as cnt
+       FROM accounts WHERE platform='outlook' AND tags LIKE '%unitool_fail%'
+         AND updated_at > NOW()-INTERVAL '24 hours'
+       GROUP BY 1 ORDER BY 2 DESC`
+    );
+
+    res.json({
+      success: true,
+      outlook: {
+        fresh:      Number(ol?.fresh ?? 0),
+        registered: Number(ol?.registered ?? 0),
+        fail:       Number(ol?.fail ?? 0),
+        processing: Number(ol?.processing ?? 0),
+        total:      Number(ol?.total ?? 0),
+      },
+      ref: { master: refMasterEmail, ref_code: refCode, used: refUsed, limit: 10 },
+      pool,
+      recent: recent.map(r => {
+        const m2 = r.notes?.match(/unitool_ssid=([a-f0-9]+)/);
+        // 优先从 unitool_ssids 表取 ssid_len（权威），回退 notes regex
+        const ssidLen = ssidLenMap[r.email] ?? (m2?.[1]?.length ?? 0);
+        return {
+          id:          r.id,
+          email:       r.email,
+          ssid_prefix: m2?.[1]?.slice(0, 16) ?? "",
+          ssid_len:    ssidLen,
+          updated_at:  r.updated_at,
+        };
+      }),
+      chain:        { status: chainStatus, last_run: chainLastRun, brief: chainBrief },
+      fail_reasons: failReasons.map(r => ({ reason: r.reason, count: Number(r.cnt) })),
+      ts: new Date().toISOString(),
+    });
+  } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
+});
+
 export default router;

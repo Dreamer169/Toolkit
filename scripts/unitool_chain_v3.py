@@ -112,6 +112,7 @@ def db_get_fresh_account():
            AND tags NOT LIKE '%%unitool_already%%'
            AND tags NOT LIKE '%%unitool_rescue_dead%%'
            AND tags NOT LIKE '%%unitool_verify_pending%%'
+           AND tags NOT LIKE '%%not_found%%'
           ))
         ORDER BY RANDOM() LIMIT 1
     """)
@@ -134,6 +135,7 @@ def db_count_fresh():
            AND tags NOT LIKE '%%unitool_already%%'
            AND tags NOT LIKE '%%unitool_rescue_dead%%'
            AND tags NOT LIKE '%%unitool_verify_pending%%'
+           AND tags NOT LIKE '%%not_found%%'
           ))
     """)
     count = cur.fetchone()[0]; conn.close()
@@ -257,7 +259,7 @@ def db_get_current_ref_code():
     # 查所有有 ref_code 的账号（activated 优先，其次 master）
     cur.execute("""
         SELECT id, email, notes, tags FROM accounts
-        WHERE platform='outlook' AND status='active'
+        WHERE platform='outlook'
           AND notes LIKE '%%unitool_ref_code=%%'
           AND (tags LIKE '%%unitool_ref_master%%' OR tags LIKE '%%unitool_ref_activated%%')
         ORDER BY
@@ -579,6 +581,19 @@ def main():
         # 兜底：使用已知的 ref_code（sarahrivera639 的 xjfjk）
         ref_code = "xjfjk"
         log(f"[ref] 兜底使用 ref_code={ref_code}")
+        # fallback 时也要找到 master 账号 ID，保证 ref_registered 追踪不丢失
+        if not ref_master_id:
+            try:
+                _c = db_connect(); _u = _c.cursor()
+                _u.execute(
+                    "SELECT id, email FROM accounts WHERE tags LIKE '%%unitool_ref_master%%' LIMIT 1"
+                )
+                _r = _u.fetchone(); _c.close()
+                if _r:
+                    ref_master_id, ref_master_email = _r[0], _r[1]
+                    log(f"[ref] fallback master 找到: {ref_master_email} id={ref_master_id}")
+            except Exception as _e:
+                log(f"[ref] fallback master 查找失败: {_e}")
     log(f"[ref] ref_code={ref_code} master={ref_master_email} used={ref_used}/{MAX_REF_SLOTS}")
 
     # ── Step 3: 取一个新鲜 outlook 账号 ────────────────────────────────────────
@@ -639,17 +654,41 @@ def main():
         log(f"[main] ⚠ 未能激活 ref_code（ssid 可能未就绪，下次重试）")
         print(f"[OK] {email}|{ssid}...|{ref_code}|no_ref_code", flush=True)
 
-    # ── 追踪 referral 关系（master 账号 notes 里追加 ref_registered=）──────────
+    # ── Step 7b: 在被注册账号 notes 写 via_ref=（监控统计用）────────────────────
+    if ref_code:
+        try:
+            _cn = db_connect(); _cu = _cn.cursor()
+            _cu.execute("SELECT notes FROM accounts WHERE id=%s", (account_id,))
+            _rr = _cu.fetchone()
+            _nn = (_rr[0] or "") if _rr else ""
+            if ("via_ref=" + ref_code) not in _nn:
+                _cu.execute(
+                    "UPDATE accounts SET notes=COALESCE(notes,'')||%s, updated_at=NOW() WHERE id=%s",
+                    ("\nvia_ref=" + ref_code, account_id)
+                )
+                _cn.commit()
+            _cn.close()
+            log(f"[ref] via_ref={ref_code} -> id={account_id}")
+        except Exception as _ex:
+            log(f"[ref] via_ref err: {_ex}")
+
+    # ── 追踪 referral 关系（ref 账号 notes 里追加 ref_registered=，用于 used 计数）──────────
     if ref_master_id:
         try:
             conn = db_connect(); cur = conn.cursor()
-            cur.execute("""
-                UPDATE accounts SET
-                  notes = COALESCE(notes,'') || %s,
-                  updated_at = NOW()
-                WHERE id = %s
-            """, (f"\nref_registered={email}|id={account_id}", ref_master_id))
-            conn.commit(); conn.close()
+            # 防重复：同一账号不重复写
+            cur.execute("SELECT notes FROM accounts WHERE id=%s", (ref_master_id,))
+            _rn = cur.fetchone()
+            _existing = (_rn[0] or "") if _rn else ""
+            if f"ref_registered={email}" not in _existing:
+                cur.execute("""
+                    UPDATE accounts SET
+                      notes = COALESCE(notes,'') || %s,
+                      updated_at = NOW()
+                    WHERE id = %s
+                """, (f"\nref_registered={email}|id={account_id}", ref_master_id))
+                conn.commit()
+            conn.close()
             log(f"[ref] master({ref_master_email}) +1 referral → {email}")
         except Exception as e:
             log(f"[ref] track referral err: {e}")
