@@ -29,8 +29,8 @@ def do_refresh():
     t0 = time.time()
     try:
         r = subprocess.run(
-            ["python3", STATS_SCRIPT, "--refresh"],
-            capture_output=True, text=True, timeout=300
+            ["python3", STATS_SCRIPT],
+            capture_output=True, text=True, timeout=600
         )
         elapsed = int(time.time() - t0)
         if r.returncode != 0:
