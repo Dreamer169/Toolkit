@@ -10,7 +10,7 @@ import psycopg2
 
 LOG      = "/tmp/unitool_verify_rescue.log"
 DB_URL   = "postgresql://postgres:postgres@localhost/toolkit"
-CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
 LOGIN_SCRIPT = "/root/Toolkit/scripts/unitool_login.py"
 
 _account_id   = None

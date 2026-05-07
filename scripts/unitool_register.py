@@ -60,7 +60,7 @@ def db_tag_unitool(account_id: int, ssid: str):
                       ELSE tags END,
           notes = COALESCE(notes,'') || ' | unitool_ssid=' || %s
         WHERE id = %s
-    """, (ssid[:80], account_id))
+    """, (ssid, account_id))
     conn.commit(); conn.close()
 
 # ── Graph API helpers ─────────────────────────────────────────────────────────
@@ -276,11 +276,26 @@ async def register_one(email: str, password: str, refresh_token: str,
             ref_url = f"https://unitool.ai/ref/{ref_code}"
             log(f"[{email}] 先访问推荐链接: {ref_url}")
             await tab.go_to(ref_url)
-            await asyncio.sleep(3)
+            await asyncio.sleep(5)
+            cur_ref_url = str(await tab.execute_script("location.href", return_by_value=True) or "")
+            log(f"[{email}] ref跳转后 url={cur_ref_url[:80]}")
             # 记录 cookie
             ck_after_ref = await tab.get_cookies()
             ref_ck = [c for c in ck_after_ref if "unitool" in c.get("domain","")]
             log(f"[{email}] ref页 cookies: {[c.get('name') for c in ref_ck]}")
+            # Early-exit: ref 页已给出 ssid（账号直接登录）
+            ssid_early = next((c["value"] for c in ref_ck if c.get("name") == AUTH_COOKIE), "")
+            if ssid_early:
+                log(f"[{email}] ✅ ref页直接获得 ssid_len={len(ssid_early)}")
+                return {"ok": True, "email": email, "ssid": ssid_early, "needs_verify": False}
+            # 如果 ref 页把我们重定向到登录/注册页，继续流程
+            # 如果已在 unitool.ai 首页（表示 ref 链接自动注册了），检查 ssid
+            if "entry" not in cur_ref_url and "unitool.ai" in cur_ref_url and cur_ref_url != ref_url:
+                extra_ck = await tab.get_cookies()
+                ssid_from_redirect = next((c["value"] for c in extra_ck if c.get("name") == AUTH_COOKIE), "")
+                if ssid_from_redirect:
+                    log(f"[{email}] ✅ ref跳转后获得 ssid_len={len(ssid_from_redirect)}")
+                    return {"ok": True, "email": email, "ssid": ssid_from_redirect, "needs_verify": False}
 
         # ── 1. 加载页面 ──────────────────────────────────────────────────────
         log(f"[{email}] 打开 {TARGET}")

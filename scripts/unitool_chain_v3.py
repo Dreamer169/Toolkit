@@ -39,7 +39,7 @@ API_BASE       = "http://localhost:8081/api"  # api-server 地址
 MAX_REF_SLOTS   = 10    # unitool 每个 ref_code 最多邀请人数
 WATERMARK       = 5     # fresh 账号低于此值时触发 outlook 补充
 REPLENISH_CNT   = 5     # 单次补充目标数量
-COOLDOWN_S      = 900   # 水位补充冷却（15 分钟）
+COOLDOWN_S      = 300   # 水位补充冷却（15 分钟）
 LOCK_FILE       = "/tmp/unitool_chain_replenish.lock"
 
 CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"   # reg_v2 用的 MS OAuth client
