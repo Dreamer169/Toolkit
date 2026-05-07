@@ -8,14 +8,17 @@
 mkdir -p /tmp/toolkit_logs
 LOG=/tmp/toolkit_logs/xray-watchdog.log
 XRAY_CFG=/root/Toolkit/xray.json
-DOMAIN_PRIMARY=iam.jimhacker.qzz.io
-DOMAIN_BACKUP=iam.jimhacker.eu.cc
+DOMAINS="iam.jimhacker.qzz.io iam.jimhacker.eu.cc iam.jimhacker.us.ci"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $1" | tee -a $LOG; }
 
 get_fresh_ips() {
-  DNS_IPS=$(nslookup $DOMAIN 2>/dev/null | grep 'Address:' | grep -v '#' | awk '{print $2}' | grep -v ':')
-  echo "$DNS_IPS" | tr ' ' '\n' | grep -v '^$' | head -4
+  ALL_IPS=""
+  for DOMAIN in $DOMAINS; do
+    IPS=$(nslookup $DOMAIN 2>/dev/null | grep 'Address:' | grep -v '#' | awk '{print $2}' | grep -v ':')
+    [ -n "$IPS" ] && ALL_IPS="$ALL_IPS $IPS" && log "DNS [$DOMAIN]: $IPS"
+  done
+  echo "$ALL_IPS" | tr ' ' '\n' | grep -v '^$' | sort -u | head -6
 }
 
 # v2: 改用 SS 静态端口(10851=ss-in-1/edir2end)，不走 VLESS→jimhacker

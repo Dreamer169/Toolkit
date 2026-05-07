@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // 自动从 DNS 解析最新 CF IP 并更新 xray.json
-// v2: 双源 - iam.jimhacker.qzz.io + iam.jimhacker.eu.cc (互备)
+// v3: 三源 - iam.jimhacker.qzz.io + iam.jimhacker.eu.cc + iam.jimhacker.us.ci (互备)
 const dns = require("dns");
 const fs  = require("fs");
 const CFG = "/root/Toolkit/xray.json";
 
-const DOMAINS = ["iam.jimhacker.qzz.io", "iam.jimhacker.eu.cc"];
+const DOMAINS = ["iam.jimhacker.qzz.io", "iam.jimhacker.eu.cc", "iam.jimhacker.us.ci"];
 
 function resolve4(domain) {
   return new Promise(res => dns.resolve4(domain, (e, ips) => res(ips || [])));
