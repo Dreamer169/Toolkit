@@ -588,6 +588,9 @@ class BaseController:
             import traceback
             tb = traceback.format_exc()
             print(f"[register] ❌ 完整错误:\n{tb}", flush=True)
+            # v9.44: TargetClosedError → 向上传播让 register_one 重启浏览器重试
+            if "TargetClosed" in type(e).__name__ or "Target page, context or browser has been closed" in str(e):
+                raise
             return False, f"加载超时或触发机器人检测: {e}", email
 
         return True, "注册成功", email
@@ -626,6 +629,10 @@ class PatchrightController(BaseController):
                 "--disable-sync",
                 "--metrics-recording-only",
                 "--mute-audio",
+                # v9.43: OOM 保护 — 限制 JS 堆 + renderer 进程数，防止 TargetClosedError
+                "--js-flags=--max-old-space-size=512",
+                "--renderer-process-limit=1",
+                "--disable-renderer-backgrounding",
             ],
             proxy=self._build_proxy_cfg(),
         )
@@ -1295,7 +1302,12 @@ class PatchrightController(BaseController):
                 # page.locator() 无法穿透跨域iframe边界，必须对每个frame单独调用locator()
                 if not _press_clicked:
                     print("[captcha] 方法B：逐frame扫描跨域按钮（10-frame重型挑战兜底）…", flush=True)
-                    page.wait_for_timeout(2000)
+                    try:
+                        page.wait_for_timeout(2000)
+                    except Exception as _wte:
+                        if "TargetClosed" in type(_wte).__name__ or "Target page" in str(_wte):
+                            raise  # 浏览器OOM崩溃，向上传播让 register_one 重试
+                        pass
 
                     # 第一轮：精确找 [aria-label="再次按下"] —— 10-frame变体中在frame[9]
                     for _hfr in page.frames:
@@ -2616,6 +2628,14 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
             _orig_print(*a, **kw)
     _b.print = _timed_print
 
+    # v9.43: TargetClosedError retry — 浏览器被OOM-killer杀掉时重启浏览器重试一次
+    try:
+        from patchright._impl._errors import TargetClosedError as _TCErr
+    except Exception:
+        _TCErr = type("_TCErrFallback", (Exception,), {})
+    _browser_crash_retries = 0
+    _MAX_BROWSER_CRASH_RETRIES = 1
+
     p, b = ctrl.launch(headless=headless)
     if not p:
         result["error"] = "浏览器启动失败"
@@ -2645,6 +2665,32 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
         result["email"]    = f"{actual_email}@outlook.com"
         result["username"] = actual_email
 
+        # v9.44: 双保险 — outlook_register() 内部若仍吞了 TargetClosedError 并
+        # 返回 (False, msg)，则在此检测 msg 并触发浏览器重启重试
+        if (not ok and _browser_crash_retries < _MAX_BROWSER_CRASH_RETRIES
+                and ("TargetClosed" in msg or "Target page, context or browser has been closed" in msg)):
+            _browser_crash_retries += 1
+            print(f"[register] ⚠ 浏览器OOM(msg) → 重启浏览器重试({_browser_crash_retries}/{_MAX_BROWSER_CRASH_RETRIES})...", flush=True)
+            try: b.close()
+            except Exception: pass
+            try: p.stop()
+            except Exception: pass
+            import time as _t2; _t2.sleep(3)
+            p, b = ctrl.launch(headless=headless)
+            if p:
+                _fp2 = gen_profile(locale="en-US")
+                _ctx2 = b.new_context(**context_kwargs(_fp2))
+                apply_fingerprint_sync(_ctx2, _fp2)
+                page = _ctx2.new_page()
+                t0 = time.time()
+                ok, msg, actual_email = ctrl.outlook_register(page, email, password)
+                result["success"]  = ok
+                result["error"]    = "" if ok else msg
+                result["email"]    = f"{actual_email}@outlook.com"
+                result["username"] = actual_email
+            else:
+                result["error"] = f"browser_oom_restart_failed"
+
         if ok:
             # 跳过微软注册后中断页（passkey / 保持登录 / 恢复邮箱等）
             _skip_ms_interrupts(page, label='post-register')
@@ -2672,6 +2718,39 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
                 page.screenshot(path=f"/tmp/outlook_fail_{actual_email}.png")
             except Exception:
                 pass
+    except _TCErr as _tce:
+        _tce_msg = str(_tce)[:100]
+        print(f"[register] ⚠ 浏览器OOM崩溃 ({_tce_msg}) retry={_browser_crash_retries}/{_MAX_BROWSER_CRASH_RETRIES}", flush=True)
+        if _browser_crash_retries < _MAX_BROWSER_CRASH_RETRIES:
+            _browser_crash_retries += 1
+            # 关闭崩溃的浏览器，释放内存，等待3s后重启
+            try: b.close()
+            except Exception: pass
+            try: p.stop()
+            except Exception: pass
+            import time as _time_retry
+            _time_retry.sleep(3)
+            print(f"[register] 🔄 重启浏览器重试注册 ({_browser_crash_retries}/{_MAX_BROWSER_CRASH_RETRIES})...", flush=True)
+            p, b = ctrl.launch(headless=headless)
+            if p:
+                fp = gen_profile(locale="en-US")
+                print(f"[register] 指纹: {profile_summary(fp)}", flush=True)
+                context = b.new_context(**context_kwargs(fp))
+                apply_fingerprint_sync(context, fp)
+                page = context.new_page()
+                t0 = time.time()
+                try:
+                    ok, msg, actual_email = ctrl.outlook_register(page, email, password)
+                    result["success"]  = ok
+                    result["error"]    = "" if ok else msg
+                    result["email"]    = f"{actual_email}@outlook.com"
+                    result["username"] = actual_email
+                except Exception as _re:
+                    result["error"] = str(_re)
+            else:
+                result["error"] = f"browser_oom_restart_failed:{_tce_msg}"
+        else:
+            result["error"] = f"browser_oom_exhausted:{_tce_msg}"
     except Exception as e:
         result["error"] = str(e)
         try:

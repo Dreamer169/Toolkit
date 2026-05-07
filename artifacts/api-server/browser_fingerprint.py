@@ -324,7 +324,7 @@ def fingerprint_script(profile: BrowserProfile) -> str:
         navigator.getBattery = async () => ({{
             charging: true, chargingTime: 0,
             dischargingTime: Infinity, level: {p.battery_level},
-            addEventListener: () => {{}}, removeEventListener: () {{}}
+            addEventListener: () => {{}}, removeEventListener: () => {{}}
         }});
     }} catch(e) {{}}
 
