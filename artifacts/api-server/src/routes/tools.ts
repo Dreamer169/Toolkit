@@ -1840,7 +1840,9 @@ router.post("/tools/outlook/register", async (req, res) => {
     }
 
     // AUTO-LINK: outlook/register -> unitool_pipeline.py
-    if (okCount > 0) {
+    // DISABLED: chain_v3 (PM2) handles unitool registration autonomously.
+    // unitool_pipeline.py would conflict with chain_v3 by picking up verify_pending accounts.
+    if (false && okCount > 0) {
       try {
         const { spawn: _spawnUT } = await import("child_process");
         job.logs.push({ type: "log", message: `🔗 Outlook 注册完成，自动触发 unitool 流水线 (${okCount} 个账号)…` });

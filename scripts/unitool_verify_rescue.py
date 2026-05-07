@@ -61,7 +61,7 @@ def get_pending_account():
           AND (
             notes IS NULL
             OR notes NOT LIKE '%rescue_fail_at=%'
-            OR updated_at < NOW() - INTERVAL '30 minutes'
+            OR updated_at < NOW() - INTERVAL '5 minutes'
           )
         ORDER BY updated_at ASC NULLS LAST
         LIMIT 1
@@ -232,10 +232,37 @@ def login_via_script(email, password):
     return ""
 
 # ── 主逻辑 ────────────────────────────────────────────────────────────────────
+def cleanup_stale_processing(max_age_min=30):
+    """清理卡死超过 max_age_min 分钟的 unitool_processing 锁（防孤儿锁永久阻塞）"""
+    try:
+        conn = db_connect(); cur = conn.cursor()
+        cur.execute("""
+            UPDATE accounts SET
+              tags = TRIM(BOTH ',' FROM regexp_replace(tags, ',?unitool_processing', '', 'g')),
+              updated_at = NOW()
+            WHERE platform='outlook'
+              AND tags LIKE '%%unitool_processing%%'
+              AND tags NOT LIKE '%%unitool_registered%%'
+              AND updated_at < NOW() - INTERVAL '%s minutes'
+            RETURNING id, email
+        """ % max_age_min)
+        cleaned = cur.fetchall()
+        if cleaned:
+            log(f"[stale] 🧹 {len(cleaned)} 个卡死 processing 已自动解锁: {[r[1] for r in cleaned]}")
+        conn.commit(); conn.close()
+    except Exception as e:
+        log(f"[stale] 解锁异常(忽略): {e}")
+
 def main():
     global _account_id, _success_flag
     open(LOG, "w").write("")
     log("=== unitool_verify_rescue start ===")
+
+    # 清理孤儿 processing 锁（>30min 未释放 = 崩溃残留）
+    try:
+        cleanup_stale_processing(30)
+    except Exception as e:
+        log(f"[stale] 异常(忽略): {e}")
 
     row = get_pending_account()
     if not row:

@@ -77,7 +77,8 @@ def _atexit_handler():
             # already_registered 类账号 (unitool_already) 不加 reg_retry — 永久跳过
             if ("unitool_reg_retry" not in new_tags
                     and "unitool_registered" not in new_tags
-                    and "unitool_already" not in new_tags):
+                    and "unitool_already" not in new_tags
+                    and "unitool_verify_pending" not in new_tags):
                 new_tags = (new_tags + ",unitool_reg_retry").strip(",")
             cur.execute(
                 "UPDATE accounts SET tags=%s, updated_at=NOW() WHERE id=%s",
@@ -186,7 +187,11 @@ def db_mark_fail(account_id, reason=""):
         if "unitool_reg_retry" not in new_tags:
             new_tags = (new_tags + ",unitool_reg_retry").strip(",")
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
-    note_line = "\nunitool_fail=" + reason[:120] + " at=" + ts
+    # note prefix matches actual fail_tag type (avoids confusion in notes)
+    _note_prefix = ("unitool_already" if fail_tag == "unitool_already"
+                    else "unitool_verify_pending" if fail_tag == "unitool_verify_pending"
+                    else "unitool_reg_retry")
+    note_line = "\n" + _note_prefix + "_fail=" + reason[:120] + " at=" + ts
     cur.execute("UPDATE accounts SET tags=%s, notes=COALESCE(notes,'') || %s, updated_at=NOW() WHERE id=%s",
                 (new_tags, note_line, account_id))
     conn.commit(); conn.close()
