@@ -114,6 +114,7 @@ def db_get_fresh_account():
            AND tags NOT LIKE '%%unitool_rescue_dead%%'
            AND tags NOT LIKE '%%unitool_verify_pending%%'
            AND tags NOT LIKE '%%not_found%%'
+           AND tags NOT LIKE '%%abuse_mode%%'
           ))
         ORDER BY RANDOM() LIMIT 1
     """)
@@ -137,6 +138,7 @@ def db_count_fresh():
            AND tags NOT LIKE '%%unitool_rescue_dead%%'
            AND tags NOT LIKE '%%unitool_verify_pending%%'
            AND tags NOT LIKE '%%not_found%%'
+           AND tags NOT LIKE '%%abuse_mode%%'
           ))
     """)
     count = cur.fetchone()[0]; conn.close()

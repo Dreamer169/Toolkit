@@ -69,6 +69,7 @@ def get_next_account():
                tags NOT LIKE '%unitool_registered%'
             AND tags NOT LIKE '%unitool_fail%'
             AND tags NOT LIKE '%token_invalid%'
+            AND tags NOT LIKE '%abuse_mode%'
           ))
           AND LENGTH(COALESCE(password,'')) >= 12
         ORDER BY created_at DESC NULLS LAST
@@ -262,7 +263,11 @@ def poll_inbox_for_verify(refresh_token, timeout_sec=300, interval_sec=20):
             log(f"  [inbox+junk] 未找到，剩余{remaining}s，{interval_sec}s后重试...")
             time.sleep(interval_sec)
         except Exception as e:
-            log(f"  [inbox] 读取异常: {e}")
+            err_s = str(e)
+            log(f"  [inbox] 读取异常: {err_s}")
+            if "400" in err_s or "401" in err_s:
+                log("  [inbox] token已废弃(400/401)，直接放弃")
+                return "__TOKEN_INVALID__"
             access_token = ""  # 强制刷新token
             time.sleep(interval_sec)
     
