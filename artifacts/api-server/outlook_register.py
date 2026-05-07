@@ -608,6 +608,14 @@ class PatchrightController(BaseController):
     # [付费打码已禁] """
     def launch(self, headless=True):
         from patchright.sync_api import sync_playwright
+        import subprocess as _sp, os as _os
+        # v9.45: 启动前释放 Linux page cache（安全的，不影响匿名页/swap）
+        try:
+            _sp.run(["sync"], check=False, timeout=3)
+            with open("/proc/sys/vm/drop_caches", "w") as _dc:
+                _dc.write("1\n")  # 1=pagecache only (safer than 3)
+        except Exception:
+            pass
         p = sync_playwright().start()
         b = p.chromium.launch(
             headless=headless,
@@ -630,12 +638,29 @@ class PatchrightController(BaseController):
                 "--metrics-recording-only",
                 "--mute-audio",
                 # v9.43: OOM 保护 — 限制 JS 堆 + renderer 进程数，防止 TargetClosedError
-                "--js-flags=--max-old-space-size=512",
+                "--js-flags=--max-old-space-size=384",
                 "--renderer-process-limit=1",
                 "--disable-renderer-backgrounding",
+                # v9.45: 额外内存节省
+                "--disable-site-isolation-trials",
+                "--no-zygote",
+                "--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints",
+                "--aggressive-cache-discard",
+                "--disable-cache",
+                "--disk-cache-size=1",
             ],
             proxy=self._build_proxy_cfg(),
         )
+        # v9.45: 降低 Chrome OOM score (默认300=优先被杀) → -200 让内核先杀其他进程
+        try:
+            for _pid in _os.listdir("/proc"):
+                if not _pid.isdigit(): continue
+                _comm = open(f"/proc/{_pid}/comm").read().strip() if _os.path.exists(f"/proc/{_pid}/comm") else ""
+                if "chrome" in _comm.lower():
+                    with open(f"/proc/{_pid}/oom_score_adj", "w") as _f:
+                        _f.write("-200\n")
+        except Exception:
+            pass
         return p, b
 
     def _try_enter_challenge_patchright(self, page) -> bool:
@@ -2636,6 +2661,18 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
     _browser_crash_retries = 0
     _MAX_BROWSER_CRASH_RETRIES = 1
 
+    # v9.45: 启动前预释放 swap 压力：等待可用内存 > 1GB，否则等待最多 20s
+    _mem_wait = 0
+    while _mem_wait < 20:
+        try:
+            _avail = int([l for l in open("/proc/meminfo").readlines() if l.startswith("MemAvailable")][0].split()[1])
+            if _avail > 900000:  # >900MB free
+                break
+            print(f"[register] ⚠ 可用内存 {_avail//1024}MB < 900MB，等待3s...", flush=True)
+            time.sleep(3)
+            _mem_wait += 3
+        except Exception:
+            break
     p, b = ctrl.launch(headless=headless)
     if not p:
         result["error"] = "浏览器启动失败"
