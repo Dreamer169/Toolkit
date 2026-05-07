@@ -63,7 +63,7 @@ def _load_token() -> str:
 def _graph_get(path: str, token: str) -> dict:
     if "?" in path:
         base, qs = path.split("?", 1)
-        qs = urllib.parse.quote(qs, safe="=&$/'")
+        qs = urllib.parse.quote(qs, safe="=&$/'+")
         url = f"https://graph.microsoft.com/v1.0{base}?{qs}"
     else:
         url = f"https://graph.microsoft.com/v1.0{path}"
@@ -78,7 +78,7 @@ def _graph_get_with_token(path: str, access_token: str) -> dict:
     """用已有 access_token 直接查询（不走文件）"""
     if "?" in path:
         base, qs = path.split("?", 1)
-        qs = urllib.parse.quote(qs, safe="=&$/'")
+        qs = urllib.parse.quote(qs, safe="=&$/'+")
         url = f"https://graph.microsoft.com/v1.0{base}?{qs}"
     else:
         url = f"https://graph.microsoft.com/v1.0{path}"
@@ -527,6 +527,68 @@ def _extract_ms_otp(text: str) -> str | None:
             continue
         return c
     return None
+
+
+
+
+# ─────────────────────────────────────────────────────────────
+# 5. Graph API 发件（Mail.Send scope）
+# ─────────────────────────────────────────────────────────────
+
+def send_mail_graph(
+    refresh_token: str,
+    to_address: str,
+    subject: str,
+    body: str,
+    body_type: str = "HTML",
+) -> dict:
+    """通过 Microsoft Graph API 发送邮件（POST /me/sendMail）。
+
+    参数:
+        refresh_token: 账号的 refresh_token（用于获取 access_token）
+        to_address:    收件人地址
+        subject:       邮件主题
+        body:          邮件正文（HTML 或纯文本）
+        body_type:     "HTML" 或 "Text"（默认 "HTML"）
+
+    返回:
+        {"success": True} 或 {"success": False, "error": "..."}
+
+    说明:
+        Mail.Send scope 已在 outlook_register.py 与 auto_device_code.py 中申请。
+        Graph API POST /me/sendMail 成功时返回 202 Accepted，无响应体。
+    """
+    try:
+        access_token = _refresh_access_token(refresh_token)
+    except Exception as e:
+        return {"success": False, "error": f"token 刷新失败: {e}"}
+
+    payload = {
+        "message": {
+            "subject": subject,
+            "body": {"contentType": body_type, "content": body},
+            "toRecipients": [{"emailAddress": {"address": to_address}}],
+        },
+        "saveToSentItems": True,
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        "https://graph.microsoft.com/v1.0/me/sendMail",
+        data=data,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(req, timeout=20)
+        return {"success": True}
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")
+        return {"success": False, "error": f"HTTP {e.code}: {err_body[:300]}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 if __name__ == "__main__":

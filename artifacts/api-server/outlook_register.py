@@ -9,7 +9,7 @@ Outlook/Hotmail 批量注册自动化脚本
   - patchright 双 iframe CAPTCHA: 可访问性挑战按钮
   - playwright CAPTCHA: Enter键 + hsprotect.net 流量监听
   - Faker 生成真实人名
-  - 可选 OAuth2 刷新 Token
+  - 注册成功后自动执行 OAuth2 authorization_code 授权，强制获取 refresh_token（非可选）
 
 用法:
   python3 outlook_register.py --count 3 --proxy socks5://127.0.0.1:1080
