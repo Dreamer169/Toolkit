@@ -440,9 +440,31 @@ async def unitool_register(email, password, ref_code=""):
             reg_error   = ""
 
             if ref_code:
-                log(f"[unitool_reg] 先访问推荐链接: https://unitool.ai/ref/{ref_code}")
-                await tab.go_to(f"https://unitool.ai/ref/{ref_code}")
-                await asyncio.sleep(4)
+                # FIX D: 访问 ref 链接后验证 ref-code cookie 写入，最多重试 3 次
+                _ref_cookie_ok = False
+                for _ref_attempt in range(3):
+                    log(f"[unitool_reg] 访问推荐链接 (attempt {_ref_attempt+1}): https://unitool.ai/ref/{ref_code}")
+                    await tab.go_to(f"https://unitool.ai/ref/{ref_code}")
+                    await asyncio.sleep(4)
+                    try:
+                        _raw = await tab.get_cookies()
+                        if isinstance(_raw, list):
+                            _cdict = {c.get("name", ""): c.get("value", "") for c in _raw}
+                        else:
+                            _lst = _raw.get("cookies", _raw.get("result", {}).get("cookies", []))
+                            _cdict = {c.get("name", ""): c.get("value", "") for c in _lst}
+                        if _cdict.get("ref-code", "") == ref_code:
+                            log(f"  [FIX D] ref-code cookie confirmed: {ref_code}")
+                            _ref_cookie_ok = True
+                            break
+                        else:
+                            log(f"  [FIX D] ref-code cookie missing attempt {_ref_attempt+1}, got keys={list(_cdict.keys())[:8]}")
+                            await asyncio.sleep(3)
+                    except Exception as _ce:
+                        log(f"  [FIX D] get_cookies err: {_ce} (attempt {_ref_attempt+1})")
+                        await asyncio.sleep(3)
+                if not _ref_cookie_ok:
+                    log(f"  [WARN] ref-code cookie unconfirmed after 3 attempts — proceeding anyway")
 
             log(f"[unitool_reg] goto {entry_url}")
             await tab.go_to(entry_url)
