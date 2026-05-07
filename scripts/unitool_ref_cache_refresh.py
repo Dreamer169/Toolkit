@@ -2,17 +2,15 @@
 """
 unitool_ref_cache_refresh.py — 后台定时刷新 ref_code 余额缓存
 ================================================================
-每 25 分钟直接 import unitool_ref_stats.main() 更新 /tmp/unitool_ref_code_cache.json
-被 PM2 以循环模式调度。
+每 25 分钟用 subprocess 调用 unitool_ref_stats.py --refresh
+更新 /tmp/unitool_ref_code_cache.json
 
 Usage:
   python3 unitool_ref_cache_refresh.py [--once]
-    --once: 只刷新一次然后退出
 """
-import argparse, json, os, sys, time
+import argparse, json, subprocess, sys, time
 
 STATS_SCRIPT = "/root/Toolkit/scripts/unitool_ref_stats.py"
-CACHE_FILE   = "/tmp/unitool_ref_code_cache.json"
 LOG_FILE     = "/tmp/unitool_ref_cache_refresh.log"
 INTERVAL     = 25 * 60   # 25 min
 
@@ -30,33 +28,28 @@ def do_refresh():
     log("开始刷新 ref_code 余额缓存...")
     t0 = time.time()
     try:
-        # 直接 exec 脚本内容，捕获 sys.argv
-        old_argv = sys.argv[:]
-        sys.argv = [STATS_SCRIPT, "--refresh"]
-        
-        # 捕获 print 到 stdout
-        import io
-        old_stdout = sys.stdout
-        sys.stdout = io.StringIO()
-        
-        script_globals = {"__name__": "__main__", "__file__": STATS_SCRIPT}
-        with open(STATS_SCRIPT) as f:
-            code = compile(f.read(), STATS_SCRIPT, "exec")
-        exec(code, script_globals)
-        
-        captured = sys.stdout.getvalue()
-        sys.stdout = old_stdout
-        sys.argv = old_argv
-        
+        r = subprocess.run(
+            ["python3", STATS_SCRIPT, "--refresh"],
+            capture_output=True, text=True, timeout=300
+        )
         elapsed = int(time.time() - t0)
-        data = json.loads(captured)
+        if r.returncode != 0:
+            log(f"❌ 脚本退出码 {r.returncode} ({elapsed}s): {r.stderr.strip()[:200]}")
+            return
+        raw = r.stdout.strip()
+        # 找到第一个 { 开始的 JSON（防止脚本有非 JSON 前置输出）
+        json_start = raw.find("{")
+        if json_start == -1:
+            log(f"❌ 无 JSON 输出 ({elapsed}s), stdout={raw[:100]}")
+            return
+        data = json.loads(raw[json_start:])
         summary = data.get("summary", {})
-        log(f"✅ 刷新完成 ({elapsed}s): {summary.get('with_own_code',0)} 个码, "
-            f"slots={summary.get('available_slots',0)}, "
-            f"earnings=${summary.get('total_earnings',0)}")
+        log(f"✅ 刷新完成 ({elapsed}s): {summary.get(with_own_code, 0)} 个码, "
+            f"slots={summary.get(available_slots, 0)}, "
+            f"earnings=${summary.get(total_earnings, 0)}")
+    except subprocess.TimeoutExpired:
+        log(f"❌ 超时 (300s)")
     except Exception as e:
-        sys.stdout = old_stdout if "old_stdout" in dir() else sys.stdout
-        sys.argv = old_argv if "old_argv" in dir() else sys.argv
         elapsed = int(time.time() - t0)
         log(f"❌ 刷新异常 ({elapsed}s): {e}")
 
