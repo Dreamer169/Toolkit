@@ -1069,10 +1069,10 @@ router.get("/data/unitool-stats", async (req, res) => {
     // 2. ref_code 池信息 (pool-aware v2: fix regex case + multi-code pool)
     const refRows = await query<{ email:string; notes:string; tags:string }>(
       `SELECT email, notes, tags FROM accounts
-       WHERE platform=outlook AND (
-         tags LIKE %unitool_ref_master% OR
-         tags LIKE %unitool_ref_activated% OR
-         notes LIKE %unitool_ref_code=%
+       WHERE platform='outlook' AND (
+         tags LIKE '%unitool_ref_master%' OR
+         tags LIKE '%unitool_ref_activated%' OR
+         notes LIKE '%unitool_ref_code=%'
        )
        ORDER BY updated_at DESC`
     );
