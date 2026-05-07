@@ -513,7 +513,7 @@ async def process_one_account(acct_id, email, password, refresh_token, ref_code=
     if not reg_ok:
         log(f"[step1] 注册失败: {reg_err}")
         mark_account(acct_id, "unitool_fail", f"reg_err={reg_err[:80]}")
-        return False
+        return False, reg_err
     
     log("[step1] 注册成功（邮件已发送）")
     
@@ -524,7 +524,7 @@ async def process_one_account(acct_id, email, password, refresh_token, ref_code=
     if not verify_url:
         log("[step2] 未找到verify链接")
         mark_account(acct_id, "unitool_verify_pending", "no_verify_email")
-        return False
+        return False, "no_verify_email"
     
     # Step 3: 点击verify链接
     log("[step3] 点击verify链接...")
@@ -533,7 +533,7 @@ async def process_one_account(acct_id, email, password, refresh_token, ref_code=
     if ssid:
         log(f"[step3] ✅ verify成功，ssid获取！ssid_len={len(ssid)}")
         save_ssid(acct_id, email, ssid)
-        return True
+        return True, ssid
     
     if to_entry:
         log("[step3] verify重定向到/entry，token可能已过期或需要另行登录")
@@ -548,11 +548,11 @@ async def process_one_account(acct_id, email, password, refresh_token, ref_code=
     if ssid:
         log(f"[step4] ✅ 登录成功，ssid获取！ssid_len={len(ssid)}")
         save_ssid(acct_id, email, ssid)
-        return True
+        return True, ssid
     else:
         log("[step4] 登录失败，无ssid")
         mark_account(acct_id, "unitool_fail", "login_no_ssid")
-        return False
+        return False, "login_no_ssid"
 
 async def retry_pending_account(acct_id, email, password, refresh_token):
     """重试pending账号：跳过step1直接轮询inbox获取verify链接"""
@@ -618,10 +618,12 @@ async def main():
         acct_id, email, password, refresh_token = row
         log(f"[main] 处理账号: {email}")
         mark_account(acct_id, "unitool_processing", "")
-        success = await process_one_account(
+        result = await process_one_account(
             acct_id, email, password, refresh_token, ref_code=args.ref_code)
-        if not success:
-            print(f"[FAIL] {email}|pipeline_failed", flush=True)
+        ok = result[0] if isinstance(result, tuple) else result
+        reason = result[1] if isinstance(result, tuple) and len(result) > 1 else "pipeline_failed"
+        if not ok:
+            print(f"[FAIL] {email}|{reason}", flush=True)
         return
 
     if args.email and args.account_id:
@@ -659,11 +661,13 @@ async def main():
         # 先标记"正在处理"防止重复拉取
         mark_account(acct_id, "unitool_processing", "")
         
-        success = await process_one_account(acct_id, email, password, refresh_token)
-        if success:
+        result = await process_one_account(acct_id, email, password, refresh_token)
+        ok = result[0] if isinstance(result, tuple) else result
+        reason = result[1] if isinstance(result, tuple) and len(result) > 1 else "pipeline_failed"
+        if ok:
             ok_count += 1
         else:
-            print(f"[FAIL] {email}|pipeline_failed", flush=True)
+            print(f"[FAIL] {email}|{reason}", flush=True)
 
         if i < args.batch - 1:
             log("[main] 间隔10s...")
