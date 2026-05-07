@@ -51,9 +51,9 @@ def do_refresh():
         elapsed = int(time.time() - t0)
         data = json.loads(captured)
         summary = data.get("summary", {})
-        log(f"✅ 刷新完成 ({elapsed}s): {summary.get(with_own_code,0)} 个码, "
-            f"slots={summary.get(available_slots,0)}, "
-            f"earnings=${summary.get(total_earnings,0)}")
+        log(f"✅ 刷新完成 ({elapsed}s): {summary.get('with_own_code',0)} 个码, "
+            f"slots={summary.get('available_slots',0)}, "
+            f"earnings=${summary.get('total_earnings',0)}")
     except Exception as e:
         sys.stdout = old_stdout if "old_stdout" in dir() else sys.stdout
         sys.argv = old_argv if "old_argv" in dir() else sys.argv
