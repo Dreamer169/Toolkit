@@ -1066,21 +1066,56 @@ router.get("/data/unitool-stats", async (req, res) => {
          AND LENGTH(COALESCE(password,''))>=8`
     );
 
-    // 2. ref_code 信息
-    const refRow = await queryOne<{ email:string; notes:string }>(
-      `SELECT email, notes FROM accounts
-       WHERE platform='outlook' AND (tags LIKE '%unitool_ref_master%' OR notes LIKE '%unitool_ref_code=%')
-       ORDER BY updated_at DESC LIMIT 1`
+    // 2. ref_code 池信息 (pool-aware v2: fix regex case + multi-code pool)
+    const refRows = await query<{ email:string; notes:string; tags:string }>(
+      `SELECT email, notes, tags FROM accounts
+       WHERE platform=outlook AND (
+         tags LIKE %unitool_ref_master% OR
+         tags LIKE %unitool_ref_activated% OR
+         notes LIKE %unitool_ref_code=%
+       )
+       ORDER BY updated_at DESC`
     );
-    let refCode = "", refMasterEmail = "";
-    if (refRow?.notes) {
-      refCode        = (refRow.notes.match(/unitool_ref_code=([a-z0-9]+)/) ?? [])[1] ?? "";
-      refMasterEmail = refRow.email ?? "";
+    let refMasterEmail = "", currentRefCode = "", currentRefUsed = 0;
+    let refPoolTotal = 0, refPoolAvailable = 0, refPoolExhausted = 0, refTotalSlots = 0;
+    // Read API cache for actual conversion counts
+    let convCache: Record<string, { code?: string; conversions?: number }> = {};
+    try {
+      const { readFileSync: rfs } = await import("fs");
+      convCache = JSON.parse(rfs("/tmp/unitool_ref_code_cache.json", "utf8"));
+    } catch {}
+    // Read rotation index
+    let rotateIdx = 0;
+    try {
+      const { readFileSync: rfs2 } = await import("fs");
+      const rd = JSON.parse(rfs2("/tmp/unitool_ref_rotate.json", "utf8"));
+      rotateIdx = Number(rd.idx ?? 0);
+    } catch {}
+    const codeList: Array<{ code: string; used: number; email: string }> = [];
+    for (const row of refRows) {
+      if ((row.tags ?? "").includes("unitool_ref_master") && !refMasterEmail) {
+        refMasterEmail = row.email;
+      }
+      // FIX: old regex [a-z0-9]+ missed uppercase letters (QqWu3, DFU7Y, etc.)
+      const cm = (row.notes ?? "").match(/unitool_ref_code=([A-Za-z0-9_-]+)/);
+      if (!cm) continue;
+      const code = cm[1];
+      // Use API cache for real conversion count; fall back to notes counting
+      const cachedEntry = Object.values(convCache).find((v) => v.code === code);
+      const used = typeof cachedEntry?.conversions === "number"
+        ? cachedEntry.conversions
+        : ((row.notes ?? "").match(/ref_registered=/g) ?? []).length;
+      codeList.push({ code, used, email: row.email });
+      refPoolTotal++;
+      if (used >= 10) { refPoolExhausted++; }
+      else { refPoolAvailable++; refTotalSlots += (10 - used); }
+      if (!refMasterEmail) refMasterEmail = row.email;
     }
-    // refUsed: count ref_registered= occurrences in master account notes (authoritative)
-    const refUsed = refRow?.notes
-      ? (refRow.notes.match(/ref_registered=/g) ?? []).length
-      : 0;
+    // Current rotating code (round-robin over available codes)
+    const availableCodes = codeList.filter(c => c.used < 10);
+    const curCode = availableCodes[rotateIdx % Math.max(1, availableCodes.length)];
+    currentRefCode = curCode?.code ?? (codeList[0]?.code ?? "");
+    currentRefUsed = curCode?.used ?? 0;
 
     // 3. proxy 池状态
     let pool = { total:0, live:0, dead:0, ssid_len:0 };
@@ -1171,7 +1206,7 @@ router.get("/data/unitool-stats", async (req, res) => {
         processing: Number(ol?.processing ?? 0),
         total:      Number(ol?.total ?? 0),
       },
-      ref: { master: refMasterEmail, ref_code: refCode, used: refUsed, limit: 10 },
+      ref: { master: refMasterEmail, ref_code: currentRefCode, used: currentRefUsed, limit: 10, pool_total: refPoolTotal, pool_available: refPoolAvailable, pool_exhausted: refPoolExhausted, total_slots: refTotalSlots },
       pool,
       recent: recent.map(r => {
         const m2 = r.notes?.match(/unitool_ssid=([a-f0-9]+)/);

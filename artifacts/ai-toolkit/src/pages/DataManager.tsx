@@ -40,7 +40,7 @@ interface Stats {
 
 interface UnitoolStats {
   outlook:      { fresh: number; registered: number; fail: number; processing: number; total: number };
-  ref:          { master: string; ref_code: string; used: number; limit: number };
+  ref:          { master: string; ref_code: string; used: number; limit: number; pool_total: number; pool_available: number; pool_exhausted: number; total_slots: number };
   pool:         { total: number; live: number; dead: number; ssid_len: number };
   recent:       { id: number; email: string; ssid_prefix: string; ssid_len: number; updated_at: string }[];
   chain:        { status: string; last_run: string; brief: string };
@@ -165,11 +165,11 @@ function StatsPanel() {
               <div className="text-xs text-gray-600">共 {uStats.pool.total} 个 ssid</div>
             </div>
             <div className="bg-[#0d1117] border border-[#30363d] rounded-lg p-3 text-center">
-              <div className={`text-2xl font-bold ${uStats.ref.used >= uStats.ref.limit ? "text-red-400" : "text-amber-400"}`}>
-                {uStats.ref.used}<span className="text-base text-gray-600">/{uStats.ref.limit}</span>
+              <div className={`text-2xl font-bold ${uStats.ref.pool_available === 0 ? "text-red-400" : "text-emerald-400"}`}>
+                {uStats.ref.pool_available ?? 0}<span className="text-base text-gray-600">/{uStats.ref.pool_total ?? 0}</span>
               </div>
-              <div className="text-xs text-gray-400 mt-1">ref_code 已用</div>
-              <div className="text-xs text-gray-600 font-mono">{uStats.ref.ref_code || "—"}</div>
+              <div className="text-xs text-gray-400 mt-1">ref 码池可用</div>
+              <div className="text-xs text-gray-600">{uStats.ref.total_slots ?? 0} 剩余名额</div>
             </div>
           </div>
 
@@ -202,31 +202,42 @@ function StatsPanel() {
 
           {/* ref_code + chain_v3 状态 + proxy pool */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {/* ref_code 详情 */}
+            {/* ref_code 码池详情 */}
             <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">
-              <h3 className="text-sm font-semibold text-gray-300 mb-3">ref_code 使用情况</h3>
+              <h3 className="text-sm font-semibold text-gray-300 mb-3">ref 码池状态</h3>
               <div className="space-y-2">
                 <div className="flex justify-between text-xs">
-                  <span className="text-gray-500">master 账号</span>
-                  <span className="text-gray-300 font-mono truncate max-w-[180px]">{uStats.ref.master || "—"}</span>
-                </div>
-                <div className="flex justify-between text-xs">
-                  <span className="text-gray-500">ref_code</span>
+                  <span className="text-gray-500">当前轮转码</span>
                   <span className="text-emerald-400 font-mono font-bold">{uStats.ref.ref_code || "—"}</span>
                 </div>
                 <div className="flex justify-between text-xs">
-                  <span className="text-gray-500">已使用 / 上限</span>
+                  <span className="text-gray-500">当前码已用 / 上限</span>
                   <span className={uStats.ref.used >= uStats.ref.limit ? "text-red-400 font-bold" : "text-white"}>
                     {uStats.ref.used} / {uStats.ref.limit}
                   </span>
                 </div>
-                {/* 使用量进度条 */}
+                <div className="flex justify-between text-xs">
+                  <span className="text-gray-500">池总码数 / 可用 / 耗尽</span>
+                  <span className="text-white">
+                    <b className="text-blue-400">{uStats.ref.pool_total ?? 0}</b>
+                    {" / "}
+                    <b className="text-emerald-400">{uStats.ref.pool_available ?? 0}</b>
+                    {" / "}
+                    <b className="text-red-400">{uStats.ref.pool_exhausted ?? 0}</b>
+                  </span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-gray-500">池总剩余名额</span>
+                  <span className="text-amber-400 font-bold">{uStats.ref.total_slots ?? 0} 个</span>
+                </div>
+                {/* 可用码进度条 */}
                 <div className="h-2 bg-[#0d1117] rounded-full overflow-hidden mt-1">
                   <div
-                    className={`h-full rounded-full transition-all ${uStats.ref.used >= uStats.ref.limit ? "bg-red-600" : uStats.ref.used >= 7 ? "bg-amber-500" : "bg-emerald-600"}`}
-                    style={{ width: `${Math.min(100, uStats.ref.used / uStats.ref.limit * 100)}%` }}
+                    className={`h-full rounded-full transition-all ${(uStats.ref.pool_available ?? 0) === 0 ? "bg-red-600" : "bg-emerald-600"}`}
+                    style={{ width: `${uStats.ref.pool_total ? Math.min(100, (uStats.ref.pool_available ?? 0) / uStats.ref.pool_total * 100) : 0}%` }}
                   />
                 </div>
+                <div className="text-xs text-gray-600 mt-1 truncate">master: {uStats.ref.master || "—"}</div>
               </div>
             </div>
 
