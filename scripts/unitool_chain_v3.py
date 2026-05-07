@@ -256,6 +256,7 @@ def db_save_ref_code(account_id, ref_code):
 
 REF_CODE_CACHE_FILE = "/tmp/unitool_ref_code_cache.json"
 REF_CODE_CACHE_TTL  = 1800  # 30 分钟
+ROTATE_FILE         = "/tmp/unitool_ref_rotate.json"  # 轮转索引持久化
 
 def _load_ref_cache() -> dict:
     try:
@@ -303,13 +304,16 @@ def _api_check_ref_code(ssid: str, account_id: int = 0) -> tuple:
         return ("", -1)
 
 
-def create_ref_code_via_proxy(ssid: str, email: str) -> str:
+def create_ref_code_via_proxy(ssid: str, email: str, port_hint: int = 0) -> str:
     """
     FIX F: 通过 SOCKS5 代理调 POST /api/ref-codes，为账号生成专属邀请码。
     unitool 限制同一 IP 只能创建一个 ref_code，必须通过住宅代理绕开。
     成功返回 ref_code 字符串，失败返回 ""。
     """
-    for port in RESI_PORTS:
+    # 从 port_hint 偏移出发，分散 IP
+    _ports = (RESI_PORTS[port_hint % len(RESI_PORTS):]
+              + RESI_PORTS[:port_hint % len(RESI_PORTS)])
+    for port in _ports:
         try:
             r = subprocess.run(
                 ["curl", "-s", "--max-time", "12",
@@ -336,12 +340,12 @@ def create_ref_code_via_proxy(ssid: str, email: str) -> str:
     return ""
 
 
-def db_get_current_ref_code():
+def db_get_all_ref_codes() -> list:
     """
-    FIX G: 从 DB 获取当前可用 ref_code（剩余邀请槽 > 0）。
-    优先选 unitool_ref_activated 中 conversions 最少的，最后兜底 unitool_ref_master。
-    通过 GET /api/user/ref-code 获取真实 conversions，防止本地计数漏记导致用超。
-    返回 (account_id, email, ref_code, used_count) 或 (None, None, "", 0)
+    获取 DB 中所有有余量的 ref_code（conversions < MAX_REF_SLOTS）。
+    对每个账号调 API 验证真实 conversions（带 30min 缓存）。
+    返回: [{"id": int, "email": str, "ref_code": str, "used": int}, ...]
+    按 used 升序排列（余量多的在前）。
     """
     conn = db_connect(); cur = conn.cursor()
     cur.execute("""
@@ -349,15 +353,11 @@ def db_get_current_ref_code():
         WHERE platform='outlook'
           AND notes LIKE '%%unitool_ref_code=%%'
           AND (tags LIKE '%%unitool_ref_master%%' OR tags LIKE '%%unitool_ref_activated%%')
-        ORDER BY
-          CASE WHEN tags LIKE '%%unitool_ref_activated%%' THEN 0 ELSE 1 END,
-          updated_at ASC
+        ORDER BY updated_at ASC
     """)
     rows = cur.fetchall(); conn.close()
 
-    best_id = best_email = best_rc = None
-    best_used = MAX_REF_SLOTS
-
+    available = []
     for acc_id, acc_email, notes, tags in rows:
         if not notes:
             continue
@@ -365,45 +365,89 @@ def db_get_current_ref_code():
         if not m:
             continue
         rc = m.group(1)
-        # 先用本地计数快速过滤
         local_used = len(re.findall(r"ref_registered=", notes))
-        # FIX G: 用 API 获取真实 conversions（本地计数常常漏记）
-        # 旧逻辑 bug: 老版 run_reflink 把 inviter 的 xjfjk 写入了所有账号 notes，
-        #   导致 DB 里 unitool_ref_code=xjfjk 对大多数账号来说是脏数据。
-        # 正确逻辑: API 返回 null → 无自己的码 → 跳过（DB 脏数据）
-        #           API 返回真实码 → 用 API 的码和 conversions（即使 DB 存的是旧的 xjfjk）
+
         ssid_m = re.search(r"unitool_ssid=([0-9a-f]{40,})", notes)
         if ssid_m:
             api_rc, api_conv = _api_check_ref_code(ssid_m.group(1), acc_id)
             if api_conv < 0:
-                # API 失败（网络/超时），降级用本地计数，保守估计
-                used = local_used
-                log(f"[ref] id={acc_id} {acc_email} API failed, fallback local used={local_used}")
+                used = local_used  # API 失败，保守降级
+                log(f"[ref] id={acc_id} {acc_email} API failed, fallback local={local_used}")
             elif not api_rc:
-                # API 返回 null：该账号没有自己的 ref_code
-                # DB 里存的 rc 是从 inviter 的 session 读来的脏数据，跳过
-                log(f"[ref] id={acc_id} {acc_email} API=null (DB rc={rc} is dirty/inviter code), skip")
+                log(f"[ref] id={acc_id} {acc_email} API=null (DB rc={rc} is dirty), skip")
                 continue
             else:
-                # API 有真实码（信任 API，可能与 DB 存的不同）
                 if api_rc != rc:
-                    log(f"[ref] id={acc_id} {acc_email} DB rc={rc} → API rc={api_rc} (use API)")
-                    rc = api_rc  # 以 API 为准
+                    log(f"[ref] id={acc_id} API rc={api_rc} != DB rc={rc}, use API")
+                    rc = api_rc
                 used = api_conv
-                log(f"[ref] id={acc_id} {acc_email} rc={rc} API_conv={api_conv} local={local_used}")
+                log(f"[ref] id={acc_id} {acc_email} rc={rc} conversions={api_conv}/{MAX_REF_SLOTS}")
         else:
-            used = local_used  # 无 ssid 时只能用本地
-        if used < MAX_REF_SLOTS and used < best_used:
-            best_id    = acc_id
-            best_email = acc_email
-            best_rc    = rc
-            best_used  = used
+            used = local_used
 
-    if best_rc:
-        log(f"[ref] 使用 ref_code={best_rc} from {best_email} used={best_used}/{MAX_REF_SLOTS}")
+        if used < MAX_REF_SLOTS:
+            available.append({"id": acc_id, "email": acc_email,
+                               "ref_code": rc, "used": used})
+
+    available.sort(key=lambda x: x["used"])
+    log(f"[ref] 可用 ref_code 池: {len(available)} 个 → " +
+        ", ".join(f"{r['ref_code']}({r['used']}/{MAX_REF_SLOTS})" for r in available))
+    return available
+
+
+def pick_rotating_ref_code(pool: list) -> dict | None:
+    """
+    从 pool 中轮转选取 ref_code，保证多码分散：
+      - 读 ROTATE_FILE 中的 last_code 和 last_ts
+      - 若上次用过的码仍有余量，选 pool 中下一个（round-robin）
+      - 若只有1个码，直接返回它
+    返回 pool 中的一个 dict，或 None（池为空）
+    """
+    if not pool:
+        return None
+    if len(pool) == 1:
+        return pool[0]
+
+    # 读上次状态
+    last_code = ""
+    try:
+        state = json.loads(open(ROTATE_FILE).read())
+        last_code = state.get("last_code", "")
+    except Exception:
+        pass
+
+    codes = [r["ref_code"] for r in pool]
+    if last_code in codes:
+        idx = (codes.index(last_code) + 1) % len(pool)
     else:
-        log("[ref] DB 无可用 ref_code，将使用 fallback")
-    return best_id, best_email, best_rc, best_used
+        idx = 0  # 上次的码已不在池中（用完/失效），从头开始
+
+    chosen = pool[idx]
+    try:
+        open(ROTATE_FILE, "w").write(json.dumps({
+            "last_code": chosen["ref_code"],
+            "last_email": chosen["email"],
+            "ts": time.time(),
+            "pool_size": len(pool),
+        }))
+    except Exception:
+        pass
+    log(f"[ref] 轮转选取 #{idx+1}/{len(pool)}: ref_code={chosen['ref_code']} "
+        f"from {chosen['email']} used={chosen['used']}/{MAX_REF_SLOTS}")
+    return chosen
+
+
+def db_get_current_ref_code():
+    """
+    兼容旧调用接口，内部改为轮转多码。
+    返回 (account_id, email, ref_code, used_count) 或 (None, None, "", 0)
+    """
+    pool = db_get_all_ref_codes()
+    chosen = pick_rotating_ref_code(pool)
+    if not chosen:
+        log("[ref] DB 无可用 ref_code（所有码已满或未生成）")
+        return None, None, "", 0
+    return chosen["id"], chosen["email"], chosen["ref_code"], chosen["used"]
 
 
 def cleanup_stale_processing(max_age_min=30):
@@ -761,7 +805,9 @@ def main():
     # ── Step 7: 为该账号生成专属 ref_code，并激活到 DB ─────────────────────────
     # FIX F: 先通过代理 POST /api/ref-codes 为新账号创建专属码，再 run_reflink 读取保存
     log(f"[main] ▶ Step7a: 通过代理为 {email} 创建专属 ref_code...")
-    created_code = create_ref_code_via_proxy(ssid, email)
+    # 用账号 id 做偏移，确保不同账号使用不同 RESI IP
+    _port_hint = account_id % len(RESI_PORTS)
+    created_code = create_ref_code_via_proxy(ssid, email, port_hint=_port_hint)
     if created_code:
         log(f"[main] ✅ 代理创建成功: ref_code={created_code}")
         time.sleep(3)  # 等服务器写入
