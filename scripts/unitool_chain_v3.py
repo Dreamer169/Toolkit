@@ -339,19 +339,29 @@ def db_get_current_ref_code():
         # 先用本地计数快速过滤
         local_used = len(re.findall(r"ref_registered=", notes))
         # FIX G: 用 API 获取真实 conversions（本地计数常常漏记）
+        # 旧逻辑 bug: 老版 run_reflink 把 inviter 的 xjfjk 写入了所有账号 notes，
+        #   导致 DB 里 unitool_ref_code=xjfjk 对大多数账号来说是脏数据。
+        # 正确逻辑: API 返回 null → 无自己的码 → 跳过（DB 脏数据）
+        #           API 返回真实码 → 用 API 的码和 conversions（即使 DB 存的是旧的 xjfjk）
         ssid_m = re.search(r"unitool_ssid=([0-9a-f]{40,})", notes)
         if ssid_m:
             api_rc, api_conv = _api_check_ref_code(ssid_m.group(1))
             if api_conv < 0:
-                # API 失败，降级用本地计数
+                # API 失败（网络/超时），降级用本地计数，保守估计
                 used = local_used
-            elif api_rc and api_rc != rc:
-                # API 返回的 code 和 DB 存的不一致（可能DB污染），跳过
-                log(f"[ref] id={acc_id} DB rc={rc} but API rc={api_rc}, skipping")
+                log(f"[ref] id={acc_id} {acc_email} API failed, fallback local used={local_used}")
+            elif not api_rc:
+                # API 返回 null：该账号没有自己的 ref_code
+                # DB 里存的 rc 是从 inviter 的 session 读来的脏数据，跳过
+                log(f"[ref] id={acc_id} {acc_email} API=null (DB rc={rc} is dirty/inviter code), skip")
                 continue
             else:
+                # API 有真实码（信任 API，可能与 DB 存的不同）
+                if api_rc != rc:
+                    log(f"[ref] id={acc_id} {acc_email} DB rc={rc} → API rc={api_rc} (use API)")
+                    rc = api_rc  # 以 API 为准
                 used = api_conv
-                log(f"[ref] id={acc_id} {acc_email} API conversions={api_conv} local={local_used}")
+                log(f"[ref] id={acc_id} {acc_email} rc={rc} API_conv={api_conv} local={local_used}")
         else:
             used = local_used  # 无 ssid 时只能用本地
         if used < MAX_REF_SLOTS and used < best_used:
