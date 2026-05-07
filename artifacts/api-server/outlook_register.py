@@ -643,11 +643,7 @@ class PatchrightController(BaseController):
                 "--disable-renderer-backgrounding",
                 # v9.45: 额外内存节省
                 "--disable-site-isolation-trials",
-                "--no-zygote",
                 "--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints",
-                "--aggressive-cache-discard",
-                "--disable-cache",
-                "--disk-cache-size=1",
             ],
             proxy=self._build_proxy_cfg(),
         )
