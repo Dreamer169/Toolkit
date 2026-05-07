@@ -322,10 +322,12 @@ def click_verify_link(verify_url):
 # ── Step 2: pydoll注册unitool ────────────────────────────────────────────────
 
 async def unitool_register(email, password, ref_code=""):
-    """用pydoll在unitool.ai注册账号，返回(success, error_msg)"""
+    """用pydoll在unitool.ai注册账号，返回(success, error_msg)
+    v2: 修复 turnstile_failed(len=0) 和 no_redirect_no_ssid
+    """
     from pydoll.browser import Chrome
     from pydoll.browser.options import ChromiumOptions
-    
+
     log(f"[unitool_reg] 开始注册: {email}")
     opt = ChromiumOptions()
     opt.headless = False
@@ -333,62 +335,123 @@ async def unitool_register(email, password, ref_code=""):
     for a in ["--no-sandbox","--disable-dev-shm-usage","--window-size=1440,900",
                "--disable-gpu","--lang=en-US","--disable-blink-features=AutomationControlled"]:
         opt.add_argument(a)
-    
+
     env_backup = os.environ.get("DISPLAY", "")
     os.environ["DISPLAY"] = DISPLAY
-    
+
     def s(r):
         if not isinstance(r, dict): return str(r) if r else ""
         inner = r.get("result", r)
         if isinstance(inner, dict): inner = inner.get("result", inner)
         return str(inner.get("value","")) if isinstance(inner, dict) else str(inner)
-    
+
     async def tok_len(tab):
         return int(s(await tab.execute_script(
             "(document.querySelector('[name=\"cf-turnstile-response\"]')||{value:''}).value.length",
             return_by_value=True)) or 0)
-    
+
+    async def wait_for_token(tab, timeout=15, label=""):
+        for i in range(timeout):
+            await asyncio.sleep(1)
+            n = await tok_len(tab)
+            if n > 20:
+                log(f"  [{label}] token ready at {i+1}s len={n}")
+                return n
+            if i % 5 == 4:
+                log(f"  [{label}] [{i+1}s] waiting token len={n}")
+        return await tok_len(tab)
+
+    async def bypass_until_token(tab, entry_url, max_rounds=4, per_round_wait=15):
+        """
+        FIX turnstile_failed(len=0):
+        1. 先等 Turnstile iframe 出现（10s）
+        2. 每轮 bypass → 等 token per_round_wait 秒
+        3. 全部失败 → reload + 最终一次 bypass
+        """
+        for i in range(10):
+            await asyncio.sleep(1)
+            n_iframe = int(s(await tab.execute_script(
+                "document.querySelectorAll('iframe[src*=\"challenges.cloudflare\"]').length",
+                return_by_value=True)) or 0)
+            if n_iframe > 0:
+                log(f"  Turnstile iframe ready at {i+1}s (count={n_iframe})")
+                break
+            if i % 3 == 2: log(f"  [{i+1}s] waiting Turnstile iframe...")
+
+        for rnd in range(max_rounds):
+            try:
+                await tab._bypass_cloudflare({}, time_to_wait_captcha=20)
+                log(f"  bypass OK (round {rnd+1})")
+            except Exception as e:
+                log(f"  bypass round {rnd+1} err: {e}")
+            n = await wait_for_token(tab, timeout=per_round_wait, label=f"rnd{rnd+1}")
+            if n > 20:
+                return True
+            log(f"  round {rnd+1} token still 0, retrying bypass...")
+            await asyncio.sleep(2)
+
+        # All rounds failed — reload for final attempt
+        log("  all bypass rounds failed — reloading page...")
+        if ref_code:
+            await tab.go_to(f"https://unitool.ai/ref/{ref_code}")
+            await asyncio.sleep(3)
+        await tab.go_to(entry_url)
+        await asyncio.sleep(6)
+        for i in range(12):
+            await asyncio.sleep(1)
+            n_iframe = int(s(await tab.execute_script(
+                "document.querySelectorAll('iframe[src*=\"challenges.cloudflare\"]').length",
+                return_by_value=True)) or 0)
+            if n_iframe > 0: break
+            if i % 3 == 2: log(f"  [reload {i+1}s] waiting iframe...")
+        try:
+            await tab._bypass_cloudflare({}, time_to_wait_captcha=25)
+            log("  final bypass OK")
+        except Exception as e:
+            log(f"  final bypass err: {e}")
+        n = await wait_for_token(tab, timeout=20, label="final")
+        return n > 20
+
+    async def do_submit(tab):
+        return s(await tab.execute_script("""(function(){
+            var btns=Array.from(document.querySelectorAll('button'));
+            for(var b of btns){
+                if(b.innerText.trim()==='Join Unitool'&&!b.disabled){b.click();return 'CLICKED';}
+            }
+            for(var b of btns){
+                if(b.innerText.trim()==='Join Unitool'){b.disabled=false;b.click();return 'FORCE';}
+            }
+            return 'NO_BTN';
+        })()""", return_by_value=True))
+
+    entry_url = "https://unitool.ai/en/entry"
+
     try:
         async with Chrome(options=opt, connection_port=_free_port()) as browser:
             tab = await browser.start()
             await tab.enable_network_events()
-            
+
             reg_success = False
-            reg_error = ""
-            
+            reg_error   = ""
+
             if ref_code:
                 log(f"[unitool_reg] 先访问推荐链接: https://unitool.ai/ref/{ref_code}")
                 await tab.go_to(f"https://unitool.ai/ref/{ref_code}")
                 await asyncio.sleep(4)
-            log("[unitool_reg] goto https://unitool.ai/en/entry")
-            await tab.go_to("https://unitool.ai/en/entry")
+
+            log(f"[unitool_reg] goto {entry_url}")
+            await tab.go_to(entry_url)
             await asyncio.sleep(4)
-            
-            # bypass Turnstile
-            log("[unitool_reg] bypass Turnstile...")
-            for attempt in range(3):
-                try:
-                    await tab._bypass_cloudflare({}, time_to_wait_captcha=20)
-                    log(f"  bypass OK (attempt {attempt+1})")
-                    break
-                except Exception as e:
-                    log(f"  bypass attempt {attempt+1}: {e}")
-                    await asyncio.sleep(2)
-            
-            # 等token
-            for i in range(25):
-                await asyncio.sleep(1)
-                n = await tok_len(tab)
-                if n > 20:
-                    log(f"  token ready at {i+1}s len={n}")
-                    break
-                if i % 5 == 4: log(f"  [{i+1}s] waiting token len={n}")
-            
+
+            # FIX 1: bypass with iframe-readiness check + multi-round retry
+            log("[unitool_reg] bypass Turnstile (v2: iframe-wait + multi-round)...")
+            token_ok = await bypass_until_token(tab, entry_url, max_rounds=4, per_round_wait=15)
+
             n = await tok_len(tab)
-            if n < 20:
-                return False, f"Turnstile failed (len={n})"
-            
-            # 填email
+            if not token_ok or n < 20:
+                return False, f"turnstile_failed len={n}"
+
+            # 填 email
             r = s(await tab.execute_script(f"""(function(){{
                 var el=document.querySelector('input[name="email"]')||document.querySelector('input[type="email"]');
                 if(!el) return 'NOT_FOUND';
@@ -398,8 +461,8 @@ async def unitool_register(email, password, ref_code=""):
             }})()""", return_by_value=True))
             log(f"  email: {r}")
             await asyncio.sleep(0.3)
-            
-            # 填password
+
+            # 填 password
             r2 = s(await tab.execute_script(f"""(function(){{
                 var el=document.querySelector('input[type="password"]');
                 if(!el) return 'NOT_FOUND';
@@ -409,8 +472,8 @@ async def unitool_register(email, password, ref_code=""):
             }})()""", return_by_value=True))
             log(f"  password: {r2}")
             await asyncio.sleep(0.5)
-            
-            # 等按钮enabled
+
+            # 等按钮 enabled（最多 25s）
             btn_ready = False
             for i in range(25):
                 await asyncio.sleep(1)
@@ -426,55 +489,109 @@ async def unitool_register(email, password, ref_code=""):
                         break
                 except: pass
                 if i % 5 == 4: log(f"  [{i+1}s] btn disabled={r3}")
-            
+
             if not btn_ready:
-                # 检查是否已存在
                 pg = s(await tab.execute_script("document.body.innerText.slice(0,300)", return_by_value=True))
                 if re.search(r'email.{0,30}already|already.{0,20}registered|already.{0,20}exist|user with like email existed', pg, re.I):
                     return False, "email_already_registered"
                 log(f"  btn_never_enabled page={pg[:200]}")
                 return False, "btn_never_enabled"
-            
-            # 提交
-            sub = s(await tab.execute_script("""(function(){
-                var btns=Array.from(document.querySelectorAll('button'));
-                for(var b of btns){
-                    if(b.innerText.trim()==='Join Unitool'&&!b.disabled){b.click();return 'CLICKED';}
-                }
-                return 'NO_BTN';
-            })()""", return_by_value=True))
-            log(f"  submit: {sub}")
-            
-            # 等待响应（email verification message）
-            for t in range(30):
-                await asyncio.sleep(1)
-                pg = s(await tab.execute_script("document.body.innerText.slice(0,500)", return_by_value=True))
-                cur_url = s(await tab.execute_script("location.href", return_by_value=True))
-                
-                if "sent link to your" in pg.lower() or "follow the link" in pg.lower():
-                    log(f"  [✓] 'sent link' at {t+1}s → email verification pending")
-                    reg_success = True
+
+            # 提交（最多 2 轮: 首次 + captcha/token过期重试）
+            for submit_round in range(2):
+                sub = await do_submit(tab)
+                log(f"  submit round={submit_round+1}: {sub}")
+                if sub == "NO_BTN":
+                    reg_error = "no_btn_after_submit"
                     break
-                if re.search(r'email.{0,30}already|already.{0,20}registered|already.{0,20}exist|user with like email existed', pg, re.I):
-                    log(f"  [!!] email_already_registered page={pg[:200]}")
-                    reg_error = "email_already_registered"
+
+                got_response = False
+                for t in range(35):
+                    await asyncio.sleep(1)
+                    pg = s(await tab.execute_script(
+                        "document.body.innerText.slice(0,600)", return_by_value=True))
+                    cur_url = s(await tab.execute_script(
+                        "location.href", return_by_value=True))
+
+                    # ✓ 成功确认
+                    if ("sent link to your" in pg.lower() or "follow the link" in pg.lower() or
+                            "check your email" in pg.lower() or "verify your email" in pg.lower()):
+                        log(f"  [OK] email confirmation at {t+1}s round={submit_round+1}")
+                        reg_success = True
+                        got_response = True
+                        break
+
+                    # ✗ 邮箱已注册
+                    if re.search(r'email.{0,30}already|already.{0,20}registered|already.{0,20}exist|user with like email existed', pg, re.I):
+                        log(f"  [!!] email_already_registered at {t+1}s")
+                        reg_error = "email_already_registered"
+                        got_response = True
+                        break
+
+                    # ✓ URL 跳走（自动登录）
+                    if "entry" not in cur_url and "unitool.ai" in cur_url:
+                        log(f"  [OK] redirect to {cur_url} at {t+1}s")
+                        reg_success = True
+                        got_response = True
+                        break
+
+                    # FIX 2: captcha 被拒 → re-bypass 再提交（no_redirect_no_ssid 根因）
+                    if ("captcha check" in pg.lower() or "complete the captcha" in pg.lower() or
+                            "please complete" in pg.lower()):
+                        log(f"  [!!] captcha rejected at {t+1}s (round {submit_round+1})")
+                        if submit_round == 0:
+                            log("  re-bypassing after captcha rejection...")
+                            try:
+                                await tab._bypass_cloudflare({}, time_to_wait_captcha=20)
+                            except Exception as be:
+                                log(f"  re-bypass err: {be}")
+                            n_new = await wait_for_token(tab, timeout=15, label="rebypass")
+                            if n_new > 20:
+                                log(f"  new token len={n_new} → retrying submit")
+                                got_response = True
+                                break  # exit inner → submit_round++
+                            else:
+                                reg_error = "captcha_rejected_no_token"
+                                got_response = True
+                                break
+                        else:
+                            reg_error = "captcha_rejected"
+                            got_response = True
+                            break
+
+                    # FIX 2b: 20s 无响应且 token 过期 → re-bypass + resubmit
+                    if t == 19:
+                        n_cur = await tok_len(tab)
+                        log(f"  [20s] no response, token len={n_cur}")
+                        if n_cur < 20:
+                            log("  token expired during wait — re-bypassing...")
+                            try:
+                                await tab._bypass_cloudflare({}, time_to_wait_captcha=20)
+                            except Exception as be:
+                                log(f"  re-bypass err: {be}")
+                            n_new = await wait_for_token(tab, timeout=15, label="rebypass20s")
+                            if n_new > 20:
+                                log(f"  token refreshed len={n_new} → resubmitting")
+                                got_response = True
+                                break
+
+                    if t % 10 == 9:
+                        log(f"  [{t+1}s] url={cur_url[:80]}")
+
+                if reg_success or reg_error:
                     break
-                log(f"  [{t+1}s] body={pg[:180].replace(chr(10), ' | ')}")
-                if "entry" not in cur_url and "unitool.ai" in cur_url:
-                    log(f"  [✓] redirect to {cur_url} at {t+1}s → registered+autologin?")
-                    reg_success = True
+                if not got_response:
+                    reg_error = "timeout_no_confirmation"
                     break
-                if t % 10 == 9: log(f"  [{t+1}s] url={cur_url}")
-            
-            if not reg_success and not reg_error:
-                reg_error = "timeout_no_confirmation"
-            
+
             return reg_success, reg_error
+
     except Exception as e:
         return False, str(e)[:200]
     finally:
         if env_backup:
             os.environ["DISPLAY"] = env_backup
+
 
 async def unitool_login_for_ssid(email, password):
     """用pydoll登录unitool.ai，返回ssid cookie"""
