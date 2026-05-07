@@ -504,8 +504,8 @@ def replenish_if_needed():
         for line in open("/proc/meminfo"):
             if "MemAvailable" in line:
                 mb = int(line.split()[1]) // 1024
-                if mb < 800:
-                    log(f"[watermark] 内存不足 {mb}MB < 800MB，跳过补充"); return
+                if mb < 1500:
+                    log(f"[watermark] 内存不足 {mb}MB < 1500MB，跳过补充"); return
                 break
     except Exception:
         pass
@@ -519,7 +519,7 @@ def replenish_if_needed():
             "engine":    "patchright",
             "wait":      11,
             "retries":   2,
-            "workers":   2,
+            "workers":   1,
         }).encode()
         req  = urllib.request.Request(
             f"{API_BASE}/tools/outlook/register",
