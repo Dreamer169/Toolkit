@@ -68,30 +68,42 @@ def db_save_ref_code(account_id, ref_code):
     conn.commit(); conn.close()
 
 def get_ref_code_from_api(ssid: str) -> dict:
+    """
+    FIX E: 改用 GET /api/user/ref-code 获取账号自己的专属邀请码。
+    原 /api/auth/session 返回的 ref_code 字段是邀请该账号时用的码（邀请人的码），
+    而 /api/user/ref-code 返回该账号自己通过 POST /api/ref-codes 生成的专属码。
+    返回示例: {"code":"xjfjk","conversions":3,"clicks":0,...} 或 null
+    """
     cmd = [
         "curl", "-s",
         "-b", f"{AUTH_COOKIE}={ssid}",
         "-H", "Accept: application/json",
         "--max-time", "15",
-        "https://unitool.ai/api/auth/session"
+        "https://unitool.ai/api/user/ref-code"
     ]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
     if r.returncode != 0:
         return {"ok": False, "reason": f"curl_error: {r.stderr[:100]}"}
+    raw = r.stdout.strip()
+    if raw == "null" or not raw:
+        return {"ok": False, "reason": f"no_ref_code: null (need POST /api/ref-codes first)"}
     try:
-        data = json.loads(r.stdout)
+        data = json.loads(raw)
     except Exception as e:
-        return {"ok": False, "reason": f"json_parse: {e} raw={r.stdout[:200]}"}
-    user = data.get("auth", {}).get("user", {})
-    ref_code = user.get("ref_code", "")
+        return {"ok": False, "reason": f"json_parse: {e} raw={raw[:200]}"}
+    ref_code = data.get("code", "")
     if not ref_code:
         return {"ok": False, "reason": f"no_ref_code: {json.dumps(data)[:300]}"}
+    conversions = data.get("conversions", 0)
+    if conversions >= 10:
+        return {"ok": False, "reason": f"ref_code_exhausted: {ref_code} conversions={conversions}/10"}
     return {
         "ok": True,
         "ref_code": ref_code,
-        "ref_url": f"https://unitool.ai/ref/{ref_code}",
-        "unitool_user_id": user.get("id", 0),
-        "email": user.get("email", ""),
+        "ref_url":  data.get("url", f"https://unitool.ai/ref/{ref_code}"),
+        "conversions": conversions,
+        "unitool_user_id": data.get("user_id", 0),
+        "email": "",
     }
 
 def main():

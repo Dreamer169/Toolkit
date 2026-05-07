@@ -37,6 +37,7 @@ PROXY_PORT     = 8089                    # unitool_proxy.py 监听端口
 API_BASE       = "http://localhost:8081/api"  # api-server 地址
 
 MAX_REF_SLOTS   = 10    # unitool 每个 ref_code 最多邀请人数
+RESI_PORTS = [10822, 10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
 WATERMARK       = 5     # fresh 账号低于此值时触发 outlook 补充
 REPLENISH_CNT   = 5     # 单次补充目标数量
 COOLDOWN_S      = 300   # 水位补充冷却（15 分钟）
@@ -253,14 +254,67 @@ def db_save_ref_code(account_id, ref_code):
     conn.commit(); conn.close()
     log(f"[DB] ref_code 保存 id={account_id} ref_code={ref_code}")
 
+def _api_check_ref_code(ssid: str) -> tuple:
+    """
+    FIX G helper: 调 GET /api/user/ref-code 获取真实 conversions 计数。
+    返回 (ref_code, conversions) 或 ("", -1) 表示失败/null。
+    """
+    try:
+        r = subprocess.run(
+            ["curl", "-s", "-b", f"__Secure-unitool-ssid={ssid}",
+             "-H", "Accept: application/json", "--max-time", "8",
+             "https://unitool.ai/api/user/ref-code"],
+            capture_output=True, text=True, timeout=12)
+        raw = r.stdout.strip()
+        if raw == "null" or not raw:
+            return ("", 0)
+        data = json.loads(raw)
+        return (data.get("code", ""), int(data.get("conversions", 0)))
+    except Exception:
+        return ("", -1)
+
+
+def create_ref_code_via_proxy(ssid: str, email: str) -> str:
+    """
+    FIX F: 通过 SOCKS5 代理调 POST /api/ref-codes，为账号生成专属邀请码。
+    unitool 限制同一 IP 只能创建一个 ref_code，必须通过住宅代理绕开。
+    成功返回 ref_code 字符串，失败返回 ""。
+    """
+    for port in RESI_PORTS:
+        try:
+            r = subprocess.run(
+                ["curl", "-s", "--max-time", "12",
+                 "--socks5-hostname", f"127.0.0.1:{port}",
+                 "-b", f"__Secure-unitool-ssid={ssid}",
+                 "-X", "POST",
+                 "-H", "Content-Type: application/json",
+                 "-H", "Accept: application/json",
+                 "https://unitool.ai/api/ref-codes"],
+                capture_output=True, text=True, timeout=18)
+            if r.returncode != 0 or not r.stdout.strip():
+                continue
+            data = json.loads(r.stdout)
+            if "code" in data:
+                log(f"[ref_create] ✅ port={port} → ref_code={data['code']} email={email}")
+                return data["code"]
+            err = data.get("error", "")
+            log(f"[ref_create] port={port} err={err} ({email})")
+            if err == "ip-already-existed":
+                continue
+        except Exception as _e:
+            log(f"[ref_create] port={port} exc={_e}")
+    log(f"[ref_create] ❌ 所有代理端口均失败 ({email})")
+    return ""
+
+
 def db_get_current_ref_code():
     """
-    从 DB 获取当前可用 ref_code（剩余邀请槽 > 0）。
-    优先选 unitool_ref_activated 中使用最少的，最后兜底 unitool_ref_master。
+    FIX G: 从 DB 获取当前可用 ref_code（剩余邀请槽 > 0）。
+    优先选 unitool_ref_activated 中 conversions 最少的，最后兜底 unitool_ref_master。
+    通过 GET /api/user/ref-code 获取真实 conversions，防止本地计数漏记导致用超。
     返回 (account_id, email, ref_code, used_count) 或 (None, None, "", 0)
     """
     conn = db_connect(); cur = conn.cursor()
-    # 查所有有 ref_code 的账号（activated 优先，其次 master）
     cur.execute("""
         SELECT id, email, notes, tags FROM accounts
         WHERE platform='outlook'
@@ -273,7 +327,7 @@ def db_get_current_ref_code():
     rows = cur.fetchall(); conn.close()
 
     best_id = best_email = best_rc = None
-    best_used = MAX_REF_SLOTS  # 初始化为上限
+    best_used = MAX_REF_SLOTS
 
     for acc_id, acc_email, notes, tags in rows:
         if not notes:
@@ -282,8 +336,24 @@ def db_get_current_ref_code():
         if not m:
             continue
         rc = m.group(1)
-        # 统计该账号下已注册的 referral 数（通过 master 账号 notes 里 ref_registered= 计数）
-        used = len(re.findall(r"ref_registered=", notes))
+        # 先用本地计数快速过滤
+        local_used = len(re.findall(r"ref_registered=", notes))
+        # FIX G: 用 API 获取真实 conversions（本地计数常常漏记）
+        ssid_m = re.search(r"unitool_ssid=([0-9a-f]{40,})", notes)
+        if ssid_m:
+            api_rc, api_conv = _api_check_ref_code(ssid_m.group(1))
+            if api_conv < 0:
+                # API 失败，降级用本地计数
+                used = local_used
+            elif api_rc and api_rc != rc:
+                # API 返回的 code 和 DB 存的不一致（可能DB污染），跳过
+                log(f"[ref] id={acc_id} DB rc={rc} but API rc={api_rc}, skipping")
+                continue
+            else:
+                used = api_conv
+                log(f"[ref] id={acc_id} {acc_email} API conversions={api_conv} local={local_used}")
+        else:
+            used = local_used  # 无 ssid 时只能用本地
         if used < MAX_REF_SLOTS and used < best_used:
             best_id    = acc_id
             best_email = acc_email
@@ -596,22 +666,10 @@ def main():
     # ── Step 2: 获取当前可用 ref_code ──────────────────────────────────────────
     ref_master_id, ref_master_email, ref_code, ref_used = db_get_current_ref_code()
     if not ref_code:
-        # 兜底：使用已知的 ref_code（sarahrivera639 的 xjfjk）
-        ref_code = "xjfjk"
-        log(f"[ref] 兜底使用 ref_code={ref_code}")
-        # fallback 时也要找到 master 账号 ID，保证 ref_registered 追踪不丢失
-        if not ref_master_id:
-            try:
-                _c = db_connect(); _u = _c.cursor()
-                _u.execute(
-                    "SELECT id, email FROM accounts WHERE tags LIKE '%%unitool_ref_master%%' LIMIT 1"
-                )
-                _r = _u.fetchone(); _c.close()
-                if _r:
-                    ref_master_id, ref_master_email = _r[0], _r[1]
-                    log(f"[ref] fallback master 找到: {ref_master_email} id={ref_master_id}")
-            except Exception as _e:
-                log(f"[ref] fallback master 查找失败: {_e}")
+        # FIX G: xjfjk 已 conversions=10/10 耗尽，不再硬编码兜底。
+        # 无可用 ref_code 说明所有已知码均已用满，需要先为一个注册账号 POST /api/ref-codes 生成新码。
+        log("[ref] ⚠ 无可用 ref_code（所有已知码已满或未生成），跳过本轮注册")
+        time.sleep(60); return
     log(f"[ref] ref_code={ref_code} master={ref_master_email} used={ref_used}/{MAX_REF_SLOTS}")
 
     # ── Step 3: 取一个新鲜 outlook 账号 ────────────────────────────────────────
@@ -661,15 +719,26 @@ def main():
 
     _success_flag = True  # 告知 atexit 不需要标 fail
 
-    # ── Step 7: 激活该账号自己的 ref_code ──────────────────────────────────────
-    log(f"[main] ▶ 激活 {email} 的 ref_code...")
-    new_ref_code = run_reflink(email)
+    # ── Step 7: 为该账号生成专属 ref_code，并激活到 DB ─────────────────────────
+    # FIX F: 先通过代理 POST /api/ref-codes 为新账号创建专属码，再 run_reflink 读取保存
+    log(f"[main] ▶ Step7a: 通过代理为 {email} 创建专属 ref_code...")
+    created_code = create_ref_code_via_proxy(ssid, email)
+    if created_code:
+        log(f"[main] ✅ 代理创建成功: ref_code={created_code}")
+        time.sleep(3)  # 等服务器写入
+    else:
+        log(f"[main] ⚠ 代理创建失败，尝试直接 run_reflink（可能已有码或延迟）")
+
+    log(f"[main] ▶ Step7b: run_reflink 读取并保存 {email} 的 ref_code...")
+    # 代理创建失败时不重试（无意义），代理创建成功时最多重试3次等服务器写入
+    reflink_retries = 3 if created_code else 1
+    new_ref_code = run_reflink(email, _retries=reflink_retries, _wait=10)
     if new_ref_code:
         db_save_ref_code(account_id, new_ref_code)
         log(f"[main] ✅ ref_code 激活: {new_ref_code} → 下一轮可用")
         print(f"[CHAIN_OK] {email}|{ssid}...|{ref_code}|{new_ref_code}", flush=True)
     else:
-        log(f"[main] ⚠ 未能激活 ref_code（ssid 可能未就绪，下次重试）")
+        log(f"[main] ⚠ 未能获取 ref_code（代理创建={created_code or 'FAIL'}，reflink 也失败）")
         print(f"[OK] {email}|{ssid}...|{ref_code}|no_ref_code", flush=True)
 
     # ── Step 7b: 在被注册账号 notes 写 via_ref=（监控统计用）────────────────────
