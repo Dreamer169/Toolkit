@@ -278,7 +278,7 @@ def db_get_current_ref_code():
     for acc_id, acc_email, notes, tags in rows:
         if not notes:
             continue
-        m = re.search(r"unitool_ref_code=([A-Za-z0-9_-]+)", notes)
+        m = re.search(r"unitool_ref_code=(?!ref_code=)([A-Za-z0-9_-]+)", notes)
         if not m:
             continue
         rc = m.group(1)
@@ -526,24 +526,36 @@ def run_login(email, password):
     log(f"[login] 未拿到 ssid rc={rc}")
     return ""
 
-def run_reflink(email):
+def run_reflink(email, _retries=3, _wait=30):
     """
     unitool_reflink.py --email EMAIL
     从 /api/auth/session 提取该账号的 ref_code
     输出: [OK] ref_code|ref_url|email|uid
-    返回 ref_code 字符串，失败返回空串
+    Bug B fix: 加管道校验防止解析 log 行; no_ref_code 时延迟重试
     """
+    import time as _t
     args = ["python3", REFLINK_PY, "--email", email]
-    stdout, stderr, rc = _run(args, timeout=30, label=f"reflink({email})")
-    for line in stdout.splitlines():
-        if line.startswith("[OK]"):
-            parts = line[5:].split("|")
-            rc_val = parts[0].strip() if parts else ""
-            if rc_val:
-                log(f"[reflink] ✅ ref_code={rc_val}")
-                return rc_val
-        if line.startswith("[FAIL]"):
-            log(f"[reflink] FAIL: {line}")
+    for attempt in range(1, _retries + 1):
+        stdout, stderr, rc = _run(args, timeout=30, label=f"reflink({email}) #{attempt}")
+        no_ref = False
+        for line in stdout.splitlines():
+            if line.startswith("[OK]"):
+                parts = line[5:].split("|")
+                if len(parts) < 2:
+                    continue  # 跳过非管道 log 行（Bug A guard）
+                rc_val = parts[0].strip()
+                if rc_val:
+                    log(f"[reflink] ✅ ref_code={rc_val} (attempt {attempt})")
+                    return rc_val
+            if line.startswith("[FAIL]"):
+                log(f"[reflink] FAIL: {line}")
+                if "no_ref_code" in line:
+                    no_ref = True
+        if no_ref and attempt < _retries:
+            log(f"[reflink] ref_code 暂空，{_wait}s 后重试 ({attempt}/{_retries})...")
+            _t.sleep(_wait)
+        else:
+            break
     log("[reflink] 未拿到 ref_code")
     return ""
 

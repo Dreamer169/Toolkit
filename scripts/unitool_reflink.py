@@ -118,7 +118,7 @@ def main():
     ref_url  = result["ref_url"]
     email    = result.get("email", acc_email or "?")
     uid      = result.get("unitool_user_id", 0)
-    log(f"[OK] ref_code={ref_code} uid={uid} email={email}")
+    log(f"[reflink_ok] ref_code={ref_code} uid={uid} email={email}")
 
     if acc_id:
         db_save_ref_code(acc_id, ref_code)
