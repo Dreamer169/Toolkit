@@ -73,6 +73,7 @@ def _atexit_handler():
         tags = row[0] if row and row[0] else ""
         if "unitool_registered" not in tags:
             new_tags = re.sub(r",?unitool_processing", "", tags).strip(",")
+            new_tags = re.sub(r",?unitool_fail", "", new_tags).strip(",")  # 清除旧版遗留
             # atexit: 崩溃时用 reg_retry 而非永久 fail
             # already_registered 类账号 (unitool_already) 不加 reg_retry — 永久跳过
             if ("unitool_reg_retry" not in new_tags
@@ -105,7 +106,7 @@ def db_get_fresh_account():
           AND LENGTH(COALESCE(password,'')) >= 8
           AND (tags IS NULL OR (
                tags NOT LIKE '%%unitool_registered%%'
-           AND tags NOT LIKE '%%unitool_fail%%'
+           AND (tags NOT LIKE '%%unitool_fail%%' OR updated_at < NOW() - INTERVAL '4 hours')
            AND tags NOT LIKE '%%unitool_already%%'
            AND (tags NOT LIKE '%%unitool_reg_retry%%' OR updated_at < NOW() - INTERVAL '4 hours')
            AND tags NOT LIKE '%%unitool_processing%%'
@@ -128,7 +129,7 @@ def db_count_fresh():
           AND LENGTH(COALESCE(password,'')) >= 8
           AND (tags IS NULL OR (
                tags NOT LIKE '%%unitool_registered%%'
-           AND tags NOT LIKE '%%unitool_fail%%'
+           AND (tags NOT LIKE '%%unitool_fail%%' OR updated_at < NOW() - INTERVAL '4 hours')
            AND tags NOT LIKE '%%unitool_already%%'
            AND (tags NOT LIKE '%%unitool_reg_retry%%' OR updated_at < NOW() - INTERVAL '4 hours')
            AND tags NOT LIKE '%%unitool_processing%%'
@@ -185,7 +186,8 @@ def db_mark_fail(account_id, reason=""):
         if "unitool_verify_pending" not in new_tags:
             new_tags = (new_tags + ",unitool_verify_pending").strip(",")
     else:
-        # unitool_reg_retry: 4h 后自动重试
+        # unitool_reg_retry: 4h 后自动重试（清除旧版遗留 unitool_fail）
+        new_tags = re.sub(r',?unitool_fail', '', new_tags).strip(',')
         if "unitool_reg_retry" not in new_tags:
             new_tags = (new_tags + ",unitool_reg_retry").strip(",")
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
