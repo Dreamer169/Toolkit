@@ -1,10 +1,9 @@
 """
-xray 静态端口中继 (v2 - Worker降级兼容版)
-- 原 v1: 为每账号启动独立 xray 实例 → CF IP:443 → jimhacker CF Worker
-- v2 改动: jimhacker Worker 429/1027配额用尽时，回退到主 xray 进程
-  已运行的静态 SOCKS5 端口池（ss-in/ps-in/in-socks 系列），
-  round-robin 分配，每账号独占一个端口（避免重用）。
-  若静态端口也不可用，再回退到动态 xray 实例（原逻辑）。
+xray 静态端口中继 (v3 - 端口独占 + 真实探针版)
+- v3 改动: 只保留实测可达 signup.live.com 的端口
+  加入端口独占锁(每端口同时只给1个注册使用，保证IP一致性)
+  加入真实连通性探针(不只检查SOCKS5握手，还探测目标可达性)
+  动态xray实例保留作最后回退
 """
 import os, json, subprocess, socket, time, threading, random, tempfile
 
@@ -15,22 +14,22 @@ VLESS_HOST   = "iam.jimhacker.qzz.io"
 VLESS_PATH   = "/?ed=2048"
 VLESS_PORT   = 443
 
-# ── 静态端口池 ──────────────────────────────────────────────────────────────
-# 主 xray 进程（/root/Toolkit/xray.json）监听的 SOCKS5 端口。
-# 每个端口走不同出口节点，提供 IP 隔离。
+# ── 静态端口池（v3: 仅保留实测可达 signup.live.com 的端口）──────────────
+# 测试方式: curl -x socks5h://127.0.0.1:<port> --connect-timeout 8 -s
+#           -o /dev/null -w '%{http_code}' https://signup.live.com/
+# 可用: 10851(ss-in-1/edir2end), 10853(ss-in-3/edir2end), 10855(ss-in-5/edir2end)
+#       10857(ss-in-7/layercon), 10859(ss-in-9/cuzthk), 10872(ps-in-2/47.83.168.191→85.254.137.104)
 _STATIC_PORTS = [
-    10851, 10853, 10854, 10855, 10857, 10859,   # ss-in-* (已验证可用)
-    10870, 10871,                                # ps-in-0/1 (已验证可用)
-    10820, 10821, 10822, 10823, 10824,           # in-socks-0~4 (备用)
-    10825, 10826, 10827, 10828, 10829,           # in-socks-5~9 (备用)
-    10830, 10831, 10832, 10833, 10834,           # in-socks-10~14 (备用)
-    10835, 10836, 10837, 10838, 10839,           # in-socks-15~19 (备用)
+    10851, 10853, 10855, 10857, 10859,   # ss-in-* Shadowsocks (已验证可达Microsoft)
+    10872,                               # ps-in-2 SOCKS5 (85.254.137.104 Canada Bitecloud, proxy=false hosting=false)
 ]
-_static_lock  = threading.Lock()
-_port_cursor  = os.getpid() % max(1, len(_STATIC_PORTS))   # v9.31 Fix: 进程唯一起点，避免多 worker 子进程全部从0开始争同一端口
+
+_static_lock    = threading.Lock()
+_port_cursor    = os.getpid() % max(1, len(_STATIC_PORTS))
+_ports_in_use   = set()   # v3: 正在使用中的端口（保证每端口同时只给1个注册用）
 
 def _is_port_alive(port: int, timeout: float = 2.0) -> bool:
-    """TCP connect + SOCKS5 握手探针，确认端口在线"""
+    """TCP connect + SOCKS5 握手探针"""
     try:
         s = socket.socket()
         s.settimeout(timeout)
@@ -42,8 +41,32 @@ def _is_port_alive(port: int, timeout: float = 2.0) -> bool:
     except Exception:
         return False
 
+def _probe_microsoft(port: int, timeout: float = 10.0) -> bool:
+    """v3: 通过 SOCKS5 探测 signup.live.com:443 TCP 可达性（不做TLS，只验证连通）"""
+    try:
+        s = socket.socket()
+        s.settimeout(timeout)
+        s.connect(('127.0.0.1', port))
+        # SOCKS5 握手
+        s.sendall(b"\x05\x01\x00")
+        r = s.recv(2)
+        if r != b"\x05\x00":
+            s.close(); return False
+        # 请求连接 signup.live.com:443
+        host = b"signup.live.com"
+        req = b"\x05\x01\x00\x03" + bytes([len(host)]) + host + (443).to_bytes(2, "big")
+        s.sendall(req)
+        resp = s.recv(10)
+        s.close()
+        return len(resp) >= 2 and resp[1] == 0x00
+    except Exception:
+        return False
+
 def _pick_static_port() -> int | None:
-    """Round-robin 扫描静态端口池，返回第一个存活端口；全部失败返回 None"""
+    """
+    v3: Round-robin 扫描静态端口池，返回第一个:
+    1) SOCKS5握手正常 2) signup.live.com TCP可达 3) 当前未被其他注册占用
+    """
     global _port_cursor
     n = len(_STATIC_PORTS)
     with _static_lock:
@@ -51,10 +74,21 @@ def _pick_static_port() -> int | None:
         for i in range(n):
             idx  = (start + i) % n
             port = _STATIC_PORTS[idx]
-            if _is_port_alive(port, timeout=2.0):
-                _port_cursor = (idx + 1) % n   # 下次从下一个开始
-                return port
+            if port in _ports_in_use:
+                continue   # 此端口已被其他注册占用，跳过
+            if not _is_port_alive(port, timeout=2.0):
+                continue
+            if not _probe_microsoft(port, timeout=10.0):
+                continue   # 此端口无法到达Microsoft，跳过
+            _port_cursor = (idx + 1) % n
+            _ports_in_use.add(port)
+            return port
     return None
+
+def _release_static_port(port: int):
+    """v3: 注册完成后释放端口独占锁"""
+    with _static_lock:
+        _ports_in_use.discard(port)
 
 # ── 动态实例辅助（原逻辑，仅在静态端口全部失效时启用）────────────────────
 def _find_free_port(start: int = 20000, end: int = 29999) -> int:
@@ -108,26 +142,20 @@ def _make_xray_config(cf_ip: str, socks_port: int) -> dict:
 class XrayRelay:
     """
     单个账号的代理中继。
-    优先路径: 主 xray 静态 SOCKS5 端口（绕过 CF Worker）。
-    回退路径: 动态 xray 实例（原 VLESS/WS/TLS → CF Worker 方式）。
+    优先路径: 静态 SOCKS5 端口（独占锁，保证IP一致性）。
+    回退路径: 动态 xray 实例（CF VLESS/WS/TLS → CF Worker）。
     """
 
     def __init__(self, cf_ip: str, force_dynamic: bool = False):
         self.cf_ip         = cf_ip
-        self.force_dynamic = force_dynamic  # True = 跳过static端口，直接用动态CF VLESS隧道
+        self.force_dynamic = force_dynamic
         self.socks_port  = 0
         self.socks5_url  = ""
         self._proc       = None
         self._cfg_path   = None
-        self._is_static  = False   # True = 使用静态端口（无子进程）
+        self._is_static  = False
 
-    # ------------------------------------------------------------------
     def start(self, timeout: float = 8.0) -> bool:
-        """
-        1) 若 force_dynamic=False: 尝试从静态端口池取一个存活端口（快，~2s）
-        2) 若 force_dynamic=True 或静态全失败: 启动动态 xray 实例（CF VLESS/WS/TLS → CF Worker）
-        """
-        # ── 优先：静态端口（仅在非force_dynamic时）─────────────────
         if not self.force_dynamic:
             static_port = _pick_static_port()
             if static_port:
@@ -139,7 +167,6 @@ class XrayRelay:
         else:
             print(f"[xray_relay] 🚀 force_dynamic=True，跳过静态端口，直接启动 CF VLESS 隧道 cf_ip={self.cf_ip}", flush=True)
 
-        # ── 回退：动态 xray 实例 ───────────────────────────────────
         print(f"[xray_relay] ⚠ 静态端口全部失败，启动动态 xray 实例 cf_ip={self.cf_ip}", flush=True)
         self.socks_port = _find_free_port()
         self.socks5_url = f"socks5://127.0.0.1:{self.socks_port}"
@@ -172,10 +199,8 @@ class XrayRelay:
         self.stop()
         return False
 
-    # ------------------------------------------------------------------
     def ensure_tunnel(self, probe_timeout: float = 4.0,
                       probe_host: str = '1.1.1.1', probe_port: int = 443) -> bool:
-        """端到端隧道探针（仅动态实例时实际检查，静态端口直接返回 True）"""
         if self._is_static:
             return True
         try:
@@ -195,10 +220,9 @@ class XrayRelay:
         except Exception:
             return False
 
-    # ------------------------------------------------------------------
     def stop(self):
-        """关闭动态 xray 进程（静态端口模式为 no-op）"""
         if self._is_static:
+            _release_static_port(self.socks_port)   # v3: 释放端口独占
             return
         if self._proc:
             try: self._proc.terminate(); self._proc.wait(timeout=3)
@@ -214,10 +238,6 @@ class XrayRelay:
 
 # ───────────────────────────────────────────────────────────────────────────
 def test_relay(cf_ip: str, timeout: float = 10.0):
-    """
-    测试中继链路。静态端口模式下测试静态端口延迟；
-    动态模式下测试 CF IP → jimhacker Worker 链路。
-    """
     relay = XrayRelay(cf_ip)
     try:
         if not relay.start(timeout=timeout):

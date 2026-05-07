@@ -1457,7 +1457,7 @@ router.post("/tools/outlook/register", async (req, res) => {
     // Auto mode: derive optimal worker count from count + proxy availability
     if (effectiveProxyMode === "cf") {
       // CF pool: auto 6 workers (xray静态端口24个，内存允许时可手动传更高)
-      resolvedWorkers = Math.min(6, n);
+      resolvedWorkers = Math.min(6, n);  // 静态端口池6个，每端口独占
     } else if (proxyList.length >= 2) {
       // Named proxy pool: 1 worker per proxy, no arbitrary cap
       resolvedWorkers = Math.min(16, n, proxyList.length);
@@ -1473,7 +1473,7 @@ router.post("/tools/outlook/register", async (req, res) => {
       const _memRaw   = _rfs("/proc/meminfo", "utf8");
       const _availMat = _memRaw.match(/MemAvailable:\s+(\d+)\s+kB/);
       const _availMB  = _availMat ? Math.floor(parseInt(_availMat[1]) / 1024) : 9999;
-      const _memPerW  = 600;
+      const _memPerW  = 1000;  // Chrome实测~1GB，防OOM
       const _maxByMem = Math.max(1, Math.floor(_availMB / _memPerW));
       if (_maxByMem < resolvedWorkers) {
         job.logs.push({ type: "warn", message: `⚠ 内存感知降档: 空闲${_availMB}MB 不足以支撑${resolvedWorkers}workers(每个~${_memPerW}MB) → 自动降为${_maxByMem}` });
@@ -1524,6 +1524,64 @@ router.post("/tools/outlook/register", async (req, res) => {
       else if (t === "✅ 成功: 0 / 1" || t.startsWith("✅ 成功:")) type = "done";
 
       job.logs.push({ type, message: t });
+
+      // 解析 INLINE_RESULT（每账号成功后立即输出，防OOM崩溃丢失）
+      if (t.startsWith("-- INLINE_RESULT --")) {
+        try {
+          const jsonPart = t.slice("-- INLINE_RESULT --".length).trim();
+          const r = JSON.parse(jsonPart) as Record<string, unknown>;
+          if (r.success && r.email) {
+            const em = String(r.email);
+            if (!identityMap.has(em)) {
+              identityMap.set(em, {
+                access_token:     String(r.access_token     ?? ""),
+                refresh_token:    String(r.refresh_token    ?? ""),
+                cookies_json:     String(r.cookies_json     ?? ""),
+                fingerprint_json: String(r.fingerprint_json ?? ""),
+                user_agent:       String(r.user_agent       ?? ""),
+                exit_ip:          String(r.exit_ip          ?? ""),
+                proxy_port:       Number(r.proxy_port       ?? 0),
+                proxy_formatted:  String(r.proxy_formatted  ?? ""),
+              });
+            }
+            const already = job.accounts.find(a => a.email === em);
+            if (!already) job.accounts.push({ email: em, password: String(r.password ?? "") });
+            // 立即持久化该账号（异步，不阻塞）
+            (async () => {
+              const idn = identityMap.get(em)!;
+              try {
+                const ar = await queryOne<{id:number}>(
+                  `INSERT INTO accounts (platform, email, password, status, token, refresh_token,
+                                          cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port, proxy_formatted)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                   ON CONFLICT (platform, email) DO UPDATE SET
+                     password=EXCLUDED.password, status=EXCLUDED.status,
+                     token=COALESCE(NULLIF(EXCLUDED.token,), accounts.token),
+                     refresh_token=COALESCE(NULLIF(EXCLUDED.refresh_token,), accounts.refresh_token),
+                     cookies_json=COALESCE(NULLIF(EXCLUDED.cookies_json,), accounts.cookies_json),
+                     fingerprint_json=COALESCE(NULLIF(EXCLUDED.fingerprint_json,), accounts.fingerprint_json),
+                     user_agent=COALESCE(NULLIF(EXCLUDED.user_agent,), accounts.user_agent),
+                     exit_ip=COALESCE(NULLIF(EXCLUDED.exit_ip,), accounts.exit_ip),
+                     proxy_port=COALESCE(NULLIF(EXCLUDED.proxy_port,0), accounts.proxy_port),
+                     proxy_formatted=COALESCE(NULLIF(EXCLUDED.proxy_formatted,), accounts.proxy_formatted),
+                     updated_at=NOW()
+                   RETURNING id`,
+                  ["outlook", em, String(r.password ?? ""), "active",
+                   idn.access_token||null, idn.refresh_token||null,
+                   idn.cookies_json||null, idn.fingerprint_json||null,
+                   idn.user_agent||null, idn.exit_ip||null,
+                   idn.proxy_port||null,
+                   idn.proxy_formatted||(idn.proxy_port?`socks5://127.0.0.1:\${idn.proxy_port}`:null)]
+                );
+                job.logs.push({ type: "success", message: `✅ [inline] 已入库: \${em} id=\${ar?.id}` });
+              } catch(e) {
+                job.logs.push({ type: "warn", message: `⚠ [inline] 入库失败(\${em}): \${e}` });
+              }
+            })();
+          }
+        } catch {}
+        continue;
+      }
 
       // 解析成功账号行
       if (type === "success" && t.includes("@outlook.com")) {

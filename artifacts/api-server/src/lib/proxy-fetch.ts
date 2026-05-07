@@ -32,10 +32,11 @@ const HTTP_PROXY_ENV_KEYS = [
   "OUTLOOK_HTTP_PROXY",
   "LIVE_VERIFY_HTTP_PROXY",
 ];
-// xray SOCKS5 inbounds 10820..10829 (each routes through a different CF CDN anycast IP
-// but all connect to the same jimhacker CF Worker). These ports also accept HTTP CONNECT
-// so undici's ProxyAgent works correctly against them.
-const XRAY_LOCAL_PORTS = [10820, 10821, 10822, 10823, 10824, 10825, 10826, 10827, 10828, 10829];
+// v2 FIX(2026-05-07): 改用 SS 静态端口(Shadowsocks) 替代 VLESS 端口(10820-10829)。
+// 原 VLESS 端口全部通过 jimhacker CF Worker，每次 microsoftFetch / live-verify-poller
+// 调用都消耗 jimhacker 100k/天配额，导致每日配额耗尽复发。
+// SS 端口(10851/10853/10855/10857/10859)走独立 Shadowsocks 服务器，不经过 jimhacker。
+const XRAY_LOCAL_PORTS = [10851, 10853, 10855, 10857, 10859];
 
 type RequestInitWithDispatcher = RequestInit & { dispatcher?: Dispatcher };
 

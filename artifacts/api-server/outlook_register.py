@@ -1254,7 +1254,7 @@ class PatchrightController(BaseController):
 
             # ── 等待 [aria-label="再次按下"] 或 PerimeterX 等效按钮 ──────────
             if _second_click_done:
-                page.wait_for_timeout(2000)  # 等待模式切换
+                page.wait_for_timeout(3500)  # 等待模式切换
                 _press_clicked = False
 
                 # 方法A：Arkose "再次按下"（frame2 + page 全局）
@@ -1264,7 +1264,7 @@ class PatchrightController(BaseController):
                         _press_again = _frame2.locator(SEL_PRESS_AGAIN)
                     if _press_again is None or _press_again.count() == 0:
                         _press_again = page.locator(SEL_PRESS_AGAIN)
-                    _box2 = _press_again.first.bounding_box(timeout=2000)
+                    _box2 = _press_again.first.bounding_box(timeout=6000)
                     if _box2 and _box2['width'] > 0:
                         _cx2 = _box2['x'] + _box2['width'] / 2 + _rnd.randint(-10, 10)
                         _cy2 = _box2['y'] + _box2['height'] / 2 + _rnd.randint(-5, 5)
@@ -2832,6 +2832,21 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
                 result["fingerprint_json"] = json.dumps(_fp_dict, ensure_ascii=False, default=str)
                 result["user_agent"]       = getattr(fp, "user_agent", "") or _fp_dict.get("user_agent", "")
                 print(f"[register] 📦 identity bundle: cookies={len(result['cookies_json'])}B fp={len(result['fingerprint_json'])}B ua={len(result['user_agent'])}B exit_ip={result['exit_ip']} port={result['proxy_port']}", flush=True)
+                # INLINE_RESULT: per-account immediate output, prevents OOM-kill data loss
+                import json as _json_inline
+                _inline_data = {
+                    "email": result["email"], "password": result["password"],
+                    "access_token": result.get("access_token",""),
+                    "refresh_token": result.get("refresh_token",""),
+                    "cookies_json": result["cookies_json"],
+                    "fingerprint_json": result["fingerprint_json"],
+                    "user_agent": result["user_agent"],
+                    "exit_ip": result["exit_ip"],
+                    "proxy_port": result["proxy_port"],
+                    "proxy_formatted": result.get("proxy_formatted",""),
+                    "success": True
+                }
+                print("-- INLINE_RESULT -- " + _json_inline.dumps(_inline_data, ensure_ascii=False), flush=True)
             except Exception as _ce:
                 print(f"[register] ⚠ identity bundle 收集失败: {_ce}", flush=True)
         try:

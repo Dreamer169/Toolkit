@@ -992,10 +992,12 @@ async function runProxyMaintenance() {
     }
 
     // 4. 连通性检测：随机抽 30 个 idle SOCKS5 代理，验证真实出网
+    // v2 FIX(2026-05-07): 排除 127.0.0.1:10820-10845 (xray VLESS in-socks桥接端口走jimhacker)。
     const toCheck = await query<{ id: number; formatted: string }>(
       `SELECT id, formatted FROM proxies
        WHERE status='idle' AND formatted ILIKE 'socks5://%'
          AND NOT (host='127.0.0.1' AND port BETWEEN ${SUBNODE_BRIDGE_MIN_PORT} AND ${SUBNODE_BRIDGE_MAX_PORT})
+         AND NOT (host='127.0.0.1' AND port BETWEEN 10820 AND 10845)
        ORDER BY RANDOM() LIMIT 30`, []
     );
     checked = toCheck.length;
