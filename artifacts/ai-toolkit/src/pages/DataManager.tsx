@@ -45,7 +45,7 @@ interface UnitoolStats {
   recent:       { id: number; email: string; ssid_prefix: string; ssid_len: number; updated_at: string }[];
   chain:        { status: string; last_run: string; brief: string };
   fail_reasons: { reason: string; count: number }[];
-  token?:       { total_regular: number; total_bonus: number; zero_accounts: number; cached_accounts: number };
+  token?:       { total_regular: number; total_bonus: number; total_all: number; zero_regular: number; zero_accounts: number; cached_accounts: number };
   ts:           string;
 }
 
@@ -181,27 +181,39 @@ function StatsPanel() {
                 <h3 className="text-sm font-semibold text-gray-300">🪙 AI Chat Token 余额</h3>
                 <span className="text-xs text-gray-600">已缓存 {uStats.token.cached_accounts} 个账号</span>
               </div>
-              <div className="grid grid-cols-3 gap-4 text-center">
+              <div className="grid grid-cols-4 gap-3 text-center">
                 <div>
-                  <div className={`text-2xl font-bold ${uStats.token.total_regular === 0 ? "text-red-400" : "text-emerald-400"}`}>
+                  <div className={`text-2xl font-bold ${(uStats.token.total_all ?? uStats.token.total_regular + uStats.token.total_bonus) === 0 ? "text-red-400" : "text-emerald-400"}`}>
+                    {uStats.token.total_all ?? (uStats.token.total_regular + uStats.token.total_bonus)}
+                  </div>
+                  <div className="text-xs text-gray-400 mt-1">总可用</div>
+                  <div className="text-xs text-gray-600">regular+bonus</div>
+                </div>
+                <div>
+                  <div className={`text-2xl font-bold ${uStats.token.total_regular === 0 ? "text-gray-500" : "text-blue-400"}`}>
                     {uStats.token.total_regular}
                   </div>
-                  <div className="text-xs text-gray-400 mt-1">主力 token</div>
-                  <div className="text-xs text-gray-600">regular 池合计</div>
+                  <div className="text-xs text-gray-400 mt-1">主力 regular</div>
+                  <div className="text-xs text-gray-600">池合计</div>
                 </div>
                 <div>
                   <div className="text-2xl font-bold text-amber-400">{uStats.token.total_bonus}</div>
                   <div className="text-xs text-gray-400 mt-1">赠送 bonus</div>
-                  <div className="text-xs text-gray-600">bonus 池合计</div>
+                  <div className="text-xs text-gray-600">池合计</div>
                 </div>
                 <div>
-                  <div className={`text-2xl font-bold ${uStats.token.zero_accounts > 0 ? "text-orange-400" : "text-gray-400"}`}>
-                    {uStats.token.zero_accounts}
+                  <div className={`text-2xl font-bold ${(uStats.token.zero_accounts ?? 0) > 0 ? "text-red-400" : "text-emerald-400"}`}>
+                    {uStats.token.zero_accounts ?? 0}
                   </div>
-                  <div className="text-xs text-gray-400 mt-1">零余额账号</div>
-                  <div className="text-xs text-gray-600">regular = 0</div>
+                  <div className="text-xs text-gray-400 mt-1">彻底空账号</div>
+                  <div className="text-xs text-gray-600">regular+bonus=0</div>
                 </div>
               </div>
+              {(uStats.token.zero_regular ?? 0) > 0 && (
+                <div className="mt-2 text-xs text-gray-500 text-center">
+                  ⚠ {uStats.token.zero_regular} 个账号 regular 耗尽（仍有 bonus 可用）
+                </div>
+              )}
               <div className="mt-3 flex justify-end">
                 <button
                   onClick={() => fetch(`${API}/tools/unitool/token-stats?refresh=1`).then(() => loadUStats())}

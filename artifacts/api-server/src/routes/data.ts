@@ -1092,7 +1092,8 @@ router.get("/data/unitool-stats", async (req, res) => {
     } catch {}
     const tokenRegular  = Object.values(tokenCache).reduce((s, v) => s + (v.regular ?? 0), 0);
     const tokenBonus    = Object.values(tokenCache).reduce((s, v) => s + (v.bonus   ?? 0), 0);
-    const tokenZeroAccs = Object.values(tokenCache).filter(v => (v.regular ?? 0) === 0).length;
+    const tokenZeroRegular = Object.values(tokenCache).filter(v => (v.regular ?? 0) === 0).length;
+    const tokenZeroAccs  = Object.values(tokenCache).filter(v => (v.regular ?? 0) + (v.bonus ?? 0) === 0).length;
 
     // Read rotation index
     let rotateIdx = 0;
@@ -1232,7 +1233,7 @@ router.get("/data/unitool-stats", async (req, res) => {
       }),
       chain:        { status: chainStatus, last_run: chainLastRun, brief: chainBrief },
       fail_reasons: failReasons.map(r => ({ reason: r.reason, count: Number(r.cnt) })),
-      token: { total_regular: tokenRegular, total_bonus: tokenBonus, zero_accounts: tokenZeroAccs, cached_accounts: Object.keys(tokenCache).length },
+      token: { total_regular: tokenRegular, total_bonus: tokenBonus, total_all: tokenRegular + tokenBonus, zero_regular: tokenZeroRegular, zero_accounts: tokenZeroAccs, cached_accounts: Object.keys(tokenCache).length },
       ts: new Date().toISOString(),
     });
   } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
