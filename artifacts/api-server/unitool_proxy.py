@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.23
+unitool.ai → OpenAI 兼容反代 v5.24
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -521,7 +521,7 @@ NATIVE_SERVICES = {
     # ChatGPT（实探 /api/services?parent_id=chatgpt 确认，含 minimum_balance）
     "gpt-5", "gpt-5.5", "gpt-5.4", "gpt-5-nano",
     "gpt5.1", "gpt5.2",
-    "gpt-4o", "gpt-4o-mini", "gpt-4-1", "gpt-4-5",
+    "gpt-4o", "gpt-4o-mini", "gpt-4-1",  # gpt-4-5 removed v5.24: not in /api/services
     "gpt-o1", "gpt-o1-mini", "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini",
     # Gemini
     "gemini-3.1-pro", "gemini-3-pro",
@@ -551,6 +551,7 @@ FREE_SERVICES = {"gpt-4o-mini", "gpt-5-nano"}  # minimum_balance=0，余额耗�
 POLL_PRIMARY_SERVICES = {
     "gpt-5.5", "gpt-5-nano", "gpt-4-1",
     "claude-sonnet", "claude-opus",
+    "claude-opus-4-6",   # v5.24: stream empty but poll returns CHERRY
 }
 _STREAM_INTERCEPT_RU = "помогаю только"  # Russian restriction marker
 
@@ -649,10 +650,13 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
     "claude-sonnet-4-5":["claude-sonnet-4-6", "claude-sonnet",     "claude-opus-4-6"],
     "claude-sonnet":    ["claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-6"],
     "gpt-5-nano":       ["gpt-5",        "gpt-5.5",  "gpt-4-1",  "gpt-4o-mini"],
+    "gemini-3.1-pro":   ["gemini-3-pro", "gpt-5.5",   "gpt-5"],
+    "gemini-3-pro":     ["gemini-3.1-pro","gpt-5.5",   "gpt-5"],
 }
 
 MODEL_ALIASES = {
-    "gpt-4": "gpt-4-1", "gpt-4-turbo": "gpt-4-1", "gpt-4-turbo-preview": "gpt-4-1",
+    "gpt-4": "gpt-4-1", "gpt-4-5": "gpt-4-1",  # v5.24: gpt-4-5 was fake service
+    "gpt-4-turbo": "gpt-4-1", "gpt-4-turbo-preview": "gpt-4-1",
     "gpt-4.1": "gpt-4-1", "gpt-4o": "gpt-4o", "gpt-4o-search": "gpt-4o",
     "gpt-4.5": "gpt-4-1", "gpt-4o-2024-11-20": "gpt-4-1",
     "gpt-4o-mini-2024-07-18": "gpt-4o-mini", "gpt-4o-mini-search": "gpt-4o-mini",
@@ -998,8 +1002,21 @@ def _paginated_poll(chat_id: int, user_msg_id: int, ssid: str,
                 raise Exception(f"service_error: {cur_txt[:300]}")
             if status == "ended" and cur_txt:
                 return cur_txt
+            # v5.24: backend hang guard (gemini status=updating with no content)
+            if status in ("updating", "wait", "") and not cur_txt:
+                updating_streak += 1
+                if updating_streak >= MAX_UPDATING:
+                    raise Exception(
+                        f"service_stuck_updating: status={status!r} no content after "
+                        f"{updating_streak} polls (~{int(updating_streak*0.7)}s)"
+                    )
+            else:
+                updating_streak = 0
+            if chunk_cb and cur_txt and cur_txt != prev_content:
+                updating_streak = 0
             break
         if not matched:
+            updating_streak = 0
             empty_streak += 1
             if empty_streak >= MAX_EMPTY:
                 raise Exception(f"poll_stuck chat={chat_id} no assistant msg after {MAX_EMPTY} attempts")
@@ -1214,7 +1231,10 @@ def _try_service(service_id: str, content: str, entries: list,
             if "client_disconnected" in err:
                 raise
             if "unsupported_service" in err:
-                _mark_dead(entry["ssid"], secs=86400, reason="balance_exhausted")
+                # v5.24: service missing, SSID fine — raise for fallback
+                raise Exception(f"service_not_found: {service_id}")
+            if "service_stuck_updating" in err or "service_not_found" in err:
+                raise  # bubble to _do_chat fallback
             last_err = e
             # v5.13: short backoff on upstream errors
             time.sleep(_retry_delay(attempt, transport=False))
@@ -1427,8 +1447,10 @@ def _do_chat(model: str, messages: list, ssid_override: str | None,
                     print(f"[FALLBACK] {service_id} retryable: {detail[:60]}", flush=True)
                     last_err = e; continue
                 raise
-            if "500" in err and idx < len(chain) - 1:
-                print(f"[FALLBACK] {service_id} HTTP 500", flush=True)
+            # v5.24: fallback on HTTP errors + service-level failures
+            _fb_triggers = ("500", "404", "400", "service_not_found", "service_stuck_updating")
+            if any(t in err for t in _fb_triggers) and idx < len(chain) - 1:
+                print(f"[FALLBACK] {service_id} -> {chain[idx+1]}: {err[:80]}", flush=True)
                 last_err = e; continue
             raise
 
@@ -1657,17 +1679,17 @@ def _startup_resi_health_check():
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.23] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.24] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.23] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.24] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     _startup_resi_health_check()
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.23] balance monitor started", flush=True)
-    print("[unitool-proxy v5.23] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking", flush=True)
+    print("[unitool-proxy v5.24] balance monitor started", flush=True)
+    print("[unitool-proxy v5.24] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
