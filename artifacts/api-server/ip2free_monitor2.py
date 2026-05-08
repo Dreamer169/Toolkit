@@ -189,6 +189,27 @@ FINISH_TASK_CODE_JS = """
 """
 
 
+def _kill_zombie_chrome():
+    """Kill leaked chrome-headless-shell processes and stale /tmp profile dirs."""
+    import subprocess, glob, shutil, time
+    try:
+        subprocess.run(["pkill", "-f", "chrome-headless-shell"], capture_output=True, timeout=5)
+        time.sleep(0.5)
+        subprocess.run(["pkill", "-9", "-f", "chrome-headless-shell"], capture_output=True, timeout=5)
+    except Exception:
+        pass
+    # Clean up stale profile dirs older than 10 minutes
+    import os, time as _t
+    cutoff = _t.time() - 600
+    for d in glob.glob("/tmp/playwright_chromiumdev_profile-*"):
+        try:
+            if os.path.getmtime(d) < cutoff:
+                shutil.rmtree(d, ignore_errors=True)
+        except Exception:
+            pass
+
+
+
 def _safe_wait(page, ms: int) -> bool:
     """wait_for_timeout that survives TargetClosedError (browser crash/close)."""
     try:
@@ -232,6 +253,7 @@ def solve_one(email, pw, port):
     LAST_API = {}
     FINISH_SUCCESS = [False]
 
+    _kill_zombie_chrome()
     with sync_playwright() as p:
         br = p.chromium.launch(
             headless=True,
