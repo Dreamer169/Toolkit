@@ -539,6 +539,21 @@ REASONING_SERVICES = {"gemini-3.1-pro", "gemini-3-pro", "grok",
 # v5.11: 从 API 实探更新 minimum_balance（用于日志报警，balance=0 的服务不 mark dead）
 FREE_SERVICES = {"gpt-4o-mini", "gpt-5-nano"}  # minimum_balance=0，余额耗尽也可用
 
+# v5.23: Services where widget/stream is intercepted — returns Russian restriction
+# message instead of real AI response. paginatedMessages returns real response.
+# CONFIRMED intercepted (2026-05-08 tests):
+#   gpt-5.5, gpt-5-nano, gpt-4-1, claude-sonnet, claude-opus
+# CONFIRMED clean (widget/stream ok):
+#   gpt-4o-mini, gpt-4o, gpt-5, gpt5.1, gpt5.2, gpt-o3-mini, gpt-o3, gpt-o4-mini,
+#   claude-sonnet-4-5, claude-sonnet-4-6
+# _send_and_collect_core skips widget/stream for POLL_PRIMARY_SERVICES;
+# _STREAM_INTERCEPT_RU is a safety net for any unlisted intercepted services.
+POLL_PRIMARY_SERVICES = {
+    "gpt-5.5", "gpt-5-nano", "gpt-4-1",
+    "claude-sonnet", "claude-opus",
+}
+_STREAM_INTERCEPT_RU = "помогаю только"  # Russian restriction marker
+
 # ─── Media generation services (image/video/audio) v5.20 ──────────────────
 # These use job polling (not SSE). Result in paginatedMessages assistant.attachments
 # CONFIRMED (2026-05-08): gpt-image completes in ~15s, content="" attachments has URL
@@ -565,11 +580,11 @@ VIDEO_SERVICES = {
     "veo3",       # Google Veo 3    min_bal=59     output=16.6
     "hailuo",     # Hailuo/Minimax  min_bal=50     output=10
     "runwayml",   # Runway ML       min_bal=48     output=16
-    # CONFIRMED BUG (2026-05-08): seedance/happyhorse return {"error":"Unsupported service"}
-    # from /api/chats/{id}/messages. /api/provider-runtime/chats sub-paths return 404.
-    # Actual message submission path unknown (possibly WebSocket). Fast-fail with clear error.
-    "seedance",   # Seedance (ByteDance) — Unsupported Service bug (see _do_media_job)
-    "happyhorse", # HappyHorse         — Unsupported Service bug (see _do_media_job)
+    # CONFIRMED (2026-05-08): seedance/happyhorse are inactive shell services.
+    # /api/services returns active=None (null), no pricing/balance fields at all.
+    # Message submission -> {"error":"Unsupported service"}. Fast-fail with clear error.
+    "seedance",   # Seedance (ByteDance) — active=None, inactive placeholder
+    "happyhorse", # HappyHorse         — active=None, inactive placeholder
 }
 
 AUDIO_SERVICES = {
@@ -1084,32 +1099,43 @@ def _send_and_collect_core(entry: dict, service_id: str, content: str,
 
         # 4. 主路径：widget/stream 真实 SSE 流
         # v5.12: msgs_snapshot 仍空 → 直接跳 paginatedMessages，避免白白触发 400
-        if msgs_snapshot:
+        # v5.23: skip stream for POLL_PRIMARY_SERVICES (widget/stream is intercepted —
+        #   returns Russian restriction msg instead of real AI response).
+        #   Confirmed: gpt-5.5, gpt-5-nano, gpt-4-1, claude-sonnet, claude-opus.
+        _use_stream = bool(msgs_snapshot) and service_id not in POLL_PRIMARY_SERVICES
+        if _use_stream:
             try:
                 text = _widget_stream_sse(chat_id, msgs_snapshot, entry["ssid"],
                                           chunk_cb, deadline, abort)
                 if text:
-                    # v5.14: AutoContinue — verify stream completed
-                    # mirrors ds2api INCOMPLETE detection guard
-                    _ac_msgs = _api_paginated(chat_id, entry["ssid"], limit=5)
-                    for _ac_m in _ac_msgs:
-                        if (_ac_m.get("role") == "assistant"
-                                and _ac_m.get("reply_to") == user_msg_id):
-                            if _ac_m.get("status") == "ended":
-                                print(f"[stream] ok chat={chat_id} len={len(text)}", flush=True)
-                                return text
-                            print(f"[stream] early-end → autocontinue chat={chat_id}", flush=True)
-                            return _paginated_poll(chat_id, user_msg_id, entry["ssid"],
-                                                   chunk_cb, deadline, text, abort)
-                    print(f"[stream] ok chat={chat_id} len={len(text)}", flush=True)
-                    return text
-                print(f"[stream] empty → fallback poll chat={chat_id}", flush=True)
+                    # v5.23: Russian interception safety net (unknown intercepted services)
+                    if _STREAM_INTERCEPT_RU in text:
+                        print(f"[stream] intercepted(ru) → fallback poll chat={chat_id}", flush=True)
+                    else:
+                        # v5.14: AutoContinue — verify stream completed
+                        # mirrors ds2api INCOMPLETE detection guard
+                        _ac_msgs = _api_paginated(chat_id, entry["ssid"], limit=5)
+                        for _ac_m in _ac_msgs:
+                            if (_ac_m.get("role") == "assistant"
+                                    and _ac_m.get("reply_to") == user_msg_id):
+                                if _ac_m.get("status") == "ended":
+                                    print(f"[stream] ok chat={chat_id} len={len(text)}", flush=True)
+                                    return text
+                                print(f"[stream] early-end → autocontinue chat={chat_id}", flush=True)
+                                return _paginated_poll(chat_id, user_msg_id, entry["ssid"],
+                                                       chunk_cb, deadline, text, abort)
+                        print(f"[stream] ok chat={chat_id} len={len(text)}", flush=True)
+                        return text
+                else:
+                    print(f"[stream] empty → fallback poll chat={chat_id}", flush=True)
             except Exception as e:
                 if abort and abort.is_set():
                     raise Exception("client_disconnected")
                 print(f"[stream] error → fallback: {e}", flush=True)
-        else:
+        elif not msgs_snapshot:
             print(f"[snap] empty after retry → skip stream, direct poll chat={chat_id}", flush=True)
+        else:
+            print(f"[stream] poll-primary svc={service_id} → direct poll chat={chat_id}", flush=True)
 
         # 5. 兜底：paginatedMessages 轮询（status=ended 为唯一完成信号）
         return _paginated_poll(chat_id, user_msg_id, entry["ssid"],
@@ -1259,8 +1285,8 @@ def _do_media_job(model: str, service_id: str, prompt: str,
             # v5.23: seedance/happyhorse fast-fail (avoids 200s timeout)
             if "Unsupported service" in err and service_id in {"seedance", "happyhorse"}:
                 raise Exception(
-                    f"{service_id}: API returns 'Unsupported service' via /api/chats/messages. "
-                    f"Provider-runtime sub-paths return 404. Message path unknown (possibly WebSocket). "
+                    f"{service_id}: service is inactive — active=None in /api/services "
+                    f"(no pricing/balance fields). This is a placeholder not yet deployed. "
                     f"Use 'luma' for video generation as an alternative."
                 )
             raise Exception(f"media_send_error: {err} {bal}")
@@ -1641,7 +1667,7 @@ if __name__ == "__main__":
     _startup_resi_health_check()
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
     print("[unitool-proxy v5.23] balance monitor started", flush=True)
-    print("[unitool-proxy v5.23] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking", flush=True)
+    print("[unitool-proxy v5.23] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
