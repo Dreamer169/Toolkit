@@ -302,6 +302,9 @@ def _run_login_once(email, password):
                 log(f"[login] {line}")
                 if "email_not_verified" in line:
                     return "EMAIL_NOT_VERIFIED"
+                # Fix-6c: navigation_timeout = dead RESI port, not account issue
+                if "navigation_timeout" in line:
+                    return "NETWORK_TRANSIENT"
         if stderr: log(f"[login] stderr: {stderr[-300:]}")
     except KeyboardInterrupt:
         if proc:
@@ -331,6 +334,10 @@ def login_via_script(email, password):
         if ssid == "EMAIL_NOT_VERIFIED":
             log(f"[login] email_not_verified — skipping retry")
             return "EMAIL_NOT_VERIFIED"
+        if ssid == "NETWORK_TRANSIENT":
+            log("[login] network_transient (dead RESI port) attempt %d/2" % attempt)
+            if attempt >= 2:
+                return "NETWORK_TRANSIENT"
         if ssid:
             return ssid
         log(f"[login] 尝试 {attempt}/2 失败")
@@ -498,8 +505,9 @@ def main():
         log(f"[done] SUCCESS len={len(ssid)}")
         save_ssid(account_id, email, ssid)
         _success_flag = True
-    elif ssid == "EMAIL_NOT_VERIFIED":
-        log("[done] email_not_verified — unlock, no rescue_fail counted")
+    elif ssid in ("EMAIL_NOT_VERIFIED", "NETWORK_TRANSIENT"):
+        _r = "email_not_verified" if ssid == "EMAIL_NOT_VERIFIED" else "network_transient"
+        log("[done] %s — unlock, no rescue_fail counted" % _r)
         try:
             _conn_nv = db_connect(); _cur_nv = _conn_nv.cursor()
             _cur_nv.execute("""
