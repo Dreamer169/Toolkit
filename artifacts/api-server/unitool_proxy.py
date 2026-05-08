@@ -42,6 +42,11 @@ def _get_resi_session(port: int) -> _rq.Session:
             _resi_sessions[port] = sess
         return _resi_sessions[port]
 
+def _drop_resi_session(port: int):
+    """连接被重置时清除缓存会话，下次调用将创建新连接"""
+    with _resi_sess_lock:
+        _resi_sessions.pop(port, None)
+
 PORT     = int(os.environ.get("PORT", 8089))
 BASE     = "https://unitool.ai"
 SSID_DIR = "/data/unitool_ssids"   # 持久化目录（vdb1 上）
@@ -508,21 +513,33 @@ def _pick_entry(entries: list) -> dict:
 
 
 # ─── v5.10: paginatedMessages 辅助 ──────────────────────────────────────────
+_CONN_RESET_ERRS = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
+
 def _api_paginated(chat_id: int, ssid: str, limit: int = 20) -> list:
-    """GET /api/chats/{id}/paginatedMessages via socks5h → data[] list"""
+    """GET /api/chats/{id}/paginatedMessages via socks5h → data[] list.
+    在连接重置时自动刷新会话重试一次。
+    """
     port = _pick_resi_port(ssid)
-    sess = _get_resi_session(port)
-    try:
-        r = sess.get(
-            f"{BASE}/api/chats/{chat_id}/paginatedMessages",
-            params={"limit": limit},
-            headers=_hdrs(ssid),
-            timeout=15,
-        )
-        return r.json().get("data", [])
-    except Exception as e:
-        print(f"[paginatedMessages] chat={chat_id} error: {e}", flush=True)
-        return []
+    for attempt in range(2):
+        sess = _get_resi_session(port)
+        try:
+            r = sess.get(
+                f"{BASE}/api/chats/{chat_id}/paginatedMessages",
+                params={"limit": limit},
+                headers=_hdrs(ssid),
+                timeout=15,
+            )
+            return r.json().get("data", [])
+        except _rq.exceptions.ConnectionError as e:
+            # socks5h 连接被 peer 重置 → 清除缓存会话，下一轮用新连接重试
+            _drop_resi_session(port)
+            if attempt == 0:
+                continue
+            print(f"[paginatedMessages] chat={chat_id} conn error (retry exhausted): {e}", flush=True)
+            return []
+        except Exception as e:
+            print(f"[paginatedMessages] chat={chat_id} error: {e}", flush=True)
+            return []
 
 
 # ─── v5.10: widget/stream 真实 SSE 主路径 ───────────────────────────────────
@@ -545,32 +562,37 @@ def _widget_stream_sse(chat_id: int, msgs_snapshot: list, ssid: str,
         "Connection":    "keep-alive",
     }
     full = ""
-    with sess.post(
-        f"{BASE}/api/widget/stream",
-        json={"chat_id": chat_id, "messages": msgs_snapshot},
-        headers=hdrs,
-        stream=True,
-        timeout=(10, timeout),
-    ) as r:
-        if r.status_code != 200:
-            raise Exception(f"widget/stream HTTP {r.status_code}: {r.text[:200]}")
-        for line in r.iter_lines(decode_unicode=True):
-            if not line:
-                continue
-            if time.time() >= deadline:
-                break
-            if line.startswith("data:"):
-                raw = line[5:].strip()
-                if not raw or raw == "[DONE]":
+    try:
+        with sess.post(
+            f"{BASE}/api/widget/stream",
+            json={"chat_id": chat_id, "messages": msgs_snapshot},
+            headers=hdrs,
+            stream=True,
+            timeout=(10, timeout),
+        ) as r:
+            if r.status_code != 200:
+                raise Exception(f"widget/stream HTTP {r.status_code}: {r.text[:200]}")
+            for line in r.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                if time.time() >= deadline:
                     break
-                try:
-                    delta = json.loads(raw).get("content", "")
-                    if delta:
-                        full += delta
-                        if chunk_cb:
-                            chunk_cb(delta)
-                except Exception:
-                    pass
+                if line.startswith("data:"):
+                    raw = line[5:].strip()
+                    if not raw or raw == "[DONE]":
+                        break
+                    try:
+                        delta = json.loads(raw).get("content", "")
+                        if delta:
+                            full += delta
+                            if chunk_cb:
+                                chunk_cb(delta)
+                    except Exception:
+                        pass
+    except _rq.exceptions.ConnectionError as e:
+        # socks5h 连接重置 → 清除会话缓存，向上抛出让调用方 fallback
+        _drop_resi_session(port)
+        raise
     return full
 
 
