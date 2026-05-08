@@ -189,6 +189,42 @@ FINISH_TASK_CODE_JS = """
 """
 
 
+def _safe_wait(page, ms: int) -> bool:
+    """wait_for_timeout that survives TargetClosedError (browser crash/close)."""
+    try:
+        page.wait_for_timeout(ms)
+        return True
+    except Exception:
+        return False
+
+
+def _navigate_spa(page, url: str, timeout_ms: int = 15000) -> bool:
+    """
+    SPA-safe navigation: use JS window.location for React Router pages.
+    Falls back to page.goto() if JS navigation doesn't change URL.
+    Returns True if navigation succeeded.
+    """
+    import time as _t
+    try:
+        current = page.url
+        page.evaluate(f"window.location.href = {repr(url)}")
+        deadline = _t.time() + timeout_ms / 1000
+        while _t.time() < deadline:
+            try:
+                if page.url != current:
+                    return True
+                page.wait_for_timeout(300)
+            except Exception:
+                return False
+        # fallback: hard goto
+        page.goto(url, wait_until="commit", timeout=timeout_ms)
+        return True
+    except Exception as e:
+        log(f"    _navigate_spa err: {e}")
+        return False
+
+
+
 def solve_one(email, pw, port):
     from patchright.sync_api import sync_playwright
     log(f"\n  → SOLVING {email} port={port}")
@@ -234,12 +270,12 @@ def solve_one(email, pw, port):
             # ── Login ──────────────────────────────────────────────
             page.goto("https://www.ip2free.com/cn/login",
                       wait_until="domcontentloaded", timeout=25000)
-            page.wait_for_timeout(3000)
+            _safe_wait(page, 3000)
             page.wait_for_selector("#email", timeout=12000)
 
             # ip2free MUI input starts as readOnly — click triggers React onFocus to make editable
             page.locator("#email").click()
-            page.wait_for_timeout(800)
+            _safe_wait(page, 800)
             # Force-remove readOnly via JS if React hasn't cleared it yet
             page.evaluate("""
                 (function() {
@@ -253,7 +289,7 @@ def solve_one(email, pw, port):
                     }
                 })()
             """)
-            page.wait_for_timeout(300)
+            _safe_wait(page, 300)
             page.locator("#email").fill(email)
             page.locator("#password").click()
             page.wait_for_timeout(300)
@@ -272,7 +308,7 @@ def solve_one(email, pw, port):
                 page.locator("button.MuiButton-sizeLarge").click(timeout=5000)
             except:
                 page.locator("button[type='submit']").first.click(timeout=3000)
-            page.wait_for_timeout(8000)
+            _safe_wait(page, 8000)
 
             if "/login" in page.url:
                 log("    ❌ login failed — URL still login")
@@ -280,11 +316,11 @@ def solve_one(email, pw, port):
                 return "login_failed"
             log(f"    ✅ logged in: {page.url}")
 
-            # ── Activity page ──────────────────────────────────────
+            # ── Activity page (SPA-safe navigation) ─────────────────
             LAST_API.clear()
-            page.goto("https://www.ip2free.com/cn/freeProxy?tab=activity",
-                      wait_until="domcontentloaded", timeout=15000)
-            page.wait_for_timeout(6000)
+            log("    navigating to freeProxy activity page...")
+            _navigate_spa(page, "https://www.ip2free.com/cn/freeProxy?tab=activity", 15000)
+            _safe_wait(page, 6000)
 
             # Check if task already done
             tl = LAST_API.get("account/taskList", "")
