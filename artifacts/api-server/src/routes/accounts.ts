@@ -343,11 +343,11 @@ async function spawnDynamicXray(bannedExitIp?: string): Promise<DynXray | null> 
     inbounds: [{ port, listen: "127.0.0.1", protocol: "socks", settings: { auth: "noauth", udp: false } }],
     outbounds: [{
       protocol: "vless",
-      settings: { vnext: [{ address: cfIp, port: 443, users: [{ id: "b3be1361-709c-4cad-824a-732e434ea06f", encryption: "none", flow: "" }] }] },
+      settings: { vnext: [{ address: cfIp, port: 443, users: [{ id: "b3be1361-709c-4cad-824a-732e434ea06f", encryption: "none" }] }] },
       streamSettings: {
         network: "ws", security: "tls",
-        tlsSettings: { serverName: "iam.jimhacker.qzz.io", fingerprint: "chrome", alpn: ["h3", "h2", "http/1.1"], allowInsecure: false },
-        wsSettings: { path: "/?ed=2048", headers: { Host: "iam.jimhacker.qzz.io" } },
+        tlsSettings: { serverName: "iam.jimhacker.qzz.io", fingerprint: "chrome" },  // v9.47: no alpn (h2 breaks WS upgrade)
+        wsSettings: { path: "/?ed=2048&p=ProxyIP.HK.CMLiussss.net%3A443&rm=no", host: "iam.jimhacker.qzz.io" },  // v9.47: ProxyIP path + host field
       },
     }],
   };

@@ -3166,7 +3166,7 @@ def main():
                 print(f"\n[{i+1}/{args.count}] 跳过注册… ⚠ CF池无可用预验证IP（已后台补池，禁止无代理裸连）", flush=True)
                 continue
             from xray_relay import XrayRelay as _XrayRelay
-            xray_relay_inst = _XrayRelay(ip_info['ip'])
+            xray_relay_inst = _XrayRelay(ip_info['ip'], force_dynamic=True)  # v9.47: each account uses unique CF IP
             if xray_relay_inst.start(timeout=8.0):
                 cur_proxy = xray_relay_inst.socks5_url
                 print(f"\n[{i+1}/{args.count}] 开始注册… CF节点: {ip_info['ip']} 延迟{ip_info['latency']}ms → SOCKS5:{xray_relay_inst.socks_port}", flush=True)
@@ -3221,7 +3221,7 @@ def main():
                     r = make_pool_skip_result(i, args, args.engine, "CF池无可用IP（CAPTCHA重试时耗尽），已后台补池")
                     break
                 from xray_relay import XrayRelay as _XrayRelay
-                xray_relay_inst = _XrayRelay(_new_ip["ip"])
+                xray_relay_inst = _XrayRelay(_new_ip["ip"], force_dynamic=True)  # v9.47: each account uses unique CF IP
                 if xray_relay_inst.start(timeout=8.0):
                     cur_proxy = xray_relay_inst.socks5_url
                     ip_info = _new_ip

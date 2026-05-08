@@ -1,7 +1,7 @@
 // nesting-pool.ts
 //
 // Microsoft API 请求通过 jimjio nesting-proxy Worker 路由。
-// Worker: nestingproxy.qtsvwfvabe.workers.dev  (jimjio 账号，非 jimhacker)
+// Worker: proxy.jimjio.indevs.in (nestingproxy-2.0, jimjio 账号)
 //
 // 收益:
 //   - microsoftFetch / live-verify 调用完全不消耗 jimhacker 100k/天配额
@@ -31,7 +31,17 @@ function buildEnvelope(targetUrl: string, init: RequestInit = {}): Record<string
       : { ...(init.headers as Record<string, string>) };
   }
   if (method !== "GET" && method !== "HEAD" && init.body != null) {
-    env["body"] = String(init.body);
+    // v2.0 protocol: use json_body for JSON payloads (Worker parses directly, avoids double-stringify)
+    const bodyStr = String(init.body);
+    const hdrs = init.headers instanceof Headers
+      ? init.headers
+      : new Headers(init.headers as Record<string, string>);
+    const ct = hdrs.get("content-type") ?? "";
+    if (ct.includes("application/json")) {
+      try { env["json_body"] = JSON.parse(bodyStr); } catch { env["body"] = bodyStr; }
+    } else {
+      env["body"] = bodyStr;
+    }
   }
   return env;
 }
