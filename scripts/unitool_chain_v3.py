@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool_chain_v3.py — 端到端全自动链路 v3.1
+unitool_chain_v3.py — 端到端全自动链路 v3.2
 ============================================
 整合所有子脚本，闭环实现完整链路：
   outlook_register.py（水位补充）
@@ -20,7 +20,7 @@ PM2 模式：每次处理一个账号后退出，PM2 自动重启继续下一个
 
 日志：/tmp/unitool_chain_v3.log
 """
-import atexit, glob, json, os, re, signal, subprocess, sys, time
+import atexit, asyncio as _asyncio, glob, json, os, re, signal, subprocess, sys, time
 import urllib.parse, urllib.request
 import psycopg2
 import sys as _sys_rp
@@ -34,6 +34,7 @@ SCRIPTS        = "/data/Toolkit/scripts"
 REGISTER_PY    = f"{SCRIPTS}/unitool_register.py"
 REFLINK_PY     = f"{SCRIPTS}/unitool_reflink.py"
 LOGIN_PY       = f"{SCRIPTS}/unitool_login.py"
+HTTP_REGISTER_PY = f"{SCRIPTS}/unitool_http_register.py"  # v3.2 fast path
 
 SSID_DIR       = "/data/unitool_ssids"   # proxy 优先读取目录
 PROXY_PORT     = 8089                    # unitool_proxy.py 监听端口
@@ -776,6 +777,124 @@ def _run(cmd, timeout=900, label=""):
         log(f"[cmd] ERR {e}")
         return "", str(e), -1
 
+
+
+# === NA 哈希日常监控 (每天一次) ======================================
+_NA_CHECK_TS_FILE = "/tmp/unitool_na_last_check.ts"
+_KNOWN_SIGNUP_NA  = "602b5c42d2c7dccaa6e3a06bed4a8a99ba7d0bc4"
+
+
+def _check_na_daily():
+    """
+    每天探测一次 SIGNUP_NA 是否变更。变更时 log 告警提示更新 _SIGNUP_NA_DEFAULT。
+    内置到 main() Step 0c，无阻塞。
+    """
+    import urllib.request as _ur
+    try:
+        last = float(open(_NA_CHECK_TS_FILE).read().strip())
+    except Exception:
+        last = 0
+    if time.time() - last < 86400:
+        return
+    try:
+        req = _ur.Request(
+            "https://unitool.ai/en/entry",
+            headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
+        )
+        html = _ur.urlopen(req, timeout=20).read().decode("utf-8", errors="ignore")
+        candidates = list(set(re.findall(r"[a-f0-9]{42}", html)))
+        if _KNOWN_SIGNUP_NA in candidates:
+            log(f"[na_probe] ✓ SIGNUP_NA 未变 ({_KNOWN_SIGNUP_NA[:12]}...)")
+        elif candidates:
+            log(f"[na_probe] ⚠️ SIGNUP_NA 已变! 旧={_KNOWN_SIGNUP_NA[:12]}... 候选={candidates[:3]}")
+            log(f"[na_probe] 请更新 unitool_http_register.py 中的 _SIGNUP_NA_DEFAULT")
+        else:
+            log(f"[na_probe] ⚠️ 页面中未找到 42 位哈希（CF 拦截？）")
+        open(_NA_CHECK_TS_FILE, "w").write(str(time.time()))
+    except Exception as e:
+        log(f"[na_probe] 探测失败: {e}")
+
+
+# === http_register 快速路径 + 全浏览器兆底 ======================================
+_http_reg_cache = {}  # {"fn": callable_or_False}
+
+
+def _load_http_reg():
+    if "fn" in _http_reg_cache:
+        return _http_reg_cache["fn"]
+    try:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location("unitool_http_register", HTTP_REGISTER_PY)
+        _mod  = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _http_reg_cache["fn"] = _mod.http_register
+        log("[http_reg] ✓ unitool_http_register 加载成功")
+    except Exception as e:
+        _http_reg_cache["fn"] = False
+        log(f"[http_reg] ⚠ 加载失败(将直接用全浏览器): {e}")
+    return _http_reg_cache["fn"]
+
+
+def _run_http_reg_with_pw(email: str, ref_code: str) -> dict:
+    """从 DB 取密码后调 http_register（chain_v3 场景）"""
+    fn = _load_http_reg()
+    if not fn:
+        return {"ok": False, "error": "http_reg_unavailable"}
+    try:
+        conn = db_connect(); cur = conn.cursor()
+        cur.execute("SELECT password FROM accounts WHERE email=%s LIMIT 1", (email,))
+        row = cur.fetchone(); conn.close()
+        pw = (row[0] or "") if row else ""
+    except Exception as e:
+        return {"ok": False, "error": f"db_pw_err:{e}"}
+    if not pw:
+        return {"ok": False, "error": "no_password_in_db"}
+    try:
+        return fn(email, pw, ref_code)
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+
+def run_register_fast(email, ref_code):
+    """
+    Step 4 注册调度器 v3.2:
+      ① 优先 http_register() - pydoll bypass + JS fetch (~20-35s, 快 40%)
+         ssid httpOnly 无法捕获，由 Step 5 run_login() 兆底。
+      ② 永久失败 (already_registered) → 直接返回失败。
+      ③ 暂态失败 (bypass/CF/超时) → 自动降级全浏览器 run_register()。
+    返回: {"ok": bool, "ssid": str, "reason": str}
+    """
+    fn = _load_http_reg()
+    if fn:
+        log(f"[main] ▶ [快速路径] http_register v3.2 --ref-code {ref_code}")
+        try:
+            result = _run_http_reg_with_pw(email, ref_code)
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            log(f"[http_reg] 异常: {e} → 降级全浏览器")
+            result = {"ok": False, "error": str(e)}
+
+        if result.get("ok"):
+            log(f"[http_reg] ✅ 注册成功 method={result.get('method','?')}")
+            return {"ok": True, "ssid": "", "reason": ""}
+
+        err = result.get("error_type") or result.get("error") or result.get("reason", "unknown")
+        err_s = str(err).lower()
+        # 永久失败：不降级
+        if any(p in err_s for p in ("already_reg", "already_registered", "email_already",
+                                     "already_use", "user with like email")):
+            log(f"[http_reg] ❌ 永久失败 (already): {err}")
+            return {"ok": False, "ssid": "", "reason": err_s}
+        # 暂态失败：降级全浏览器
+        log(f"[http_reg] ⚠ 暂态失败: {err} → 降级全浏览器 unitool_register.py")
+    else:
+        log(f"[main] ▶ http_register 不可用 → 直接全浏览器")
+
+    log(f"[main] ▶ [兆底] unitool_register.py --ref-code {ref_code}")
+    return run_register(email, ref_code)
+
+
 def run_register(email, ref_code):
     """
     调用 unitool_register.py --email EMAIL --ref-code CODE
@@ -887,6 +1006,12 @@ def main():
     log("=" * 60)
     log("=== unitool_chain_v3 start ===")
 
+    # ── Step 0c: NA 哈希监控（每天一次，无阻塞）───────────────────────
+    try:
+        _check_na_daily()
+    except Exception as e:
+        log(f"[na_probe] 异常(忽略): {e}")
+
     # ── Step 0a: 模块隔离 — 清理卡死 processing（>30min 自动解锁）─────────────
     try:
         cleanup_stale_processing(30)
@@ -926,8 +1051,7 @@ def main():
     db_lock_account(account_id)   # 立即锁定，防 OOM 后重复选
 
     # ── Step 4: 注册 unitool（带 ref_code）──────────────────────────────────────
-    log(f"[main] ▶ 调用 unitool_register.py --ref-code {ref_code}")
-    reg_result = run_register(email, ref_code)
+    reg_result = run_register_fast(email, ref_code)
 
     if not reg_result["ok"]:
         reason = reg_result.get("reason", "unknown")
