@@ -289,14 +289,27 @@ def _api_check_ref_code(ssid: str, account_id: int = 0) -> tuple:
         return (entry.get("code", ""), entry.get("conversions", 0))
     try:
         _rc_port = RESI_PORTS[hash(str(account_id)) % len(RESI_PORTS)]
-        r = subprocess.run(
-            ["curl", "-s",
-             "--socks5-hostname", f"127.0.0.1:{_rc_port}",
-             "-b", f"__Secure-unitool-ssid={ssid}",
-             "-H", "Accept: application/json", "--max-time", "10",
-             "https://unitool.ai/api/user/ref-code"],
-            capture_output=True, text=True, timeout=15)
-        raw = r.stdout.strip()
+        # v5.13 fix: Popen+communicate to avoid KBI crashing the main loop
+        _rc_cmd = [
+            "curl", "-s",
+            "--socks5-hostname", f"127.0.0.1:{_rc_port}",
+            "-b", f"__Secure-unitool-ssid={ssid}",
+            "-H", "Accept: application/json", "--max-time", "10",
+            "https://unitool.ai/api/user/ref-code",
+        ]
+        _rc_proc = subprocess.Popen(_rc_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            _rc_out, _ = _rc_proc.communicate(timeout=15)
+            raw = _rc_out.decode("utf-8", errors="ignore").strip()
+        except KeyboardInterrupt:
+            try: _rc_proc.kill(); _rc_proc.communicate()
+            except Exception: pass
+            raise
+        except subprocess.TimeoutExpired:
+            try: _rc_proc.kill(); _rc_proc.communicate()
+            except Exception: pass
+            return ("", -1)
+        raw = raw
         if raw == "null" or not raw:
             cache[key] = {"code": "", "conversions": 0, "ts": time.time()}
             _save_ref_cache(cache)
@@ -324,18 +337,31 @@ def create_ref_code_via_proxy(ssid: str, email: str, port_hint: int = 0) -> str:
               + RESI_PORTS[:port_hint % len(RESI_PORTS)])
     for port in _ports:
         try:
-            r = subprocess.run(
-                ["curl", "-s", "--max-time", "12",
-                 "--socks5-hostname", f"127.0.0.1:{port}",
-                 "-b", f"__Secure-unitool-ssid={ssid}",
-                 "-X", "POST",
-                 "-H", "Content-Type: application/json",
-                 "-H", "Accept: application/json",
-                 "https://unitool.ai/api/ref-codes"],
-                capture_output=True, text=True, timeout=18)
-            if r.returncode != 0 or not r.stdout.strip():
+            # v5.13 fix: Popen+communicate to avoid KBI crash
+            _crf_cmd = [
+                "curl", "-s", "--max-time", "12",
+                "--socks5-hostname", f"127.0.0.1:{port}",
+                "-b", f"__Secure-unitool-ssid={ssid}",
+                "-X", "POST",
+                "-H", "Content-Type: application/json",
+                "-H", "Accept: application/json",
+                "https://unitool.ai/api/ref-codes",
+            ]
+            _crf_proc = subprocess.Popen(_crf_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                _crf_out, _ = _crf_proc.communicate(timeout=18)
+                _crf_stdout = _crf_out.decode("utf-8", errors="ignore")
+            except KeyboardInterrupt:
+                try: _crf_proc.kill(); _crf_proc.communicate()
+                except Exception: pass
+                raise
+            except subprocess.TimeoutExpired:
+                try: _crf_proc.kill(); _crf_proc.communicate()
+                except Exception: pass
                 continue
-            data = json.loads(r.stdout)
+            if _crf_proc.returncode != 0 or not _crf_stdout.strip():
+                continue
+            data = json.loads(_crf_stdout)
             if "code" in data:
                 log(f"[ref_create] ✅ port={port} → ref_code={data['code']} email={email}")
                 return data["code"]
@@ -561,11 +587,21 @@ def check_resources():
     except Exception:
         pass
     try:
-        r = subprocess.run(
+        # v5.13: Popen to avoid KBI propagation
+        _ps_proc = subprocess.Popen(
             ["bash", "-c",
              "ps aux | grep chrome-linux64/chrome | grep -v 'crashpad\\|grep' | wc -l"],
-            capture_output=True, text=True)
-        n = max(0, int(r.stdout.strip() or 0))
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            _ps_out, _ = _ps_proc.communicate(timeout=10)
+            _ps_stdout = _ps_out.decode("utf-8", errors="ignore")
+        except KeyboardInterrupt:
+            try: _ps_proc.kill(); _ps_proc.communicate()
+            except Exception: pass
+            raise
+        except Exception:
+            _ps_stdout = "0"
+        n = max(0, int(_ps_stdout.strip() or 0))
         log(f"[res] Chrome进程数={n}")
         if n > 5:
             log(f"[res] SKIP chrome_count={n}>5"); return False

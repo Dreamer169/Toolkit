@@ -186,14 +186,26 @@ def click_verify_link(verify_url):
     for f in [ck, hdr]:
         try: os.remove(f)
         except: pass
-    r = subprocess.run([
+    # v5.13: Popen+communicate to avoid KBI crash (mirrors ds2api SIGTERM handling)
+    _vr_cmd = [
         "curl", "-sS", "-L", "--max-redirs", "8",
         "-c", ck, "-b", ck, "-D", hdr,
         "-H", "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0.0.0",
         "-H", "Accept: text/html,application/xhtml+xml,*/*;q=0.9",
         "--max-time", "30",
-        verify_url
-    ], capture_output=True, text=True, timeout=35)
+        verify_url,
+    ]
+    _vr_proc = subprocess.Popen(_vr_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        _vr_out, _ = _vr_proc.communicate(timeout=35)
+    except KeyboardInterrupt:
+        try: _vr_proc.kill(); _vr_proc.communicate()
+        except Exception: pass
+        raise
+    except subprocess.TimeoutExpired:
+        try: _vr_proc.kill(); _vr_proc.communicate()
+        except Exception: pass
+        return "", False
     ssid     = ""; to_entry = False
     raw_hdrs = open(hdr).read() if os.path.exists(hdr) else ""
     # headers in hdr file, NOT r.stdout (body)

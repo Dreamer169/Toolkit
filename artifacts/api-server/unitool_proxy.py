@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.12
+unitool.ai → OpenAI 兼容反代 v5.13
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -43,7 +43,19 @@ from urllib.error import HTTPError
 RESI_PORTS = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
 
 def _pick_resi_port(ssid: str) -> int:
-    return RESI_PORTS[hash(ssid[:16] if ssid else "x") % len(RESI_PORTS)]
+    """v5.13: skip unhealthy ports (mirrors ds2api pickHealthyProxy).
+    Start from SSID-hashed base port; fall back to first healthy one.
+    """
+    base = RESI_PORTS[hash(ssid[:16] if ssid else "x") % len(RESI_PORTS)]
+    now  = time.time()
+    with _resi_health_lock:
+        if _resi_port_health.get(base, 0) <= now:
+            return base
+        for p in RESI_PORTS:
+            if _resi_port_health.get(p, 0) <= now:
+                return p
+    return base
+
 
 _resi_sessions: dict = {}
 _resi_sess_lock = threading.Lock()
@@ -62,6 +74,11 @@ def _get_resi_session(port: int) -> _rq.Session:
 def _drop_resi_session(port: int):
     with _resi_sess_lock:
         _resi_sessions.pop(port, None)
+    # v5.13: 60s port cooldown (mirrors ds2api markProxyOnCooldown)
+    with _resi_health_lock:
+        _resi_port_health[port] = time.time() + 60
+    print(f"[RESI] port={port} unhealthy 60s", flush=True)
+
 
 PORT     = int(os.environ.get("PORT", 8089))
 BASE     = "https://unitool.ai"
@@ -72,7 +89,20 @@ LOGIN_SCRIPT = "/data/Toolkit/scripts/unitool_login.py"
 BALANCE_CHECK_INTERVAL = 900
 BALANCE_LOW_WARN = 0.5
 MAX_HISTORY_TURNS = 12   # v5.11: 最多保留 12 轮消息（对标 DS split_history_prompt）
-MAX_CONN_ERRORS   = 3    # v5.11: 连续连接错误上限 → mark_dead(90s)
+MAX_CONN_ERRORS   = 3    # v5.11: consecutive conn errors -> mark_dead(90s)
+MAX_EMPTY_STREAK  = 3    # v5.13: consecutive empty responses -> mark_dead(120s)
+
+# v5.13: RESI port health map (mirrors ds2api proxyHealthMap)
+_resi_port_health = {}    # port -> dead_until (float epoch)
+_resi_health_lock = __import__("threading").Lock()
+
+# v5.13: RPM sliding-window counter (mirrors ds2api runtimeStats)
+import random as _random
+_rpm_lock        = __import__("threading").Lock()
+_rpm_buckets     = [0] * 60
+_rpm_ts          = [0] * 60
+_rpm_total_reqs  = 0
+
 
 os.makedirs(SSID_DIR, exist_ok=True)
 ctx = ssl.create_default_context()
@@ -243,7 +273,9 @@ def _make_entry(ssid: str, label: str, email: str = "") -> dict:
             "_relogin_pending": False,
             "_active": 0,
             "_last_released": 0.0,   # v5.11: 最近一次释放时间戳（空闲最长优先用）
-            "_conn_errors": 0}       # v5.11: 连续 ConnectionReset 计数
+            "_conn_errors": 0,      # v5.11: consecutive conn reset counter
+            "_empty_streak": 0}    # v5.13: consecutive empty response counter
+
 
 def _mark_dead(ssid: str, secs: int = 600, reason: str = ""):
     with _lock:
@@ -551,6 +583,41 @@ def _is_retryable(msg: str) -> bool:
     ml = msg.lower()
     return any(k.lower() in ml for k in KEYS)
 
+def _retry_delay(attempt, transport=False):
+    """v5.13: exponential backoff with +-25% jitter (mirrors ds2api retryDelay).
+    transport=True uses a longer base (network errors need more recovery time).
+    """
+    base  = 0.6 if transport else 0.2
+    shift = min(attempt, 4)
+    d     = min(base * (2 ** shift), 3.0)
+    j     = d / 4
+    return d - j + _random.random() * 2 * j
+
+
+def _record_rpm():
+    """v5.13: record one request into 60s sliding window (mirrors ds2api runtimeStats)."""
+    global _rpm_total_reqs
+    now = int(time.time())
+    idx = now % 60
+    with _rpm_lock:
+        if _rpm_ts[idx] != now:
+            _rpm_ts[idx]      = now
+            _rpm_buckets[idx] = 0
+        _rpm_buckets[idx] += 1
+        _rpm_total_reqs    += 1
+
+
+def _get_rpm():
+    """v5.13: requests in last 60s (mirrors ds2api snapshot rpm)."""
+    now    = int(time.time())
+    cutoff = now - 59
+    with _rpm_lock:
+        return sum(
+            cnt for i, cnt in enumerate(_rpm_buckets)
+            if _rpm_ts[i] >= cutoff
+        )
+
+
 def _pick_entry(entries: list) -> dict:
     """v5.11: 空闲最长优先（对标 DS AccountPool.get_account idle-longest-first）。
     选取 _last_released 最小（最久未使用）的 SSID，最大化冷却间隔。
@@ -724,10 +791,22 @@ def _send_and_collect(entry: dict, service_id: str, content: str,
         entry["_active"] = entry.get("_active", 0) + 1
     try:
         result = _send_and_collect_core(entry, service_id, content, chunk_cb, timeout, abort)
-        # 成功：重置连续错误计数 + 更新释放时间（空闲最长优先用）
         with _lock:
-            entry["_conn_errors"]    = 0
-            entry["_last_released"]  = time.time()
+            entry["_last_released"] = time.time()
+            if result and result.strip():
+                # success: reset both error counters
+                entry["_conn_errors"]  = 0
+                entry["_empty_streak"] = 0
+            else:
+                # v5.13: track consecutive empty responses (mirrors ds2api accountEmptyOutputHealth)
+                entry["_empty_streak"] = entry.get("_empty_streak", 0) + 1
+                es = entry["_empty_streak"]
+                if es >= MAX_EMPTY_STREAK:
+                    lbl = entry["label"]
+                    print(f"[POOL] {lbl} empty_streak={es} -> dead 120s", flush=True)
+                    entry["dead_until"]    = time.time() + 120
+                    entry["dead_reason"]   = "empty_response"
+                    entry["_empty_streak"] = 0
         return result
     except Exception:
         with _lock:
@@ -780,7 +859,7 @@ def _send_and_collect_core(entry: dict, service_id: str, content: str,
         msgs_snapshot = _api_paginated(chat_id, entry["ssid"], limit=5)
         # v5.12: msgs_snapshot=[] → 再等 0.5s 重试（服务器写入延迟）
         if not msgs_snapshot:
-            print(f"[v5.12] msgs_snapshot=[] chat={chat_id} → retry snapshot 0.5s", flush=True)
+            print(f"[v5.13] msgs_snapshot=[] chat={chat_id} → retry snapshot 0.5s", flush=True)
             time.sleep(0.5)
             msgs_snapshot = _api_paginated(chat_id, entry["ssid"], limit=5)
 
@@ -791,15 +870,15 @@ def _send_and_collect_core(entry: dict, service_id: str, content: str,
                 text = _widget_stream_sse(chat_id, msgs_snapshot, entry["ssid"],
                                           chunk_cb, deadline, abort)
                 if text:
-                    print(f"[v5.12] stream ok chat={chat_id} len={len(text)}", flush=True)
+                    print(f"[v5.13] stream ok chat={chat_id} len={len(text)}", flush=True)
                     return text
-                print(f"[v5.12] stream empty → fallback poll chat={chat_id}", flush=True)
+                print(f"[v5.13] stream empty → fallback poll chat={chat_id}", flush=True)
             except Exception as e:
                 if abort and abort.is_set():
                     raise Exception("client_disconnected")
-                print(f"[v5.12] stream error → fallback: {e}", flush=True)
+                print(f"[v5.13] stream error → fallback: {e}", flush=True)
         else:
-            print(f"[v5.12] msgs_snapshot=[] after retry → skip widget/stream, direct poll chat={chat_id}", flush=True)
+            print(f"[v5.13] msgs_snapshot=[] after retry → skip widget/stream, direct poll chat={chat_id}", flush=True)
 
         # 5. 兜底：paginatedMessages 轮询（status=ended 为唯一完成信号）
         return _paginated_poll(chat_id, user_msg_id, entry["ssid"],
@@ -841,6 +920,8 @@ def _try_service(service_id: str, content: str, entries: list,
                 print(f"[POOL] {entry['label']} conn_errors={cerrs} → dead 90s", flush=True)
                 _mark_dead(entry["ssid"], secs=90, reason="conn_reset")
             last_err = e
+            # v5.13: backoff before retry on transport error
+            time.sleep(_retry_delay(attempt, transport=True))
             continue
         except HTTPError as e:
             body_txt = ""
@@ -857,6 +938,7 @@ def _try_service(service_id: str, content: str, entries: list,
         except TimeoutError as e:
             _mark_dead(entry["ssid"], secs=120, reason="timeout")
             last_err = e
+            time.sleep(_retry_delay(attempt, transport=False))
             continue
         except Exception as e:
             err = str(e)
@@ -865,6 +947,8 @@ def _try_service(service_id: str, content: str, entries: list,
             if "unsupported_service" in err:
                 _mark_dead(entry["ssid"], secs=86400, reason="balance_exhausted")
             last_err = e
+            # v5.13: short backoff on upstream errors
+            time.sleep(_retry_delay(attempt, transport=False))
             continue
     raise Exception(f"all ssids failed for {service_id}: {last_err}")
 
@@ -873,6 +957,7 @@ def _do_chat(model: str, messages: list, ssid_override: str | None,
              chunk_cb=None, abort: AbortFlag | None = None) -> str:
     primary_id = _resolve_model(model)
     content    = _fmt(messages)
+    _record_rpm()  # v5.13: RPM counter
     print(f"[REQ] {model}→{primary_id} msgs={len(messages)}", flush=True)
 
     if ssid_override and len(ssid_override) > 50:
@@ -956,11 +1041,16 @@ class Handler(BaseHTTPRequestHandler):
                     "balance":     e.get("balance"),
                     "relogin":     e.get("_relogin_pending", False),
                     "active":      e.get("_active", 0),
-                    "conn_errors": e.get("_conn_errors", 0),
-                    "idle_secs":   round(now - e["_last_released"], 1) if e.get("_last_released") else None,
+                    "conn_errors":  e.get("_conn_errors", 0),
+                    "empty_streak": e.get("_empty_streak", 0),
+                    "idle_secs":    round(now - e["_last_released"], 1) if e.get("_last_released") else None,
                 } for e in _pool]
             live = sum(1 for a in info if not a["dead"])
-            return self._json(200, {"pool_size": len(_pool), "live": live, "accounts": info})
+            return self._json(200, {
+                "pool_size": len(_pool), "live": live,
+                "rpm": _get_rpm(), "total_requests": _rpm_total_reqs,
+                "accounts": info,
+            })
 
         if p == "/reload-ssids":
             _rebuild_pool()
@@ -1098,16 +1188,16 @@ class ThreadedServer(HTTPServer):
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.12] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.13] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.12] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.13] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.12] balance monitor started", flush=True)
-    print("[unitool-proxy v5.12] features: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream", flush=True)
+    print("[unitool-proxy v5.13] balance monitor started", flush=True)
+    print("[unitool-proxy v5.13] features: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
