@@ -36,8 +36,44 @@ AUTH_COOKIE  = "__Secure-unitool-ssid"
 # 住宅代理端口列表（与 chain_v3 保持一致）
 RESI_PORTS = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
 
+# v5.14: RESI port health check cache (valid 5 min)
+_resi_healthy_ports: list = []
+_resi_health_ts: float = 0.0
+
+def _check_resi_port(port: int) -> bool:
+    """Quick test: can this SOCKS5 port actually proxy HTTPS to unitool.ai?"""
+    try:
+        proc = subprocess.Popen(
+            ["curl", "-s", "--max-time", "5",
+             "--proxy", f"socks5h://127.0.0.1:{port}",
+             "-o", "/dev/null", "-w", "%{{http_code}}",
+             "https://unitool.ai/en/entry"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            out, _ = proc.communicate(timeout=7)
+        except subprocess.TimeoutExpired:
+            proc.kill(); proc.communicate(); return False
+        return out.decode().strip() not in ("", "000")
+    except Exception:
+        return False
+
+def _get_healthy_resi_ports() -> list:
+    global _resi_healthy_ports, _resi_health_ts
+    import time as _t
+    if _resi_healthy_ports and _t.time() - _resi_health_ts < 300:
+        return _resi_healthy_ports
+    healthy = [p for p in RESI_PORTS if _check_resi_port(p)]
+    if not healthy:
+        healthy = RESI_PORTS  # fallback: use all if check fails
+    _resi_healthy_ports = healthy
+    _resi_health_ts = _t.time()
+    print(f"[RESI] healthy ports: {healthy}", flush=True)
+    return healthy
+
 def _pick_resi_port(email: str) -> int:
-    return RESI_PORTS[hash(email) % len(RESI_PORTS)]
+    """Pick RESI port from healthy set; falls back to full list if none pass check."""
+    ports = _get_healthy_resi_ports()
+    return ports[hash(email) % len(ports)]
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────

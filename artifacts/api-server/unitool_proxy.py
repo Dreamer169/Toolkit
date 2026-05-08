@@ -351,13 +351,26 @@ def _bg_relogin(label: str):
     if not pw:
         print(f"[RELOGIN] no password found for {email}/{label}, skip", flush=True)
         return
+    _rl_proc = None
     try:
-        result = subprocess.run(
+        # v5.14: Popen+communicate to avoid KBI child-process leak
+        _rl_proc = subprocess.Popen(
             ["python3", LOGIN_SCRIPT, "--email", email, "--password", pw, "--no-headless"],
-            capture_output=True, text=True, timeout=180,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env={**os.environ, "DISPLAY": ":99", "PYTHONUNBUFFERED": "1"}
         )
-        for line in result.stdout.split("\n"):
+        try:
+            _rl_out, _rl_err = _rl_proc.communicate(timeout=180)
+        except KeyboardInterrupt:
+            try: _rl_proc.kill(); _rl_proc.communicate()
+            except Exception: pass
+            raise
+        except subprocess.TimeoutExpired:
+            try: _rl_proc.kill(); _rl_proc.communicate()
+            except Exception: pass
+            print(f"[RELOGIN] timeout for {label}", flush=True)
+            return
+        for line in _rl_out.decode("utf-8", errors="ignore").splitlines():
             if line.startswith("[OK]"):
                 parts = line.split("|")
                 if len(parts) >= 3:
@@ -366,8 +379,11 @@ def _bg_relogin(label: str):
                     _add_ssid_to_pool(label, new_ssid)
                     return
         print(f"[RELOGIN] ❌ {label} no OK line found", flush=True)
-        if result.stderr:
-            print(f"[RELOGIN] stderr: {result.stderr[-200:]}", flush=True)
+        _rl_err_txt = _rl_err.decode("utf-8", errors="ignore") if _rl_err else ""
+        if _rl_err_txt:
+            print(f"[RELOGIN] stderr: {_rl_err_txt[-200:]}", flush=True)
+    except KeyboardInterrupt:
+        raise
     except Exception as ex:
         print(f"[RELOGIN] error: {ex}", flush=True)
     finally:
