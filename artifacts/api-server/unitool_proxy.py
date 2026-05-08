@@ -1275,17 +1275,17 @@ def _do_media_job(model: str, service_id: str, prompt: str,
                             if uri:
                                 if att_type in ("png", "jpg", "jpeg", "webp", "gif") or msg_type == "photo":
                                     dim = f" ({w}x{h})" if w and h else ""
-                                    parts.append(f"![{name or service_id}{dim}]({uri})" + "
+                                    parts.append(f"![{name or service_id}{dim}]({uri})\n\n[Download]({uri})")
 
-" + f"[Download]({uri})")
+
                                 elif att_type in ("mp4", "webm", "mov") or msg_type == "video":
-                                    parts.append(f"Video: [{name or service_id}]({uri})" + "
+                                    parts.append(f"Video: [{name or service_id}]({uri})\n\n[Download]({uri})")
 
-" + f"[Download]({uri})")
+
                                 elif att_type in ("mp3", "wav", "ogg") or msg_type == "audio":
-                                    parts.append(f"Audio: [{name or service_id}]({uri})" + "
+                                    parts.append(f"Audio: [{name or service_id}]({uri})\n\n[Download]({uri})")
 
-" + f"[Download]({uri})")
+
                                 else:
                                     parts.append(f"[{name or uri}]({uri})")
                     if content and not parts:
@@ -1293,9 +1293,9 @@ def _do_media_job(model: str, service_id: str, prompt: str,
                     if not parts:
                         parts.append(f"[{service_id} job completed but no output returned]")
 
-                    final_text = "
+                    final_text = "\n\n".join(parts)
 
-".join(parts)
+
                     print(f"[MEDIA] done chat={chat_id} cost={cost} type={msg_type} len={len(final_text)}", flush=True)
                     # v5.21 BUG FIX: send final_text via chunk_cb for streaming clients
                     # Previously chunk_cb only got "[Generating...]" and image URL was lost!
