@@ -68,7 +68,7 @@ def _get_healthy_resi_ports() -> list:
         _ok = list(_ex.map(_check_resi_port, RESI_PORTS))
     healthy = [p for p, ok in zip(RESI_PORTS, _ok) if ok]
     if not healthy:
-        healthy = list(RESI_PORTS)  # fallback
+        healthy = list(range(10851, 10860))  # Fix13: fallback to SS-range only, not all 29 dead ports
     _resi_healthy_ports = healthy
     _resi_health_ts = _t.time()
     print(f"[RESI] healthy={healthy} ({len(healthy)}/{len(RESI_PORTS)}) in {_t.time()-t0:.1f}s", flush=True)

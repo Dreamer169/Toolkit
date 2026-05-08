@@ -438,7 +438,7 @@ async def _pydoll_register(
                 break
         return "".join(parts)
 
-    async def _bypass_wait(tab, label="", rounds=4, per_round=15) -> bool:
+    async def _bypass_wait(tab, label="", rounds=2, per_round=10) -> bool:
         """等 Turnstile iframe → 多轮 bypass → reload 兜底"""
         for i in range(12):
             await asyncio.sleep(1)
@@ -745,21 +745,28 @@ async def http_register_hybrid(
       比全浏览器省去：表单填写 / 按钮等待 / 页面跳转（快 ~30%）
       token ↔ cookie 绑定在同一浏览器会话，CF 验证必然通过
     """
+    # Fix14: bypass失败换端口重试（CF Turnstile 静默拒绝当前IP时换IP）
+    _BYPASS_FAIL_ERRORS = ("bypass_failed", "token_empty_after_bypass")
     port = resi_port or _pick_port(hash(email))
-    log(f"[hybrid] {email} ref={ref_code or '-'} port={port}")
-
-    result = await _pydoll_register(email, password, ref_code=ref_code, resi_port=port)
-    result["method"] = "hybrid_v3.2"
-
-    if result.get("ok"):
-        log(f"[hybrid] ✓ 注册成功 {email}")
-    else:
+    result = {}
+    for _attempt in range(3):
+        if _attempt > 0:
+            if _RESI:
+                _rpool.report_failure(port)
+            port = _pick_port(hash(email) + _attempt * 37)
+            log(f"[hybrid] bypass失败换端口 attempt={_attempt+1} new_port={port}")
+        log(f"[hybrid] {email} ref={ref_code or chr(45)} port={port} attempt={_attempt+1}")
+        result = await _pydoll_register(email, password, ref_code=ref_code, resi_port=port)
+        result["method"] = "hybrid_v3.2"
+        if result.get("ok"):
+            log(f"[hybrid] ✓ 注册成功 {email} attempt={_attempt+1}")
+            return result
         err = result.get("error_type") or result.get("error") or "unknown"
-        log(f"[hybrid] ✗ 失败: {err}")
-
+        log(f"[hybrid] ✗ 失败 attempt={_attempt+1}: {err}")
+        if err not in _BYPASS_FAIL_ERRORS:
+            break
         if result.get("digest") == "3453729035":
-            log("[hybrid] token 仍被拒绝（fetch 内 cookie 异常？），建议检查 Xvfb/pydoll 版本")
-
+            log("[hybrid] token仍被拒绝，建议检查Xvfb/pydoll版本")
     return result
 
 

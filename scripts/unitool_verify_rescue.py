@@ -183,9 +183,9 @@ def refresh_ms_token(refresh_token):
     return json.loads(r.read())
 
 def find_verify_link(access_token, max_msgs=30):
-    """在 JunkEmail+Inbox+Clutter 找unitool验证邮件，$search 跨全文件夹兜底"""
+    """在 JunkEmail+Inbox+Clutter+DeletedItems 找unitool验证邮件，$search 兜底"""
     headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
-    pattern = re.compile(r"https://unitool\.ai/\S+", re.IGNORECASE)
+    pattern = re.compile(r"https://(?:[a-z0-9-]+\.)?unitool\.ai/\S+", re.IGNORECASE)
     for folder in ["JunkEmail", "Inbox", "Clutter", "DeletedItems"]:
         url = (f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder}/messages"
                f"?$top={max_msgs}&$orderby=receivedDateTime+desc"
@@ -196,15 +196,17 @@ def find_verify_link(access_token, max_msgs=30):
             msgs = json.loads(resp.read()).get("value", [])
         except Exception as e:
             log(f"[graph] {folder} err: {e}"); continue
-        for m in msgs:
-            subj      = m.get("subject", "").lower()
-            from_addr = m.get("from", {}).get("emailAddress", {}).get("address", "").lower()
-            if "unitool.ai" not in from_addr and "unitool" not in subj and "verify" not in subj:
-                continue
+        log(f"[graph] {folder}: {len(msgs)} messages")
+        for i, m in enumerate(msgs):
+            subj      = m.get("subject", "")
+            from_addr = m.get("from", {}).get("emailAddress", {}).get("address", "")
+            recv_dt   = m.get("receivedDateTime", "")[:16]
+            if i < 3:
+                log(f"[graph]   msg{i}: from={from_addr} subj={subj!r:.60} dt={recv_dt}")
             body  = m.get("body", {}).get("content", "")
             links = pattern.findall(body)
             if links:
-                log(f"[graph] ✓ {folder}: subj='{m.get('subject','')}' from={from_addr}")
+                log(f"[graph] ✓ {folder}: subj={subj!r} from={from_addr} url={links[0][:80]}")
                 return links[0]
     # $search 跨全部文件夹（Focused/Other/ClutteredLow 等 folder 扫描可能遗漏）
     try:

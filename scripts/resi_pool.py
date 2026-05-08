@@ -15,18 +15,19 @@ import subprocess, threading, time, concurrent.futures
 from typing import List
 
 RESI_CANDIDATE_PORTS: List[int] = list(range(10851, 10860)) + list(range(10870, 10890))
-PROBE_TARGET    = "https://unitool.ai/en/entry"
+PROBE_TARGET    = "https://www.google.com/generate_204"
 PROBE_TIMEOUT   = 6
 PROBE_CACHE_TTL = 300  # 5 min (same as existing scripts)
 FAIL_THRESHOLD  = 3    # easy_proxies: FailureThreshold
 BLACKLIST_TTL   = 300  # easy_proxies: BlacklistDuration
 
-_lock          = threading.Lock()
-_healthy_ports: List[int] = []
-_health_ts:     float = 0.0
-_rr_idx:        int = 0
-_fail_counts:   dict = {}
-_blacklisted:   dict = {}
+_lock              = threading.Lock()
+_healthy_ports:    List[int] = []
+_last_good_healthy: List[int] = []   # fallback when live probe yields nothing
+_health_ts:        float = 0.0
+_rr_idx:           int = 0
+_fail_counts:      dict = {}
+_blacklisted:      dict = {}
 
 
 def _probe_port(port: int) -> bool:
@@ -65,16 +66,22 @@ def refresh(force: bool = False) -> List[int]:
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_w) as ex:
         results = list(ex.map(_probe_port, RESI_CANDIDATE_PORTS))
     healthy = [p for p, ok in zip(RESI_CANDIDATE_PORTS, results) if ok]
-    if not healthy:
+    if healthy:
         with _lock:
-            bl = {p for p, u in _blacklisted.items() if time.time() < u}
-        healthy = [p for p in RESI_CANDIDATE_PORTS if p not in bl]
-    if not healthy:
-        healthy = list(RESI_CANDIDATE_PORTS)
+            _healthy_ports = healthy
+            _last_good_healthy[:] = healthy   # save for fallback
+            _health_ts = time.time()
+        return list(healthy)
+    # Probe returned nothing — network blip or all ports dead
+    # Use last known good list (safe fallback), else first-range ports (SS range)
     with _lock:
-        _healthy_ports = healthy
+        fallback = list(_last_good_healthy) if _last_good_healthy else list(range(10851, 10860))
+        bl = {p for p, u in _blacklisted.items() if time.time() < u}
+        fallback = [p for p in fallback if p not in bl] or fallback
+        _healthy_ports = fallback
         _health_ts = time.time()
-    return list(healthy)
+    import sys as _sys; print(f"[resi_pool] WARN: probe found 0 healthy — using fallback {fallback}", file=_sys.stderr)
+    return list(fallback)
 
 
 def _available() -> List[int]:
