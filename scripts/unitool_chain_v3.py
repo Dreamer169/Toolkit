@@ -41,7 +41,7 @@ PROXY_PORT     = 8089                    # unitool_proxy.py 监听端口
 API_BASE       = "http://localhost:8081/api"  # api-server 地址
 
 MAX_REF_SLOTS   = 10    # unitool 每个 ref_code 最多邀请人数
-RESI_PORTS = list(range(10851, 10860)) + list(range(10870, 10890))  # v3.2: 29 candidates
+RESI_PORTS = list(range(10851, 10860))  # v3.2: 9 live candidates (10870-10889 dead, removed Fix-5a)
 
 # CF Worker 直连代理（proxy.jimjio.indevs.in），提供 CF 边缘 IP 多样性
 # 用于 ref-code API 查询/创建的 IP 分散（RESI 失败时自动降级）
@@ -636,8 +636,8 @@ def replenish_if_needed():
         for line in open("/proc/meminfo"):
             if "MemAvailable" in line:
                 mb = int(line.split()[1]) // 1024
-                if mb < 1500:
-                    log(f"[watermark] 内存不足 {mb}MB < 1500MB，跳过补充"); return
+                if mb < 900:
+                    log(f"[watermark] 内存不足 {mb}MB < 900MB，跳过补充"); return
                 break
     except Exception:
         pass
@@ -700,8 +700,8 @@ def check_resources():
             _ps_stdout = "0"
         n = max(0, int(_ps_stdout.strip() or 0))
         log(f"[res] Chrome进程数={n}")
-        if n > 5:
-            log(f"[res] SKIP chrome_count={n}>5"); return False
+        if n > 8:
+            log(f"[res] SKIP chrome_count={n}>8"); return False
     except Exception:
         pass
     return True
