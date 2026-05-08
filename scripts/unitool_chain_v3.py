@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool_chain_v3.py — 端到端全自动链路 v3.0
+unitool_chain_v3.py — 端到端全自动链路 v3.1
 ============================================
 整合所有子脚本，闭环实现完整链路：
   outlook_register.py（水位补充）
@@ -27,7 +27,7 @@ import psycopg2
 # ── 常量 ──────────────────────────────────────────────────────────────────────
 LOG            = "/tmp/unitool_chain_v3.log"
 DB_URL         = "postgresql://postgres:postgres@localhost/toolkit"
-SCRIPTS        = "/root/Toolkit/scripts"
+SCRIPTS        = "/data/Toolkit/scripts"
 REGISTER_PY    = f"{SCRIPTS}/unitool_register.py"
 REFLINK_PY     = f"{SCRIPTS}/unitool_reflink.py"
 LOGIN_PY       = f"{SCRIPTS}/unitool_login.py"
