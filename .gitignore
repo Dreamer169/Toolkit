@@ -72,3 +72,6 @@ artifacts/api-server/data.db
 *.bak_*
 tailscale-backup/
 tailscaled.state*
+
+# secrets & runtime
+credentials.json
