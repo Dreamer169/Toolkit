@@ -34,7 +34,7 @@ TARGET       = "https://unitool.ai/en/entry"
 LOGIN_NA     = "60e02e33f743e14f5dab1dc42181ba1e746fd4d925"
 AUTH_COOKIE  = "__Secure-unitool-ssid"
 # 住宅代理端口列表（与 chain_v3 保持一致）
-RESI_PORTS = list(range(10851, 10860))  # 9 live ports only (Fix-6a: 10870-10889 dead)
+RESI_PORTS = [10851, 10853, 10854, 10855, 10857, 10859]  # Fix-6a+6d: 10852,10856,10858 dead
 
 # v5.14: RESI port health check cache (valid 5 min)
 _resi_healthy_ports: list = []
@@ -68,7 +68,7 @@ def _get_healthy_resi_ports() -> list:
         _ok = list(_ex.map(_check_resi_port, RESI_PORTS))
     healthy = [p for p, ok in zip(RESI_PORTS, _ok) if ok]
     if not healthy:
-        healthy = list(range(10851, 10860))  # Fix13: fallback to SS-range only, not all 29 dead ports
+        healthy = [10851, 10853, 10854, 10855, 10857, 10859]  # Fix-6d: exclude dead 10852,10856,10858
     _resi_healthy_ports = healthy
     _resi_health_ts = _t.time()
     print(f"[RESI] healthy={healthy} ({len(healthy)}/{len(RESI_PORTS)}) in {_t.time()-t0:.1f}s", flush=True)
