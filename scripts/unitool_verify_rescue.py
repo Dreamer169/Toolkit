@@ -155,14 +155,14 @@ def save_ssid(account_id, email, ssid):
     """, (ssid, time.strftime("%Y-%m-%d %H:%M:%S"), account_id))
     conn.commit(); conn.close()
     log(f"[DB] ssid saved {email} id={account_id} len={len(ssid)}")
+    # v5.15b: write to /data/unitool_ssids/<email>.txt
+    # Avoids /tmp/unitool_ssidN.txt sprawl; proxy loads with proper email label
+    SSID_DIR_VR = "/data/unitool_ssids"
     try:
-        existing = sorted(glob.glob("/tmp/unitool_ssid*.txt"))
-        idxs = []
-        for fp in existing:
-            m = re.search(r"unitool_ssid(\d*)\.txt", fp)
-            idxs.append(int(m.group(1)) if m and m.group(1) else 1)
-        n     = (max(idxs) + 1) if idxs else 1
-        fname = f"/tmp/unitool_ssid{n}.txt"
+        os.makedirs(SSID_DIR_VR, exist_ok=True)
+        import re as _re_vr
+        _safe_email = _re_vr.sub(r"[^a-zA-Z0-9@._-]", "_", email)
+        fname = os.path.join(SSID_DIR_VR, _safe_email + ".txt")
         open(fname, "w").write(ssid)
         log(f"[proxy] wrote {fname}")
     except Exception as e:
