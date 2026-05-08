@@ -65,6 +65,7 @@ def get_pending_account():
           AND tags NOT LIKE '%unitool_registered%'
           AND tags NOT LIKE '%unitool_processing%'
           AND tags NOT LIKE '%unitool_rescue_dead%'
+          AND updated_at < NOW() - INTERVAL '2 minutes'
           AND (
             notes IS NULL
             OR notes NOT LIKE '%rescue_fail_at=%'
