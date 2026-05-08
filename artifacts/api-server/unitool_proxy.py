@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.32
+unitool.ai → OpenAI 兼容反代 v5.33
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -121,6 +121,27 @@ _rpm_total_reqs  = 0
 os.makedirs(SSID_DIR, exist_ok=True)
 ctx = ssl.create_default_context()
 _lock = threading.Lock()
+
+# ─── v5.33: Service-level dynamic dead tracking ──────────────────────────────
+# When a service returns "currently being maintained" → mark dead 24h.
+# Prevents hammering a service that's clearly in maintenance every request.
+_svc_dead: dict[str, float] = {}   # service_id → dead_until epoch
+_svc_dead_lock = threading.Lock()
+
+def _mark_svc_dead(service_id: str, secs: int, reason: str = ""):
+    with _svc_dead_lock:
+        _svc_dead[service_id] = time.time() + secs
+    h = secs // 3600
+    m = (secs % 3600) // 60
+    label = f"{h}h" if h else f"{m}m"
+    print(f"[SVC] ☠ {service_id} maintenance-dead {label}: {reason[:60]}", flush=True)
+
+def _is_svc_dead(service_id: str) -> tuple[bool, int]:
+    """Returns (is_dead, remaining_seconds)."""
+    with _svc_dead_lock:
+        until = _svc_dead.get(service_id, 0)
+    remaining = int(until - time.time())
+    return remaining > 0, max(remaining, 0)
 
 # ─── v5.11: AbortFlag ────────────────────────────────────────────────────────
 class AbortFlag:
@@ -682,17 +703,16 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
 # Confirmed broken 2026-05-08: all o-series (TypeError/no choices/404) +
 # gpt-5-nano (sends reasoning_effort but paginatedMessages never receives reply).
 IMMEDIATE_FALLBACK_SERVICES: set[str] = {
-    # o-series: TypeError/no choices/404 confirmed broken (2026-05-08 probe)
+    # o-series: TypeError/no choices/404 — confirmed permanently broken at unitool
     "gpt-o1", "gpt-o1-mini",
     "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini",
-    # confirmed broken via 2026-05-08 probe (joshua, balance=10.0):
-    "gpt-5-nano",    # reasoning_effort hang — 400 "Reasoning is mandatory"
-    "claude-opus",   # 400 max_tokens: 32768 > 32000 (max for claude-opus-4-20250514)
-    "gpt-4-5",       # 400 Unsupported service
-    "grok",          # 500 Unexpected end of JSON input
-    "claude-haiku",  # 500 404 model: claude-3-5-haiku-20241022 not found
-    "gemini-3.1-pro",# 500 Unexpected end of JSON input
-    "gemini-3-pro",  # 500 Unexpected end of JSON input
+    # permanently dead (400 Unsupported / API-level breaks):
+    "gpt-5-nano",  # 400 "Reasoning is mandatory" — hangs even with reasoning_effort
+    "claude-opus", # 400 max_tokens: 32768 > 32000 (max for claude-opus-4-20250514)
+    "gpt-4-5",     # 400 Unsupported service (confirmed dead 2026-05-08)
+    # NOTE: grok / claude-haiku / gemini-3.1-pro / gemini-3-pro are NOT here:
+    # they return "currently being maintained" (temporary). v5.33 _svc_dead handles
+    # these dynamically: maintenance error → dead 24h, clears automatically.
 }
 
 MODEL_ALIASES = {
@@ -1368,6 +1388,17 @@ def _do_media_job(model: str, service_id: str, prompt: str,
     if not entries:
         raise Exception("ssid pool empty")
 
+    # v5.33: check service-level dead cache (maintenance → 24h block)
+    dead, remaining = _is_svc_dead(service_id)
+    if dead:
+        mins = remaining // 60
+        h, m = divmod(mins, 60)
+        eta  = f"{h}h{m:02d}m" if h else f"{m}m"
+        raise Exception(
+            f"service_maintenance: unitool.ai '{service_id}' is under maintenance — "
+            f"retry in ~{eta}"
+        )
+
     entry = _pick_entry(entries)
     ssid = entry["ssid"]
 
@@ -1522,31 +1553,47 @@ def _do_chat(model: str, messages: list, ssid_override: str | None,
     if not entries:
         raise Exception("ssid pool empty — please login first")
 
+    # v5.33: check dynamic service-dead cache (maintenance errors → 24h block)
+    dead, remaining = _is_svc_dead(primary_id)
+    if dead:
+        mins = remaining // 60
+        h, m = divmod(mins, 60)
+        eta  = f"{h}h{m:02d}m" if h else f"{m}m"
+        print(f"[SVC] ⏳ {primary_id} still maintenance-dead, retry in {eta}", flush=True)
+        raise Exception(
+            f"service_maintenance: unitool.ai '{primary_id}' is under maintenance — "
+            f"retry in ~{eta} (cached, resets automatically)"
+        )
+
     # v5.31: NO model fallback — return actual error for requested model.
     # SSID-level retry still happens inside _try_service (multiple SSIDs, same service).
     # For confirmed-broken services, fail fast with clear error instead of 90s hang.
     if primary_id in IMMEDIATE_FALLBACK_SERVICES:
         _reasons = {
-            "gpt-o1":     "o-series TypeError/no-choices confirmed broken at unitool (2026-05-08)",
-            "gpt-o1-mini":"o-series TypeError/no-choices confirmed broken at unitool (2026-05-08)",
-            "gpt-o3":     "o-series TypeError/no-choices confirmed broken at unitool (2026-05-08)",
-            "gpt-o3-mini":"o-series TypeError/no-choices confirmed broken at unitool (2026-05-08)",
-            "gpt-o3-pro": "o-series TypeError/no-choices confirmed broken at unitool (2026-05-08)",
-            "gpt-o4-mini":"o-series TypeError/no-choices confirmed broken at unitool (2026-05-08)",
-            "gpt-5-nano":    "reasoning_effort hang + 400 'Reasoning is mandatory' — broken",
-            "claude-opus":   "400 max_tokens: 32768 > 32000 for claude-opus-4-20250514",
-            "gpt-4-5":       "400 Unsupported service — dead at unitool (2026-05-08 probe)",
-            "grok":          "500 Unexpected end of JSON input — backend broken (2026-05-08)",
-            "claude-haiku":  "500 404 model: claude-3-5-haiku-20241022 not found (2026-05-08)",
-            "gemini-3.1-pro":"500 Unexpected end of JSON input — backend broken (2026-05-08)",
-            "gemini-3-pro":  "500 Unexpected end of JSON input — backend broken (2026-05-08)",
+            "gpt-o1":     "o-series TypeError/no-choices confirmed broken at unitool",
+            "gpt-o1-mini":"o-series TypeError/no-choices confirmed broken at unitool",
+            "gpt-o3":     "o-series TypeError/no-choices confirmed broken at unitool",
+            "gpt-o3-mini":"o-series TypeError/no-choices confirmed broken at unitool",
+            "gpt-o3-pro": "o-series TypeError/no-choices confirmed broken at unitool",
+            "gpt-o4-mini":"o-series TypeError/no-choices confirmed broken at unitool",
+            "gpt-5-nano": "400 'Reasoning is mandatory' — hangs even with reasoning_effort",
+            "claude-opus":"400 max_tokens: 32768 > 32000 for claude-opus-4-20250514",
+            "gpt-4-5":    "400 Unsupported service (permanently dead at unitool)",
         }
-        reason = _reasons.get(primary_id, "confirmed broken at unitool API level")
-        print(f"[ERR] {primary_id} broken: {reason}", flush=True)
+        reason = _reasons.get(primary_id, "confirmed permanently broken at unitool API level")
+        print(f"[ERR] {primary_id} permanent-broken: {reason}", flush=True)
         raise Exception(
-            f"model_not_available: unitool.ai service '{primary_id}' is currently broken — {reason}"
+            f"model_not_available: unitool.ai service '{primary_id}' is permanently broken — {reason}"
         )
-    return _try_service(primary_id, content, entries, chunk_cb=chunk_cb, abort=abort)
+
+    # v5.33: try service, catch maintenance → mark dead 24h so next calls skip immediately
+    try:
+        return _try_service(primary_id, content, entries, chunk_cb=chunk_cb, abort=abort)
+    except Exception as e:
+        err = str(e)
+        if "service_maintenance" in err:
+            _mark_svc_dead(primary_id, secs=86400, reason=err)
+        raise
 
 # ─── HTTP Handler ─────────────────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
@@ -1774,9 +1821,9 @@ def _startup_resi_health_check():
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.32] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.33] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.32] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.33] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
@@ -1786,8 +1833,8 @@ if __name__ == "__main__":
     except (KeyboardInterrupt, SystemExit):
         pass  # PM2 SIGINT during startup — skip check, continue
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.32] balance monitor started", flush=True)
-    print("[unitool-proxy v5.32] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc|GrokReasoningStrip|GeminiMaintenance|GrokFallback|OSeriesFallback|NanoReasoning|SvcErrFallback|ImmediateFallback|OSeriesChainFix|ClaudeOpusFallback: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking|NoModelFallback|ClaudeOpusErrFix|ProbeConfirmed2026-05-08", flush=True)
+    print("[unitool-proxy v5.33] balance monitor started", flush=True)
+    print("[unitool-proxy v5.33] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc|GrokReasoningStrip|GeminiMaintenance|GrokFallback|OSeriesFallback|NanoReasoning|SvcErrFallback|ImmediateFallback|OSeriesChainFix|ClaudeOpusFallback: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking|NoModelFallback|ClaudeOpusErrFix|SvcDeadCache24h|ProbeConfirmed2026-05-08", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
