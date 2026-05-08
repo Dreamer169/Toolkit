@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.36
+unitool.ai → OpenAI 兼容反代 v5.37
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -712,11 +712,21 @@ IMMEDIATE_FALLBACK_SERVICES: set[str] = {
     "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini",
     # permanently dead (400 Unsupported / API-level breaks):
     "gpt-5-nano",  # 400 "Reasoning is mandatory" — hangs even with reasoning_effort
-    "claude-opus", # 400 max_tokens: 32768 > 32000 (max for claude-opus-4-20250514)
+    "claude-opus", # 400 max_tokens: 32768 > 32000 — unitool ignores chat_settings.max_tokens (confirmed 2026-05-08)
     "gpt-4-5",     # 400 Unsupported service (confirmed dead 2026-05-08)
-    "claude-haiku",  # HTTP 500 consistently from unitool (confirmed 2026-05-08); use claude-sonnet
+    "claude-haiku",  # 404 not_found "model: claude-3-5-haiku-20241022" (probe confirmed 2026-05-08); model route broken at unitool
     # NOTE: grok / gemini-3.1-pro / gemini-3-pro are NOT in IMMEDIATE_FALLBACK:
     # maintenance errors → _mark_svc_dead 30min (v5.35), auto-recovers.
+}
+
+# v5.37: Per-service extra fields merged into chat_settings at chat creation.
+# Discovered via Anthropic 400 error passthrough:
+#   "max_tokens: 32768 > 32000 for claude-opus-4-20250514"
+# → unitool default max_tokens=32768 (2^15) exceeds claude-opus limit of 32000.
+# CONFIRMED 2026-05-08: unitool backend IGNORES chat_settings.max_tokens.
+# This override has NO effect. Kept here as a record and for future API changes.
+MODEL_CHAT_SETTINGS_OVERRIDE: dict[str, dict] = {
+    # "claude-opus": {"max_tokens": 31000},  # DOES NOT WORK — unitool ignores this field
 }
 
 MODEL_ALIASES = {
@@ -1185,6 +1195,9 @@ def _send_and_collect_core(entry: dict, service_id: str, content: str,
         _csettings: dict = {}
         if _sys_prompt_val:  # only non-empty system prompts
             _csettings["system_prompt"] = _sys_prompt_val
+        # v5.37: merge per-service overrides (e.g. max_tokens for claude-opus)
+        if service_id in MODEL_CHAT_SETTINGS_OVERRIDE:
+            _csettings.update(MODEL_CHAT_SETTINGS_OVERRIDE[service_id])
         _chat_body: dict = {"service_id": service_id, "title": ""}
         if _csettings:
             _chat_body["chat_settings"] = json.dumps(_csettings)
@@ -1594,9 +1607,9 @@ def _do_chat(model: str, messages: list, ssid_override: str | None,
             "gpt-o3-pro": "o-series TypeError/no-choices confirmed broken at unitool",
             "gpt-o4-mini":"o-series TypeError/no-choices confirmed broken at unitool",
             "gpt-5-nano": "400 'Reasoning is mandatory' — hangs even with reasoning_effort",
-            "claude-opus":"400 max_tokens: 32768 > 32000 for claude-opus-4-20250514",
+            "claude-opus":"400 max_tokens: 32768 > 32000 — unitool ignores chat_settings.max_tokens",
             "gpt-4-5":    "400 Unsupported service (permanently dead at unitool)",
-            "claude-haiku": "HTTP 500 consistently from unitool — use claude-sonnet",
+            "claude-haiku": "404 not_found model:claude-3-5-haiku-20241022 — route broken at unitool (probe confirmed 2026-05-08)",
 
         }
         reason = _reasons.get(primary_id, "confirmed permanently broken at unitool API level")
@@ -1742,7 +1755,7 @@ class Handler(BaseHTTPRequestHandler):
                 services_out.append({"service": sid, "status": st})
 
             return self._json(200, {
-                "version": "v5.36",
+                "version": "v5.37",
                 "pool_live": sum(1 for e in _pool if e["dead_until"] <= now),
                 "pool_total": len(_pool),
                 "rpm": _get_rpm(),
