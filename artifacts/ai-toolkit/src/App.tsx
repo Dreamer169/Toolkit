@@ -124,7 +124,7 @@ import OxylabsRegister from "@/pages/OxylabsRegister";
 
 const queryClient = new QueryClient();
 
-type Tab = "home" | "agent" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "machine-reset" | "fingerprint" | "outlook" | "mail-center" | "cursor-register" | "replit-register" | "sub2api" | "team-register" | "openai-pool" | "data-manager" | "full-workflow" | "monitor" | "sms-center" | "captcha" | "waf-bypass" | "novproxy" | "webshare-register" | "oxylabs-register";
+type Tab = "home" | "agent" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "machine-reset" | "fingerprint" | "outlook" | "mail-center" | "cursor-register" | "replit-register" | "sub2api" | "team-register" | "openai-pool" | "data-manager" | "full-workflow" | "monitor" | "sms-center" | "captcha" | "waf-bypass" | "unitool-login" | "novproxy" | "webshare-register" | "oxylabs-register";
 
 const tabs: { id: Tab; label: string; icon: string; badge?: string }[] = [
   { id: "home",             label: "工具导航",        icon: "🗂️" },
@@ -141,6 +141,7 @@ const tabs: { id: Tab; label: string; icon: string; badge?: string }[] = [
   { id: "replit-register",  label: "Reseek 自动注册", icon: "🤖", badge: "新增" },
   { id: "captcha",          label: "验证码识别",        icon: "🔢", badge: "CNN" },
   { id: "waf-bypass",      label: "WAF 绕过",          icon: "🛡️", badge: "pydoll" },
+  { id: "unitool-login",    label: "unitool 自动登录",   icon: "🔓", badge: "SSID" },
   { id: "novproxy",         label: "Novproxy 工作流",   icon: "🔐", badge: "pydoll" },
   { id: "sms-center",      label: "短信接收中心",       icon: "📱", badge: "免费号码" },
   { id: "webshare-register", label: "Webshare 注册",    icon: "🌐", badge: "全自动" },
