@@ -1,18 +1,36 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.10
+unitool.ai → OpenAI 兼容反代 v5.11
 =====================================
-改进 (相对 v5.9):
-  v5.10 三大核心改造（来自 ds-free-api 分析 + unitool API 实测）：
-  1. 主路径切换为 /api/widget/stream 真实 SSE 流
-     — POST {"chat_id":X,"messages":[snapshot]} → data:{"content":"delta"}
-     — 逐 token 推送，零延迟，无截断
-  2. 轮询端点从 /api/chats/{id}/messages 改为 /api/chats/{id}/paginatedMessages
-     — 响应 key 为 "data"（非 "messages"）
-     — status 流：updating（生成中）→ ended（完成）
-  3. 移除 active_stable 计数器
-     — 以 status=="ended" 为唯一完成信号，彻底解决长输出截断问题
-  其余改进保留 v5.2–v5.9 的全部功能。
+v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
+
+1. GuardedChat：每请求在 finally 后台删除 chat（对标 DS GuardedStream PinnedDrop）
+   — DELETE /api/chats/{id} 异步执行，不阻塞响应
+   — 彻底解决孤儿 chat 导致的 paginatedMessages 连续 ConnectionResetError
+
+2. AbortFlag：客户端断开立即中止流/轮询（对标 DS stop_stream + finished flag）
+   — chunk_cb 捕获 BrokenPipeError → 设置 abort_flag
+   — widget/stream 和 paginatedMessages 均检查 abort_flag
+
+3. 空闲最长优先调度（对标 DS get_account idle-longest-first）
+   — 每个 entry 记录 _last_released 时间戳
+   — _pick_entry() 选取空闲时间最长的 SSID（替换 round-robin）
+   — 最大化 SSID 冷却间隔，降低频率限制触发率
+
+4. 连续连接错误计数（对标 DS error_count → MAX_ERROR_COUNT → Invalid）
+   — 同一 SSID 连续 ConnectionReset/Abort ≥3 次 → mark_dead(90s)
+   — _conn_errors 在请求成功后重置为 0
+
+5. 正确的 SSE 解析器（对标 DS SseStream UTF-8 边界处理 + \n\n 分割）
+   — 手动 buffer 累积 + \n\n 分割，不依赖 iter_lines()
+   — 正确处理跨 chunk 的 SSE 事件边界
+
+6. 历史消息截断（对标 DS split_history_prompt 降低 prompt 大小）
+   — _fmt() 保留最近 MAX_HISTORY_TURNS 轮（含 system prompt）
+   — 超长对话不再发送全量历史
+
+保留 v5.10 全部功能：widget/stream 主路径、paginatedMessages 兜底、
+SSID 池管理、余额监控、自动重登、fallback chain。
 """
 import json, time, uuid, threading, ssl, os, re, sys, subprocess
 import psycopg2
@@ -21,13 +39,12 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
-# ── 住宅代理配置（与 chain_v3 / register / login 保持一致）────────────────────
+# ── 住宅代理配置 ──────────────────────────────────────────────────────────────
 RESI_PORTS = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
 
 def _pick_resi_port(ssid: str) -> int:
     return RESI_PORTS[hash(ssid[:16] if ssid else "x") % len(RESI_PORTS)]
 
-# 每个代理端口对应一个 requests.Session（连接复用 + socks5h 代理）
 _resi_sessions: dict = {}
 _resi_sess_lock = threading.Lock()
 
@@ -43,24 +60,51 @@ def _get_resi_session(port: int) -> _rq.Session:
         return _resi_sessions[port]
 
 def _drop_resi_session(port: int):
-    """连接被重置时清除缓存会话，下次调用将创建新连接"""
     with _resi_sess_lock:
         _resi_sessions.pop(port, None)
 
 PORT     = int(os.environ.get("PORT", 8089))
 BASE     = "https://unitool.ai"
-SSID_DIR = "/data/unitool_ssids"   # 持久化目录（vdb1 上）
-TMP_DIR  = "/tmp"                  # 兼容旧 /tmp/unitool_ssid*.txt
+SSID_DIR = "/data/unitool_ssids"
+TMP_DIR  = "/tmp"
 DB_URL   = "postgresql://postgres:postgres@localhost/toolkit"
 LOGIN_SCRIPT = "/data/Toolkit/scripts/unitool_login.py"
-BALANCE_CHECK_INTERVAL = 900   # 15 min
+BALANCE_CHECK_INTERVAL = 900
 BALANCE_LOW_WARN = 0.5
+MAX_HISTORY_TURNS = 12   # v5.11: 最多保留 12 轮消息（对标 DS split_history_prompt）
+MAX_CONN_ERRORS   = 3    # v5.11: 连续连接错误上限 → mark_dead(90s)
 
 os.makedirs(SSID_DIR, exist_ok=True)
 ctx = ssl.create_default_context()
 _lock = threading.Lock()
 
-# ─── SSID 池 ────────────────────────────────────────────────────────────────
+# ─── v5.11: AbortFlag ────────────────────────────────────────────────────────
+class AbortFlag:
+    """对标 DS GuardedStream.finished + stop_stream。
+    chunk_cb 捕获 BrokenPipeError 时设置；流/轮询循环检查后中止。"""
+    __slots__ = ("_v",)
+    def __init__(self):  self._v = False
+    def set(self):       self._v = True
+    def is_set(self) -> bool: return self._v
+
+# ─── v5.11: GuardedChat（对标 DS GuardedStream PinnedDrop） ─────────────────
+def _delete_chat(chat_id: int, ssid: str):
+    """后台异步删除 chat，不阻塞响应。
+    对标 DS GuardedStream PinnedDrop 里的 delete_session 调用。"""
+    def _do():
+        try:
+            req = Request(
+                f"{BASE}/api/chats/{chat_id}",
+                headers=_hdrs(ssid), method="DELETE"
+            )
+            with urlopen(req, context=ctx, timeout=10):
+                pass
+            print(f"[CHAT] deleted chat={chat_id}", flush=True)
+        except Exception as e:
+            print(f"[CHAT] delete chat={chat_id} failed: {e}", flush=True)
+    threading.Thread(target=_do, daemon=True).start()
+
+# ─── SSID 池 ─────────────────────────────────────────────────────────────────
 _pool: list = []
 _pool_mtime: float = 0.0
 
@@ -72,18 +116,15 @@ def _read_ssid_file(path: str) -> str:
         return ""
 
 def _scan_files() -> list[tuple[str, str]]:
-    """扫描 /data/unitool_ssids/ 和 /tmp/unitool_ssid*.txt，返回 (label, ssid) 列表，去重"""
-    found: dict[str, str] = {}  # ssid → label
-    # 1. /data/unitool_ssids/*.txt (label = 文件名 stem)
+    found: dict[str, str] = {}
     try:
         for fn in sorted(os.listdir(SSID_DIR)):
             if fn.endswith(".txt"):
                 ssid = _read_ssid_file(os.path.join(SSID_DIR, fn))
                 if ssid and ssid not in found:
-                    found[ssid] = fn[:-4]   # strip .txt
+                    found[ssid] = fn[:-4]
     except Exception:
         pass
-    # 2. /tmp/unitool_ssid*.txt (兼容旧格式)
     pat = re.compile(r"^unitool_ssid\d*\.txt$")
     try:
         for fn in sorted(os.listdir(TMP_DIR)):
@@ -96,7 +137,6 @@ def _scan_files() -> list[tuple[str, str]]:
     return [(label, ssid) for ssid, label in found.items()]
 
 def _load_from_db() -> list[tuple[str, str]]:
-    """从 unitool_ssids 表加载 (label/email, ssid)"""
     try:
         conn = psycopg2.connect(DB_URL)
         cur  = conn.cursor()
@@ -114,11 +154,9 @@ def _load_from_db() -> list[tuple[str, str]]:
         return []
 
 def _save_to_db(label: str, ssid: str):
-    """把新 ssid 写入 unitool_ssids 表"""
     try:
         conn = psycopg2.connect(DB_URL)
         cur  = conn.cursor()
-        # 先看是否有同 label 的旧记录
         cur.execute("SELECT id FROM unitool_ssids WHERE source_email=%s LIMIT 1", (label,))
         row = cur.fetchone()
         if row:
@@ -146,7 +184,6 @@ def _invalidate_in_db(label: str):
         pass
 
 def _save_to_file(label: str, ssid: str):
-    """持久化到 /data/unitool_ssids/<label>.txt"""
     safe = re.sub(r"[^a-zA-Z0-9@._-]", "_", label)
     path = os.path.join(SSID_DIR, f"{safe}.txt")
     try:
@@ -157,16 +194,13 @@ def _save_to_file(label: str, ssid: str):
 def _rebuild_pool():
     global _pool, _pool_mtime
     _pool_mtime = time.time()
-
-    # 合并来源：文件 + DB
-    sources: dict[str, str] = {}   # ssid → label
+    sources: dict[str, str] = {}
     for (label, ssid) in _scan_files():
         if ssid not in sources:
             sources[ssid] = label
     for (label, ssid) in _load_from_db():
         if ssid not in sources:
             sources[ssid] = label
-
     with _lock:
         existing = {e["ssid"]: e for e in _pool}
         new_pool = []
@@ -180,7 +214,6 @@ def _rebuild_pool():
             else:
                 new_pool.append(_make_entry(ssid, label))
                 print(f"[POOL] loaded {label} ssid={ssid[:16]}...", flush=True)
-        # 保留 dead 但还在冷却的旧条目（等恢复或重登）
         for e in _pool:
             if e["ssid"] not in seen and e["dead_until"] > time.time():
                 new_pool.append(e)
@@ -191,10 +224,9 @@ def _reload_pool_if_needed():
         return
     _rebuild_pool()
 
-MAX_CONCURRENCY_PER_SSID = 2   # 每个 ssid 允许同时最多并发请求数
+MAX_CONCURRENCY_PER_SSID = 2
 
 def _label_to_email(label: str) -> str:
-    """将文件名 label 还原为 email (kmitchellnvh__outlook_com -> kmitchellnvh@outlook.com)"""
     if "@" in label:
         return label
     m = re.match(r"^(.+?)__(.+)$", label)
@@ -203,12 +235,15 @@ def _label_to_email(label: str) -> str:
     return label
 
 def _make_entry(ssid: str, label: str, email: str = "") -> dict:
+    # v5.11: 新增 _last_released（空闲最长优先）和 _conn_errors（连续错误计数）
     return {"ssid": ssid, "label": label,
             "_email": email or _label_to_email(label),
             "dead_until": 0, "dead_reason": "",
             "balance": None, "_balance_ts": 0,
             "_relogin_pending": False,
-            "_active": 0}
+            "_active": 0,
+            "_last_released": 0.0,   # v5.11: 最近一次释放时间戳（空闲最长优先用）
+            "_conn_errors": 0}       # v5.11: 连续 ConnectionReset 计数
 
 def _mark_dead(ssid: str, secs: int = 600, reason: str = ""):
     with _lock:
@@ -216,8 +251,8 @@ def _mark_dead(ssid: str, secs: int = 600, reason: str = ""):
             if e["ssid"] == ssid:
                 e["dead_until"] = time.time() + secs
                 e["dead_reason"] = reason
+                e["_conn_errors"] = 0   # 重置计数器
                 print(f"[POOL] dead {e['label']} {secs}s reason={reason!r}", flush=True)
-                # 如果是 auth 错误，触发后台重登
                 if "auth" in reason and not e.get("_relogin_pending"):
                     e["_relogin_pending"] = True
                     t = threading.Thread(target=_bg_relogin, args=(e["label"],), daemon=True)
@@ -228,7 +263,6 @@ def _mark_dead(ssid: str, secs: int = 600, reason: str = ""):
 
 # ─── 自动重登 ────────────────────────────────────────────────────────────────
 def _get_password_for_label(label: str) -> str:
-    """从 DB 查密码；同时尝试 label 原值和还原的 email 格式"""
     candidates = list(dict.fromkeys([label, _label_to_email(label)]))
     try:
         conn = psycopg2.connect(DB_URL)
@@ -245,8 +279,7 @@ def _get_password_for_label(label: str) -> str:
         return ""
 
 def _bg_relogin(label: str):
-    """后台线程：用 unitool_login.py 重新登录，成功后推入 pool"""
-    email = _label_to_email(label)   # 还原 email（文件名 label 含下划线编码）
+    email = _label_to_email(label)
     print(f"[RELOGIN] starting for {email} (label={label})", flush=True)
     pw = _get_password_for_label(label)
     if not pw:
@@ -279,7 +312,6 @@ def _bg_relogin(label: str):
                     break
 
 def _add_ssid_to_pool(label: str, ssid: str):
-    """将 ssid 加入/更新 pool，并持久化到文件+DB"""
     _save_to_file(label, ssid)
     _save_to_db(label, ssid)
     with _lock:
@@ -290,6 +322,7 @@ def _add_ssid_to_pool(label: str, ssid: str):
             same_label["dead_until"] = 0
             same_label["dead_reason"] = ""
             same_label["_relogin_pending"] = False
+            same_label["_conn_errors"] = 0
             print(f"[POOL] updated {label} ssid={ssid[:16]}...", flush=True)
         elif not same_ssid:
             _pool.append(_make_entry(ssid, label))
@@ -307,7 +340,6 @@ def _hdrs(ssid: str) -> dict:
     }
 
 def _check_balance(ssid: str) -> float | None:
-    """v5.6: balance 检查也走住宅代理"""
     try:
         port = _pick_resi_port(ssid)
         sess = _get_resi_session(port)
@@ -321,7 +353,6 @@ def _check_balance(ssid: str) -> float | None:
         return None
 
 def _check_session_valid(ssid: str) -> bool:
-    """v5.6: 主动探 /api/auth/session 检测 ssid 是否仍有效"""
     try:
         port = _pick_resi_port(ssid)
         sess = _get_resi_session(port)
@@ -330,7 +361,6 @@ def _check_session_valid(ssid: str) -> bool:
         if resp.status_code != 200:
             return False
         d = resp.json()
-        # NextAuth 格式：{"auth": {"user": {...}}} 或 NextAuth v4: {"user": {...}}
         user = (d.get("auth") or {}).get("user") or d.get("user")
         return bool(user and user.get("id"))
     except Exception:
@@ -344,18 +374,16 @@ def _balance_monitor_loop():
                 entries = list(_pool)
             now = time.time()
             for e in entries:
-                # 跳过 dead 条目（ssid 过期，检查无意义）
                 if e["dead_until"] > now:
                     continue
                 if now - e.get("_balance_ts", 0) < BALANCE_CHECK_INTERVAL:
                     continue
-                # v5.6: 先做 session 有效性检查，再做 balance 检查
                 lbl = e["label"]
                 sess_ok = _check_session_valid(e["ssid"])
                 if not sess_ok:
                     print(f"[SES] ⚠ {lbl}: session invalid (ssid expired)", flush=True)
                     _mark_dead(e["ssid"], secs=300, reason="auth_error")
-                    e["_balance_ts"] = now  # 避免反复检查
+                    e["_balance_ts"] = now
                     time.sleep(2)
                     continue
                 bal = _check_balance(e["ssid"])
@@ -374,25 +402,28 @@ def _balance_monitor_loop():
             print(f"[BAL] monitor error: {ex}", flush=True)
         time.sleep(60)
 
-# ─── 服务/模型映射 ────────────────────────────────────────────────────────────
+# ─── 服务/模型映射（v5.11: 从 API 实探更新，新增 gpt-5）─────────────────────
 NATIVE_SERVICES = {
-    # ChatGPT sub-services (from /api/services?parent_id=chatgpt)
+    # ChatGPT（实探 /api/services?parent_id=chatgpt 确认，含 minimum_balance）
     "gpt-5", "gpt-5.5", "gpt-5.4", "gpt-5-nano",
     "gpt5.1", "gpt5.2",
     "gpt-4o", "gpt-4o-mini", "gpt-4-1", "gpt-4-5",
     "gpt-o1", "gpt-o1-mini", "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini",
-    # Gemini sub-services
+    # Gemini
     "gemini-3.1-pro", "gemini-3-pro",
     # xAI
     "grok",
-    # Claude sub-services (from /api/services?parent_id=claude)
+    # Claude
     "claude-sonnet", "claude-sonnet-4-5", "claude-sonnet-4-6",
     "claude-opus", "claude-opus-4-6", "claude-haiku",
 }
 
-# [v5.4] 需要 reasoning_effort 的服务：chat 创建用 /api/chats + chat_settings, 消息带 options
-# [v5.7] o-series 也属于 reasoning 服务（需要 reasoning_effort options）
-REASONING_SERVICES = {"gemini-3.1-pro", "gemini-3-pro", "grok", "gpt-o1", "gpt-o1-mini", "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini"}
+# 需要 reasoning_effort 的服务
+REASONING_SERVICES = {"gemini-3.1-pro", "gemini-3-pro", "grok",
+                      "gpt-o1", "gpt-o1-mini", "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini"}
+
+# v5.11: 从 API 实探更新 minimum_balance（用于日志报警，balance=0 的服务不 mark dead）
+FREE_SERVICES = {"gpt-4o-mini", "gpt-5-nano"}  # minimum_balance=0，余额耗尽也可用
 
 FALLBACK_CHAINS: dict[str, list[str]] = {
     "gpt-5":            ["gpt-5.5",   "gpt-5.4",  "gpt-4-1",  "gpt-4o-mini"],
@@ -408,9 +439,7 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
     "claude-sonnet-4-6":["claude-sonnet-4-5", "claude-sonnet",     "claude-opus-4-6"],
     "claude-sonnet-4-5":["claude-sonnet-4-6", "claude-sonnet",     "claude-opus-4-6"],
     "claude-sonnet":    ["claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-6"],
-    # [v5.3] gpt-5-nano: "Reasoning is mandatory" → 降级 gpt-5
     "gpt-5-nano":       ["gpt-5",        "gpt-5.5",  "gpt-4-1",  "gpt-4o-mini"],
-    # [v5.4] gemini-3.1-pro / grok: 原生修复，用户明确禁止降级 → 无 fallback chain
 }
 
 MODEL_ALIASES = {
@@ -437,16 +466,14 @@ MODEL_ALIASES = {
     "claude-haiku-3-5": "claude-haiku",
     "claude-3-haiku": "claude-haiku", "claude-3-haiku-20240307": "claude-haiku",
     "claude-3-sonnet": "claude-sonnet", "claude-3-sonnet-20240229": "claude-sonnet",
-    "claude-haiku": "claude-sonnet", "claude-3-5-sonnet-latest": "claude-sonnet",
+    "claude-3-5-sonnet-latest": "claude-sonnet",
     "claude-3-7-sonnet-latest": "claude-sonnet", "claude-sonnet-latest": "claude-sonnet",
-    # [v5.4] gemini: 所有别名 → gemini-3.1-pro（原生支持）
     "gemini": "gemini-3.1-pro", "gemini-pro": "gemini-3.1-pro",
     "gemini-3": "gemini-3-pro", "gemini-3-flash": "gemini-3-pro",
     "gemini-flash": "gemini-3.1-pro", "gemini-ultra": "gemini-3.1-pro",
     "gemini-2.5-pro": "gemini-3.1-pro", "gemini-2.5-flash": "gemini-3.1-pro",
     "gemini-2.0-pro": "gemini-3.1-pro", "gemini-2.0-flash": "gemini-3.1-pro",
     "gemini-1.5-pro": "gemini-3.1-pro", "gemini-1.5-flash": "gemini-3.1-pro",
-    # [v5.4] grok: 原生支持，无降级
     "grok-3": "grok", "grok-3-fast": "grok", "grok-3-mini": "grok",
     "grok-2": "grok", "grok-beta": "grok",
     "deepseek": "gpt-5.5", "deepseek-r1": "gpt-5.5", "deepseek-v3": "gpt-5.5",
@@ -467,17 +494,28 @@ ALL_MODELS   = sorted(NATIVE_SERVICES | set(MODEL_ALIASES.keys()))
 MODELS_LIST  = [{"id": m, "object": "model", "created": 1700000000, "owned_by": "unitool"}
                 for m in ALL_MODELS]
 
-# ─── 核心 API 调用 ───────────────────────────────────────────────────────────
+# ─── 核心 API 调用 ────────────────────────────────────────────────────────────
 def _api(method: str, path: str, body=None, ssid: str = ""):
-    """v5.7: 直连 unitool.ai (保持原 urllib 路径；socks5h 仅用于 balance/session 健康检查)"""
+    """直连 unitool.ai（chat 创建/消息发送用，不走 SOCKS5）"""
     data = json.dumps(body).encode() if body is not None else None
     req  = Request(f"{BASE}{path}", data=data, headers=_hdrs(ssid), method=method)
     with urlopen(req, context=ctx, timeout=35) as r:
         return json.loads(r.read())
 
 def _fmt(messages: list) -> str:
+    """v5.11: 截断历史到最近 MAX_HISTORY_TURNS 轮（对标 DS split_history_prompt）。
+    始终保留 system prompt + 最后 N 条消息。"""
+    if not messages:
+        return ""
+    # 分离 system prompt
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    other_msgs  = [m for m in messages if m.get("role") != "system"]
+    # 截断到最后 MAX_HISTORY_TURNS 条非 system 消息
+    if len(other_msgs) > MAX_HISTORY_TURNS:
+        other_msgs = other_msgs[-MAX_HISTORY_TURNS:]
+    msgs = system_msgs + other_msgs
     parts = []
-    for m in messages:
+    for m in msgs:
         role    = m.get("role", "user")
         content = m.get("content", "")
         if isinstance(content, list):
@@ -495,30 +533,25 @@ def _is_retryable(msg: str) -> bool:
     KEYS = ["No content returned","Reasoning is mandatory","max_tokens",
             "context_length_exceeded","overloaded","rate_limit","capacity",
             "unavailable","timeout","upstream","Bad gateway","Service Unavailable",
-            # [v5.3] grok 子型号: unitool 明确返回不支持
-            "Unsupported service",
-            # [v5.4] gemini 后端临时维护
-            "currently being maintained"]
+            "Unsupported service","currently being maintained"]
     ml = msg.lower()
     return any(k.lower() in ml for k in KEYS)
 
-_rr_lock = threading.Lock()
-_rr_idx  = 0
 def _pick_entry(entries: list) -> dict:
-    global _rr_idx
-    with _rr_lock:
-        idx = _rr_idx % len(entries)
-        _rr_idx += 1
-        return entries[idx]
+    """v5.11: 空闲最长优先（对标 DS AccountPool.get_account idle-longest-first）。
+    选取 _last_released 最小（最久未使用）的 SSID，最大化冷却间隔。"""
+    if len(entries) == 1:
+        return entries[0]
+    now = time.time()
+    # 按空闲时间降序（空闲最久的在前）
+    return min(entries, key=lambda e: e.get("_last_released", 0.0))
 
-
-# ─── v5.10: paginatedMessages 辅助 ──────────────────────────────────────────
+# ─── v5.11: paginatedMessages 辅助 ──────────────────────────────────────────
 _CONN_RESET_ERRS = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
 
 def _api_paginated(chat_id: int, ssid: str, limit: int = 20) -> list:
     """GET /api/chats/{id}/paginatedMessages via socks5h → data[] list.
-    在连接重置时自动刷新会话重试一次。
-    """
+    连接重置时自动刷新会话重试一次。"""
     port = _pick_resi_port(ssid)
     for attempt in range(2):
         sess = _get_resi_session(port)
@@ -531,7 +564,6 @@ def _api_paginated(chat_id: int, ssid: str, limit: int = 20) -> list:
             )
             return r.json().get("data", [])
         except _rq.exceptions.ConnectionError as e:
-            # socks5h 连接被 peer 重置 → 清除缓存会话，下一轮用新连接重试
             _drop_resi_session(port)
             if attempt == 0:
                 continue
@@ -541,15 +573,14 @@ def _api_paginated(chat_id: int, ssid: str, limit: int = 20) -> list:
             print(f"[paginatedMessages] chat={chat_id} error: {e}", flush=True)
             return []
 
-
-# ─── v5.10: widget/stream 真实 SSE 主路径 ───────────────────────────────────
+# ─── v5.11: widget/stream 真实 SSE（改进 SSE 解析器） ───────────────────────
 def _widget_stream_sse(chat_id: int, msgs_snapshot: list, ssid: str,
-                       chunk_cb, deadline: float) -> str:
-    """
-    POST /api/widget/stream → SSE 逐 token 流。
-    body: {"chat_id": X, "messages": [snapshot from paginatedMessages]}
-    events: data: {"content":"delta"}
-    Returns: 完整拼接内容（空字符串表示无数据，调用方需回退轮询）。
+                       chunk_cb, deadline: float,
+                       abort: AbortFlag | None = None) -> str:
+    """POST /api/widget/stream → SSE 逐 token 流。
+    v5.11 改进：
+    - 手动 buffer + \\n\\n 分割（对标 DS SseStream，避免 iter_lines() 边界问题）
+    - 检查 abort_flag（客户端断开后立即中止）
     """
     port    = _pick_resi_port(ssid)
     sess    = _get_resi_session(port)
@@ -572,44 +603,71 @@ def _widget_stream_sse(chat_id: int, msgs_snapshot: list, ssid: str,
         ) as r:
             if r.status_code != 200:
                 raise Exception(f"widget/stream HTTP {r.status_code}: {r.text[:200]}")
-            for line in r.iter_lines(decode_unicode=True):
-                if not line:
-                    continue
+
+            # v5.11: 手动 SSE buffer（对标 DS sse_parser.rs try_pop_event）
+            raw_buf   = b""
+            text_buf  = ""
+            for chunk in r.iter_content(chunk_size=None):
+                if abort and abort.is_set():
+                    break
                 if time.time() >= deadline:
                     break
-                if line.startswith("data:"):
-                    raw = line[5:].strip()
-                    if not raw or raw == "[DONE]":
-                        break
-                    try:
-                        delta = json.loads(raw).get("content", "")
-                        if delta:
-                            full += delta
-                            if chunk_cb:
-                                chunk_cb(delta)
-                    except Exception:
-                        pass
+                if not chunk:
+                    continue
+                raw_buf  += chunk
+                # UTF-8 边界安全解码
+                try:
+                    text_buf += raw_buf.decode("utf-8")
+                    raw_buf   = b""
+                except UnicodeDecodeError as ue:
+                    valid_up = ue.start
+                    text_buf += raw_buf[:valid_up].decode("utf-8", errors="replace")
+                    raw_buf   = raw_buf[valid_up:]
+                # 按 \n\n 分割 SSE 事件（对标 DS try_pop_event）
+                while "\n\n" in text_buf:
+                    event_block, text_buf = text_buf.split("\n\n", 1)
+                    for line in event_block.splitlines():
+                        line = line.strip()
+                        if not line.startswith("data:"):
+                            continue
+                        raw = line[5:].strip()
+                        if not raw or raw == "[DONE]":
+                            break
+                        try:
+                            delta = json.loads(raw).get("content", "")
+                            if delta:
+                                full += delta
+                                if chunk_cb:
+                                    chunk_cb(delta)
+                        except Exception:
+                            pass
     except _rq.exceptions.ConnectionError as e:
-        # socks5h 连接重置 → 清除会话缓存，向上抛出让调用方 fallback
         _drop_resi_session(port)
         raise
     return full
 
-
-# ─── v5.10: paginatedMessages 轮询兜底 ──────────────────────────────────────
+# ─── v5.11: paginatedMessages 轮询兜底 ──────────────────────────────────────
 def _paginated_poll(chat_id: int, user_msg_id: int, ssid: str,
-                    chunk_cb, deadline: float, prev_content: str = "") -> str:
+                    chunk_cb, deadline: float, prev_content: str = "",
+                    abort: AbortFlag | None = None) -> str:
+    """paginatedMessages 轮询兜底（widget/stream 失败时使用）。
+    v5.11 改进：
+    - 检查 abort_flag（客户端断开后立即中止）
+    - 连续空结果检测：连续 N 次无法获取消息 → 提前放弃
     """
-    paginatedMessages 轮询兜底（widget/stream 失败时使用）。
-    每 0.7s 轮询一次；唯一完成信号：status == "ended"。
-    无 active_stable 计数器，不会截断长输出。
-    """
+    empty_streak = 0
+    MAX_EMPTY    = 10   # 连续 10 次（7s）无有效消息 → 认定 chat 失效
     while time.time() < deadline:
+        if abort and abort.is_set():
+            raise Exception("client_disconnected")
         time.sleep(0.7)
         msgs = _api_paginated(chat_id, ssid)
+        matched = False
         for m in msgs:
             if m.get("role") != "assistant" or m.get("reply_to") != user_msg_id:
                 continue
+            matched     = True
+            empty_streak = 0
             status  = m.get("status", "")
             cur_txt = m.get("content") or ""
             if chunk_cb and cur_txt and cur_txt != prev_content:
@@ -621,29 +679,41 @@ def _paginated_poll(chat_id: int, user_msg_id: int, ssid: str,
                 raise Exception(f"service_error: {cur_txt[:300]}")
             if status == "ended" and cur_txt:
                 return cur_txt
-            break   # 匹配到消息后退出 for，等下一轮
+            break
+        if not matched:
+            empty_streak += 1
+            if empty_streak >= MAX_EMPTY:
+                raise Exception(f"poll_stuck chat={chat_id} no assistant msg after {MAX_EMPTY} attempts")
     raise TimeoutError(f"timeout chat={chat_id}")
 
-
+# ─── v5.11: _send_and_collect（GuardedChat + AbortFlag） ────────────────────
 def _send_and_collect(entry: dict, service_id: str, content: str,
-                      chunk_cb=None, timeout: int = 180) -> str:
-    """并发计数 wrapper → _send_and_collect_core"""
+                      chunk_cb=None, timeout: int = 180,
+                      abort: AbortFlag | None = None) -> str:
+    """并发计数 wrapper + _last_released 更新（对标 DS AccountGuard.drop）"""
     with _lock:
         entry["_active"] = entry.get("_active", 0) + 1
     try:
-        return _send_and_collect_core(entry, service_id, content, chunk_cb, timeout)
+        result = _send_and_collect_core(entry, service_id, content, chunk_cb, timeout, abort)
+        # 成功：重置连续错误计数 + 更新释放时间（空闲最长优先用）
+        with _lock:
+            entry["_conn_errors"]    = 0
+            entry["_last_released"]  = time.time()
+        return result
+    except Exception:
+        with _lock:
+            entry["_last_released"] = time.time()
+        raise
     finally:
         with _lock:
             entry["_active"] = max(0, entry.get("_active", 0) - 1)
 
 
 def _send_and_collect_core(entry: dict, service_id: str, content: str,
-                           chunk_cb=None, timeout: int = 180) -> str:
-    """
-    v5.10: 创建新 chat → 发送消息 →
-      主路径: POST /api/widget/stream SSE（逐 token 推送）
-      兜底:   GET  /api/chats/{id}/paginatedMessages 轮询（status=ended）
-    移除了 active_stable 计数器。
+                           chunk_cb=None, timeout: int = 180,
+                           abort: AbortFlag | None = None) -> str:
+    """v5.11: 创建 chat → 发送消息 → 流/轮询 → finally 删除 chat（GuardedChat）。
+    对标 DS v0_chat_once: create_session → completion → GuardedStream PinnedDrop delete_session。
     """
     # 1. 创建新 chat（每请求独立，避免上下文污染）
     if service_id in REASONING_SERVICES:
@@ -659,46 +729,58 @@ def _send_and_collect_core(entry: dict, service_id: str, content: str,
     if not chat_id:
         raise Exception(f"cannot create chat: {chat}")
 
-    # 2. 发送用户消息
-    _msg_opts = '{"reasoning_effort":"high"}' if service_id in REASONING_SERVICES else ""
-    result = _api("POST", f"/api/chats/{chat_id}/messages",
-                  body={"content": content, "attachments": [], "options": _msg_opts},
-                  ssid=entry["ssid"])
-    # [v5.9] 检测 "Unsupported service"（账号无 regular 余额）
-    if result.get("error"):
-        err_msg = result["error"]
-        if "Unsupported service" in err_msg or "Unknown" in err_msg:
-            raise Exception(f"unsupported_service: {err_msg}")
-        raise Exception(f"msg_send_error: {err_msg}")
-    user_msg_id = result.get("message", {}).get("id")
-    if not user_msg_id:
-        raise Exception(f"no message id: {result}")
-
-    deadline = time.time() + timeout
-
-    # 3. 取消息快照（0.3s 后 user msg 可见），供 widget/stream body 使用
-    time.sleep(0.3)
-    msgs_snapshot = _api_paginated(chat_id, entry["ssid"], limit=5)
-
-    # 4. 主路径：widget/stream 真实 SSE 流
     try:
-        text = _widget_stream_sse(chat_id, msgs_snapshot, entry["ssid"], chunk_cb, deadline)
-        if text:
-            print(f"[v5.10] widget/stream ok chat={chat_id} len={len(text)}", flush=True)
-            return text
-        print(f"[v5.10] widget/stream empty → fallback poll chat={chat_id}", flush=True)
-    except Exception as e:
-        print(f"[v5.10] widget/stream error → fallback: {e}", flush=True)
+        # 2. 发送用户消息
+        _msg_opts = '{"reasoning_effort":"high"}' if service_id in REASONING_SERVICES else ""
+        result = _api("POST", f"/api/chats/{chat_id}/messages",
+                      body={"content": content, "attachments": [], "options": _msg_opts},
+                      ssid=entry["ssid"])
+        if result.get("error"):
+            err_msg = result["error"]
+            if "Unsupported service" in err_msg or "Unknown" in err_msg:
+                raise Exception(f"unsupported_service: {err_msg}")
+            raise Exception(f"msg_send_error: {err_msg}")
+        user_msg_id = result.get("message", {}).get("id")
+        if not user_msg_id:
+            raise Exception(f"no message id: {result}")
 
-    # 5. 兜底：paginatedMessages 轮询（status=ended 为唯一完成信号）
-    return _paginated_poll(chat_id, user_msg_id, entry["ssid"], chunk_cb, deadline)
+        deadline = time.time() + timeout
+
+        # 3. 快照（0.3s 后 user msg 可见），供 widget/stream body 使用
+        time.sleep(0.3)
+        msgs_snapshot = _api_paginated(chat_id, entry["ssid"], limit=5)
+
+        # 4. 主路径：widget/stream 真实 SSE 流
+        try:
+            text = _widget_stream_sse(chat_id, msgs_snapshot, entry["ssid"],
+                                      chunk_cb, deadline, abort)
+            if text:
+                print(f"[v5.11] stream ok chat={chat_id} len={len(text)}", flush=True)
+                return text
+            print(f"[v5.11] stream empty → fallback poll chat={chat_id}", flush=True)
+        except Exception as e:
+            if abort and abort.is_set():
+                raise Exception("client_disconnected")
+            print(f"[v5.11] stream error → fallback: {e}", flush=True)
+
+        # 5. 兜底：paginatedMessages 轮询（status=ended 为唯一完成信号）
+        return _paginated_poll(chat_id, user_msg_id, entry["ssid"],
+                               chunk_cb, deadline, abort=abort)
+    finally:
+        # v5.11: GuardedChat — 无论成功/失败都删除 chat（对标 DS delete_session）
+        if chat_id:
+            _delete_chat(chat_id, entry["ssid"])
+
 
 def _try_service(service_id: str, content: str, entries: list,
-                 chunk_cb=None) -> str:
+                 chunk_cb=None, abort: AbortFlag | None = None) -> str:
+    """v5.11: 新增连续 ConnectionReset 计数（对标 DS error_count → Invalid）。
+    同一 SSID 连续 MAX_CONN_ERRORS 次连接错误 → mark_dead(90s) 强制换号。"""
     last_err = None
     max_attempts = max(len(entries) * 2, 4)
     for attempt in range(max_attempts):
-        # 动态过滤: 跳过 dead + 并发已满的 ssid
+        if abort and abort.is_set():
+            raise Exception("client_disconnected")
         now = time.time()
         live_now = [
             e for e in entries
@@ -706,11 +788,21 @@ def _try_service(service_id: str, content: str, entries: list,
             and e.get("_active", 0) < MAX_CONCURRENCY_PER_SSID
         ]
         if not live_now:
-            # 全部繁忙/死亡：先取 live 忽略并发上限，再兜底全量
             live_now = [e for e in entries if e["dead_until"] <= now] or entries
         entry = _pick_entry(live_now)
         try:
-            return _send_and_collect(entry, service_id, content, chunk_cb=chunk_cb)
+            return _send_and_collect(entry, service_id, content,
+                                     chunk_cb=chunk_cb, abort=abort)
+        except _rq.exceptions.ConnectionError as e:
+            # v5.11: 连续连接错误计数
+            with _lock:
+                entry["_conn_errors"] = entry.get("_conn_errors", 0) + 1
+                cerrs = entry["_conn_errors"]
+            if cerrs >= MAX_CONN_ERRORS:
+                print(f"[POOL] {entry['label']} conn_errors={cerrs} → dead 90s", flush=True)
+                _mark_dead(entry["ssid"], secs=90, reason="conn_reset")
+            last_err = e
+            continue
         except HTTPError as e:
             body_txt = ""
             try: body_txt = e.read().decode(errors="ignore")
@@ -719,7 +811,7 @@ def _try_service(service_id: str, content: str, entries: list,
                 if "Free tokens are over" in body_txt or "Balance need" in body_txt:
                     _mark_dead(entry["ssid"], secs=86400, reason="balance_exhausted")
                 else:
-                    _mark_dead(entry["ssid"], secs=600,   reason="auth_error")
+                    _mark_dead(entry["ssid"], secs=600, reason="auth_error")
                 last_err = e
                 continue
             raise
@@ -729,15 +821,17 @@ def _try_service(service_id: str, content: str, entries: list,
             continue
         except Exception as e:
             err = str(e)
+            if "client_disconnected" in err:
+                raise
             if "unsupported_service" in err:
-                # [v5.9] 账号无 regular 余额 → 标记 balance_exhausted (24h)
                 _mark_dead(entry["ssid"], secs=86400, reason="balance_exhausted")
             last_err = e
             continue
     raise Exception(f"all ssids failed for {service_id}: {last_err}")
 
+
 def _do_chat(model: str, messages: list, ssid_override: str | None,
-             chunk_cb=None) -> str:
+             chunk_cb=None, abort: AbortFlag | None = None) -> str:
     primary_id = _resolve_model(model)
     content    = _fmt(messages)
     print(f"[REQ] {model}→{primary_id} msgs={len(messages)}", flush=True)
@@ -759,11 +853,14 @@ def _do_chat(model: str, messages: list, ssid_override: str | None,
         if idx > 0:
             print(f"[FALLBACK] {chain[idx-1]} → {service_id}", flush=True)
         try:
-            return _try_service(service_id, content, entries, chunk_cb=chunk_cb)
+            return _try_service(service_id, content, entries,
+                                chunk_cb=chunk_cb, abort=abort)
         except TimeoutError as e:
             print(f"[FALLBACK] {service_id} timeout", flush=True); last_err = e; continue
         except Exception as e:
             err = str(e)
+            if "client_disconnected" in err:
+                raise
             if "service_error:" in err:
                 detail = err.split("service_error:", 1)[-1].strip()
                 if _is_retryable(detail):
@@ -820,6 +917,8 @@ class Handler(BaseHTTPRequestHandler):
                     "balance":     e.get("balance"),
                     "relogin":     e.get("_relogin_pending", False),
                     "active":      e.get("_active", 0),
+                    "conn_errors": e.get("_conn_errors", 0),
+                    "idle_secs":   round(now - e.get("_last_released", 0), 1),
                 } for e in _pool]
             live = sum(1 for a in info if not a["dead"])
             return self._json(200, {"pool_size": len(_pool), "live": live, "accounts": info})
@@ -844,7 +943,6 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         p = self.path.split("?")[0]
 
-        # ── /add-ssid ────────────────────────────────────────────────────────
         if p == "/add-ssid":
             try:
                 length = int(self.headers.get("Content-Length", 0))
@@ -861,7 +959,6 @@ class Handler(BaseHTTPRequestHandler):
         if p not in ("/v1/chat/completions", "/v1/chat/completions/"):
             self.send_response(404); self.end_headers(); return
 
-        # ── /v1/chat/completions ──────────────────────────────────────────────
         try:
             length = int(self.headers.get("Content-Length", 0))
             body   = json.loads(self.rfile.read(length))
@@ -877,8 +974,10 @@ class Handler(BaseHTTPRequestHandler):
         resp_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         ts      = int(time.time())
 
+        # v5.11: AbortFlag 对象，每个请求独立（对标 DS GuardedStream.finished）
+        abort = AbortFlag()
+
         if do_stream:
-            # 真实 SSE 流式：通过 chunk_cb 增量推送
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -897,13 +996,17 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
-                    pass
+                    # v5.11: 客户端断开 → 设置 abort_flag（对标 DS stop_stream）
+                    abort.set()
 
             try:
-                text = _do_chat(model, messages, ssid_ov, chunk_cb=send_chunk)
+                text = _do_chat(model, messages, ssid_ov,
+                                chunk_cb=send_chunk, abort=abort)
             except BrokenPipeError:
                 return
             except Exception as e:
+                if abort.is_set():
+                    return   # 客户端已断开，不发错误
                 print(f"[ERR] {e}", flush=True)
                 err_chunk = {"error": {"message": str(e), "type": "proxy_error"}}
                 try:
@@ -913,6 +1016,8 @@ class Handler(BaseHTTPRequestHandler):
                     pass
                 return
 
+            if abort.is_set():
+                return
             stop = {
                 "id": resp_id, "object": "chat.completion.chunk",
                 "created": ts, "model": model,
@@ -925,9 +1030,8 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
         else:
-            # 非流式：等待完整回复
             try:
-                text = _do_chat(model, messages, ssid_ov)
+                text = _do_chat(model, messages, ssid_ov, abort=abort)
             except BrokenPipeError:
                 return
             except Exception as e:
@@ -955,15 +1059,16 @@ class ThreadedServer(HTTPServer):
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.10] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.11] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.10] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.11] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.10] balance monitor started | widget/stream=primary paginatedMessages=fallback", flush=True)
+    print("[unitool-proxy v5.11] balance monitor started", flush=True)
+    print("[unitool-proxy v5.11] features: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
