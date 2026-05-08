@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.11.1
+unitool.ai → OpenAI 兼容反代 v5.12
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -778,19 +778,28 @@ def _send_and_collect_core(entry: dict, service_id: str, content: str,
         # 3. 快照（0.3s 后 user msg 可见），供 widget/stream body 使用
         time.sleep(0.3)
         msgs_snapshot = _api_paginated(chat_id, entry["ssid"], limit=5)
+        # v5.12: msgs_snapshot=[] → 再等 0.5s 重试（服务器写入延迟）
+        if not msgs_snapshot:
+            print(f"[v5.12] msgs_snapshot=[] chat={chat_id} → retry snapshot 0.5s", flush=True)
+            time.sleep(0.5)
+            msgs_snapshot = _api_paginated(chat_id, entry["ssid"], limit=5)
 
         # 4. 主路径：widget/stream 真实 SSE 流
-        try:
-            text = _widget_stream_sse(chat_id, msgs_snapshot, entry["ssid"],
-                                      chunk_cb, deadline, abort)
-            if text:
-                print(f"[v5.11] stream ok chat={chat_id} len={len(text)}", flush=True)
-                return text
-            print(f"[v5.11] stream empty → fallback poll chat={chat_id}", flush=True)
-        except Exception as e:
-            if abort and abort.is_set():
-                raise Exception("client_disconnected")
-            print(f"[v5.11] stream error → fallback: {e}", flush=True)
+        # v5.12: msgs_snapshot 仍空 → 直接跳 paginatedMessages，避免白白触发 400
+        if msgs_snapshot:
+            try:
+                text = _widget_stream_sse(chat_id, msgs_snapshot, entry["ssid"],
+                                          chunk_cb, deadline, abort)
+                if text:
+                    print(f"[v5.12] stream ok chat={chat_id} len={len(text)}", flush=True)
+                    return text
+                print(f"[v5.12] stream empty → fallback poll chat={chat_id}", flush=True)
+            except Exception as e:
+                if abort and abort.is_set():
+                    raise Exception("client_disconnected")
+                print(f"[v5.12] stream error → fallback: {e}", flush=True)
+        else:
+            print(f"[v5.12] msgs_snapshot=[] after retry → skip widget/stream, direct poll chat={chat_id}", flush=True)
 
         # 5. 兜底：paginatedMessages 轮询（status=ended 为唯一完成信号）
         return _paginated_poll(chat_id, user_msg_id, entry["ssid"],
@@ -1089,16 +1098,16 @@ class ThreadedServer(HTTPServer):
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.11.1] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.12] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.11.1] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.12] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.11.1] balance monitor started", flush=True)
-    print("[unitool-proxy v5.11.1] features: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|BugFix3", flush=True)
+    print("[unitool-proxy v5.12] balance monitor started", flush=True)
+    print("[unitool-proxy v5.12] features: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
