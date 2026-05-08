@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.34
+unitool.ai → OpenAI 兼容反代 v5.35
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -580,6 +580,10 @@ POLL_PRIMARY_SERVICES = {
     # o-series reasoning models (v5.30): widget/stream unreliable; paginatedMessages returns clean answer
     "gpt-o1", "gpt-o1-mini",
     "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini",
+    # v5.35: gemini stream path hangs (~60s); poll-only is reliable
+    "gemini-3.1-pro", "gemini-3-pro",
+    # v5.35: gpt-5.4 stream intermittently empty; poll reliable
+    "gpt-5.4",
 }
 _STREAM_INTERCEPT_RU = "помогаю только"  # Russian restriction marker
 
@@ -710,9 +714,9 @@ IMMEDIATE_FALLBACK_SERVICES: set[str] = {
     "gpt-5-nano",  # 400 "Reasoning is mandatory" — hangs even with reasoning_effort
     "claude-opus", # 400 max_tokens: 32768 > 32000 (max for claude-opus-4-20250514)
     "gpt-4-5",     # 400 Unsupported service (confirmed dead 2026-05-08)
-    # NOTE: grok / claude-haiku / gemini-3.1-pro / gemini-3-pro are NOT here:
-    # they return "currently being maintained" (temporary). v5.33 _svc_dead handles
-    # these dynamically: maintenance error → dead 24h, clears automatically.
+    "claude-haiku",  # HTTP 500 consistently from unitool (confirmed 2026-05-08); use claude-sonnet
+    # NOTE: grok / gemini-3.1-pro / gemini-3-pro are NOT in IMMEDIATE_FALLBACK:
+    # maintenance errors → _mark_svc_dead 30min (v5.35), auto-recovers.
 }
 
 MODEL_ALIASES = {
@@ -1579,6 +1583,8 @@ def _do_chat(model: str, messages: list, ssid_override: str | None,
             "gpt-5-nano": "400 'Reasoning is mandatory' — hangs even with reasoning_effort",
             "claude-opus":"400 max_tokens: 32768 > 32000 for claude-opus-4-20250514",
             "gpt-4-5":    "400 Unsupported service (permanently dead at unitool)",
+            "claude-haiku": "HTTP 500 consistently from unitool — use claude-sonnet",
+
         }
         reason = _reasons.get(primary_id, "confirmed permanently broken at unitool API level")
         print(f"[ERR] {primary_id} permanent-broken: {reason}", flush=True)
@@ -1592,7 +1598,7 @@ def _do_chat(model: str, messages: list, ssid_override: str | None,
     except Exception as e:
         err = str(e)
         if "service_maintenance" in err:
-            _mark_svc_dead(primary_id, secs=86400, reason=err)
+            _mark_svc_dead(primary_id, secs=1800, reason=err)  # v5.35: 30min not 24h
         raise
 
 # ─── HTTP Handler ─────────────────────────────────────────────────────────────
@@ -1720,7 +1726,7 @@ class Handler(BaseHTTPRequestHandler):
                 services_out.append({"service": sid, "status": st})
 
             return self._json(200, {
-                "version": "v5.34",
+                "version": "v5.35",
                 "pool_live": sum(1 for e in _pool if e["dead_until"] <= now),
                 "pool_total": len(_pool),
                 "rpm": _get_rpm(),
