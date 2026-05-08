@@ -104,6 +104,7 @@ BALANCE_LOW_WARN = 0.5
 MAX_HISTORY_TURNS = 12   # v5.11: 最多保留 12 轮消息（对标 DS split_history_prompt）
 MAX_CONN_ERRORS   = 3    # v5.11: consecutive conn errors -> mark_dead(90s)
 MAX_EMPTY_STREAK  = 3    # v5.13: consecutive empty responses -> mark_dead(120s)
+MAX_UPDATING      = 60   # v5.24: backend hang guard: 60 polls (~42s) -> service_stuck_updating
 
 # v5.13: RESI port health map (mirrors ds2api proxyHealthMap)
 _resi_port_health = {}    # port -> dead_until (float epoch)
