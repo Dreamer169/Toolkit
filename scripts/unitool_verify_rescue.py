@@ -335,6 +335,19 @@ def main():
                 log(f"[relogin] SUCCESS len={len(_rl_ssid)}")
                 save_ssid(_rl_id, _rl_email, _rl_ssid)
                 _success_flag = True
+                # v5.15b: invalidate stale ref_code cache entry so chain_v3
+                # uses fresh API result instead of old "expired" cached empty
+                try:
+                    import json as _jmod
+                    _cf = "/tmp/unitool_ref_code_cache.json"
+                    if os.path.exists(_cf):
+                        _cache = _jmod.loads(open(_cf).read())
+                        _removed = _cache.pop(str(_rl_id), None)
+                        if _removed is not None:
+                            open(_cf, "w").write(_jmod.dumps(_cache))
+                            log(f"[relogin] cleared stale ref_cache for id={_rl_id}")
+                except Exception as _ce:
+                    log(f"[relogin] cache clear warn: {_ce}")
             else:
                 log(f"[relogin] FAIL — unlock processing")
                 try:
