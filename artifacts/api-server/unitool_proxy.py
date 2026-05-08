@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.9
-====================================
-改进 (相对 v5.2):
-  1. 真实 SSE 流式输出 — 后台线程轮询消息 API，增量推送 delta（不再按空格假分块）
-  2. 每请求新建独立 chat — 彻底隔离上下文，避免跨 API 调用污染对话历史
-  3. 持久化 ssid — 写入 /data/unitool_ssids/<label>.txt（不再只存 /tmp）
-  4. 启动时从 DB + /data/ 恢复 ssid 池（重启不丢 ssid）
-  5. 自动重登 — ssid 因 401/403 死亡时后台触发 unitool_login.py（若能找到匹配账号密码）
-  6. /reload-ssids 端点 — 强制重扫文件 + DB
-  7. /add-ssid 同步写 DB 和 /data/ 持久文件
-  8. 更细粒度 dead_reason — balance_exhausted / auth_error / timeout / http_5xx
-  9. 余额监控间隔缩短为 15min（高负载下更快发现耗尽）
- 10. [v5.3] gpt-5-nano 加入 NATIVE_SERVICES + fallback 链（unitool 后端禁用 reasoning，
-     触发 "Reasoning is mandatory" 后自动降级到 gpt-5）
- 11. [v5.3] gemini-2.5-pro/flash、grok 加入 NATIVE_SERVICES（unitool 返回
-     "Unexpected end of JSON input" 时自动降级）；_is_retryable 新增两个错误串
+unitool.ai → OpenAI 兼容反代 v5.10
+=====================================
+改进 (相对 v5.9):
+  v5.10 三大核心改造（来自 ds-free-api 分析 + unitool API 实测）：
+  1. 主路径切换为 /api/widget/stream 真实 SSE 流
+     — POST {"chat_id":X,"messages":[snapshot]} → data:{"content":"delta"}
+     — 逐 token 推送，零延迟，无截断
+  2. 轮询端点从 /api/chats/{id}/messages 改为 /api/chats/{id}/paginatedMessages
+     — 响应 key 为 "data"（非 "messages"）
+     — status 流：updating（生成中）→ ended（完成）
+  3. 移除 active_stable 计数器
+     — 以 status=="ended" 为唯一完成信号，彻底解决长输出截断问题
+  其余改进保留 v5.2–v5.9 的全部功能。
 """
 import json, time, uuid, threading, ssl, os, re, sys, subprocess
 import psycopg2
@@ -509,13 +506,106 @@ def _pick_entry(entries: list) -> dict:
         _rr_idx += 1
         return entries[idx]
 
+
+# ─── v5.10: paginatedMessages 辅助 ──────────────────────────────────────────
+def _api_paginated(chat_id: int, ssid: str, limit: int = 20) -> list:
+    """GET /api/chats/{id}/paginatedMessages via socks5h → data[] list"""
+    port = _pick_resi_port(ssid)
+    sess = _get_resi_session(port)
+    try:
+        r = sess.get(
+            f"{BASE}/api/chats/{chat_id}/paginatedMessages",
+            params={"limit": limit},
+            headers=_hdrs(ssid),
+            timeout=15,
+        )
+        return r.json().get("data", [])
+    except Exception as e:
+        print(f"[paginatedMessages] chat={chat_id} error: {e}", flush=True)
+        return []
+
+
+# ─── v5.10: widget/stream 真实 SSE 主路径 ───────────────────────────────────
+def _widget_stream_sse(chat_id: int, msgs_snapshot: list, ssid: str,
+                       chunk_cb, deadline: float) -> str:
+    """
+    POST /api/widget/stream → SSE 逐 token 流。
+    body: {"chat_id": X, "messages": [snapshot from paginatedMessages]}
+    events: data: {"content":"delta"}
+    Returns: 完整拼接内容（空字符串表示无数据，调用方需回退轮询）。
+    """
+    port    = _pick_resi_port(ssid)
+    sess    = _get_resi_session(port)
+    timeout = max(8.0, deadline - time.time())
+    hdrs    = {
+        **_hdrs(ssid),
+        "Content-Type":  "application/json",
+        "Accept":        "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection":    "keep-alive",
+    }
+    full = ""
+    with sess.post(
+        f"{BASE}/api/widget/stream",
+        json={"chat_id": chat_id, "messages": msgs_snapshot},
+        headers=hdrs,
+        stream=True,
+        timeout=(10, timeout),
+    ) as r:
+        if r.status_code != 200:
+            raise Exception(f"widget/stream HTTP {r.status_code}: {r.text[:200]}")
+        for line in r.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            if time.time() >= deadline:
+                break
+            if line.startswith("data:"):
+                raw = line[5:].strip()
+                if not raw or raw == "[DONE]":
+                    break
+                try:
+                    delta = json.loads(raw).get("content", "")
+                    if delta:
+                        full += delta
+                        if chunk_cb:
+                            chunk_cb(delta)
+                except Exception:
+                    pass
+    return full
+
+
+# ─── v5.10: paginatedMessages 轮询兜底 ──────────────────────────────────────
+def _paginated_poll(chat_id: int, user_msg_id: int, ssid: str,
+                    chunk_cb, deadline: float, prev_content: str = "") -> str:
+    """
+    paginatedMessages 轮询兜底（widget/stream 失败时使用）。
+    每 0.7s 轮询一次；唯一完成信号：status == "ended"。
+    无 active_stable 计数器，不会截断长输出。
+    """
+    while time.time() < deadline:
+        time.sleep(0.7)
+        msgs = _api_paginated(chat_id, ssid)
+        for m in msgs:
+            if m.get("role") != "assistant" or m.get("reply_to") != user_msg_id:
+                continue
+            status  = m.get("status", "")
+            cur_txt = m.get("content") or ""
+            if chunk_cb and cur_txt and cur_txt != prev_content:
+                delta = cur_txt[len(prev_content):]
+                if delta:
+                    chunk_cb(delta)
+                prev_content = cur_txt
+            if status == "error":
+                raise Exception(f"service_error: {cur_txt[:300]}")
+            if status == "ended" and cur_txt:
+                return cur_txt
+            break   # 匹配到消息后退出 for，等下一轮
+    raise TimeoutError(f"timeout chat={chat_id}")
+
+
 def _send_and_collect(entry: dict, service_id: str, content: str,
                       chunk_cb=None, timeout: int = 180) -> str:
-    """
-    创建新 chat → 发送消息 → 轮询等待完整回复（同时通过 chunk_cb 发送增量）
-    chunk_cb(delta: str) 若提供则做真实流式推送
-    """
-    # 并发计数 +1（try/finally 保证必然 -1）
+    """并发计数 wrapper → _send_and_collect_core"""
     with _lock:
         entry["_active"] = entry.get("_active", 0) + 1
     try:
@@ -527,8 +617,13 @@ def _send_and_collect(entry: dict, service_id: str, content: str,
 
 def _send_and_collect_core(entry: dict, service_id: str, content: str,
                            chunk_cb=None, timeout: int = 180) -> str:
+    """
+    v5.10: 创建新 chat → 发送消息 →
+      主路径: POST /api/widget/stream SSE（逐 token 推送）
+      兜底:   GET  /api/chats/{id}/paginatedMessages 轮询（status=ended）
+    移除了 active_stable 计数器。
+    """
     # 1. 创建新 chat（每请求独立，避免上下文污染）
-    # [v5.4] gemini-3.1-pro / grok 需要通过 /api/chats 创建并设置 chat_settings
     if service_id in REASONING_SERVICES:
         _rsettings = '{"reasoning_effort":"high","thinking":true}'
         chat = _api("POST", "/api/chats",
@@ -543,12 +638,11 @@ def _send_and_collect_core(entry: dict, service_id: str, content: str,
         raise Exception(f"cannot create chat: {chat}")
 
     # 2. 发送用户消息
-    # [v5.4] reasoning services 需要附带 options
     _msg_opts = '{"reasoning_effort":"high"}' if service_id in REASONING_SERVICES else ""
     result = _api("POST", f"/api/chats/{chat_id}/messages",
                   body={"content": content, "attachments": [], "options": _msg_opts},
                   ssid=entry["ssid"])
-    # [v5.9] 检测 "Unsupported service" (账号无 regular 余额，bonus 无法使用付费服务)
+    # [v5.9] 检测 "Unsupported service"（账号无 regular 余额）
     if result.get("error"):
         err_msg = result["error"]
         if "Unsupported service" in err_msg or "Unknown" in err_msg:
@@ -558,44 +652,24 @@ def _send_and_collect_core(entry: dict, service_id: str, content: str,
     if not user_msg_id:
         raise Exception(f"no message id: {result}")
 
-    # 3. 轮询等待 assistant 回复
-    deadline        = time.time() + timeout
-    prev_content    = ""
-    active_stable   = 0   # 连续 "active" 且内容不变的次数，到 2 次则视为完成
-    interval        = 0.8  # [v5.8] 缩短初始间隔，更快感知 ended 状态
+    deadline = time.time() + timeout
 
-    while time.time() < deadline:
-        time.sleep(interval)
-        msgs_resp = _api("GET", f"/api/chats/{chat_id}/messages", ssid=entry["ssid"])
-        msgs = msgs_resp.get("messages", msgs_resp) if isinstance(msgs_resp, dict) else msgs_resp
-        for m in reversed(msgs if isinstance(msgs, list) else []):
-            if m.get("role") != "assistant" or m.get("reply_to") != user_msg_id:
-                continue
-            status  = m.get("status", "")
-            cur_txt = m.get("content") or ""
+    # 3. 取消息快照（0.3s 后 user msg 可见），供 widget/stream body 使用
+    time.sleep(0.3)
+    msgs_snapshot = _api_paginated(chat_id, entry["ssid"], limit=5)
 
-            # 增量流式推送
-            if chunk_cb and cur_txt and cur_txt != prev_content:
-                delta = cur_txt[len(prev_content):]
-                if delta:
-                    chunk_cb(delta)
-                active_stable = 0   # 有新内容，重置静止计数
-                prev_content  = cur_txt
+    # 4. 主路径：widget/stream 真实 SSE 流
+    try:
+        text = _widget_stream_sse(chat_id, msgs_snapshot, entry["ssid"], chunk_cb, deadline)
+        if text:
+            print(f"[v5.10] widget/stream ok chat={chat_id} len={len(text)}", flush=True)
+            return text
+        print(f"[v5.10] widget/stream empty → fallback poll chat={chat_id}", flush=True)
+    except Exception as e:
+        print(f"[v5.10] widget/stream error → fallback: {e}", flush=True)
 
-            if status == "error":
-                raise Exception(f"service_error: {cur_txt[:300]}")
-            if status in ("ended", "done") and cur_txt:
-                return cur_txt
-            # "active" 且连续多轮内容不变 → 兜底退出（主信号是 status=ended/done）
-            # [v5.8] 阈值从 2 提升到 10（≈10秒无变化），避免截断长输出（ds-free-api 教训）
-            if status == "active" and cur_txt:
-                active_stable += 1
-                if active_stable >= 10:
-                    return cur_txt
-            break   # 找到匹配消息后退出 for，防止历史消息错误重置 active_stable
-        interval = 0.7  # [v5.8] 快轮询
-
-    raise TimeoutError(f"timeout chat={chat_id} service={service_id}")
+    # 5. 兜底：paginatedMessages 轮询（status=ended 为唯一完成信号）
+    return _paginated_poll(chat_id, user_msg_id, entry["ssid"], chunk_cb, deadline)
 
 def _try_service(service_id: str, content: str, entries: list,
                  chunk_cb=None) -> str:
@@ -859,15 +933,15 @@ class ThreadedServer(HTTPServer):
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.9] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.10] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.6] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.10] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.8] balance monitor started", flush=True)
+    print("[unitool-proxy v5.10] balance monitor started | widget/stream=primary paginatedMessages=fallback", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
