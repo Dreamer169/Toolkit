@@ -16,6 +16,12 @@ import psycopg2
 
 DB_URL = "postgresql://postgres:postgres@localhost/toolkit"
 AUTH_COOKIE = "__Secure-unitool-ssid"
+# 住宅代理端口列表
+RESI_PORTS = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
+
+def _pick_resi_port(key: str) -> int:
+    return RESI_PORTS[hash(key) % len(RESI_PORTS)]
+
 
 def log(*a): print(*a, flush=True)
 
@@ -74,11 +80,14 @@ def get_ref_code_from_api(ssid: str) -> dict:
     而 /api/user/ref-code 返回该账号自己通过 POST /api/ref-codes 生成的专属码。
     返回示例: {"code":"xjfjk","conversions":3,"clicks":0,...} 或 null
     """
+    _port = _pick_resi_port(ssid[:12])
+    log(f"[reflink] 住宅代理端口: {_port}")
     cmd = [
         "curl", "-s",
+        "--socks5-hostname", f"127.0.0.1:{_port}",
         "-b", f"{AUTH_COOKIE}={ssid}",
         "-H", "Accept: application/json",
-        "--max-time", "15",
+        "--max-time", "20",
         "https://unitool.ai/api/user/ref-code"
     ]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)

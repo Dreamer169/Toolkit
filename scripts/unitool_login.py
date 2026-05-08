@@ -33,6 +33,12 @@ for _p in [
 TARGET       = "https://unitool.ai/en/entry"
 LOGIN_NA     = "60e02e33f743e14f5dab1dc42181ba1e746fd4d925"
 AUTH_COOKIE  = "__Secure-unitool-ssid"
+# 住宅代理端口列表（与 chain_v3 保持一致）
+RESI_PORTS = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
+
+def _pick_resi_port(email: str) -> int:
+    return RESI_PORTS[hash(email) % len(RESI_PORTS)]
+
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 def _log(*a):  print(*a, flush=True, file=sys.stderr)
@@ -131,8 +137,11 @@ async def login_one(email: str, password: str, headless: bool = True,
             _log(f"  [display] headless=False (DISPLAY={display})")
     opt.headless = headless
     if CHROME: opt.binary_location = CHROME
+    _resi_port = _pick_resi_port(email)
+    _log(f"  [{email}] 住宅代理端口: {_resi_port}")
     for a in ["--no-sandbox", "--disable-dev-shm-usage", "--window-size=1440,900",
-               "--disable-gpu", "--lang=en-US"]:
+               "--disable-gpu", "--lang=en-US",
+               f"--proxy-server=socks5://127.0.0.1:{_resi_port}"]:
         opt.add_argument(a)
 
     t0 = time.time()

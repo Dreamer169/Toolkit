@@ -25,6 +25,12 @@ import psycopg2
 DB_URL = "postgresql://postgres:postgres@localhost/toolkit"
 CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
 DISPLAY = ":99"
+# 住宅代理端口列表（与 chain_v3 / unitool_batch_refcode 保持一致）
+RESI_PORTS = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
+
+def _pick_resi_port(email: str) -> int:
+    return RESI_PORTS[hash(email) % len(RESI_PORTS)]
+
 CHROME = None
 for p in ["/data/cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
           "/root/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
@@ -337,8 +343,11 @@ async def unitool_register(email, password, ref_code=""):
     opt = ChromiumOptions()
     opt.headless = False
     if CHROME: opt.binary_location = CHROME
+    _resi_port = _pick_resi_port(email)
+    log(f"[unitool_reg] 住宅代理端口: {_resi_port}")
     for a in ["--no-sandbox","--disable-dev-shm-usage","--window-size=1440,900",
-               "--disable-gpu","--lang=en-US","--disable-blink-features=AutomationControlled"]:
+               "--disable-gpu","--lang=en-US","--disable-blink-features=AutomationControlled",
+               f"--proxy-server=socks5://127.0.0.1:{_resi_port}"]:
         opt.add_argument(a)
 
     env_backup = os.environ.get("DISPLAY", "")
