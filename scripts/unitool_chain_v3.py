@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool_chain_v3.py — 端到端全自动链路 v3.0
+unitool_chain_v3.py — 端到端全自动链路 v3.1
 ============================================
 整合所有子脚本，闭环实现完整链路：
   outlook_register.py（水位补充）
@@ -27,7 +27,7 @@ import psycopg2
 # ── 常量 ──────────────────────────────────────────────────────────────────────
 LOG            = "/tmp/unitool_chain_v3.log"
 DB_URL         = "postgresql://postgres:postgres@localhost/toolkit"
-SCRIPTS        = "/root/Toolkit/scripts"
+SCRIPTS        = "/data/Toolkit/scripts"
 REGISTER_PY    = f"{SCRIPTS}/unitool_register.py"
 REFLINK_PY     = f"{SCRIPTS}/unitool_reflink.py"
 LOGIN_PY       = f"{SCRIPTS}/unitool_login.py"
@@ -38,6 +38,43 @@ API_BASE       = "http://localhost:8081/api"  # api-server 地址
 
 MAX_REF_SLOTS   = 10    # unitool 每个 ref_code 最多邀请人数
 RESI_PORTS = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
+
+# CF Worker 直连代理（proxy.jimjio.indevs.in），提供 CF 边缘 IP 多样性
+# 用于 ref-code API 查询/创建的 IP 分散（RESI 失败时自动降级）
+CF_WORKER_URL = "https://proxy.jimjio.indevs.in/proxy"
+
+def _cf_worker_api(target_url: str, method: str, ssid: str,
+                   extra_headers: dict = None, timeout: int = 15) -> str:
+    """
+    通过 CF Worker 发起 unitool API 请求（CF 边缘 IP 出口）。
+    返回: target API 响应体字符串，失败返回 ""。
+    """
+    import json as _jcf, urllib.request as _urcf
+    hdrs = {
+        "Cookie": f"__Secure-unitool-ssid={ssid}",
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+    }
+    if extra_headers:
+        hdrs.update(extra_headers)
+    payload = _jcf.dumps({
+        "target_url": target_url,
+        "method": method,
+        "headers": hdrs,
+    }).encode("utf-8")
+    try:
+        req = _urcf.Request(CF_WORKER_URL, data=payload, method="POST",
+                            headers={"Content-Type": "application/json"})
+        resp = _urcf.urlopen(req, timeout=timeout)
+        outer = _jcf.loads(resp.read())
+        body = outer.get("body", "")
+        if isinstance(body, dict):
+            return _jcf.dumps(body)
+        return str(body)
+    except Exception as _e:
+        log(f"[CF] worker err: {_e}")
+        return ""
+
 
 # v5.15: parallel RESI health cache (shared across this process)
 _chain_healthy_ports: list = []
@@ -377,7 +414,23 @@ def _api_check_ref_code(ssid: str, account_id: int = 0) -> tuple:
         _save_ref_cache(cache)
         return (code, conv)
     except Exception:
-        return ("", -1)
+        pass
+    # RESI 全失败 → CF Worker 兜底（CF 边缘 IP，绕开 VPS IP 限速/封锁）
+    try:
+        _cf_raw = _cf_worker_api("https://unitool.ai/api/user/ref-code", "GET", ssid)
+        if _cf_raw and _cf_raw not in ("", "null"):
+            _cfd = json.loads(_cf_raw)
+            _cfc = _cfd.get("code", "")
+            _cfv = int(_cfd.get("conversions", 0))
+            cache[key] = {"code": _cfc, "conversions": _cfv,
+                          "earnings": _cfd.get("earnings", 0),
+                          "clicks": _cfd.get("clicks", 0), "ts": time.time()}
+            _save_ref_cache(cache)
+            log(f"[CF] ref-code via Worker: code={_cfc} conv={_cfv}")
+            return (_cfc, _cfv)
+    except Exception:
+        pass
+    return ("", -1)
 
 
 def create_ref_code_via_proxy(ssid: str, email: str, port_hint: int = 0) -> str:
@@ -427,6 +480,20 @@ def create_ref_code_via_proxy(ssid: str, email: str, port_hint: int = 0) -> str:
         except Exception as _e:
             log(f"[ref_create] port={port} exc={_e}")
     log(f"[ref_create] ❌ 所有代理端口均失败 ({email})")
+    # 全 RESI 端口失败 → CF Worker 兜底创建 ref_code（CF 边缘 IP）
+    try:
+        _cfc_body = _cf_worker_api(
+            "https://unitool.ai/api/ref-codes", "POST", ssid,
+            extra_headers={"Content-Type": "application/json"}
+        )
+        if _cfc_body and _cfc_body not in ("", "null"):
+            import json as _jcfc; _cfc_d = _jcfc.loads(_cfc_body)
+            _cfc_code = _cfc_d.get("code", "")
+            if _cfc_code:
+                log(f"[CF] create ref_code via Worker: {_cfc_code}")
+                return _cfc_code
+    except Exception as _cfe:
+        log(f"[CF] create ref fallback err: {_cfe}")
     return ""
 
 

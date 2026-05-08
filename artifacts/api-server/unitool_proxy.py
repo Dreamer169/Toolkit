@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.18
+unitool.ai → OpenAI 兼容反代 v5.20
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -527,6 +527,81 @@ REASONING_SERVICES = {"gemini-3.1-pro", "gemini-3-pro", "grok",
 # v5.11: 从 API 实探更新 minimum_balance（用于日志报警，balance=0 的服务不 mark dead）
 FREE_SERVICES = {"gpt-4o-mini", "gpt-5-nano"}  # minimum_balance=0，余额耗尽也可用
 
+# ─── Media generation services (image/video/audio) v5.20 ──────────────────
+# These use job polling (not SSE). Result in paginatedMessages assistant.attachments
+# CONFIRMED (2026-05-08): gpt-image completes in ~15s, content="" attachments has URL
+# Response structure: {"role":"assistant","status":"ended","content":"","attachments":[
+#   {"uri":"https://media.unitool.ai/r2/....png","type":"png","width":1024,...}]}
+
+IMAGE_SERVICES = {
+    "gpt-image",         # GPT-Image 2.0  min_bal=1  output=0.0024/tok  CONFIRMED
+    "dalle-3",           # DALL-E 3        min_bal=6.74  output=3.6
+    "midjourney",        # Midjourney      min_bal=6.5   output=5
+    "stable-diffusion",  # SD XL           min_bal=6.74  output=3.6
+    "flux",              # FLUX.1          min_bal=6.74  output=0.8
+    "nanobanana",        # NanoBanana      min_bal=7     output=6.25
+    # sdxl image-editing sub-services (require image in attachments)
+    "remove-background", "uncrop", "reimagine", "upscaler", "image-to-video", "cleanup",
+}
+
+VIDEO_SERVICES = {
+    "luma",       # Dream Machine   min_bal=31.25  output=28.33
+    "kling",      # Kling           min_bal=80     output=10
+    "sora2",      # Sora 2          min_bal=19     output=10
+    "veo3",       # Google Veo 3    min_bal=59     output=16.6
+    "hailuo",     # Hailuo/Minimax  min_bal=50     output=10
+    "runwayml",   # Runway ML       min_bal=48     output=16
+    "seedance",   # Seedance (ByteDance) via /api/provider-runtime/chats
+    "happyhorse", # HappyHorse      via /api/provider-runtime/chats
+}
+
+AUDIO_SERVICES = {
+    "suno",                  # Suno music      min_bal=15    output=14
+    "text-to-speech",        # ElevenLabs TTS  min_bal=2     output=0.0012
+    "voice-cloning",         # ElevenLabs clone
+    "text-to-sound-effects", # ElevenLabs SFX
+    "library",               # ElevenLabs library
+}
+
+MEDIA_SERVICES: set[str] = IMAGE_SERVICES | VIDEO_SERVICES | AUDIO_SERVICES
+
+MEDIA_ALIASES: dict[str, str] = {
+    # Image aliases
+    "dall-e-3": "dalle-3",
+    "dall-e-2": "dalle-3",
+    "dalle-2": "dalle-3",
+    "image-generation": "gpt-image",
+    "gpt-image-1": "gpt-image",
+    "gpt-4o-image": "gpt-image",
+    "mj": "midjourney",
+    "midjourney-v6": "midjourney",
+    "midjourney-v7": "midjourney",
+    "sd": "stable-diffusion",
+    "stable-diffusion-xl": "stable-diffusion",
+    "flux-pro": "flux",
+    "flux-schnell": "flux",
+    "flux-dev": "flux",
+    # Video aliases
+    "luma-dream": "luma",
+    "dream-machine": "luma",
+    "runway": "runwayml",
+    "runway-gen4": "runwayml",
+    "sora": "sora2",
+    "veo": "veo3",
+    "google-veo3": "veo3",
+    "minimax-video": "hailuo",
+    "kling-v2": "kling",
+    # Audio aliases
+    "music-generation": "suno",
+    "suno-v4": "suno",
+    "suno-v3": "suno",
+    "tts": "text-to-speech",
+    "elevenlabs": "text-to-speech",
+    "elevenlabs-tts": "text-to-speech",
+    "text-to-audio": "text-to-sound-effects",
+}
+
+
 FALLBACK_CHAINS: dict[str, list[str]] = {
     "gpt-5":            ["gpt-5.5",   "gpt-5.4",  "gpt-4-1",  "gpt-4o-mini"],
     "gpt-5.5":          ["gpt-5",     "gpt-5.4",  "gpt-4-1",  "gpt-4o-mini"],
@@ -586,32 +661,47 @@ MODEL_ALIASES = {
 # Strips "-rp" from model name before resolution; reduces history to RP_MAX_HISTORY.
 RP_MAX_HISTORY = 4   # -rp mode history turns (vs default MAX_HISTORY_TURNS=12)
 
-def _resolve_model(model: str) -> tuple[str, bool]:
-    """Returns (service_id, reduced_prompt_mode).
-    v5.16: strips -rp suffix before resolving model name.
-    Mirrors ds2api reducedPromptModelSuffix (-rp): ds2api uploads history as a
-    file via /api/v0/file/upload_file and sends only latest user msg as prompt.
-    Our implementation: reduce max_turns to RP_MAX_HISTORY=4 (semantically equiv).
+def _resolve_model(model: str) -> tuple[str, bool, bool]:
+    """Returns (service_id, reduced_prompt_mode, no_thinking).
+    v5.19: strips -nothinking suffix; injects <no_thinking/> in [System:] prefix.
+    Mirrors ds2api noThinkingModelSuffix: disables reasoning for o-series models.
     """
-    reduced = False
-    if model.lower().endswith("-rp"):
-        model   = model[:-3]   # strip -rp suffix
+    reduced     = False
+    no_thinking = False
+    ml = model.lower()
+    if ml.endswith("-nothinking"):
+        model       = model[:-len("-nothinking")]
+        no_thinking = True
+        ml          = model.lower()
+    if ml.endswith("-rp"):
+        model   = model[:-3]
         reduced = True
-    if model in NATIVE_SERVICES:  return model, reduced
-    if model in MODEL_ALIASES:    return MODEL_ALIASES[model], reduced
+    if model in NATIVE_SERVICES:  return model, reduced, no_thinking
+    if model in MEDIA_SERVICES:   return model, reduced, no_thinking
+    if model in MODEL_ALIASES:    return MODEL_ALIASES[model], reduced, no_thinking
+    if model in MEDIA_ALIASES:    return MEDIA_ALIASES[model], reduced, no_thinking
     m = model.lower()
-    if "claude" in m:   return "claude-sonnet", reduced
-    if "gemini" in m:   return "gemini-3.1-pro", reduced
-    if "grok" in m:     return "grok", reduced
-    if "deepseek" in m: return "gpt-5.5", reduced
-    return "gpt-5.5", reduced
+    if "claude" in m:   return "claude-sonnet", reduced, no_thinking
+    if "gemini" in m:   return "gemini-3.1-pro", reduced, no_thinking
+    if "grok" in m:     return "grok",           reduced, no_thinking
+    if "deepseek" in m: return "gpt-5.5",        reduced, no_thinking
+    if "dall" in m or ("image" in m and "gpt" in m): return "gpt-image", reduced, no_thinking
+    if "midjourney" in m: return "midjourney", reduced, no_thinking
+    if "suno" in m or "music-gen" in m: return "suno", reduced, no_thinking
+    if "flux" in m: return "flux", reduced, no_thinking
+    if "luma" in m or "dream-machine" in m: return "luma", reduced, no_thinking
+    return "gpt-5.5", reduced, no_thinking
 
 ALL_MODELS   = sorted(NATIVE_SERVICES | set(MODEL_ALIASES.keys()))
 # v5.16: expose -rp variants of common services in model list
 _RP_EXPOSED = ["gpt-4o-mini-rp", "gpt-5.5-rp", "gpt-4-1-rp",
                "claude-sonnet-rp", "gpt-5-rp", "gpt-o3-mini-rp"]
+# v5.19: -nothinking variants (reasoning models that support <no_thinking/>)
+_NT_EXPOSED = ["gpt-o3-mini-nothinking", "gpt-o3-nothinking", "gpt-o4-mini-nothinking",
+               "gpt-o1-mini-nothinking", "gpt-o1-nothinking", "gpt-5-nothinking"]
+_MEDIA_EXPOSED = sorted(MEDIA_SERVICES | set(MEDIA_ALIASES.keys()))
 MODELS_LIST  = [{"id": m, "object": "model", "created": 1700000000, "owned_by": "unitool"}
-                for m in sorted(set(ALL_MODELS) | set(_RP_EXPOSED))]
+                for m in sorted(set(ALL_MODELS) | set(_RP_EXPOSED) | set(_NT_EXPOSED) | set(_MEDIA_EXPOSED))]
 
 # ─── 核心 API 调用 ────────────────────────────────────────────────────────────
 def _api(method: str, path: str, body=None, ssid: str = ""):
@@ -621,7 +711,7 @@ def _api(method: str, path: str, body=None, ssid: str = ""):
     with urlopen(req, context=ctx, timeout=35) as r:
         return json.loads(r.read())
 
-def _fmt(messages: list, max_turns: int = MAX_HISTORY_TURNS) -> str:
+def _fmt(messages: list, max_turns: int = MAX_HISTORY_TURNS, no_thinking: bool = False) -> str:
     """v5.16: truncate history to last max_turns (mirrors DS split_history_prompt).
     Always keep system prompt + last N non-system messages.
 
@@ -666,7 +756,10 @@ def _fmt(messages: list, max_turns: int = MAX_HISTORY_TURNS) -> str:
             content = " ".join(c.get("text", "") for c in content
                                if isinstance(c, dict) and c.get("type") == "text")
         if role == "system":
-            parts.append(f"[System: {content}]")
+            # v5.19: -nothinking injects <no_thinking/> tag into [System:] prefix
+            # Mirrors ds2api noThinkingModelSuffix — disables extended thinking
+            nt_pfx = "<no_thinking/>" if no_thinking else ""
+            parts.append(f"[System: {nt_pfx}{content}]")
         elif role == "assistant":
             parts.append(f"[Assistant: {content}]")
         else:
@@ -1086,14 +1179,166 @@ def _try_service(service_id: str, content: str, entries: list,
     raise Exception(f"all ssids failed for {service_id}: {last_err}")
 
 
+
+def _do_media_job(model: str, service_id: str, prompt: str,
+                  ssid_override: str | None = None,
+                  chunk_cb=None) -> str:
+    """v5.21: Media generation job polling flow.
+    POST /api/chats -> POST /api/chats/{id}/messages -> paginatedMessages poll.
+    Returns markdown-formatted result: image URL, video URL, or audio URL.
+    Result is in assistant message: content (text) or attachments[0].uri (media).
+    Confirmed: gpt-image ~15s, seedance ~60s+; attachments[0].uri has the URL.
+
+    v5.21 fixes:
+      - BUG1: streaming mode now sends final_text via chunk_cb (was lost before)
+      - BUG2: _active counter now properly tracked (pool concurrency limiting works)
+      - BUG3: _record_rpm() called so RPM counter is accurate
+    """
+    if ssid_override and len(ssid_override) > 50:
+        entry = _make_entry(ssid_override, "header")
+        entries = [entry]
+    else:
+        _reload_pool_if_needed()
+        with _lock:
+            live = [e for e in _pool if e["dead_until"] <= time.time()]
+            entries = live or _pool[:]
+
+    if not entries:
+        raise Exception("ssid pool empty")
+
+    entry = _pick_entry(entries)
+    ssid = entry["ssid"]
+
+    _record_rpm()  # v5.21: count media jobs in RPM stats
+    print(f"[MEDIA] {model}->{service_id} prompt={prompt[:60]!r}", flush=True)
+
+    # v5.21: track _active so MAX_CONCURRENCY_PER_SSID applies to media jobs too
+    with _lock:
+        entry["_active"] = entry.get("_active", 0) + 1
+
+    chat_id = None
+    try:
+        # 1. Create chat
+        chat = _api("POST", "/api/chats",
+                    body={"service_id": service_id, "title": ""},
+                    ssid=ssid)
+        chat_id = chat.get("id")
+        if not chat_id:
+            raise Exception(f"media job: cannot create chat for {service_id}: {chat}")
+
+        print(f"[MEDIA] {service_id} chat={chat_id}", flush=True)
+
+        # 2. Send prompt
+        result = _api("POST", f"/api/chats/{chat_id}/messages",
+                      body={"content": prompt, "attachments": [], "options": ""},
+                      ssid=ssid)
+        if result.get("error"):
+            err = result["error"]
+            bal = result.get("message", "")
+            raise Exception(f"media_send_error: {err} {bal}")
+
+        user_msg_id = result.get("message", {}).get("id")
+        job_id = result.get("job", {}).get("id")
+        print(f"[MEDIA] job_id={job_id} msg_id={user_msg_id}", flush=True)
+
+        # 3. Poll paginatedMessages until status=ended
+        deadline = time.time() + 200  # 200s max (generous for slow services)
+        poll_interval = 2.0
+        while time.time() < deadline:
+            time.sleep(poll_interval)
+            msgs = _api_paginated(chat_id, ssid, limit=10)
+            for m in msgs:
+                if m.get("role") != "assistant":
+                    continue
+                if user_msg_id and m.get("reply_to") != user_msg_id:
+                    continue
+                status = m.get("status", "")
+                if status == "error":
+                    err_txt = m.get("content", "unknown error")
+                    raise Exception(f"media_job_error: {err_txt[:200]}")
+                if status == "ended":
+                    # Extract result
+                    content = m.get("content", "").strip()
+                    attachments = m.get("attachments", [])
+                    msg_type = m.get("type", "")
+                    cost = m.get("cost", 0)
+
+                    # Build response text
+                    parts = []
+                    if attachments:
+                        for att in attachments:
+                            uri = att.get("uri", "")
+                            att_type = att.get("type", "")
+                            name = att.get("name", "")
+                            w = att.get("width", 0)
+                            h = att.get("height", 0)
+                            if uri:
+                                if att_type in ("png", "jpg", "jpeg", "webp", "gif") or msg_type == "photo":
+                                    dim = f" ({w}x{h})" if w and h else ""
+                                    parts.append(f"![{name or service_id}{dim}]({uri})" + "
+
+" + f"[Download]({uri})")
+                                elif att_type in ("mp4", "webm", "mov") or msg_type == "video":
+                                    parts.append(f"Video: [{name or service_id}]({uri})" + "
+
+" + f"[Download]({uri})")
+                                elif att_type in ("mp3", "wav", "ogg") or msg_type == "audio":
+                                    parts.append(f"Audio: [{name or service_id}]({uri})" + "
+
+" + f"[Download]({uri})")
+                                else:
+                                    parts.append(f"[{name or uri}]({uri})")
+                    if content and not parts:
+                        parts.append(content)
+                    if not parts:
+                        parts.append(f"[{service_id} job completed but no output returned]")
+
+                    final_text = "
+
+".join(parts)
+                    print(f"[MEDIA] done chat={chat_id} cost={cost} type={msg_type} len={len(final_text)}", flush=True)
+                    # v5.21 BUG FIX: send final_text via chunk_cb for streaming clients
+                    # Previously chunk_cb only got "[Generating...]" and image URL was lost!
+                    if chunk_cb:
+                        chunk_cb(final_text)
+                    return final_text
+            # Exponential poll backoff: 2s -> 3s -> 4s -> max 6s
+            poll_interval = min(poll_interval * 1.2, 6.0)
+
+        raise TimeoutError(f"media job timeout after 200s (chat={chat_id}, job={job_id})")
+    finally:
+        # v5.21: release _active + update _last_released (mirrors _send_and_collect)
+        with _lock:
+            entry["_active"] = max(0, entry.get("_active", 0) - 1)
+            entry["_last_released"] = time.time()
+        _pool_release_event.set()  # wake AcquireWait waiters
+        if chat_id:
+            _delete_chat(chat_id, ssid)
+
+
+
 def _do_chat(model: str, messages: list, ssid_override: str | None,
              chunk_cb=None, abort: AbortFlag | None = None) -> str:
-    primary_id, reduced = _resolve_model(model)  # v5.16: unpack (service_id, rp_mode)
+    primary_id, reduced, no_thinking = _resolve_model(model)  # v5.19: 3-tuple
+    # v5.20: route media generation to job-polling path
+    if primary_id in MEDIA_SERVICES:
+        # Extract last user message content as prompt
+        prompt = next(
+            (m.get('content', '') for m in reversed(messages)
+             if m.get('role') == 'user'),
+            messages[-1].get('content', '') if messages else ''
+        )
+        if isinstance(prompt, list):  # vision content blocks
+            prompt = ' '.join(c.get('text', '') for c in prompt
+                              if isinstance(c, dict) and c.get('type') == 'text')
+        return _do_media_job(model, primary_id, prompt,
+                             ssid_override=ssid_override, chunk_cb=chunk_cb)
     max_turns  = RP_MAX_HISTORY if reduced else MAX_HISTORY_TURNS
-    content    = _fmt(messages, max_turns=max_turns)
+    content    = _fmt(messages, max_turns=max_turns, no_thinking=no_thinking)
     _record_rpm()  # v5.13: RPM counter
     rp_tag = " [rp]" if reduced else ""
-    print(f"[REQ] {model}\u2192{primary_id}{rp_tag} turns={max_turns} msgs={len(messages)}", flush=True)
+    nt_tag = " [nothinking]" if no_thinking else ""
+    print(f"[REQ] {model}\u2192{primary_id}{rp_tag}{nt_tag} turns={max_turns} msgs={len(messages)}", flush=True)
 
     if ssid_override and len(ssid_override) > 50:
         entries = [_make_entry(ssid_override, "header")]
@@ -1356,17 +1601,17 @@ def _startup_resi_health_check():
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.18] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.21] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.18] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.21] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     _startup_resi_health_check()
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.18] balance monitor started", flush=True)
-    print("[unitool-proxy v5.18] features: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck", flush=True)
+    print("[unitool-proxy v5.21] balance monitor started", flush=True)
+    print("[unitool-proxy v5.21] features|MediaJob|StreamFix|PoolTracking: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()

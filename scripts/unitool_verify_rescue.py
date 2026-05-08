@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 unitool_verify_rescue.py — 专门处理 unitool_verify_pending 账号
-流程: 选pending账号 → 锁定 → 刷新Graph token → 查JunkEmail(60s) → curl点击验证 → unitool_login.py登录拿ssid
+流程: 选pending账号 → 锁定 → 刷新Graph token → 查JunkEmail+Inbox+$search(360s) → curl点击验证 → unitool_login.py登录拿ssid
 持续循环运行，无账号时sleep 60s
 """
 import atexit, glob, json, os, re, signal, subprocess, sys, time
@@ -10,8 +10,8 @@ import psycopg2
 
 LOG      = "/tmp/unitool_verify_rescue.log"
 DB_URL   = "postgresql://postgres:postgres@localhost/toolkit"
-CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
-LOGIN_SCRIPT = "/root/Toolkit/scripts/unitool_login.py"
+CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+LOGIN_SCRIPT = "/data/Toolkit/scripts/unitool_login.py"
 
 _account_id   = None
 _success_flag = False
@@ -182,10 +182,10 @@ def refresh_ms_token(refresh_token):
     return json.loads(r.read())
 
 def find_verify_link(access_token, max_msgs=30):
-    """在 JunkEmail+Inbox 找unitool验证邮件，按sender域名优先匹配"""
+    """在 JunkEmail+Inbox+Clutter 找unitool验证邮件，$search 跨全文件夹兜底"""
     headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
     pattern = re.compile(r"https://unitool\.ai/\S+", re.IGNORECASE)
-    for folder in ["JunkEmail", "Inbox"]:
+    for folder in ["JunkEmail", "Inbox", "Clutter"]:
         url = (f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder}/messages"
                f"?$top={max_msgs}&$orderby=receivedDateTime+desc"
                f"&$select=subject,body,from,receivedDateTime")
@@ -205,6 +205,25 @@ def find_verify_link(access_token, max_msgs=30):
             if links:
                 log(f"[graph] ✓ {folder}: subj='{m.get('subject','')}' from={from_addr}")
                 return links[0]
+    # $search 跨全部文件夹（Focused/Other/ClutteredLow 等 folder 扫描可能遗漏）
+    try:
+        _search_url = (
+            "https://graph.microsoft.com/v1.0/me/messages"
+            "?$search=%22unitool%22&$top=10"
+            "&$select=subject,body,from,receivedDateTime"
+        )
+        req2  = urllib.request.Request(_search_url, headers=headers)
+        resp2 = urllib.request.urlopen(req2, timeout=15)
+        msgs2 = json.loads(resp2.read()).get("value", [])
+        for m in msgs2:
+            body  = m.get("body", {}).get("content", "")
+            links = pattern.findall(body)
+            if links:
+                _subj = m.get("subject", "")
+                log(f"[graph] \u2713 $search: subj='{_subj}' url={links[0][:60]}")
+                return links[0]
+    except Exception as e:
+        log(f"[graph] $search err: {e}")
     return ""
 
 def click_verify_link(verify_url):
@@ -380,16 +399,16 @@ def main():
     except Exception as e:
         log(f"[graph] token fail: {e}")
 
-    # 查验证邮件（60s轮询，6×10s）
+    # 查验证邮件（360s轮询，18×20s）— 覆盖邮件通常2-4分钟延迟
     verify_url = ""
     if access_token:
-        log("[graph] polling JunkEmail+Inbox (max 60s)...")
-        for attempt in range(6):
-            import time as _t; _t.sleep(10)
+        log("[graph] polling JunkEmail+Inbox+$search (max 360s)...")
+        for attempt in range(18):
+            import time as _t; _t.sleep(20)
             verify_url = find_verify_link(access_token)
             if verify_url:
-                log(f"[graph] found at {(attempt+1)*10}s: {verify_url[:80]}"); break
-            log(f"[graph] [{(attempt+1)*10}s] not found")
+                log(f"[graph] found at {(attempt+1)*20}s: {verify_url[:80]}"); break
+            log(f"[graph] [{(attempt+1)*20}s] not found")
     else:
         log("[graph] no token")
 
