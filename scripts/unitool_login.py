@@ -335,18 +335,31 @@ async def login_one(email: str, password: str, headless: bool = True,
                 pg_body = _s(await tab.execute_script(
                     "(document.body||{}).innerText?.slice(0,200)", return_by_value=True))
                 _log(f"  [{email}]   [{t+1}s] url={cur}")
+                _log(f"  [{email}]   pg_body: {pg_body[:150]!r}")
                 if "captcha" in pg_body.lower():
                     _log(f"  [{email}]   still captcha error")
                 if "wrong" in pg_body.lower() or "incorrect" in pg_body.lower():
                     _log(f"  [{email}]   credentials rejected")
                     return {"ok": False, "email": email, "reason": "invalid_credentials"}
+                if any(kw in pg_body.lower() for kw in (
+                        "verify your email", "confirm your", "check your email",
+                        "email not verified", "please verify", "activation link",
+                        "we have just sent", "sent link to your email")):
+                    _log(f"  [{email}]   email verification required (early detect)")
+                    return {"ok": False, "email": email, "reason": "email_not_verified"}
 
         if not logged_in:
             # 再检查一次 body 内容
             pg_body = _s(await tab.execute_script(
                 "(document.body||{}).innerText?.slice(0,300)", return_by_value=True))
+            _log(f"  [{email}] final pg_body: {pg_body[:200]!r}")
             if "captcha" in pg_body.lower():
                 return {"ok": False, "email": email, "reason": "captcha_rejected"}
+            if any(kw in pg_body.lower() for kw in (
+                    "verify your email", "confirm your", "check your email",
+                    "email not verified", "please verify", "activation link",
+                    "we have just sent", "sent link to your email")):
+                return {"ok": False, "email": email, "reason": "email_not_verified"}
             return {"ok": False, "email": email, "reason": "login_timeout"}
 
         # ── 9. 提取 cookies ──────────────────────────────────────────────────

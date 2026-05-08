@@ -186,7 +186,7 @@ def find_verify_link(access_token, max_msgs=30):
     """在 JunkEmail+Inbox+Clutter 找unitool验证邮件，$search 跨全文件夹兜底"""
     headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
     pattern = re.compile(r"https://unitool\.ai/\S+", re.IGNORECASE)
-    for folder in ["JunkEmail", "Inbox", "Clutter"]:
+    for folder in ["JunkEmail", "Inbox", "Clutter", "DeletedItems"]:
         url = (f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder}/messages"
                f"?$top={max_msgs}&$orderby=receivedDateTime+desc"
                f"&$select=subject,body,from,receivedDateTime")
@@ -297,6 +297,8 @@ def _run_login_once(email, password):
                         return ssid
             if line.startswith("[FAIL]"):
                 log(f"[login] {line}")
+                if "email_not_verified" in line:
+                    return "EMAIL_NOT_VERIFIED"
         if stderr: log(f"[login] stderr: {stderr[-300:]}")
     except KeyboardInterrupt:
         if proc:
@@ -323,6 +325,9 @@ def login_via_script(email, password):
             log(f"[login] 已清除 RESI 健康缓存, 重试 #{attempt}...")
             time.sleep(5)
         ssid = _run_login_once(email, password)
+        if ssid == "EMAIL_NOT_VERIFIED":
+            log(f"[login] email_not_verified — skipping retry")
+            return "EMAIL_NOT_VERIFIED"
         if ssid:
             return ssid
         log(f"[login] 尝试 {attempt}/2 失败")
@@ -486,10 +491,23 @@ def main():
         log("[login] calling unitool_login.py...")
         ssid = login_via_script(email, password)
 
-    if ssid:
+    if ssid and ssid != "EMAIL_NOT_VERIFIED":
         log(f"[done] SUCCESS len={len(ssid)}")
         save_ssid(account_id, email, ssid)
         _success_flag = True
+    elif ssid == "EMAIL_NOT_VERIFIED":
+        log("[done] email_not_verified — unlock, no rescue_fail counted")
+        try:
+            _conn_nv = db_connect(); _cur_nv = _conn_nv.cursor()
+            _cur_nv.execute("""
+                UPDATE accounts SET
+                  tags = TRIM(BOTH ',' FROM regexp_replace(tags, ',?unitool_processing', '', 'g')),
+                  updated_at = NOW()
+                WHERE id = %s
+            """, (account_id,))
+            _conn_nv.commit(); _conn_nv.close()
+        except Exception as _eu:
+            log(f"[done] unlock err: {_eu}")
     else:
         log("[done] FAIL — no ssid, will retry next cycle")
         mark_rescue_fail(account_id)
