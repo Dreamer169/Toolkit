@@ -452,6 +452,9 @@ def _check_session_valid(ssid: str) -> bool | None:
         user = (d.get("auth") or {}).get("user") or d.get("user")
         return bool(user and user.get("id"))
     except (_rq.exceptions.Timeout, _rq.exceptions.ConnectionError):
+        # v5.15: mark RESI port unhealthy so _pick_resi_port skips it next time
+        try: _drop_resi_session(port)
+        except Exception: pass
         return None   # 网络问题，不确定
     except Exception:
         return None
@@ -1262,17 +1265,51 @@ class ThreadedServer(HTTPServer):
         t.start()
 
 
+def _startup_resi_health_check():
+    """v5.15: parallel-test all RESI ports at startup; pre-mark dead ones 3600s.
+    Prevents session-check storms through permanently broken ports."""
+    import concurrent.futures
+    def _test(port):
+        import subprocess as _sp
+        try:
+            p = _sp.Popen(
+                ["curl", "-s", "--max-time", "5",
+                 "--proxy", f"socks5h://127.0.0.1:{port}",
+                 "-o", "/dev/null", "-w", "%{http_code}",
+                 "https://unitool.ai/en/entry"],
+                stdout=_sp.PIPE, stderr=_sp.PIPE)
+            try:
+                out, _ = p.communicate(timeout=7)
+            except _sp.TimeoutExpired:
+                p.kill(); p.communicate(); return port, False
+            return port, out.decode().strip() not in ("", "000")
+        except Exception:
+            return port, False
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(RESI_PORTS)) as ex:
+        results = list(ex.map(_test, RESI_PORTS))
+    dead, alive = [], []
+    with _resi_health_lock:
+        for port, ok in results:
+            if ok:
+                alive.append(port)
+            else:
+                _resi_port_health[port] = time.time() + 3600  # 1h cooldown
+                dead.append(port)
+    print(f"[RESI] startup check: alive={alive} dead={dead}", flush=True)
+
+
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.14] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.15] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.14] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.15] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
+    _startup_resi_health_check()
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.14] balance monitor started", flush=True)
-    print("[unitool-proxy v5.14] features: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue", flush=True)
+    print("[unitool-proxy v5.15] balance monitor started", flush=True)
+    print("[unitool-proxy v5.15] features: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()

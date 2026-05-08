@@ -38,6 +38,44 @@ API_BASE       = "http://localhost:8081/api"  # api-server 地址
 
 MAX_REF_SLOTS   = 10    # unitool 每个 ref_code 最多邀请人数
 RESI_PORTS = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
+
+# v5.15: parallel RESI health cache (shared across this process)
+_chain_healthy_ports: list = []
+_chain_health_ts: float = 0.0
+_chain_health_lock = __import__("threading").Lock()
+
+def _check_resi_port_chain(port: int) -> bool:
+    try:
+        p = subprocess.Popen(
+            ["curl", "-s", "--max-time", "5",
+             "--proxy", f"socks5h://127.0.0.1:{port}",
+             "-o", "/dev/null", "-w", "%{http_code}",
+             "https://unitool.ai/en/entry"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            out, _ = p.communicate(timeout=7)
+        except subprocess.TimeoutExpired:
+            p.kill(); p.communicate(); return False
+        return out.decode().strip() not in ("", "000")
+    except Exception:
+        return False
+
+def _get_healthy_resi_ports_chain() -> list:
+    """Parallel check, cached 5 min."""
+    global _chain_healthy_ports, _chain_health_ts
+    import concurrent.futures
+    with _chain_health_lock:
+        if _chain_healthy_ports and time.time() - _chain_health_ts < 300:
+            return list(_chain_healthy_ports)
+    t0 = time.time()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(RESI_PORTS)) as ex:
+        ok = list(ex.map(_check_resi_port_chain, RESI_PORTS))
+    healthy = [p for p, v in zip(RESI_PORTS, ok) if v] or list(RESI_PORTS)
+    with _chain_health_lock:
+        _chain_healthy_ports = healthy
+        _chain_health_ts = time.time()
+    log(f"[RESI] healthy={healthy} ({len(healthy)}/{len(RESI_PORTS)}) in {time.time()-t0:.1f}s")
+    return healthy
 WATERMARK       = 5     # fresh 账号低于此值时触发 outlook 补充
 REPLENISH_CNT   = 5     # 单次补充目标数量
 COOLDOWN_S      = 300   # 水位补充冷却（15 分钟）
@@ -288,7 +326,8 @@ def _api_check_ref_code(ssid: str, account_id: int = 0) -> tuple:
     if entry and (time.time() - entry.get("ts", 0)) < REF_CODE_CACHE_TTL:
         return (entry.get("code", ""), entry.get("conversions", 0))
     try:
-        _rc_port = RESI_PORTS[hash(str(account_id)) % len(RESI_PORTS)]
+        _hp = _get_healthy_resi_ports_chain()
+        _rc_port = _hp[hash(str(account_id)) % len(_hp)]
         # v5.13 fix: Popen+communicate to avoid KBI crashing the main loop
         _rc_cmd = [
             "curl", "-s",
@@ -332,9 +371,10 @@ def create_ref_code_via_proxy(ssid: str, email: str, port_hint: int = 0) -> str:
     unitool 限制同一 IP 只能创建一个 ref_code，必须通过住宅代理绕开。
     成功返回 ref_code 字符串，失败返回 ""。
     """
-    # 从 port_hint 偏移出发，分散 IP
-    _ports = (RESI_PORTS[port_hint % len(RESI_PORTS):]
-              + RESI_PORTS[:port_hint % len(RESI_PORTS)])
+    # 从 port_hint 偏移出发，分散 IP；v5.15: 跳过已知死端口
+    _hp2 = _get_healthy_resi_ports_chain()
+    _base = port_hint % len(_hp2)
+    _ports = _hp2[_base:] + _hp2[:_base]
     for port in _ports:
         try:
             # v5.13 fix: Popen+communicate to avoid KBI crash
