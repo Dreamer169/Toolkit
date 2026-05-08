@@ -482,6 +482,9 @@ def _balance_monitor_loop():
                 if sess_ok is False:
                     print(f"[SES] ⚠ {lbl}: session invalid (ssid expired)", flush=True)
                     _mark_dead(e["ssid"], secs=300, reason="auth_error")
+                    # v5.15: mark SSID invalid in DB → verify_rescue will re-login
+                    _invalidate_in_db(lbl)
+                    print(f"[SES] marked is_valid=FALSE in DB for {lbl}", flush=True)
                     e["_balance_ts"] = now
                     time.sleep(2)
                     continue

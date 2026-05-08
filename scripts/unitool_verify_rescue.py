@@ -88,7 +88,7 @@ def get_relogin_account():
           AND a.tags NOT LIKE '%unitool_processing%'
           AND a.tags NOT LIKE '%balance_exhausted%'
           AND a.tags NOT LIKE '%unitool_rescue_dead%'
-          AND (a.updated_at IS NULL OR a.updated_at < NOW() - INTERVAL '15 minutes')
+          AND (a.updated_at IS NULL OR a.updated_at < NOW() - INTERVAL '5 minutes')
           AND NOT EXISTS (
             SELECT 1 FROM unitool_ssids s
             WHERE s.source_email = a.email

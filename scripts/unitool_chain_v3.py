@@ -349,7 +349,22 @@ def _api_check_ref_code(ssid: str, account_id: int = 0) -> tuple:
             except Exception: pass
             return ("", -1)
         raw = raw
-        if raw == "null" or not raw:
+        if raw == "null":
+            # v5.15: server returned explicit null → SSID expired → mark invalid in DB
+            try:
+                _inv_c = db_connect(); _inv_cur = _inv_c.cursor()
+                _inv_cur.execute(
+                    "UPDATE unitool_ssids SET is_valid=FALSE WHERE ssid=%s",
+                    (ssid,))
+                _inv_c.commit(); _inv_c.close()
+                log(f"[SSID] is_valid=FALSE → account_id={account_id} (null from API)")
+            except Exception as _inv_e:
+                log(f"[SSID] invalidate error: {_inv_e}")
+            cache[key] = {"code": "", "conversions": 0, "ts": time.time()}
+            _save_ref_cache(cache)
+            return ("", 0)
+        if not raw:
+            # empty = network failure; do not invalidate
             cache[key] = {"code": "", "conversions": 0, "ts": time.time()}
             _save_ref_cache(cache)
             return ("", 0)
