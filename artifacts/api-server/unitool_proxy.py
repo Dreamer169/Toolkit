@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.20
+unitool.ai → OpenAI 兼容反代 v5.22
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -540,7 +540,9 @@ IMAGE_SERVICES = {
     "stable-diffusion",  # SD XL           min_bal=6.74  output=3.6
     "flux",              # FLUX.1          min_bal=6.74  output=0.8
     "nanobanana",        # NanoBanana      min_bal=7     output=6.25
-    # sdxl image-editing sub-services (require image in attachments)
+    # sdxl image-editing sub-services (require image in attachments, parent=sdxl)
+    # REAL min_balance (2026-05-08 probe): remove-background=3.74, cleanup=3.74
+    #   uncrop=7.49, reimagine=7.49, image-to-video=37.49, upscaler=37.49
     "remove-background", "uncrop", "reimagine", "upscaler", "image-to-video", "cleanup",
 }
 
@@ -551,14 +553,17 @@ VIDEO_SERVICES = {
     "veo3",       # Google Veo 3    min_bal=59     output=16.6
     "hailuo",     # Hailuo/Minimax  min_bal=50     output=10
     "runwayml",   # Runway ML       min_bal=48     output=16
-    "seedance",   # Seedance (ByteDance) via /api/provider-runtime/chats
-    "happyhorse", # HappyHorse      via /api/provider-runtime/chats
+    # CONFIRMED BUG (2026-05-08): seedance/happyhorse return {"error":"Unsupported service"}
+    # from /api/chats/{id}/messages. /api/provider-runtime/chats sub-paths return 404.
+    # Actual message submission path unknown (possibly WebSocket). Fast-fail with clear error.
+    "seedance",   # Seedance (ByteDance) — Unsupported Service bug (see _do_media_job)
+    "happyhorse", # HappyHorse         — Unsupported Service bug (see _do_media_job)
 }
 
 AUDIO_SERVICES = {
     "suno",                  # Suno music      min_bal=15    output=14
     "text-to-speech",        # ElevenLabs TTS  min_bal=2     output=0.0012
-    "voice-cloning",         # ElevenLabs clone
+    "voice-cloning",         # ElevenLabs clone     min_bal=8  (2026-05-08 confirmed)
     "text-to-sound-effects", # ElevenLabs SFX
     "library",               # ElevenLabs library
 }
@@ -1182,7 +1187,7 @@ def _try_service(service_id: str, content: str, entries: list,
 
 def _do_media_job(model: str, service_id: str, prompt: str,
                   ssid_override: str | None = None,
-                  chunk_cb=None) -> str:
+                  chunk_cb=None, abort: "AbortFlag | None" = None) -> str:
     """v5.21: Media generation job polling flow.
     POST /api/chats -> POST /api/chats/{id}/messages -> paginatedMessages poll.
     Returns markdown-formatted result: image URL, video URL, or audio URL.
@@ -1193,6 +1198,10 @@ def _do_media_job(model: str, service_id: str, prompt: str,
       - BUG1: streaming mode now sends final_text via chunk_cb (was lost before)
       - BUG2: _active counter now properly tracked (pool concurrency limiting works)
       - BUG3: _record_rpm() called so RPM counter is accurate
+    v5.22 fixes:
+      - abort param: media job checks abort_flag so client disconnect stops the poll
+      - seedance/happyhorse fast-fail: raise clear error instead of 200s timeout
+      - sdxl min_balance corrected in comments (3.74/7.49/37.49, not 0.1)
     """
     if ssid_override and len(ssid_override) > 50:
         entry = _make_entry(ssid_override, "header")
@@ -1235,6 +1244,13 @@ def _do_media_job(model: str, service_id: str, prompt: str,
         if result.get("error"):
             err = result["error"]
             bal = result.get("message", "")
+            # v5.22: seedance/happyhorse fast-fail (avoids 200s timeout)
+            if "Unsupported service" in err and service_id in {"seedance", "happyhorse"}:
+                raise Exception(
+                    f"{service_id}: API returns 'Unsupported service' via /api/chats/messages. "
+                    f"Provider-runtime sub-paths return 404. Message path unknown (possibly WebSocket). "
+                    f"Use 'luma' for video generation as an alternative."
+                )
             raise Exception(f"media_send_error: {err} {bal}")
 
         user_msg_id = result.get("message", {}).get("id")
@@ -1245,6 +1261,8 @@ def _do_media_job(model: str, service_id: str, prompt: str,
         deadline = time.time() + 200  # 200s max (generous for slow services)
         poll_interval = 2.0
         while time.time() < deadline:
+            if abort and abort.is_set():
+                raise Exception("client_disconnected")
             time.sleep(poll_interval)
             msgs = _api_paginated(chat_id, ssid, limit=10)
             for m in msgs:
@@ -1332,7 +1350,7 @@ def _do_chat(model: str, messages: list, ssid_override: str | None,
             prompt = ' '.join(c.get('text', '') for c in prompt
                               if isinstance(c, dict) and c.get('type') == 'text')
         return _do_media_job(model, primary_id, prompt,
-                             ssid_override=ssid_override, chunk_cb=chunk_cb)
+                             ssid_override=ssid_override, chunk_cb=chunk_cb, abort=abort)
     max_turns  = RP_MAX_HISTORY if reduced else MAX_HISTORY_TURNS
     content    = _fmt(messages, max_turns=max_turns, no_thinking=no_thinking)
     _record_rpm()  # v5.13: RPM counter
@@ -1601,17 +1619,17 @@ def _startup_resi_health_check():
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.21] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.22] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.21] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.22] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     _startup_resi_health_check()
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.21] balance monitor started", flush=True)
-    print("[unitool-proxy v5.21] features|MediaJob|StreamFix|PoolTracking: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking", flush=True)
+    print("[unitool-proxy v5.22] balance monitor started", flush=True)
+    print("[unitool-proxy v5.22] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
