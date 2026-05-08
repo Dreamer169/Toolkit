@@ -13,7 +13,7 @@
 
 import { logger } from "./logger.js";
 
-const WORKER_HOST = "proxy.jimhacker.us.ci";
+const WORKER_HOST = "proxy.jimjio.indevs.in";
 const PROXY_EP    = `https://${WORKER_HOST}/proxy`;
 
 // ── Envelope helpers (protocol: JSON 信封) ────────────────────────────────
