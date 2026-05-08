@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.33
+unitool.ai → OpenAI 兼容反代 v5.34
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -1667,6 +1667,68 @@ class Handler(BaseHTTPRequestHandler):
                 "ssid_len":    len(top["ssid"]) if top else 0,
             })
 
+        # v5.34: service health status endpoint
+        if p in ("/v1/svc-status", "/v1/svc-status/"):
+            now = time.time()
+            with _svc_dead_lock:
+                dead_snap = dict(_svc_dead)
+
+            maintenance: list[dict] = []
+            for sid, until in sorted(dead_snap.items()):
+                remaining = int(until - now)
+                if remaining > 0:
+                    h, m = divmod(remaining // 60, 60)
+                    maintenance.append({
+                        "service": sid,
+                        "status":  "maintenance",
+                        "dead_until": int(until),
+                        "remaining_secs": remaining,
+                        "retry_in": f"{h}h{m:02d}m" if h else f"{m}m",
+                    })
+                else:
+                    maintenance.append({
+                        "service": sid,
+                        "status":  "cleared",
+                        "dead_until": int(until),
+                        "remaining_secs": 0,
+                        "retry_in": "available",
+                    })
+
+            permanent = [
+                {"service": sid, "status": "permanent_broken"}
+                for sid in sorted(IMMEDIATE_FALLBACK_SERVICES)
+            ]
+
+            # services we've confirmed working via probe (2026-05-08)
+            probe_ok = ["gpt-5", "gpt-5.5", "gpt-5.4", "gpt-4-1", "gpt-4o",
+                        "gpt-4o-mini", "claude-sonnet", "claude-sonnet-4-5",
+                        "claude-sonnet-4-6", "claude-opus-4-6"]
+
+            all_svc_ids = sorted(NATIVE_SERVICES | MEDIA_SERVICES)
+            services_out = []
+            maint_ids = {e["service"] for e in maintenance if e["status"] == "maintenance"}
+            perm_ids  = IMMEDIATE_FALLBACK_SERVICES
+            for sid in all_svc_ids:
+                if sid in maint_ids:
+                    st = "maintenance"
+                elif sid in perm_ids:
+                    st = "permanent_broken"
+                elif sid in probe_ok:
+                    st = "ok_probe_confirmed"
+                else:
+                    st = "unknown"
+                services_out.append({"service": sid, "status": st})
+
+            return self._json(200, {
+                "version": "v5.34",
+                "pool_live": sum(1 for e in _pool if e["dead_until"] <= now),
+                "pool_total": len(_pool),
+                "rpm": _get_rpm(),
+                "maintenance_cached": maintenance,
+                "permanent_broken": permanent,
+                "all_services": services_out,
+            })
+
         self.send_response(404); self.end_headers()
 
     def do_POST(self):
@@ -1684,6 +1746,26 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, "pool_size": len(_pool)})
             except Exception as e:
                 return self._json(500, {"error": str(e)})
+
+        # v5.34: manually evict a service from maintenance cache
+        if p in ("/v1/svc-status/clear", "/v1/svc-status/clear/"):
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body   = json.loads(self.rfile.read(length)) if length else {}
+            except Exception as e:
+                return self._json(400, {"error": str(e)})
+            svc = body.get("service", "").strip()
+            if not svc:
+                # list current dead cache
+                now = time.time()
+                with _svc_dead_lock:
+                    snap = {k: int(v - now) for k, v in _svc_dead.items() if v > now}
+                return self._json(200, {"maintenance_cache": snap})
+            with _svc_dead_lock:
+                was_dead = svc in _svc_dead and _svc_dead[svc] > time.time()
+                _svc_dead.pop(svc, None)
+            print(f"[SVC] 🩹 Manual clear: {svc} (was_dead={was_dead})", flush=True)
+            return self._json(200, {"ok": True, "service": svc, "was_dead": was_dead})
 
         if p not in ("/v1/chat/completions", "/v1/chat/completions/"):
             self.send_response(404); self.end_headers(); return
@@ -1821,9 +1903,9 @@ def _startup_resi_health_check():
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.33] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.34] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.33] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.34] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
@@ -1833,8 +1915,8 @@ if __name__ == "__main__":
     except (KeyboardInterrupt, SystemExit):
         pass  # PM2 SIGINT during startup — skip check, continue
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.33] balance monitor started", flush=True)
-    print("[unitool-proxy v5.33] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc|GrokReasoningStrip|GeminiMaintenance|GrokFallback|OSeriesFallback|NanoReasoning|SvcErrFallback|ImmediateFallback|OSeriesChainFix|ClaudeOpusFallback: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking|NoModelFallback|ClaudeOpusErrFix|SvcDeadCache24h|ProbeConfirmed2026-05-08", flush=True)
+    print("[unitool-proxy v5.34] balance monitor started", flush=True)
+    print("[unitool-proxy v5.34] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc|GrokReasoningStrip|GeminiMaintenance|GrokFallback|OSeriesFallback|NanoReasoning|SvcErrFallback|ImmediateFallback|OSeriesChainFix|ClaudeOpusFallback: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking|NoModelFallback|ClaudeOpusErrFix|SvcDeadCache24h|SvcStatusAPI|ProbeConfirmed2026-05-08", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
