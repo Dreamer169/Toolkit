@@ -1177,8 +1177,9 @@ def _send_and_collect_core(entry: dict, service_id: str, content: str,
                                     print(f"[stream] ok chat={chat_id} len={len(text)}", flush=True)
                                     return text
                                 print(f"[stream] early-end → autocontinue chat={chat_id}", flush=True)
-                                return _paginated_poll(chat_id, user_msg_id, entry["ssid"],
-                                                       chunk_cb, deadline, text, abort)
+                                _ac_result = _paginated_poll(chat_id, user_msg_id, entry["ssid"],
+                                                             chunk_cb, deadline, text, abort)
+                                return _strip_reasoning_block(_ac_result)  # v5.25
                         text = _strip_reasoning_block(text)  # v5.25
                         print(f"[stream] ok chat={chat_id} len={len(text)}", flush=True)
                         return text
@@ -1194,8 +1195,9 @@ def _send_and_collect_core(entry: dict, service_id: str, content: str,
             print(f"[stream] poll-primary svc={service_id} → direct poll chat={chat_id}", flush=True)
 
         # 5. 兜底：paginatedMessages 轮询（status=ended 为唯一完成信号）
-        return _paginated_poll(chat_id, user_msg_id, entry["ssid"],
-                               chunk_cb, deadline, abort=abort)
+        _poll_result = _paginated_poll(chat_id, user_msg_id, entry["ssid"],
+                                       chunk_cb, deadline, abort=abort)
+        return _strip_reasoning_block(_poll_result)  # v5.25
     finally:
         # v5.11: GuardedChat — 无论成功/失败都删除 chat（对标 DS delete_session）
         if chat_id:
