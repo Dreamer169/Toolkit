@@ -90,6 +90,8 @@ def get_relogin_account():
           AND a.tags NOT LIKE '%unitool_processing%'
           AND a.tags NOT LIKE '%balance_exhausted%'
           AND a.tags NOT LIKE '%unitool_rescue_dead%'
+          AND a.tags NOT LIKE '%abuse_mode%'
+          AND a.tags NOT LIKE '%unitool_already%'
           AND (a.updated_at IS NULL OR a.updated_at < NOW() - INTERVAL '5 minutes')
           AND NOT EXISTS (
             SELECT 1 FROM unitool_ssids s
@@ -145,20 +147,27 @@ def mark_rescue_fail(account_id):
 
 def save_ssid(account_id, email, ssid):
     conn = db_connect(); cur = conn.cursor()
+    # Fix-8a: add ssid_ok tag; strip all transient tags
     cur.execute("""
         UPDATE accounts SET
-          tags  = regexp_replace(
-                    CASE WHEN COALESCE(tags,'')='' THEN 'unitool_registered'
-                         ELSE tags || ',unitool_registered' END,
-                    ',?unitool_(processing|fail|verify_pending)', '', 'g'),
+          tags  = TRIM(BOTH ',' FROM regexp_replace(
+                    COALESCE(tags,'') || ',ssid_ok,unitool_registered',
+                    ',?unitool_(processing|fail|verify_pending|reg_retry)', '', 'g')),
           notes = COALESCE(notes,'') || E'\nunitool_ssid=' || %s || E'\nat=' || %s,
           updated_at = NOW()
         WHERE id=%s
     """, (ssid, time.strftime("%Y-%m-%d %H:%M:%S"), account_id))
+    # Fix-8b: insert into unitool_ssids with source_account_id
+    try:
+        cur.execute("""
+            INSERT INTO unitool_ssids (source_account_id, source_email, ssid, collected_at, is_valid)
+            VALUES (%s, %s, %s, NOW(), TRUE)
+        """, (account_id, email, ssid))
+    except Exception as _ei:
+        log(f"[DB] unitool_ssids insert warn: {_ei}")
     conn.commit(); conn.close()
     log(f"[DB] ssid saved {email} id={account_id} len={len(ssid)}")
     # v5.15b: write to /data/unitool_ssids/<email>.txt
-    # Avoids /tmp/unitool_ssidN.txt sprawl; proxy loads with proper email label
     SSID_DIR_VR = "/data/unitool_ssids"
     try:
         os.makedirs(SSID_DIR_VR, exist_ok=True)
@@ -169,6 +178,16 @@ def save_ssid(account_id, email, ssid):
         log(f"[proxy] wrote {fname}")
     except Exception as e:
         log(f"[proxy] warn: {e}")
+    # Fix-8c: hotpush to proxy pool immediately (PROXY_PORT=8089)
+    try:
+        _data = json.dumps({"ssid": ssid, "label": email}).encode()
+        _req  = urllib.request.Request(
+            "http://localhost:8089/add-ssid", data=_data,
+            headers={"Content-Type": "application/json"})
+        _resp = json.loads(urllib.request.urlopen(_req, timeout=5).read())
+        log(f"[proxy] hotpush OK pool_size={_resp.get('pool_size','?')}")
+    except Exception as _ep:
+        log(f"[proxy] hotpush warn: {_ep}")
     print(f"[OK] {email} | {ssid}", flush=True)
 
 # ── Graph API ─────────────────────────────────────────────────────────────────
@@ -433,11 +452,23 @@ def main():
     except Exception as e:
         log(f"[graph] token fail: {e}")
 
-    # 查验证邮件（360s轮询，18×20s）— 覆盖邮件通常2-4分钟延迟
+    # Fix-7a: smart polling — 0 vr_attempt→360s first try, 1+→100s repeat
+    _notes_pre = ""
+    try:
+        _conn_pre = db_connect(); _cur_pre = _conn_pre.cursor()
+        _cur_pre.execute("SELECT notes FROM accounts WHERE id=%s", (account_id,))
+        _row_pre = _cur_pre.fetchone(); _conn_pre.close()
+        _notes_pre = _row_pre[0] if _row_pre and _row_pre[0] else ""
+    except Exception as _ep:
+        log(f"[graph] notes pre-read err: {_ep}")
+    _prior_vr = _notes_pre.count("vr_attempt=")
+    _max_polls = 18 if _prior_vr == 0 else 5  # 360s first, 100s repeat
+    log(f"[graph] prior_vr={_prior_vr} max_polls={_max_polls} ({_max_polls*20}s)")
+
     verify_url = ""
     if access_token:
-        log("[graph] polling JunkEmail+Inbox+$search (max 360s)...")
-        for attempt in range(18):
+        log(f"[graph] polling JunkEmail+Inbox+$search (max {_max_polls*20}s)...")
+        for attempt in range(_max_polls):
             import time as _t; _t.sleep(20)
             verify_url = find_verify_link(access_token)
             if verify_url:
@@ -458,10 +489,7 @@ def main():
     # 如果 notes 含 already_registered → unitool 已有该账号但邮件未验证
     # 多睡 30s 再扫一次 inbox，给验证邮件多一点到达时间
     if not ssid:
-        conn_chk = db_connect(); cur_chk = conn_chk.cursor()
-        cur_chk.execute("SELECT notes FROM accounts WHERE id=%s", (account_id,))
-        row_chk = cur_chk.fetchone(); conn_chk.close()
-        notes_chk = row_chk[0] if row_chk and row_chk[0] else ""
+        notes_chk = _notes_pre  # Fix-7c: reuse pre-fetched notes
         if "already_registered" in notes_chk and access_token:
             log("[rescue] already_registered in notes — extra 30s wait + rescan inbox")
             time.sleep(30)
@@ -508,14 +536,18 @@ def main():
     elif ssid in ("EMAIL_NOT_VERIFIED", "NETWORK_TRANSIENT"):
         _r = "email_not_verified" if ssid == "EMAIL_NOT_VERIFIED" else "network_transient"
         log("[done] %s — unlock, no rescue_fail counted" % _r)
+        # Fix-7b: write vr_attempt= only for EMAIL_NOT_VERIFIED (not NETWORK_TRANSIENT)
+        _note_vr = ("\nvr_attempt=" + time.strftime("%Y-%m-%d %H:%M:%S")
+                    if ssid == "EMAIL_NOT_VERIFIED" else "")
         try:
             _conn_nv = db_connect(); _cur_nv = _conn_nv.cursor()
             _cur_nv.execute("""
                 UPDATE accounts SET
                   tags = TRIM(BOTH ',' FROM regexp_replace(tags, ',?unitool_processing', '', 'g')),
+                  notes = COALESCE(notes, '') || %s,
                   updated_at = NOW()
                 WHERE id = %s
-            """, (account_id,))
+            """, (_note_vr, account_id))
             _conn_nv.commit(); _conn_nv.close()
         except Exception as _eu:
             log(f"[done] unlock err: {_eu}")
