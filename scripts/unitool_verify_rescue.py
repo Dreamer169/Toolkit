@@ -404,7 +404,7 @@ def main():
     if access_token:
         log("[graph] polling JunkEmail+Inbox+$search (max 360s)...")
         for attempt in range(18):
-            import time as _t; _t.sleep(10)
+            import time as _t; _t.sleep(20)
             verify_url = find_verify_link(access_token)
             if verify_url:
                 log(f"[graph] found at {(attempt+1)*20}s: {verify_url[:80]}"); break
