@@ -20,7 +20,7 @@ DB_URL      = "postgresql://postgres:postgres@localhost/toolkit"
 AUTH_COOKIE = "__Secure-unitool-ssid"
 LOG_FILE    = "/tmp/unitool_batch_refcode.log"
 
-RESI_PORTS  = [10822, 10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
+RESI_PORTS  = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
 
 
 CACHE_FILE = "/tmp/unitool_ref_code_cache.json"

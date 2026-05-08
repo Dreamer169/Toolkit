@@ -1,6 +1,6 @@
 import { PersistenceManager } from "../lib/persistence-manager.js";
 import { jobQueue } from "../lib/job-queue.js";
-import { setLiveVerifyEnabled, getLiveVerifyStatus } from "../lib/live-verify-poller.js";
+import { setLiveVerifyEnabled, getLiveVerifyStatus, incRegBusy, decRegBusy } from "../lib/live-verify-poller.js";
 import { microsoftFetch, getMicrosoftProxyEnv, pickProxyForAccount, resolveAccountProxy } from "../lib/proxy-fetch.js";
 import { Router, type IRouter } from "express";
 import { createHash, randomBytes, randomUUID } from "crypto";
@@ -1494,6 +1494,7 @@ router.post("/tools/outlook/register", async (req, res) => {
     PLAYWRIGHT_BROWSERS_PATH: "/data/cache/ms-playwright",
     DISPLAY: process.env.DISPLAY || ":99",
   };
+  incRegBusy();
   const child = spawn("python3", args, { env: _spawnEnv });
   jobQueue.setChild(jobId, child);
 
@@ -1916,6 +1917,7 @@ router.post("/tools/outlook/register", async (req, res) => {
       type: "done",
       message: `注册任务完成 · 成功 ${okCount} 个 / 共 ${n} 个` + (okCount > 0 ? ` ✅` : ``),
     });
+    decRegBusy();
     await jobQueue.finish(jobId, code ?? -1, "done");
   });
 });
@@ -2950,7 +2952,7 @@ async function forwardCfPoolRequest(endpoint: string, init?: RequestInit) {
 
 const ELIGIBLE_SHARED_PROXY_SQL = `
   status != 'banned'
-  AND NOT (host = '127.0.0.1' AND port BETWEEN 10820 AND 10845)
+  AND NOT (host = '127.0.0.1' AND port BETWEEN 10820 AND 10860)
   AND NOT (formatted ILIKE 'socks5://127.0.0.1:1082%' OR formatted ILIKE 'socks5://127.0.0.1:1083%' OR formatted ILIKE 'socks5://127.0.0.1:1084%')
 `;
 
@@ -3014,7 +3016,7 @@ async function pickAdaptiveProxy(
   const POOL_CASE = `
     CASE
       WHEN formatted ILIKE 'http://%@%'                             THEN 'webshare_http'
-      WHEN (host='127.0.0.1' AND port BETWEEN 10820 AND 10845)     THEN 'local_socks5'
+      WHEN (host='127.0.0.1' AND port BETWEEN 10820 AND 10860)     THEN 'local_socks5'
       WHEN (host='127.0.0.1' AND port BETWEEN 1089 AND 1199)       THEN 'subnode_bridge'
       ELSE 'other'
     END
@@ -3028,14 +3030,15 @@ async function pickAdaptiveProxy(
     if (remain <= 0) break;
     let filter = "";
     if (pool === "webshare_http")  filter = "AND formatted ILIKE 'http://%@%'";  // v8.98: exclude bare CF IPs (http://IP:443 no-auth) — they need xray relay, cannot do HTTP CONNECT
-    if (pool === "local_socks5")   filter = `AND host='127.0.0.1' AND port BETWEEN 10820 AND 10845`;
+    if (pool === "local_socks5")   filter = `AND host='127.0.0.1' AND port BETWEEN 10820 AND 10860`;
     if (pool === "subnode_bridge") filter = `AND host='127.0.0.1' AND port BETWEEN 1089 AND 1199`;
     if (!filter) continue;
 
+      const _sq = pool === "local_socks5" ? "status != 'banned'" : ELIGIBLE_SHARED_PROXY_SQL;
     try {
       const rows = await query<{ formatted: string }>(
         `SELECT formatted FROM proxies
-         WHERE ${ELIGIBLE_SHARED_PROXY_SQL} ${filter}
+         WHERE ${_sq} ${filter}
          ORDER BY used_count ASC, RANDOM()
          LIMIT $1`,
         [remain]

@@ -802,6 +802,18 @@
   ],
   "outbounds": [
     {
+      "tag": "nest-http",
+      "protocol": "http",
+      "settings": {
+        "servers": [
+          {
+            "address": "127.0.0.1",
+            "port": 5559
+          }
+        ]
+      }
+    },
+    {
       "tag": "proxy-0",
       "protocol": "vless",
       "settings": {
@@ -2312,70 +2324,70 @@
         "inboundTag": [
           "af-http-9"
         ],
-        "outboundTag": "proxy-9"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "af-http-8"
         ],
-        "outboundTag": "proxy-8"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "af-http-7"
         ],
-        "outboundTag": "proxy-7"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "af-http-6"
         ],
-        "outboundTag": "proxy-6"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "af-http-5"
         ],
-        "outboundTag": "proxy-5"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "af-http-4"
         ],
-        "outboundTag": "proxy-4"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "af-http-3"
         ],
-        "outboundTag": "proxy-3"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "af-http-2"
         ],
-        "outboundTag": "proxy-2"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "af-http-1"
         ],
-        "outboundTag": "proxy-1"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "af-http-0"
         ],
-        "outboundTag": "proxy-0"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
@@ -2522,182 +2534,182 @@
         "inboundTag": [
           "in-socks-0"
         ],
-        "outboundTag": "proxy-0"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-1"
         ],
-        "outboundTag": "proxy-1"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-2"
         ],
-        "outboundTag": "proxy-2"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-3"
         ],
-        "outboundTag": "proxy-3"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-4"
         ],
-        "outboundTag": "proxy-4"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-5"
         ],
-        "outboundTag": "proxy-5"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-6"
         ],
-        "outboundTag": "proxy-6"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-7"
         ],
-        "outboundTag": "proxy-7"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-8"
         ],
-        "outboundTag": "proxy-8"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-9"
         ],
-        "outboundTag": "proxy-9"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-10"
         ],
-        "outboundTag": "proxy-10"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-11"
         ],
-        "outboundTag": "proxy-11"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-12"
         ],
-        "outboundTag": "proxy-12"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-13"
         ],
-        "outboundTag": "proxy-13"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-14"
         ],
-        "outboundTag": "proxy-14"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-15"
         ],
-        "outboundTag": "proxy-15"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-16"
         ],
-        "outboundTag": "proxy-16"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-17"
         ],
-        "outboundTag": "proxy-17"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-18"
         ],
-        "outboundTag": "proxy-18"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-19"
         ],
-        "outboundTag": "proxy-19"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-20"
         ],
-        "outboundTag": "proxy-20"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-21"
         ],
-        "outboundTag": "proxy-21"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-22"
         ],
-        "outboundTag": "proxy-22"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-23"
         ],
-        "outboundTag": "proxy-23"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-24"
         ],
-        "outboundTag": "proxy-24"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
         "inboundTag": [
           "in-socks-25"
         ],
-        "outboundTag": "proxy-25"
+        "outboundTag": "nest-http"
       },
       {
         "type": "field",
@@ -2705,7 +2717,7 @@
           "socks-main",
           "http-main"
         ],
-        "outboundTag": "proxy-0"
+        "outboundTag": "nest-http"
       }
     ]
   }

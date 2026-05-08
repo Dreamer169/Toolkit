@@ -10,6 +10,7 @@ const SUBJECT_FILTER  = "verify";
 
 let _enabled    = true;
 let _running    = false;
+let _regBusy    = 0;   // registration jobs in progress: skip verify poll
 let _intervalId: ReturnType<typeof setInterval> | null = null;
 let _lastRun: string | null = null;
 let _lastStats: { total: number; clicked: number; skipped: number; failed: number; ok: number } = { total: 0, clicked: 0, skipped: 0, failed: 0, ok: 0 };
@@ -37,6 +38,8 @@ function isRecentlyHandled(msgId: string): boolean {
 /** 当前正在执行的 python 子进程集合，关闭时统一 kill */
 const _inflightChildren = new Set<import("child_process").ChildProcess>();
 
+export function incRegBusy() { _regBusy++; logger.info({ _regBusy }, "[live-verify] regBusy++"); }
+export function decRegBusy() { _regBusy = Math.max(0, _regBusy - 1); logger.info({ _regBusy }, "[live-verify] regBusy--"); }
 export function setLiveVerifyEnabled(val: boolean) {
   _enabled = val;
   if (!val) {
@@ -109,6 +112,7 @@ async function refreshToken(rt: string, proxy?: string | null): Promise<{ token:
 
 async function runOnce() {
   if (_running) { logger.info("[live-verify] 上次轮询尚未结束，跳过"); return; }
+  if (_regBusy > 0) { logger.info({ _regBusy }, "[live-verify] 注册中，跳过本轮"); return; }
   _running = true;
   const stats = { total: 0, clicked: 0, skipped: 0, failed: 0, ok: 0 };
   try {
@@ -238,7 +242,7 @@ async function runOnce() {
     };
 
     // 并发执行，最多 5 个账号同时处理
-    const CONCURRENCY = 5;
+    const CONCURRENCY = 2;
     for (let i = 0; i < rows.length; i += CONCURRENCY) {
       if (!_enabled) { logger.info("[live-verify] 检测到关闭信号，提前结束本轮"); break; }
       const chunk = rows.slice(i, i + CONCURRENCY);

@@ -6,7 +6,7 @@ ACC_DIR = Path("/root/obvious-accounts/eu-test1")
 MANIFEST_PATH = ACC_DIR / "manifest.json"
 STATE_PATH = ACC_DIR / "storage_state.json"
 NEW_PID = "prj_G9RjU6Jj"
-PROXY_SOCKS = "socks5://127.0.0.1:10822"
+PROXY_SOCKS = "socks5://127.0.0.1:10851"
 API_BASE = "https://api.app.obvious.ai/prepare"
 
 def make_session():

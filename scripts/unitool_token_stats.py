@@ -17,7 +17,7 @@ CACHE_TTL   = 14400   # 4 hours
 AUTH_COOKIE = "__Secure-unitool-ssid"
 UA          = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
-RESI_PORTS = [10822, 10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
+RESI_PORTS = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
 _resi_idx  = 0
 
 def _next_resi_port():

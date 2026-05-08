@@ -34,7 +34,7 @@ def save_cache(c: dict) -> None:
 
 # 本地 Xray SOCKS5 代理端口（Xray 管理，每个 port 是不同住宅 IP 出口）
 # 与 chain_v3 / unitool_batch_refcode 保持一致
-RESI_PORTS = [10822, 10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
+RESI_PORTS = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
 
 _resi_idx = 0   # 全局轮转索引
 
