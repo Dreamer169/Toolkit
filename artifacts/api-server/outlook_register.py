@@ -617,8 +617,14 @@ class PatchrightController(BaseController):
         except Exception:
             pass
         p = sync_playwright().start()
+        # v9.51: Force full Chrome binary (not chromium_headless_shell) to avoid easy bot detection
+        # chrome-headless-shell is stripped-down and Microsoft detects it immediately
+        import os as _os9
+        _FULL_CHROME = "/root/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome"
+        _exec_path = _FULL_CHROME if _os9.path.exists(_FULL_CHROME) else None
         b = p.chromium.launch(
             headless=headless,
+            executable_path=_exec_path,
             args=[
                 "--lang=en-US,en",
                 "--no-sandbox",
@@ -626,7 +632,7 @@ class PatchrightController(BaseController):
                 "--disable-blink-features=AutomationControlled",
                 "--disable-infobars",
                 "--disable-extensions",
-                "--disable-gpu",
+                # v9.51: removed --disable-gpu (full Chrome handles GPU gracefully; disable-gpu can cause rendering issues)
                 # v9.50: REMOVED --disable-software-rasterizer
                 # headless Chrome uses SwiftShader (software rasterizer) as its ONLY renderer;
                 # disabling it leaves Chrome with NO rendering backend → renderer crash (TargetClosedError)
