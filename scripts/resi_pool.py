@@ -8,13 +8,15 @@ Inspired by:
 
 Port ranges (xray.json):
   10851-10859: ss-in-1..9  -> Shadowsocks residential (confirmed alive)
-  10870-10889: ps-in-0..19 -> SOCKS5 upstream (need probing)
+  10870-10889: ps-in-0..19 -> SOCKS5 upstream (ALL DEAD — ps-out upstreams offline)
 """
 from __future__ import annotations
 import subprocess, threading, time, concurrent.futures
 from typing import List
 
-RESI_CANDIDATE_PORTS: List[int] = list(range(10851, 10860)) + list(range(10870, 10890))
+# ps-in-0..19 (10870-10889) probe dead: all ps-out upstreams offline (38.60.209.88, 206.123.156.x etc.)
+# Only retain ss-in-0..8 (10851-10859) which are Shadowsocks-based and healthy.
+RESI_CANDIDATE_PORTS: List[int] = list(range(10851, 10860))
 PROBE_TARGET    = "https://www.google.com/generate_204"
 PROBE_TIMEOUT   = 6
 PROBE_CACHE_TTL = 300  # 5 min (same as existing scripts)
