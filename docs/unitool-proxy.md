@@ -377,3 +377,75 @@ SeedanceFastFail  — seedance/happyhorse 立即报错（v5.22）
 ---
 
 *文档基于 2026-05-08 `/api/services` 全量实探 + live curl 验证，由 Replit Agent 整理。*
+
+
+---
+
+## v5.23 — Stream Interception Fix (2026-05-08)
+
+### Critical Bug: widget/stream Interception by Service
+
+Confirmed via direct comparison tests (same SSID, same prompt):
+
+| Service | widget/stream | paginatedMessages | Fix Applied |
+|---------|--------------|-------------------|-------------|
+| `gpt-4o-mini` | ✅ Real response | ✅ Real response | None needed |
+| `gpt-4o` | ✅ Real response | ✅ Real response | None needed |
+| `gpt-5`, `gpt5.1`, `gpt5.2` | ✅ Real response | ✅ Real response | None needed |
+| `gpt-o3-mini`, `gpt-o3`, `gpt-o4-mini` | ✅ Real response | ✅ Real response | None needed |
+| `claude-sonnet-4-5`, `claude-sonnet-4-6` | ✅ Real response | ✅ Real response | None needed |
+| **`gpt-5.5`** | ❌ Russian restriction msg | ✅ Real response | `POLL_PRIMARY_SERVICES` |
+| **`gpt-5-nano`** | ❌ Russian restriction msg | ✅ Real response | `POLL_PRIMARY_SERVICES` |
+| **`gpt-4-1`** | ❌ Russian restriction msg | ✅ Real response | `POLL_PRIMARY_SERVICES` |
+| **`claude-sonnet`** | ❌ Russian restriction msg | ✅ Real response | `POLL_PRIMARY_SERVICES` |
+| **`claude-opus`** | ❌ Russian restriction msg | ✅ Real response | `POLL_PRIMARY_SERVICES` |
+
+**Russian restriction message** (verbatim from widget/stream for affected services):
+> "Я помогаю только с вопросами платформы Unitool и написанием..."
+
+The `[System: ]` prefix in content bypasses this for paginatedMessages but NOT for
+widget/stream. widget/stream's interception happens at the transport layer, before
+the model processes the prompt.
+
+**Mechanism**: unitool's SSE transport layer intercepts widget/stream for certain
+service_ids and injects the Russian restriction response. paginatedMessages polls
+the backend DB directly where the actual LLM response is written — no interception.
+
+### Fix: `POLL_PRIMARY_SERVICES` + `_STREAM_INTERCEPT_RU`
+
+```python
+POLL_PRIMARY_SERVICES = {
+    "gpt-5.5", "gpt-5-nano", "gpt-4-1",
+    "claude-sonnet", "claude-opus",
+}
+_STREAM_INTERCEPT_RU = "помогаю только"
+```
+
+`_send_and_collect_core` now:
+1. Skips widget/stream entirely for `POLL_PRIMARY_SERVICES` (goes straight to
+   `_paginated_poll`)
+2. Detects Russian interception string in stream output as safety net for
+   any unlisted intercepted services
+
+**Verified (2026-05-08)**:
+- `claude-sonnet` → PAPAYA ✅ (was returning Russian msg before v5.23)
+- `gpt-5.5` (via `chatgpt` alias) → LEMON ✅ (was returning Russian msg)
+- `gpt-4o-mini` → PONG ✅ (still uses fast widget/stream path)
+
+### Other v5.23 Changes
+
+**seedance/happyhorse error message corrected**: Changed from "API path unknown
+(possibly WebSocket)" to "service is inactive — active=None in /api/services
+(no pricing/balance fields). This is a placeholder not yet deployed."
+
+Root cause confirmation: `/api/services` returns `active=None` (null) with no
+pricing/balance fields for seedance and happyhorse. Both are confirmed placeholder
+entries not yet deployed by unitool. luma is the correct working alternative.
+
+**API architecture clarified** (from deep analysis session):
+- `service_id="chatgpt"` (top-level) → "Unsupported service" on message send
+- Model-level IDs (`gpt-4o-mini`, `gpt-5.5`, `claude-sonnet`, etc.) required
+- Proxy already correctly uses model-level IDs in `NATIVE_SERVICES`
+- `/api/developer`, `/api/api`, `/api/keys` endpoints return 200 but are CSR
+  pages — content only in JS bundle, no API key issuance via REST
+
