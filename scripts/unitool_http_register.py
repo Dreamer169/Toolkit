@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool_http_register.py v3.0 — unitool.ai 混合协议注册（pydoll + curl_cffi）
+unitool_http_register.py v3.2 — unitool.ai 混合协议注册（pydoll + multipart FormData）
 =============================================================================
 
 分析结论（2025-05）:
@@ -340,33 +340,52 @@ def _extract_signup_na(html: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step A: pydoll 提取真实 Turnstile token（免费）
-# 原理：用已验证的 bypass_cloudflare 拿到真实 CF token，关浏览器
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pydoll 混合注册：bypass + JS fetch() 提交（同一 cookie 上下文）
+#
+# Bug #1 根因（v3.0 实测）：
+#   pydoll Chrome 产生的 Turnstile token 绑定浏览器内 CF cookie
+#   (__cf_bm / cf_clearance)。若将 token 传给 curl_cffi 新会话提交，
+#   CF 服务端检测到 cookie ↔ token 不匹配 → digest=3453729035 (turnstile_invalid)。
+#
+# 修法（v3.1）：
+#   bypass 完成后，直接在浏览器内调 JS fetch() 发 POST，
+#   浏览器自动携带全部 cookie，token 验证必然通过。
+#   省去：表单填写 / 按钮点击 / 页面跳转等待（比全浏览器仍快 ~30%）
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _pydoll_get_turnstile_token(
+_RST = "%5B%22%22%2C%7B%22children%22%3A%5B%5B%22lang%22%2C%22en%22%2C%22d%22%5D%2C%7B%22children%22%3A%5B%22entry%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%5D%7D%5D%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D"
+
+
+async def _pydoll_register(
     email: str,
+    password: str,
     ref_code: str = "",
     resi_port: int = 0,
-    timeout_total: int = 90,
-) -> str:
+    signup_na: str = "",
+) -> dict:
     """
-    用 pydoll Chrome（RESI 代理）访问 /en/entry，bypass Turnstile，
-    提取 cf-turnstile-response 值后关闭浏览器。
-    返回 token 字符串，失败返回空串。
+    pydoll Chrome（RESI 代理）完整注册流程：
+      1. 访问 /en/entry（带 ref_code cookie）
+      2. bypass_cloudflare() 获取真实 Turnstile token
+      3. 在浏览器内 JS fetch() POST 注册（同一 cookie 上下文）
+      4. 解析 RSC 响应流
+      5. 关闭浏览器
+
+    返回: {"ok": bool, "raw": str, "token_len": int, "build_id": str, ...}
     """
     try:
         from pydoll.browser import Chrome
         from pydoll.browser.options import ChromiumOptions
     except ImportError:
-        log("[pydoll] pydoll 未安装，跳过混合模式")
-        return ""
+        return {"ok": False, "error": "pydoll_not_installed"}
 
     port = resi_port or _pick_port(hash(email))
     log(f"[pydoll] 启动 Chrome RESI={port} email={email}")
 
     opt = ChromiumOptions()
-    # Xvfb 环境自动非 headless（CF Turnstile 需要真实渲染）
     display = os.environ.get("DISPLAY", "")
     if not display:
         import glob
@@ -384,6 +403,10 @@ async def _pydoll_get_turnstile_token(
     ]:
         opt.add_argument(arg)
 
+    result: dict = {"ok": False, "email": email, "port": port, "token_len": 0, "raw": ""}
+    t_start = time.time()
+
+    # ── JS 工具函数 ──────────────────────────────────────────────────────────
     def _s(r):
         if not isinstance(r, dict):
             return str(r) if r else ""
@@ -416,7 +439,7 @@ async def _pydoll_get_turnstile_token(
         return "".join(parts)
 
     async def _bypass_wait(tab, label="", rounds=4, per_round=15) -> bool:
-        # 等 iframe 出现
+        """等 Turnstile iframe → 多轮 bypass → reload 兜底"""
         for i in range(12):
             await asyncio.sleep(1)
             n_iframe = int(_s(await tab.execute_script(
@@ -434,16 +457,14 @@ async def _pydoll_get_turnstile_token(
                 log(f"  [{label}] bypass OK round={rnd+1}")
             except Exception as e:
                 log(f"  [{label}] bypass err round={rnd+1}: {e}")
-
             for i in range(per_round):
                 await asyncio.sleep(1)
                 n = await _tok_len(tab)
                 if n > 20:
-                    log(f"  [{label}] token ready at rnd={rnd+1} t={i+1}s len={n}")
+                    log(f"  [{label}] token ready rnd={rnd+1} t={i+1}s len={n}")
                     return True
                 if i % 5 == 4:
                     log(f"  [{label}] [{i+1}s] token len={n} ...")
-
             log(f"  [{label}] round {rnd+1} token=0, retry bypass...")
             await asyncio.sleep(2)
 
@@ -451,6 +472,13 @@ async def _pydoll_get_turnstile_token(
         log(f"  [{label}] all rounds failed, reloading...")
         await tab.go_to(f"{UNITOOL_BASE}/en/entry")
         await asyncio.sleep(6)
+        for i in range(12):
+            await asyncio.sleep(1)
+            n_iframe = int(_s(await tab.execute_script(
+                "document.querySelectorAll('iframe[src*=\"challenges.cloudflare\"]').length",
+                return_by_value=True)) or 0)
+            if n_iframe > 0:
+                break
         try:
             await tab._bypass_cloudflare({}, time_to_wait_captcha=25)
         except Exception as e:
@@ -463,17 +491,14 @@ async def _pydoll_get_turnstile_token(
                 return True
         return False
 
-    token = ""
-    t_start = time.time()
-
     try:
         async with Chrome(options=opt, connection_port=_free_port()) as browser:
             tab = await browser.start()
             await tab.enable_network_events()
 
-            # ref_code cookie 写入
+            # ref_code: 先访问 /ref/<code> 写入 cookie
             if ref_code:
-                log(f"[pydoll] visiting ref link: /ref/{ref_code}")
+                log(f"[pydoll] visiting ref /ref/{ref_code}")
                 await tab.go_to(f"{UNITOOL_BASE}/ref/{ref_code}")
                 await asyncio.sleep(4)
 
@@ -481,27 +506,127 @@ async def _pydoll_get_turnstile_token(
             await tab.go_to(f"{UNITOOL_BASE}/en/entry")
             await asyncio.sleep(4)
 
-            ok = await _bypass_wait(tab, "signup")
-            if ok:
-                token = await _get_token(tab)
-                log(f"[pydoll] ✓ token extracted len={len(token)}")
-            else:
-                log("[pydoll] ✗ failed to get token")
+            # ── Step 1: bypass Turnstile ─────────────────────────────────────
+            log("[pydoll] bypassing Turnstile...")
+            bypass_ok = await _bypass_wait(tab, "signup")
+            if not bypass_ok:
+                result["error"] = "bypass_failed"
+                return result
+
+            token = await _get_token(tab)
+            result["token_len"] = len(token)
+            log(f"[pydoll] token len={len(token)}")
+            if not token:
+                result["error"] = "token_empty_after_bypass"
+                return result
+
+            # 动态获取 SIGNUP_NA（从页面 source 提取，与浏览器 build 一致）
+            page_src = _s(await tab.execute_script(
+                "document.documentElement.innerHTML.slice(0, 200000)",
+                return_by_value=True))
+            na = signup_na or _extract_signup_na(page_src) or _SIGNUP_NA_DEFAULT
+            log(f"[pydoll] SIGNUP_NA={na} ({'ok' if na == _SIGNUP_NA_DEFAULT else '⚠ changed'})")
+
+            # ── Step 2: JS fetch() FormData POST（同一 session，token 与 cookie 匹配）─
+            # Bug #2 修复（v3.2）：
+            #   真实按钮提交格式是 multipart/form-data，字段名带 1_ 前缀
+            #   原来发 application/json 服务端解析不到 token 字段 → turnstile_invalid
+            #   字段: 1_email / 1_password / 1_cf-turnstile-response / 1_captcha_token
+            #         1_captcha_action="signup" / 0=React state
+            log("[pydoll] JS FormData POST /en/entry ...")
+            ref_append = f'fd.append("1_ref_code", {json.dumps(ref_code)});' if ref_code else ""
+            fetch_js = f"""
+(async function() {{
+  try {{
+    const token = document.querySelector('[name="cf-turnstile-response"]').value;
+    const fd = new FormData();
+    fd.append("1_email",                 {json.dumps(email)});
+    fd.append("1_password",              {json.dumps(password)});
+    fd.append("1_cf-turnstile-response", token);
+    fd.append("1_captcha_token",         token);
+    fd.append("1_captcha_action",        "signup");
+    fd.append("0", '[{{"error":"","next":null,"success":false}},"$K1"]');
+    {ref_append}
+    const r = await fetch("https://unitool.ai/en/entry", {{
+      method: "POST",
+      headers: {{
+        "accept":                 "text/x-component",
+        "accept-language":        "en-US,en;q=0.9",
+        "next-action":            {json.dumps(na)},
+        "next-router-state-tree": {json.dumps(_RST)},
+        "origin":                 "https://unitool.ai",
+        "referer":                "https://unitool.ai/en/entry",
+        "sec-fetch-dest":         "empty",
+        "sec-fetch-mode":         "cors",
+        "sec-fetch-site":         "same-origin"
+      }},
+      credentials: "include",
+      body: fd
+    }});
+    const text = await r.text();
+    return JSON.stringify({{status: r.status, body: text.slice(0, 800)}});
+  }} catch(e) {{
+    return JSON.stringify({{status: 0, error: String(e)}});
+  }}
+}})()
+"""
+            raw_json = _s(await tab.execute_script(fetch_js, return_by_value=True, await_promise=True))
+            log(f"[pydoll] fetch result: {raw_json[:300]}")
+
+            try:
+                fetch_result = json.loads(raw_json)
+            except Exception:
+                fetch_result = {"status": 0, "error": f"json_parse: {raw_json[:100]}"}
+
+            http_status = fetch_result.get("status", 0)
+            raw_body = fetch_result.get("body", "")
+            result["status"] = http_status
+            result["raw"] = raw_body
+
+            # ── Step 3: 解析 RSC 响应 ────────────────────────────────────────
+            digest_m = re.search(r'"digest"\s*:\s*"(\d+)"', raw_body)
+            if digest_m:
+                d = digest_m.group(1)
+                result["digest"] = d
+                result["error_type"] = _DIGEST_MAP.get(d, f"unknown_{d}")
+                log(f"[pydoll] RSC error digest={d} → {result['error_type']}")
+
+            # build_id
+            bid = re.search(r'"b"\s*:\s*"([^"]+)"', raw_body)
+            if bid:
+                result["build_id"] = bid.group(1)
+
+            # 成功判断：HTTP 200 且无 error digest
+            if http_status == 200 and "1:E{" not in raw_body and not digest_m:
+                result["ok"] = True
+                log(f"[pydoll] ✓ 注册成功 {email}")
+            # 兜底：邮件提示词
+            raw_lower = raw_body.lower()
+            if any(w in raw_lower for w in ("sent link", "check your email",
+                                             "verify your email", "follow the link")):
+                result["ok"] = True
+                log(f"[pydoll] ✓ 邮件确认词检测到")
+
+            if not result["ok"] and not digest_m:
+                # fetch 本身 error（网络等）
+                result["error"] = fetch_result.get("error", f"http_{http_status}")
 
     except Exception as e:
+        result["error"] = str(e)[:200]
         log(f"[pydoll] exception: {e}")
 
     elapsed = time.time() - t_start
-    log(f"[pydoll] browser closed ({elapsed:.1f}s) token_len={len(token)}")
-    return token
+    log(f"[pydoll] 完成 {elapsed:.1f}s ok={result['ok']}")
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step B: curl_cffi HTTP 注册提交
+# curl_cffi 辅助提交（备用：当外部已有有效 token 时）
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _http_submit(
+def _http_submit_with_cookies(
     cf_token: str,
+    browser_cookies: dict,
     email: str,
     password: str,
     ref_code: str = "",
@@ -509,41 +634,51 @@ def _http_submit(
     signup_na: str = "",
 ) -> dict:
     """
-    curl_cffi Chrome 指纹 POST /en/entry（Next.js Server Action）
-    先 GET /en/entry 建立会话 + 获取动态 NA 哈希，再 POST 注册。
+    curl_cffi 提交（需传入与 token 配套的浏览器 cookies）。
+    正常流程不用此函数——主流程已在 pydoll 内完成 fetch()。
+    此函数供外部已有 token + cookies 时使用。
     """
     port = resi_port or _pick_port(hash(email))
     sess = make_session(port)
     result = {"ok": False, "email": email, "port": port, "raw": ""}
 
     try:
-        # GET /en/entry — 建立会话（CF clearance、NEXT_LOCALE cookie）
-        log(f"[http] GET /en/entry port={port}")
-        r = sess.get(
-            f"{UNITOOL_BASE}/en/entry",
-            headers=HDR_NAV,
-            timeout=25,
-        )
-        log(f"[http] GET HTTP {r.status_code} len={len(r.text)}")
-        if r.status_code != 200:
-            result["error"] = f"entry_{r.status_code}"
-            return result
+        # 注入浏览器 cookies
+        for k, v in browser_cookies.items():
+            try:
+                sess.cookies.set(k, v, domain="unitool.ai")
+            except Exception:
+                pass
 
-        # 动态提取 NA 哈希
-        na = signup_na or _extract_signup_na(r.text)
-        log(f"[http] SIGNUP_NA={na} ({'hardcoded' if na == _SIGNUP_NA_DEFAULT else 'dynamic'})")
+        na = signup_na or _SIGNUP_NA_DEFAULT
+        # v3.2: multipart/form-data（与真实浏览器按钮提交格式一致）
+        import uuid as _uuid
+        boundary = "----WebKitFormBoundary" + _uuid.uuid4().hex[:16]
+        def _mp_field(name: str, value: str) -> bytes:
+            return (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode("utf-8")
+        body_parts = [
+            _mp_field("1_email",                 email),
+            _mp_field("1_password",              password),
+            _mp_field("1_cf-turnstile-response", cf_token),
+            _mp_field("1_captcha_token",         cf_token),
+            _mp_field("1_captcha_action",        "signup"),
+            _mp_field("0",                       '[{"error":"","next":null,"success":false},"$K1"]'),
+        ]
+        if ref_code:
+            body_parts.append(_mp_field("1_ref_code", ref_code))
+        body_parts.append(f"--{boundary}--\r\n".encode())
+        multipart_body = b"".join(body_parts)
 
-        # 构建 POST headers — 注意：不覆盖 session cookies
         hdr_post = {
             "accept": "text/x-component",
             "accept-language": "en-US,en;q=0.9",
-            "content-type": "application/json",
+            "content-type": f"multipart/form-data; boundary={boundary}",
             "next-action": na,
-            "next-router-state-tree": (
-                "%5B%22%22%2C%7B%22children%22%3A%5B%22en%22%2C%7B%22children%22%3A%5B"
-                "%22entry%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%5D%7D%5D"
-                "%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D"
-            ),
+            "next-router-state-tree": _RST,
             "origin": UNITOOL_BASE,
             "referer": f"{UNITOOL_BASE}/en/entry",
             "user-agent": _UA,
@@ -554,75 +689,28 @@ def _http_submit(
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-origin",
         }
-
-        # Bug fix: ref_code 作为 cookie 追加而不是覆盖整个 cookie header
-        # curl_cffi Session 会自动携带 cookie jar（含 NEXT_LOCALE 等）
-        # 只需额外注入 ref-code cookie
-        if ref_code:
-            # 通过 session cookie jar 注入，不覆盖 header cookie
-            from curl_cffi.requests import Cookies as _Cookies
-            try:
-                sess.cookies.set("ref-code", ref_code, domain="unitool.ai")
-            except Exception:
-                pass  # 如果 API 不支持就跳过，ref_code 影响不大
-
-        payload = [{"email": email, "password": password, "token": cf_token}]
-        if ref_code:
-            payload[0]["ref_code"] = ref_code
-        body = json.dumps(payload).encode()
-
-        log(f"[http] POST /en/entry token_len={len(cf_token)}")
-        r2 = sess.post(
-            f"{UNITOOL_BASE}/en/entry",
-            headers=hdr_post,
-            data=body,
-            timeout=25,
-            allow_redirects=False,
-        )
-        raw = r2.text
-        log(f"[http] POST HTTP {r2.status_code} body={raw[:200]}")
-        result["status"] = r2.status_code
+        r = sess.post(f"{UNITOOL_BASE}/en/entry", headers=hdr_post,
+                      data=multipart_body, timeout=25, allow_redirects=False)
+        raw = r.text
+        result["status"] = r.status_code
         result["raw"] = raw[:500]
-
-        # 解析 RSC 流响应
-        # 成功: 0:{...}\n1:{...ok...}\n  或  邮件已发送提示
-        # 失败: 0:{...}\n1:E{"digest":"..."}\n
 
         digest_m = re.search(r'"digest"\s*:\s*"(\d+)"', raw)
         if digest_m:
             d = digest_m.group(1)
             result["digest"] = d
             result["error_type"] = _DIGEST_MAP.get(d, f"unknown_{d}")
-            log(f"[http] error digest={d} → {result['error_type']}")
 
-        # 成功判断: 无 E{} 行 + HTTP 200
-        if r2.status_code == 200 and "1:E{" not in raw:
-            rsc_line = re.search(r"^1:(.+)$", raw, re.MULTILINE)
-            if rsc_line:
-                try:
-                    d = json.loads(rsc_line.group(1))
-                    if d.get("ok") or d.get("success") or d.get("result") == "ok":
-                        result["ok"] = True
-                except Exception:
-                    pass
-            if not result["ok"]:
-                result["ok"] = True  # 200 + no error = success
-            log(f"[http] ✓ 注册成功 {email}")
-
-        # 兜底: 邮件发送提示词出现
-        raw_lower = raw.lower()
-        if any(w in raw_lower for w in ("sent link", "check your email", "verify your email", "follow the link")):
+        if r.status_code == 200 and "1:E{" not in raw and not digest_m:
             result["ok"] = True
-            log(f"[http] ✓ 邮件确认词检测到")
 
-        # build_id 记录（用于监控 NA 哈希是否还匹配当前部署）
-        bid = re.search(r'"b"\s*:\s*"([^"]+)"', raw)
-        if bid:
-            result["build_id"] = bid.group(1)
+        raw_lower = raw.lower()
+        if any(w in raw_lower for w in ("sent link", "check your email",
+                                         "verify your email", "follow the link")):
+            result["ok"] = True
 
     except Exception as e:
         result["error"] = str(e)
-        log(f"[http] exception: {e}")
     finally:
         try:
             sess.close()
@@ -633,7 +721,7 @@ def _http_submit(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 主入口：混合模式 http_register
+# 主入口
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def http_register_hybrid(
@@ -643,41 +731,25 @@ async def http_register_hybrid(
     resi_port: int = 0,
 ) -> dict:
     """
-    混合模式注册：
-      A. pydoll 获取真实 Turnstile token（免费，~15-30s）
-      B. curl_cffi HTTP 提交注册（~1-2s）
-    比全浏览器节省 ~40% 时间（省去表单填写/提交等待/页面跳转）
+    混合注册 v3.1（Bug #1 修复版）：
+      pydoll Chrome bypass Turnstile → 浏览器内 JS fetch() POST 注册
+      比全浏览器省去：表单填写 / 按钮等待 / 页面跳转（快 ~30%）
+      token ↔ cookie 绑定在同一浏览器会话，CF 验证必然通过
     """
     port = resi_port or _pick_port(hash(email))
     log(f"[hybrid] {email} ref={ref_code or '-'} port={port}")
-    result = {"email": email, "ref_code": ref_code, "ok": False, "method": "hybrid"}
 
-    # Step A: pydoll 拿 token
-    token = await _pydoll_get_turnstile_token(email, ref_code=ref_code, resi_port=port)
+    result = await _pydoll_register(email, password, ref_code=ref_code, resi_port=port)
+    result["method"] = "hybrid_v3.1"
 
-    if not token:
-        result["error"] = "pydoll_token_failed"
-        log(f"[hybrid] ✗ pydoll failed to get token")
-        return result
-
-    result["token_len"] = len(token)
-
-    # Step B: HTTP 提交
-    submit = _http_submit(token, email, password, ref_code=ref_code, resi_port=port)
-    result["submit"] = submit
-    result["ok"] = submit.get("ok", False)
-
-    if result["ok"]:
-        log(f"[hybrid] ✓ 注册请求成功！{email} — 等待邮件验证")
+    if result.get("ok"):
+        log(f"[hybrid] ✓ 注册成功 {email}")
     else:
-        et = submit.get("error_type", submit.get("error", "unknown"))
-        log(f"[hybrid] ✗ 提交失败: {et}")
-        result["error"] = et
+        err = result.get("error_type") or result.get("error") or "unknown"
+        log(f"[hybrid] ✗ 失败: {err}")
 
-        # token 无效: pydoll 可能 bypass 失败，重试一次
-        if submit.get("digest") == "3453729035":
-            log(f"[hybrid] token 被 CF 拒绝（digest=3453729035），pydoll bypass 可能不完整")
-            result["recommendation"] = "check_pydoll_bypass_cloudflare_version"
+        if result.get("digest") == "3453729035":
+            log("[hybrid] token 仍被拒绝（fetch 内 cookie 异常？），建议检查 Xvfb/pydoll 版本")
 
     return result
 
@@ -693,7 +765,7 @@ def http_register(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HTTP 登录（提取 ssid cookie）
+# 登录：pydoll bypass → Sign In tab → JS fetch() POST
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def http_login_hybrid(
@@ -702,81 +774,163 @@ async def http_login_hybrid(
     resi_port: int = 0,
 ) -> dict:
     """
-    同样用 pydoll 拿 Turnstile token（captcha_action=login）后 HTTP POST 登录。
-    unitool 登录返回 __Secure-unitool-ssid cookie。
+    登录流程（仅作辅助，主登录走 unitool_login.py）：
+      pydoll 点 Sign In tab → bypass login Turnstile → JS fetch() POST
     """
+    try:
+        from pydoll.browser import Chrome
+        from pydoll.browser.options import ChromiumOptions
+    except ImportError:
+        return {"ok": False, "error": "pydoll_not_installed"}
+
     port = resi_port or _pick_port(hash(email))
+    log(f"[http_login] {email} port={port}")
+
+    opt = ChromiumOptions()
+    display = os.environ.get("DISPLAY", "")
+    if not display:
+        import glob
+        if glob.glob("/tmp/.X99-lock") or glob.glob("/tmp/.X[0-9]-lock"):
+            display = ":99"
+            os.environ["DISPLAY"] = display
+    opt.headless = not bool(display)
+    if CHROME:
+        opt.binary_location = CHROME
+    for arg in ["--no-sandbox", "--disable-dev-shm-usage", "--window-size=1440,900",
+                 "--disable-gpu", "--lang=en-US",
+                 "--disable-blink-features=AutomationControlled",
+                 f"--proxy-server=socks5://127.0.0.1:{port}"]:
+        opt.add_argument(arg)
+
     result = {"email": email, "ok": False, "ssid": ""}
 
-    # pydoll 获取登录 token — login 表单在 Sign In tab，需要点切换
-    # 简化：注册成功后通常有 verify link → ssid，登录走 unitool_login.py
-    # 此处直接尝试 HTTP 登录（token 留空走 fallback 测试）
-    log(f"[http_login] {email}")
+    def _s(r):
+        if not isinstance(r, dict):
+            return str(r) if r else ""
+        inner = r.get("result", r)
+        if isinstance(inner, dict):
+            inner = inner.get("result", inner)
+        return str(inner.get("value", "")) if isinstance(inner, dict) else str(inner)
 
-    token = await _pydoll_get_turnstile_token(email, resi_port=port)
+    async def _tok_len(tab, field="cf-turnstile-response") -> int:
+        try:
+            return int(_s(await tab.execute_script(
+                f"(document.querySelector('[name=\"{field}\"]')||{{value:''}}).value.length",
+                return_by_value=True)) or 0)
+        except Exception:
+            return 0
 
-    sess = make_session(port)
     try:
-        r = sess.get(f"{UNITOOL_BASE}/en/entry", headers=HDR_NAV, timeout=25)
-        if r.status_code != 200:
-            result["error"] = f"entry_{r.status_code}"
-            return result
+        async with Chrome(options=opt, connection_port=_free_port()) as browser:
+            tab = await browser.start()
+            await tab.enable_network_events()
 
-        na = _SIGNUP_NA_DEFAULT  # 先用 SIGNUP_NA 检测 LOGIN_NA
-        na_candidates = list(set(re.findall(r"[a-f0-9]{42}", r.text)))
-        login_na = _LOGIN_NA_DEFAULT
-        if _LOGIN_NA_DEFAULT not in na_candidates and len(na_candidates) > 1:
-            # 第二个 NA 通常是 LOGIN
-            login_na = na_candidates[1] if len(na_candidates) > 1 else _LOGIN_NA_DEFAULT
+            await tab.go_to(f"{UNITOOL_BASE}/en/entry")
+            await asyncio.sleep(4)
 
-        hdr = {
-            "accept": "text/x-component",
-            "accept-language": "en-US,en;q=0.9",
-            "content-type": "application/json",
-            "next-action": login_na,
-            "next-router-state-tree": (
-                "%5B%22%22%2C%7B%22children%22%3A%5B%22en%22%2C%7B%22children%22%3A%5B"
-                "%22entry%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%5D%7D%5D"
-                "%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D"
-            ),
-            "origin": UNITOOL_BASE,
-            "referer": f"{UNITOOL_BASE}/en/entry",
-            "user-agent": _UA,
-            "sec-ch-ua": _SEC_CH_UA,
-            "sec-fetch-dest": "empty",
-            "sec-fetch-mode": "cors",
-            "sec-fetch-site": "same-origin",
-        }
-        payload = json.dumps([{
-            "email": email, "password": password,
-            "token": token, "captcha_action": "login",
-        }]).encode()
+            # 点 Sign In tab
+            await tab.execute_script("""
+                for (var el of document.querySelectorAll('button,[role="tab"]')) {
+                    if (el.innerText.trim().toLowerCase() === 'sign in') { el.click(); break; }
+                }
+            """, return_by_value=True)
+            await asyncio.sleep(2)
 
-        r2 = sess.post(f"{UNITOOL_BASE}/en/entry", headers=hdr,
-                       data=payload, timeout=25, allow_redirects=False)
-        result["status"] = r2.status_code
-        result["raw"] = r2.text[:300]
-        log(f"[http_login] HTTP {r2.status_code} body={r2.text[:150]}")
+            # bypass 登录 Turnstile
+            for rnd in range(3):
+                try:
+                    await tab._bypass_cloudflare({}, time_to_wait_captcha=15)
+                except Exception as e:
+                    log(f"  [login_bypass] round {rnd+1} err: {e}")
+                for i in range(15):
+                    await asyncio.sleep(1)
+                    ca = _s(await tab.execute_script(
+                        "(document.querySelector('[name=\"captcha_action\"]')||{value:'?'}).value",
+                        return_by_value=True))
+                    n = await _tok_len(tab)
+                    if n > 20 and ca == "login":
+                        log(f"  [login_bypass] token ready rnd={rnd+1} t={i+1}s action={ca}")
+                        break
+                else:
+                    continue
+                break
 
-        # 从 Set-Cookie 捕获 ssid
-        sc = r2.headers.get("set-cookie", "")
-        ssid_m = re.search(r"__Secure-unitool-ssid=([^;]+)", sc)
-        if ssid_m:
-            result["ssid"] = ssid_m.group(1)
-            result["ok"] = True
-            log(f"[http_login] ✓ ssid len={len(result['ssid'])}")
-        else:
-            log(f"[http_login] ✗ no ssid in Set-Cookie")
+            # 页面动态获取 LOGIN_NA
+            page_src = _s(await tab.execute_script(
+                "document.documentElement.innerHTML.slice(0,200000)", return_by_value=True))
+            na_candidates = list(set(re.findall(r"[a-f0-9]{42}", page_src)))
+            login_na = _LOGIN_NA_DEFAULT
+            if login_na not in na_candidates and len(na_candidates) > 1:
+                login_na = na_candidates[1]
+
+            # JS FormData POST 登录（v3.2 修复：multipart/form-data，1_ 前缀字段）
+            fetch_js = f"""
+(async function() {{
+  try {{
+    const token = document.querySelector('[name="cf-turnstile-response"]').value;
+    const fd = new FormData();
+    fd.append("1_email",                 {json.dumps(email)});
+    fd.append("1_password",              {json.dumps(password)});
+    fd.append("1_cf-turnstile-response", token);
+    fd.append("1_captcha_token",         token);
+    fd.append("1_captcha_action",        "login");
+    fd.append("0", '[{{"error":"","next":null,"success":false}},"$K1"]');
+    const r = await fetch("https://unitool.ai/en/entry", {{
+      method: "POST",
+      headers: {{
+        "accept":                 "text/x-component",
+        "accept-language":        "en-US,en;q=0.9",
+        "next-action":            {json.dumps(login_na)},
+        "next-router-state-tree": {json.dumps(_RST)},
+        "origin":                 "https://unitool.ai",
+        "referer":                "https://unitool.ai/en/entry",
+        "sec-fetch-dest":         "empty",
+        "sec-fetch-mode":         "cors",
+        "sec-fetch-site":         "same-origin"
+      }},
+      credentials: "include",
+      body: fd
+    }});
+    const text = await r.text();
+    const cookies = document.cookie;
+    return JSON.stringify({{status: r.status, body: text.slice(0,400), cookies: cookies.slice(0,500)}});
+  }} catch(e) {{
+    return JSON.stringify({{status: 0, error: String(e)}});
+  }}
+}})()
+"""
+            raw_json = _s(await tab.execute_script(fetch_js, return_by_value=True, await_promise=True))
+            log(f"[http_login] fetch result: {raw_json[:200]}")
+
+            try:
+                fr = json.loads(raw_json)
+            except Exception:
+                fr = {"status": 0, "error": raw_json[:100]}
+
+            result["status"] = fr.get("status", 0)
+            result["raw"] = fr.get("body", "")[:200]
+
+            # ssid 在 httpOnly cookie 里，JS document.cookie 看不到
+            # 但 RSC 响应会重定向或包含成功信息
+            # 真正的 ssid 需要从 CDP Network 事件的 Set-Cookie 捕获
+            # 此处标记需要 unitool_login.py 处理
+            raw_lower = result["raw"].lower()
+            if fr.get("status") == 200 and "1:E{" not in result["raw"]:
+                result["ok"] = True
+                result["note"] = "login_ok_but_ssid_httponly_use_unitool_login"
+                log("[http_login] ✓ 登录成功（ssid 为 httpOnly，请用 unitool_login.py 捕获）")
+            else:
+                result["error"] = fr.get("error", f"http_{fr.get('status',0)}")
 
     except Exception as e:
-        result["error"] = str(e)
-    finally:
-        try:
-            sess.close()
-        except Exception:
-            pass
+        result["error"] = str(e)[:200]
+        log(f"[http_login] exception: {e}")
 
     return result
+
+
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
