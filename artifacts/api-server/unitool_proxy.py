@@ -536,7 +536,8 @@ NATIVE_SERVICES = {
 # 需要 reasoning_effort 的服务
 REASONING_SERVICES = {"gemini-3.1-pro", "gemini-3-pro", "grok",
                       "gpt-o1", "gpt-o1-mini", "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini",
-                      "gpt-5-nano",  # v5.27: unitool requires reasoning_effort for this endpoint}
+                      "gpt-5-nano",  # v5.27: unitool requires reasoning_effort for this endpoint
+}
 
 # v5.11: 从 API 实探更新 minimum_balance（用于日志报警，balance=0 的服务不 mark dead）
 FREE_SERVICES = {"gpt-4o-mini", "gpt-5-nano"}  # minimum_balance=0，余额耗尽也可用
@@ -1762,7 +1763,10 @@ if __name__ == "__main__":
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
-    _startup_resi_health_check()
+    try:
+        _startup_resi_health_check()
+    except (KeyboardInterrupt, SystemExit):
+        pass  # PM2 SIGINT during startup — skip check, continue
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
     print("[unitool-proxy v5.27] balance monitor started", flush=True)
     print("[unitool-proxy v5.27] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc|GrokReasoningStrip|GeminiMaintenance|GrokFallback|OSeriesFallback|NanoReasoning|SvcErrFallback: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking", flush=True)
