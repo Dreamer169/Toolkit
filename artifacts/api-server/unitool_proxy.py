@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.17
+unitool.ai → OpenAI 兼容反代 v5.18
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -968,7 +968,7 @@ def _send_and_collect_core(entry: dict, service_id: str, content: str,
         msgs_snapshot = _api_paginated(chat_id, entry["ssid"], limit=5)
         # v5.12: msgs_snapshot=[] → 再等 0.5s 重试（服务器写入延迟）
         if not msgs_snapshot:
-            print(f"[v5.13] msgs_snapshot=[] chat={chat_id} → retry snapshot 0.5s", flush=True)
+            print(f"[snap] empty chat={chat_id} → retry 0.5s", flush=True)
             time.sleep(0.5)
             msgs_snapshot = _api_paginated(chat_id, entry["ssid"], limit=5)
 
@@ -986,20 +986,20 @@ def _send_and_collect_core(entry: dict, service_id: str, content: str,
                         if (_ac_m.get("role") == "assistant"
                                 and _ac_m.get("reply_to") == user_msg_id):
                             if _ac_m.get("status") == "ended":
-                                print(f"[v5.14] stream+ok chat={chat_id} len={len(text)}", flush=True)
+                                print(f"[stream] ok chat={chat_id} len={len(text)}", flush=True)
                                 return text
-                            print(f"[v5.14] stream early-end → autocontinue chat={chat_id}", flush=True)
+                            print(f"[stream] early-end → autocontinue chat={chat_id}", flush=True)
                             return _paginated_poll(chat_id, user_msg_id, entry["ssid"],
                                                    chunk_cb, deadline, text, abort)
-                    print(f"[v5.14] stream ok chat={chat_id} len={len(text)}", flush=True)
+                    print(f"[stream] ok chat={chat_id} len={len(text)}", flush=True)
                     return text
-                print(f"[v5.13] stream empty → fallback poll chat={chat_id}", flush=True)
+                print(f"[stream] empty → fallback poll chat={chat_id}", flush=True)
             except Exception as e:
                 if abort and abort.is_set():
                     raise Exception("client_disconnected")
-                print(f"[v5.13] stream error → fallback: {e}", flush=True)
+                print(f"[stream] error → fallback: {e}", flush=True)
         else:
-            print(f"[v5.13] msgs_snapshot=[] after retry → skip widget/stream, direct poll chat={chat_id}", flush=True)
+            print(f"[snap] empty after retry → skip stream, direct poll chat={chat_id}", flush=True)
 
         # 5. 兜底：paginatedMessages 轮询（status=ended 为唯一完成信号）
         return _paginated_poll(chat_id, user_msg_id, entry["ssid"],
@@ -1356,17 +1356,17 @@ def _startup_resi_health_check():
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.17] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.18] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.17] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.18] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     _startup_resi_health_check()
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.17] balance monitor started", flush=True)
-    print("[unitool-proxy v5.17] features: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck", flush=True)
+    print("[unitool-proxy v5.18] balance monitor started", flush=True)
+    print("[unitool-proxy v5.18] features: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
