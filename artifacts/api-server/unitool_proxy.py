@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.24
+unitool.ai → OpenAI 兼容反代 v5.25
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -552,6 +552,7 @@ POLL_PRIMARY_SERVICES = {
     "gpt-5.5", "gpt-5-nano", "gpt-4-1",
     "claude-sonnet", "claude-opus",
     "claude-opus-4-6",   # v5.24: stream empty but poll returns CHERRY
+    "grok",              # v5.25: widget/stream embeds reasoning-block-marker div; poll clean
 }
 _STREAM_INTERCEPT_RU = "помогаю только"  # Russian restriction marker
 
@@ -810,6 +811,28 @@ def _is_retryable(msg: str) -> bool:
     ml = msg.lower()
     return any(k.lower() in ml for k in KEYS)
 
+def _strip_reasoning_block(text: str) -> str:
+    """v5.25: strip grok <div class="reasoning-block-marker">...</div>.
+    The <div token is often lost (non-JSON SSE line) so we match
+    from 'class="reasoning-block-marker"' or '<div class=' forward.
+    Actual answer is after the last </div>; fall back to regex strip.
+    """
+    if "reasoning-block-marker" not in text:
+        return text
+    # Strategy 1: take everything after the last </div> occurrence
+    last_end = text.rfind("</div>")
+    if last_end != -1:
+        after = text[last_end + 6:].strip()
+        if after:          # non-empty → this is the real answer
+            return after
+    # Strategy 2: regex strip the marker block
+    cleaned = re.sub(
+        r'(?:<div)?\s*class="reasoning-block-marker">.*?</div>\s*',
+        "", text, flags=re.DOTALL
+    )
+    return cleaned.strip() or text
+
+
 def _retry_delay(attempt, transport=False):
     """v5.13: exponential backoff with +-25% jitter (mirrors ds2api retryDelay).
     transport=True uses a longer base (network errors need more recovery time).
@@ -883,7 +906,15 @@ def _api_paginated(chat_id: int, ssid: str, limit: int = 20) -> list:
                 headers=_hdrs(ssid),
                 timeout=12,
             )
-            return r.json().get("data", [])
+            # v5.25: detect backend maintenance (HTTP-200 body code=500)
+            if r.status_code != 200:
+                raise Exception(f"paginatedMessages HTTP {r.status_code}: {r.text[:100]}")
+            rj = r.json()
+            if rj.get("code") == 500:
+                _pm = rj.get("msg", "")
+                if "maintained" in _pm or "maintenance" in _pm.lower():
+                    raise Exception(f"service_maintenance: backend — {_pm[:80]}")
+            return rj.get("data", [])
         except (_rq.exceptions.ConnectionError, _rq.exceptions.Timeout) as e:
             # 清除坏会话，尝试下一个端口
             _drop_resi_session(port)
@@ -1099,6 +1130,12 @@ def _send_and_collect_core(entry: dict, service_id: str, content: str,
             if "Unsupported service" in err_msg or "Unknown" in err_msg:
                 raise Exception(f"unsupported_service: {err_msg}")
             raise Exception(f"msg_send_error: {err_msg}")
+        # v5.25: detect HTTP-200 body with error code (backend maintenance)
+        if result.get("code") == 500:
+            _bmsg = result.get("msg", "")
+            if "maintained" in _bmsg or "maintenance" in _bmsg.lower():
+                raise Exception(f"service_maintenance: {service_id} — {_bmsg[:80]}")
+            raise Exception(f"backend_error_500: {service_id} — {_bmsg[:80]}")
         user_msg_id = result.get("message", {}).get("id")
         if not user_msg_id:
             raise Exception(f"no message id: {result}")
@@ -1136,11 +1173,13 @@ def _send_and_collect_core(entry: dict, service_id: str, content: str,
                             if (_ac_m.get("role") == "assistant"
                                     and _ac_m.get("reply_to") == user_msg_id):
                                 if _ac_m.get("status") == "ended":
+                                    text = _strip_reasoning_block(text)  # v5.25
                                     print(f"[stream] ok chat={chat_id} len={len(text)}", flush=True)
                                     return text
                                 print(f"[stream] early-end → autocontinue chat={chat_id}", flush=True)
                                 return _paginated_poll(chat_id, user_msg_id, entry["ssid"],
                                                        chunk_cb, deadline, text, abort)
+                        text = _strip_reasoning_block(text)  # v5.25
                         print(f"[stream] ok chat={chat_id} len={len(text)}", flush=True)
                         return text
                 else:
@@ -1213,6 +1252,9 @@ def _try_service(service_id: str, content: str, entries: list,
             body_txt = ""
             try: body_txt = e.read().decode(errors="ignore")
             except Exception: pass
+            # v5.25: 500 + maintenance → raise service_maintenance (SSID not dead)
+            if e.code == 500 and ("maintained" in body_txt or "maintenance" in body_txt.lower()):
+                raise Exception(f"service_maintenance: {service_id} (HTTP 500 body)")
             if e.code in (401, 403, 423):
                 if "Free tokens are over" in body_txt or "Balance need" in body_txt:
                     _mark_dead(entry["ssid"], secs=86400, reason="balance_exhausted")
@@ -1233,8 +1275,9 @@ def _try_service(service_id: str, content: str, entries: list,
             if "unsupported_service" in err:
                 # v5.24: service missing, SSID fine — raise for fallback
                 raise Exception(f"service_not_found: {service_id}")
-            if "service_stuck_updating" in err or "service_not_found" in err:
-                raise  # bubble to _do_chat fallback
+            if ("service_stuck_updating" in err or "service_not_found" in err
+                    or "service_maintenance" in err or "backend_error_500" in err):
+                raise  # v5.25: bubble to _do_chat fallback (SSID fine)
             last_err = e
             # v5.13: short backoff on upstream errors
             time.sleep(_retry_delay(attempt, transport=False))
@@ -1447,8 +1490,10 @@ def _do_chat(model: str, messages: list, ssid_override: str | None,
                     print(f"[FALLBACK] {service_id} retryable: {detail[:60]}", flush=True)
                     last_err = e; continue
                 raise
-            # v5.24: fallback on HTTP errors + service-level failures
-            _fb_triggers = ("500", "404", "400", "service_not_found", "service_stuck_updating")
+            # v5.25: fallback on HTTP errors + service-level failures + maintenance
+            _fb_triggers = ("500", "404", "400", "service_not_found",
+                            "service_stuck_updating", "service_maintenance",
+                            "backend_error_500")
             if any(t in err for t in _fb_triggers) and idx < len(chain) - 1:
                 print(f"[FALLBACK] {service_id} -> {chain[idx+1]}: {err[:80]}", flush=True)
                 last_err = e; continue
@@ -1679,17 +1724,17 @@ def _startup_resi_health_check():
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.24] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.25] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.24] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.25] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     _startup_resi_health_check()
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.24] balance monitor started", flush=True)
-    print("[unitool-proxy v5.24] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking", flush=True)
+    print("[unitool-proxy v5.25] balance monitor started", flush=True)
+    print("[unitool-proxy v5.25] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc|GrokReasoningStrip|GeminiMaintenance: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
