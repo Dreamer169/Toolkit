@@ -208,7 +208,11 @@ async def login_one(email: str, password: str, headless: bool = True,
 
         # ── 1. 加载页面 ──────────────────────────────────────────────────────
         _log(f"  [{email}] goto {TARGET}")
-        await tab.go_to(TARGET)
+        try:
+            await tab.go_to(TARGET)
+        except Exception as _nav_e:
+            _log(f"  [{email}] go_to FAILED: {_nav_e}")
+            return {"ok": False, "email": email, "reason": "navigation_timeout"}
         await asyncio.sleep(4)
 
         # ── 2. bypass signup Turnstile (page load) ───────────────────────────

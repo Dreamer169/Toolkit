@@ -954,6 +954,9 @@ def run_login(email, password):
                 return ssid
         if line.startswith("[FAIL]"):
             log(f"[login] FAIL: {line}")
+    if rc != 0:
+        _stderr_s = stderr.decode(errors="replace") if isinstance(stderr, bytes) else str(stderr)
+        log(f"[login] stderr: {_stderr_s[-300:]}")
     log(f"[login] 未拿到 ssid rc={rc}")
     return ""
 
@@ -1065,18 +1068,24 @@ def main():
     if not ssid:
         log("[ssid] 注册返回无 ssid，尝试从 DB 读...")
         ssid = db_get_ssid_from_notes(account_id)
-    if not ssid:
-        log("[ssid] DB 也无 ssid，尝试 unitool_login.py 兜底登录...")
+    # Fix G6: email_sent registration -> skip login, mark verify_pending
+    if not ssid and reg_result.get("ok"):
+        log("[ssid] email_sent: account unverified, skip login -> verify_rescue")
+    elif not ssid:
+        log("[ssid] DB \u4e5f\u65e0 ssid\uff0c\u5c1d\u8bd5 unitool_login.py \u5c3c\u5e95\u767b\u5f55...")
         if check_resources():
             ssid = run_login(email, password)
         else:
-            log("[ssid] 资源不足，跳过登录兜底")
+            log("[ssid] \u8d44\u6e90\u4e0d\u8db3\uff0c\u8df3\u8fc7\u767b\u5f55\u5c3c\u5e95")
 
     if not ssid:
-        log(f"[main] ❌ 三级兜底均失败，无法获取 ssid")
-        db_mark_fail(account_id, "no_ssid_after_3_fallbacks")
+        if reg_result.get("ok"):
+            log("[main] \u26a0 email_sent OK but no ssid -> unitool_verify_pending")
+            db_mark_fail(account_id, "verify_email_not_found")
+        else:
+            log(f"[main] \u274c three-fallback fail, no ssid")
+            db_mark_fail(account_id, "no_ssid_after_3_fallbacks")
         return
-
     log(f"[main] ✅ ssid 获取成功 len={len(ssid)}")
 
     # ── Step 6: 保存完整 ssid（覆盖截断版本）──────────────────────────────────
