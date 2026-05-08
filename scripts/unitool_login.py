@@ -34,7 +34,7 @@ TARGET       = "https://unitool.ai/en/entry"
 LOGIN_NA     = "60e02e33f743e14f5dab1dc42181ba1e746fd4d925"
 AUTH_COOKIE  = "__Secure-unitool-ssid"
 # 住宅代理端口列表（与 chain_v3 保持一致）
-RESI_PORTS = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
+RESI_PORTS = list(range(10851, 10860)) + list(range(10870, 10890))  # 29 ports (matches resi_pool)
 
 # v5.14: RESI port health check cache (valid 5 min)
 _resi_healthy_ports: list = []

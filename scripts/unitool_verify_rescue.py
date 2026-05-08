@@ -270,8 +270,8 @@ def click_verify_link(verify_url):
     log(f"[curl] ssid={'len='+str(len(ssid)) if ssid else 'NONE'} to_entry={to_entry}")
     return ssid, to_entry
 
-def login_via_script(email, password):
-    """调用 unitool_login.py 子进程登录，返回ssid"""
+def _run_login_once(email, password):
+    """unitool_login.py 单次尝试，返回 ssid 或 ''"""
     if not os.path.exists(LOGIN_SCRIPT):
         log(f"[login] not found: {LOGIN_SCRIPT}"); return ""
     env = {**os.environ, "DISPLAY": ":99", "PYTHONUNBUFFERED": "1"}
@@ -285,18 +285,18 @@ def login_via_script(email, password):
             stdout, stderr = proc.communicate(timeout=180)
         except subprocess.TimeoutExpired:
             proc.kill(); proc.communicate()
-            log("[login] timeout")
-            return ""
+            log("[login] timeout"); return ""
         for line in stdout.splitlines():
             if line.startswith("[OK]"):
                 parts = line.split("|")
                 if len(parts) >= 3:
                     ssid = parts[2].strip()
-                    log(f"[login] ssid len={len(ssid)}")
-                    return ssid
+                    if ssid:
+                        log(f"[login] ssid len={len(ssid)}")
+                        return ssid
             if line.startswith("[FAIL]"):
                 log(f"[login] {line}")
-        if stderr: log(f"[login] stderr: {stderr[-200:]}")
+        if stderr: log(f"[login] stderr: {stderr[-300:]}")
     except KeyboardInterrupt:
         if proc:
             try: proc.kill(); proc.communicate()
@@ -307,7 +307,25 @@ def login_via_script(email, password):
         log(f"[login] err: {e}")
     return ""
 
-# ── 主逻辑 ────────────────────────────────────────────────────────────────────
+
+def login_via_script(email, password):
+    """
+    调用 unitool_login.py 登录，返回 ssid。
+    修复: 第一次 ERR_TIMED_OUT 时清除 RESI 健康缓存再重试，最多 2 次。
+    """
+    _resi_caches = ["/tmp/unitool_resi_healthy.json", "/tmp/unitool_resi_cache.json"]
+    for attempt in range(1, 3):
+        if attempt > 1:
+            for _cf in _resi_caches:
+                try: os.remove(_cf)
+                except Exception: pass
+            log(f"[login] 已清除 RESI 健康缓存, 重试 #{attempt}...")
+            time.sleep(5)
+        ssid = _run_login_once(email, password)
+        if ssid:
+            return ssid
+        log(f"[login] 尝试 {attempt}/2 失败")
+    return ""
 def cleanup_stale_processing(max_age_min=30):
     """清理卡死超过 max_age_min 分钟的 unitool_processing 锁（防孤儿锁永久阻塞）"""
     try:

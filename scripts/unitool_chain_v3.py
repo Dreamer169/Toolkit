@@ -145,6 +145,7 @@ def _sigterm_handler(signum, frame):
     log("[signal] SIGTERM received — exiting cleanly")
     sys.exit(0)
 signal.signal(signal.SIGTERM, _sigterm_handler)
+signal.signal(signal.SIGINT,  _sigterm_handler)  # PM2默认发 SIGINT
 
 # ── DB 工具 ───────────────────────────────────────────────────────────────────
 def db_connect():

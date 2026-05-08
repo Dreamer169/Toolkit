@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.26
+unitool.ai → OpenAI 兼容反代 v5.27
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -522,7 +522,7 @@ NATIVE_SERVICES = {
     # ChatGPT（实探 /api/services?parent_id=chatgpt 确认，含 minimum_balance）
     "gpt-5", "gpt-5.5", "gpt-5.4", "gpt-5-nano",
     "gpt5.1", "gpt5.2",
-    "gpt-4o", "gpt-4o-mini", "gpt-4-1", "gpt-4-5",  # v5.26: gpt-4-5 back (active=1 confirmed 2026-05-08)
+    "gpt-4o", "gpt-4o-mini", "gpt-4-1", "gpt-4-5",  # v5.27: gpt-4-5 back (active=1 confirmed 2026-05-08)
     "gpt-o1", "gpt-o1-mini", "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini",
     # Gemini
     "gemini-3.1-pro", "gemini-3-pro",
@@ -535,7 +535,8 @@ NATIVE_SERVICES = {
 
 # 需要 reasoning_effort 的服务
 REASONING_SERVICES = {"gemini-3.1-pro", "gemini-3-pro", "grok",
-                      "gpt-o1", "gpt-o1-mini", "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini"}
+                      "gpt-o1", "gpt-o1-mini", "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini",
+                      "gpt-5-nano",  # v5.27: unitool requires reasoning_effort for this endpoint}
 
 # v5.11: 从 API 实探更新 minimum_balance（用于日志报警，balance=0 的服务不 mark dead）
 FREE_SERVICES = {"gpt-4o-mini", "gpt-5-nano"}  # minimum_balance=0，余额耗尽也可用
@@ -554,7 +555,7 @@ POLL_PRIMARY_SERVICES = {
     "claude-sonnet", "claude-opus",
     "claude-opus-4-6",   # v5.24: stream empty but poll returns CHERRY
     "grok",              # v5.25: widget/stream embeds reasoning-block-marker div; poll clean
-    # o-series reasoning models (v5.26): widget/stream unreliable; paginatedMessages returns clean answer
+    # o-series reasoning models (v5.27): widget/stream unreliable; paginatedMessages returns clean answer
     "gpt-o1", "gpt-o1-mini",
     "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini",
 }
@@ -657,19 +658,23 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
     "gpt-5-nano":       ["gpt-5",        "gpt-5.5",  "gpt-4-1",  "gpt-4o-mini"],
     "gemini-3.1-pro":   ["gemini-3-pro", "gpt-5.5",   "gpt-5"],
     "gemini-3-pro":     ["gemini-3.1-pro","gpt-5.5",   "gpt-5"],
-    # o-series reasoning models (v5.26)
-    "gpt-o1":       ["gpt-o3",     "gpt-o4-mini", "gpt-o3-mini"],
-    "gpt-o1-mini":  ["gpt-o1",     "gpt-o4-mini", "gpt-o3-mini"],
-    "gpt-o3":       ["gpt-o3-pro", "gpt-o4-mini", "gpt-o3-mini"],
-    "gpt-o3-mini":  ["gpt-o4-mini","gpt-o3",      "gpt-o3-pro"],
-    "gpt-o3-pro":   ["gpt-o3",     "gpt-o4-mini", "gpt-o3-mini"],
-    "gpt-o4-mini":  ["gpt-o3-mini","gpt-o3",      "gpt-o3-pro"],
-    # gpt-4-5 back (v5.26: unitool API active=1 confirmed)
+    # o-series reasoning models (v5.27; v5.27: add non-o-series last-resort fallback)
+    # All o-series currently broken on unitool (TypeError/No completion choices):
+    # → fallback chain extends to gpt-5/gpt-5.5 so requests still succeed
+    "gpt-o1":       ["gpt-o3",     "gpt-o4-mini", "gpt-o3-mini", "gpt-5", "gpt-5.5"],
+    "gpt-o1-mini":  ["gpt-o1",     "gpt-o4-mini", "gpt-o3-mini", "gpt-5", "gpt-5.5"],
+    "gpt-o3":       ["gpt-o3-pro", "gpt-o4-mini", "gpt-o3-mini", "gpt-5", "gpt-5.5"],
+    "gpt-o3-mini":  ["gpt-o4-mini","gpt-o3",      "gpt-o3-pro",  "gpt-5", "gpt-5.5"],
+    "gpt-o3-pro":   ["gpt-o3",     "gpt-o4-mini", "gpt-o3-mini", "gpt-5", "gpt-5.5"],
+    "gpt-o4-mini":  ["gpt-o3-mini","gpt-o3",      "gpt-o3-pro",  "gpt-5", "gpt-5.5"],
+    # gpt-4-5 back (v5.27: unitool API active=1 confirmed)
     "gpt-4-5":      ["gpt-4-1", "gpt-5", "gpt-5.5"],
+    # grok (v5.27: HTTP 500 from unitool; add non-grok fallback)
+    "grok":         ["gpt-5.5", "gpt-5", "gpt5.2"],
 }
 
 MODEL_ALIASES = {
-    "gpt-4": "gpt-4-1",  # v5.26: gpt-4-5 removed from aliases (real service again)
+    "gpt-4": "gpt-4-1",  # v5.27: gpt-4-5 removed from aliases (real service again)
     "gpt-4-turbo": "gpt-4-1", "gpt-4-turbo-preview": "gpt-4-1",
     "gpt-4.1": "gpt-4-1", "gpt-4o": "gpt-4o", "gpt-4o-search": "gpt-4o",
     "gpt-4.5": "gpt-4-1", "gpt-4o-2024-11-20": "gpt-4-1",
@@ -1023,7 +1028,7 @@ def _paginated_poll(chat_id: int, user_msg_id: int, ssid: str,
     - 连续空结果检测：连续 N 次无法获取消息 → 提前放弃
     """
     empty_streak = 0
-    updating_streak = 0  # v5.26: was missing, caused UnboundLocalError on first poll
+    updating_streak = 0  # v5.27: was missing, caused UnboundLocalError on first poll
     MAX_EMPTY    = 10   # 连续 10 次（7s）无有效消息 → 认定 chat 失效
     while time.time() < deadline:
         if abort and abort.is_set():
@@ -1048,7 +1053,7 @@ def _paginated_poll(chat_id: int, user_msg_id: int, ssid: str,
             if status == "ended":
                 if cur_txt:
                     return cur_txt
-                raise Exception("service_error: service ended with empty content")  # v5.26
+                raise Exception("service_error: service ended with empty content")  # v5.27
             # v5.24: backend hang guard (gemini status=updating with no content)
             if status in ("updating", "wait", "") and not cur_txt:
                 updating_streak += 1
@@ -1504,10 +1509,15 @@ def _do_chat(model: str, messages: list, ssid_override: str | None,
                 raise
             if "service_error:" in err:
                 detail = err.split("service_error:", 1)[-1].strip()
+                # v5.27: always try fallback chain (retryable or not) if more services remain;
+                # previously non-retryable service_error raised immediately, skipping fallback.
                 if _is_retryable(detail):
                     print(f"[FALLBACK] {service_id} retryable: {detail[:60]}", flush=True)
-                    last_err = e; continue
-                raise
+                elif idx < len(chain) - 1:
+                    print(f"[FALLBACK] {service_id} svc_err → {chain[idx+1]}: {detail[:60]}", flush=True)
+                else:
+                    raise
+                last_err = e; continue
             # v5.25: fallback on HTTP errors + service-level failures + maintenance
             _fb_triggers = ("500", "404", "400", "service_not_found",
                             "service_stuck_updating", "service_maintenance",
@@ -1531,10 +1541,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def _json(self, code: int, data: dict):
         body = json.dumps(data, ensure_ascii=False).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self._cors(); self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self._cors(); self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass  # client disconnected before response
 
     def do_OPTIONS(self):
         self.send_response(200); self._cors(); self.end_headers()
@@ -1742,17 +1755,17 @@ def _startup_resi_health_check():
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.26] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.27] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.26] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.27] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     _startup_resi_health_check()
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.26] balance monitor started", flush=True)
-    print("[unitool-proxy v5.26] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc|GrokReasoningStrip|GeminiMaintenance: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking", flush=True)
+    print("[unitool-proxy v5.27] balance monitor started", flush=True)
+    print("[unitool-proxy v5.27] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc|GrokReasoningStrip|GeminiMaintenance|GrokFallback|OSeriesFallback|NanoReasoning|SvcErrFallback: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
