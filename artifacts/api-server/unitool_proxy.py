@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.18
+unitool.ai → OpenAI 兼容反代 v5.19
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -586,32 +586,39 @@ MODEL_ALIASES = {
 # Strips "-rp" from model name before resolution; reduces history to RP_MAX_HISTORY.
 RP_MAX_HISTORY = 4   # -rp mode history turns (vs default MAX_HISTORY_TURNS=12)
 
-def _resolve_model(model: str) -> tuple[str, bool]:
-    """Returns (service_id, reduced_prompt_mode).
-    v5.16: strips -rp suffix before resolving model name.
-    Mirrors ds2api reducedPromptModelSuffix (-rp): ds2api uploads history as a
-    file via /api/v0/file/upload_file and sends only latest user msg as prompt.
-    Our implementation: reduce max_turns to RP_MAX_HISTORY=4 (semantically equiv).
+def _resolve_model(model: str) -> tuple[str, bool, bool]:
+    """Returns (service_id, reduced_prompt_mode, no_thinking).
+    v5.19: strips -nothinking suffix; injects <no_thinking/> in [System:] prefix.
+    Mirrors ds2api noThinkingModelSuffix: disables reasoning for o-series models.
     """
-    reduced = False
-    if model.lower().endswith("-rp"):
-        model   = model[:-3]   # strip -rp suffix
+    reduced     = False
+    no_thinking = False
+    ml = model.lower()
+    if ml.endswith("-nothinking"):
+        model       = model[:-len("-nothinking")]
+        no_thinking = True
+        ml          = model.lower()
+    if ml.endswith("-rp"):
+        model   = model[:-3]
         reduced = True
-    if model in NATIVE_SERVICES:  return model, reduced
-    if model in MODEL_ALIASES:    return MODEL_ALIASES[model], reduced
+    if model in NATIVE_SERVICES:  return model, reduced, no_thinking
+    if model in MODEL_ALIASES:    return MODEL_ALIASES[model], reduced, no_thinking
     m = model.lower()
-    if "claude" in m:   return "claude-sonnet", reduced
-    if "gemini" in m:   return "gemini-3.1-pro", reduced
-    if "grok" in m:     return "grok", reduced
-    if "deepseek" in m: return "gpt-5.5", reduced
-    return "gpt-5.5", reduced
+    if "claude" in m:   return "claude-sonnet", reduced, no_thinking
+    if "gemini" in m:   return "gemini-3.1-pro", reduced, no_thinking
+    if "grok" in m:     return "grok",           reduced, no_thinking
+    if "deepseek" in m: return "gpt-5.5",        reduced, no_thinking
+    return "gpt-5.5", reduced, no_thinking
 
 ALL_MODELS   = sorted(NATIVE_SERVICES | set(MODEL_ALIASES.keys()))
 # v5.16: expose -rp variants of common services in model list
 _RP_EXPOSED = ["gpt-4o-mini-rp", "gpt-5.5-rp", "gpt-4-1-rp",
                "claude-sonnet-rp", "gpt-5-rp", "gpt-o3-mini-rp"]
+# v5.19: -nothinking variants (reasoning models that support <no_thinking/>)
+_NT_EXPOSED = ["gpt-o3-mini-nothinking", "gpt-o3-nothinking", "gpt-o4-mini-nothinking",
+               "gpt-o1-mini-nothinking", "gpt-o1-nothinking", "gpt-5-nothinking"]
 MODELS_LIST  = [{"id": m, "object": "model", "created": 1700000000, "owned_by": "unitool"}
-                for m in sorted(set(ALL_MODELS) | set(_RP_EXPOSED))]
+                for m in sorted(set(ALL_MODELS) | set(_RP_EXPOSED) | set(_NT_EXPOSED))]
 
 # ─── 核心 API 调用 ────────────────────────────────────────────────────────────
 def _api(method: str, path: str, body=None, ssid: str = ""):
@@ -621,7 +628,7 @@ def _api(method: str, path: str, body=None, ssid: str = ""):
     with urlopen(req, context=ctx, timeout=35) as r:
         return json.loads(r.read())
 
-def _fmt(messages: list, max_turns: int = MAX_HISTORY_TURNS) -> str:
+def _fmt(messages: list, max_turns: int = MAX_HISTORY_TURNS, no_thinking: bool = False) -> str:
     """v5.16: truncate history to last max_turns (mirrors DS split_history_prompt).
     Always keep system prompt + last N non-system messages.
 
@@ -666,7 +673,10 @@ def _fmt(messages: list, max_turns: int = MAX_HISTORY_TURNS) -> str:
             content = " ".join(c.get("text", "") for c in content
                                if isinstance(c, dict) and c.get("type") == "text")
         if role == "system":
-            parts.append(f"[System: {content}]")
+            # v5.19: -nothinking injects <no_thinking/> tag into [System:] prefix
+            # Mirrors ds2api noThinkingModelSuffix — disables extended thinking
+            nt_pfx = "<no_thinking/>" if no_thinking else ""
+            parts.append(f"[System: {nt_pfx}{content}]")
         elif role == "assistant":
             parts.append(f"[Assistant: {content}]")
         else:
@@ -1088,12 +1098,13 @@ def _try_service(service_id: str, content: str, entries: list,
 
 def _do_chat(model: str, messages: list, ssid_override: str | None,
              chunk_cb=None, abort: AbortFlag | None = None) -> str:
-    primary_id, reduced = _resolve_model(model)  # v5.16: unpack (service_id, rp_mode)
+    primary_id, reduced, no_thinking = _resolve_model(model)  # v5.19: 3-tuple
     max_turns  = RP_MAX_HISTORY if reduced else MAX_HISTORY_TURNS
-    content    = _fmt(messages, max_turns=max_turns)
+    content    = _fmt(messages, max_turns=max_turns, no_thinking=no_thinking)
     _record_rpm()  # v5.13: RPM counter
     rp_tag = " [rp]" if reduced else ""
-    print(f"[REQ] {model}\u2192{primary_id}{rp_tag} turns={max_turns} msgs={len(messages)}", flush=True)
+    nt_tag = " [nothinking]" if no_thinking else ""
+    print(f"[REQ] {model}\u2192{primary_id}{rp_tag}{nt_tag} turns={max_turns} msgs={len(messages)}", flush=True)
 
     if ssid_override and len(ssid_override) > 50:
         entries = [_make_entry(ssid_override, "header")]
@@ -1356,17 +1367,17 @@ def _startup_resi_health_check():
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.18] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.19] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.18] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.19] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     _startup_resi_health_check()
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.18] balance monitor started", flush=True)
-    print("[unitool-proxy v5.18] features: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck", flush=True)
+    print("[unitool-proxy v5.19] balance monitor started", flush=True)
+    print("[unitool-proxy v5.19] features: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
