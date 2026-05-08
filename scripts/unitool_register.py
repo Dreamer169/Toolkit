@@ -21,55 +21,23 @@ unitool_pipeline.py — unitool 注册完整流水线（下游脚本）
 
 import asyncio, glob, json, os, random, re, socket, subprocess, sys, time, urllib.parse, urllib.request
 import psycopg2
+import sys as _sys_rp2
+_sys_rp2.path.insert(0, "/data/Toolkit/scripts") if "/data/Toolkit/scripts" not in _sys_rp2.path else None
+import resi_pool as _rpool
 
 DB_URL = "postgresql://postgres:postgres@localhost/toolkit"
 CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
 DISPLAY = ":99"
 # 住宅代理端口列表（与 chain_v3 / unitool_batch_refcode 保持一致）
-RESI_PORTS = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
+RESI_PORTS = list(range(10851, 10860)) + list(range(10870, 10890))  # 29 candidates via resi_pool
 
-# v5.14: RESI port health check cache (valid 5 min)
-_resi_healthy_ports: list = []
-_resi_health_ts: float = 0.0
-
-def _check_resi_port(port: int) -> bool:
-    """Quick test: can this SOCKS5 port actually proxy HTTPS to unitool.ai?"""
-    try:
-        proc = subprocess.Popen(
-            ["curl", "-s", "--max-time", "5",
-             "--proxy", f"socks5h://127.0.0.1:{port}",
-             "-o", "/dev/null", "-w", "%{{http_code}}",
-             "https://unitool.ai/en/entry"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        try:
-            out, _ = proc.communicate(timeout=7)
-        except subprocess.TimeoutExpired:
-            proc.kill(); proc.communicate(); return False
-        return out.decode().strip() not in ("", "000")
-    except Exception:
-        return False
-
+# v5.23: RESI health delegated to resi_pool (easy_proxies failure-threshold + TTL blacklist)
 def _get_healthy_resi_ports() -> list:
-    """All ports checked in parallel; max wall-time ~7s instead of 32s."""
-    global _resi_healthy_ports, _resi_health_ts
-    import time as _t, concurrent.futures
-    if _resi_healthy_ports and _t.time() - _resi_health_ts < 300:
-        return _resi_healthy_ports
-    t0 = _t.time()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(RESI_PORTS)) as _ex:
-        _ok = list(_ex.map(_check_resi_port, RESI_PORTS))
-    healthy = [p for p, ok in zip(RESI_PORTS, _ok) if ok]
-    if not healthy:
-        healthy = list(RESI_PORTS)  # fallback
-    _resi_healthy_ports = healthy
-    _resi_health_ts = _t.time()
-    print(f"[RESI] healthy={healthy} ({len(healthy)}/{len(RESI_PORTS)}) in {_t.time()-t0:.1f}s", flush=True)
-    return healthy
+    return _rpool.refresh()
 
 def _pick_resi_port(email: str) -> int:
-    """Pick RESI port from healthy set; falls back to full list if none pass check."""
-    ports = _get_healthy_resi_ports()
-    return ports[hash(email) % len(ports)]
+    """Pick RESI port via resi_pool round-robin with failure tracking."""
+    return _rpool.pick(hint=hash(email) % 97)
 
 CHROME = None
 for p in ["/data/cache/ms-playwright/chromium-1208/chrome-linux64/chrome",

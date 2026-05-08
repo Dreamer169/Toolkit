@@ -23,6 +23,9 @@ PM2 模式：每次处理一个账号后退出，PM2 自动重启继续下一个
 import atexit, glob, json, os, re, signal, subprocess, sys, time
 import urllib.parse, urllib.request
 import psycopg2
+import sys as _sys_rp
+_sys_rp.path.insert(0, "/data/Toolkit/scripts") if "/data/Toolkit/scripts" not in _sys_rp.path else None
+import resi_pool as _rpool
 
 # ── 常量 ──────────────────────────────────────────────────────────────────────
 LOG            = "/tmp/unitool_chain_v3.log"
@@ -37,7 +40,7 @@ PROXY_PORT     = 8089                    # unitool_proxy.py 监听端口
 API_BASE       = "http://localhost:8081/api"  # api-server 地址
 
 MAX_REF_SLOTS   = 10    # unitool 每个 ref_code 最多邀请人数
-RESI_PORTS = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
+RESI_PORTS = list(range(10851, 10860)) + list(range(10870, 10890))  # v3.2: 29 candidates
 
 # CF Worker 直连代理（proxy.jimjio.indevs.in），提供 CF 边缘 IP 多样性
 # 用于 ref-code API 查询/创建的 IP 分散（RESI 失败时自动降级）
@@ -76,43 +79,11 @@ def _cf_worker_api(target_url: str, method: str, ssid: str,
         return ""
 
 
-# v5.15: parallel RESI health cache (shared across this process)
-_chain_healthy_ports: list = []
-_chain_health_ts: float = 0.0
-_chain_health_lock = __import__("threading").Lock()
-
-def _check_resi_port_chain(port: int) -> bool:
-    try:
-        p = subprocess.Popen(
-            ["curl", "-s", "--max-time", "5",
-             "--proxy", f"socks5h://127.0.0.1:{port}",
-             "-o", "/dev/null", "-w", "%{http_code}",
-             "https://unitool.ai/en/entry"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        try:
-            out, _ = p.communicate(timeout=7)
-        except subprocess.TimeoutExpired:
-            p.kill(); p.communicate(); return False
-        return out.decode().strip() not in ("", "000")
-    except Exception:
-        return False
-
+# v3.2: RESI health delegated to resi_pool
+# (easy_proxies-style: failure threshold + TTL blacklist, 29 candidates vs old 9)
 def _get_healthy_resi_ports_chain() -> list:
-    """Parallel check, cached 5 min."""
-    global _chain_healthy_ports, _chain_health_ts
-    import concurrent.futures
-    with _chain_health_lock:
-        if _chain_healthy_ports and time.time() - _chain_health_ts < 300:
-            return list(_chain_healthy_ports)
-    t0 = time.time()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(RESI_PORTS)) as ex:
-        ok = list(ex.map(_check_resi_port_chain, RESI_PORTS))
-    healthy = [p for p, v in zip(RESI_PORTS, ok) if v] or list(RESI_PORTS)
-    with _chain_health_lock:
-        _chain_healthy_ports = healthy
-        _chain_health_ts = time.time()
-    log(f"[RESI] healthy={healthy} ({len(healthy)}/{len(RESI_PORTS)}) in {time.time()-t0:.1f}s")
-    return healthy
+    """Delegate to resi_pool: parallel probe 29 ports, cached 5 min."""
+    return _rpool.refresh()
 WATERMARK       = 5     # fresh 账号低于此值时触发 outlook 补充
 REPLENISH_CNT   = 5     # 单次补充目标数量
 COOLDOWN_S      = 300   # 水位补充冷却（15 分钟）
@@ -466,11 +437,13 @@ def create_ref_code_via_proxy(ssid: str, email: str, port_hint: int = 0) -> str:
             except subprocess.TimeoutExpired:
                 try: _crf_proc.kill(); _crf_proc.communicate()
                 except Exception: pass
+                _rpool.report_failure(port)
                 continue
             if _crf_proc.returncode != 0 or not _crf_stdout.strip():
                 continue
             data = json.loads(_crf_stdout)
             if "code" in data:
+                _rpool.report_success(port)
                 log(f"[ref_create] ✅ port={port} → ref_code={data['code']} email={email}")
                 return data["code"]
             err = data.get("error", "")
@@ -991,7 +964,7 @@ def main():
     # FIX F: 先通过代理 POST /api/ref-codes 为新账号创建专属码，再 run_reflink 读取保存
     log(f"[main] ▶ Step7a: 通过代理为 {email} 创建专属 ref_code...")
     # 用账号 id 做偏移，确保不同账号使用不同 RESI IP
-    _port_hint = account_id % len(RESI_PORTS)
+    _port_hint = account_id  # passed as hint to resi_pool.pick() inside create_ref_code_via_proxy
     created_code = create_ref_code_via_proxy(ssid, email, port_hint=_port_hint)
     if created_code:
         log(f"[main] ✅ 代理创建成功: ref_code={created_code}")

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.22
+unitool.ai → OpenAI 兼容反代 v5.23
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -40,7 +40,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
 # ── 住宅代理配置 ──────────────────────────────────────────────────────────────
-RESI_PORTS = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
+RESI_PORTS = list(range(10851, 10860)) + list(range(10870, 10890))  # v5.23: 29 candidates (was 9)
 
 def _pick_resi_port(ssid: str) -> int:
     """v5.13: skip unhealthy ports (mirrors ds2api pickHealthyProxy).
@@ -79,6 +79,18 @@ def _drop_resi_session(port: int):
     with _resi_health_lock:
         _resi_port_health[port] = time.time() + 60
     print(f"[RESI] port={port} unhealthy 60s", flush=True)
+    # v5.23: cross-report to resi_pool failure counter
+    try:
+        import sys as _s; _s.path.insert(0, "/data/Toolkit/scripts") if "/data/Toolkit/scripts" not in _s.path else None
+        import resi_pool as _rp; _rp.report_failure(port)
+    except Exception:
+        pass
+    # v5.23: cross-report to resi_pool failure counter
+    try:
+        import sys as _s; _s.path.insert(0, "/data/Toolkit/scripts") if "/data/Toolkit/scripts" not in _s.path else None
+        import resi_pool as _rp; _rp.report_failure(port)
+    except Exception:
+        pass
 
 
 PORT     = int(os.environ.get("PORT", 8089))
@@ -1198,7 +1210,7 @@ def _do_media_job(model: str, service_id: str, prompt: str,
       - BUG1: streaming mode now sends final_text via chunk_cb (was lost before)
       - BUG2: _active counter now properly tracked (pool concurrency limiting works)
       - BUG3: _record_rpm() called so RPM counter is accurate
-    v5.22 fixes:
+    v5.23 fixes:
       - abort param: media job checks abort_flag so client disconnect stops the poll
       - seedance/happyhorse fast-fail: raise clear error instead of 200s timeout
       - sdxl min_balance corrected in comments (3.74/7.49/37.49, not 0.1)
@@ -1244,7 +1256,7 @@ def _do_media_job(model: str, service_id: str, prompt: str,
         if result.get("error"):
             err = result["error"]
             bal = result.get("message", "")
-            # v5.22: seedance/happyhorse fast-fail (avoids 200s timeout)
+            # v5.23: seedance/happyhorse fast-fail (avoids 200s timeout)
             if "Unsupported service" in err and service_id in {"seedance", "happyhorse"}:
                 raise Exception(
                     f"{service_id}: API returns 'Unsupported service' via /api/chats/messages. "
@@ -1619,17 +1631,17 @@ def _startup_resi_health_check():
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.22] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.23] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.22] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.23] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     _startup_resi_health_check()
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.22] balance monitor started", flush=True)
-    print("[unitool-proxy v5.22] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking", flush=True)
+    print("[unitool-proxy v5.23] balance monitor started", flush=True)
+    print("[unitool-proxy v5.23] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
