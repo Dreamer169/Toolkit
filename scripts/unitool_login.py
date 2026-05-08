@@ -58,16 +58,20 @@ def _check_resi_port(port: int) -> bool:
         return False
 
 def _get_healthy_resi_ports() -> list:
+    """All ports checked in parallel; max wall-time ~7s instead of 32s."""
     global _resi_healthy_ports, _resi_health_ts
-    import time as _t
+    import time as _t, concurrent.futures
     if _resi_healthy_ports and _t.time() - _resi_health_ts < 300:
         return _resi_healthy_ports
-    healthy = [p for p in RESI_PORTS if _check_resi_port(p)]
+    t0 = _t.time()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(RESI_PORTS)) as _ex:
+        _ok = list(_ex.map(_check_resi_port, RESI_PORTS))
+    healthy = [p for p, ok in zip(RESI_PORTS, _ok) if ok]
     if not healthy:
-        healthy = RESI_PORTS  # fallback: use all if check fails
+        healthy = list(RESI_PORTS)  # fallback
     _resi_healthy_ports = healthy
     _resi_health_ts = _t.time()
-    print(f"[RESI] healthy ports: {healthy}", flush=True)
+    print(f"[RESI] healthy={healthy} ({len(healthy)}/{len(RESI_PORTS)}) in {_t.time()-t0:.1f}s", flush=True)
     return healthy
 
 def _pick_resi_port(email: str) -> int:
