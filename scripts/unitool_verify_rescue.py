@@ -82,8 +82,8 @@ def get_relogin_account():
     cur.execute("""
         SELECT a.id, a.email, a.password
         FROM accounts a
-        WHERE a.ref_activated = true
-          AND a.platform = 'outlook'
+        WHERE a.platform = 'outlook'
+          AND a.tags LIKE '%unitool_registered%'
           AND LENGTH(COALESCE(a.password,'')) >= 8
           AND a.tags NOT LIKE '%unitool_processing%'
           AND a.tags NOT LIKE '%balance_exhausted%'
