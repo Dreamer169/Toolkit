@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.4
+unitool.ai → OpenAI 兼容反代 v5.9
 ====================================
 改进 (相对 v5.2):
   1. 真实 SSE 流式输出 — 后台线程轮询消息 API，增量推送 delta（不再按空格假分块）
@@ -19,9 +19,31 @@ unitool.ai → OpenAI 兼容反代 v5.4
 """
 import json, time, uuid, threading, ssl, os, re, sys, subprocess
 import psycopg2
+import requests as _rq
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
+
+# ── 住宅代理配置（与 chain_v3 / register / login 保持一致）────────────────────
+RESI_PORTS = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
+
+def _pick_resi_port(ssid: str) -> int:
+    return RESI_PORTS[hash(ssid[:16] if ssid else "x") % len(RESI_PORTS)]
+
+# 每个代理端口对应一个 requests.Session（连接复用 + socks5h 代理）
+_resi_sessions: dict = {}
+_resi_sess_lock = threading.Lock()
+
+def _get_resi_session(port: int) -> _rq.Session:
+    with _resi_sess_lock:
+        if port not in _resi_sessions:
+            sess = _rq.Session()
+            sess.proxies = {
+                "https": f"socks5h://127.0.0.1:{port}",
+                "http":  f"socks5h://127.0.0.1:{port}",
+            }
+            _resi_sessions[port] = sess
+        return _resi_sessions[port]
 
 PORT     = int(os.environ.get("PORT", 8089))
 BASE     = "https://unitool.ai"
@@ -283,14 +305,34 @@ def _hdrs(ssid: str) -> dict:
     }
 
 def _check_balance(ssid: str) -> float | None:
+    """v5.6: balance 检查也走住宅代理"""
     try:
-        req = Request(f"{BASE}/api/user/billing-accounts",
-                      headers=_hdrs(ssid), method="GET")
-        with urlopen(req, context=ctx, timeout=10) as r:
-            d = json.loads(r.read())
+        port = _pick_resi_port(ssid)
+        sess = _get_resi_session(port)
+        resp = sess.get(f"{BASE}/api/user/billing-accounts",
+                        headers=_hdrs(ssid), timeout=10, verify=True)
+        if resp.status_code != 200:
+            return None
+        d = resp.json()
         return sum(float(a.get("value", 0)) for a in d.get("accounts", []))
     except Exception:
         return None
+
+def _check_session_valid(ssid: str) -> bool:
+    """v5.6: 主动探 /api/auth/session 检测 ssid 是否仍有效"""
+    try:
+        port = _pick_resi_port(ssid)
+        sess = _get_resi_session(port)
+        resp = sess.get(f"{BASE}/api/auth/session",
+                        headers=_hdrs(ssid), timeout=8, verify=True)
+        if resp.status_code != 200:
+            return False
+        d = resp.json()
+        # NextAuth 格式：{"auth": {"user": {...}}} 或 NextAuth v4: {"user": {...}}
+        user = (d.get("auth") or {}).get("user") or d.get("user")
+        return bool(user and user.get("id"))
+    except Exception:
+        return False
 
 def _balance_monitor_loop():
     time.sleep(120)
@@ -305,10 +347,18 @@ def _balance_monitor_loop():
                     continue
                 if now - e.get("_balance_ts", 0) < BALANCE_CHECK_INTERVAL:
                     continue
+                # v5.6: 先做 session 有效性检查，再做 balance 检查
+                lbl = e["label"]
+                sess_ok = _check_session_valid(e["ssid"])
+                if not sess_ok:
+                    print(f"[SES] ⚠ {lbl}: session invalid (ssid expired)", flush=True)
+                    _mark_dead(e["ssid"], secs=300, reason="auth_error")
+                    e["_balance_ts"] = now  # 避免反复检查
+                    time.sleep(2)
+                    continue
                 bal = _check_balance(e["ssid"])
                 e["_balance_ts"] = now
                 e["balance"] = bal
-                lbl = e["label"]
                 if bal is None:
                     print(f"[BAL] {lbl}: check failed", flush=True)
                 elif bal <= 0:
@@ -324,18 +374,23 @@ def _balance_monitor_loop():
 
 # ─── 服务/模型映射 ────────────────────────────────────────────────────────────
 NATIVE_SERVICES = {
-    "gpt-5", "gpt-5.5", "gpt-4-1", "gpt5.1", "gpt5.2",
-    "gpt-4o-mini", "gpt-5.4",
-    # [v5.3] gpt-5-nano: unitool backend 禁用 reasoning → 触发 retryable 后降级到 gpt-5
-    "gpt-5-nano",
-    # [v5.4] gemini-3.1-pro / grok: 原生支持（需特殊 chat_settings + options）
-    "gemini-3.1-pro",
+    # ChatGPT sub-services (from /api/services?parent_id=chatgpt)
+    "gpt-5", "gpt-5.5", "gpt-5.4", "gpt-5-nano",
+    "gpt5.1", "gpt5.2",
+    "gpt-4o", "gpt-4o-mini", "gpt-4-1", "gpt-4-5",
+    "gpt-o1", "gpt-o1-mini", "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini",
+    # Gemini sub-services
+    "gemini-3.1-pro", "gemini-3-pro",
+    # xAI
     "grok",
-    "claude-sonnet", "claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-6",
+    # Claude sub-services (from /api/services?parent_id=claude)
+    "claude-sonnet", "claude-sonnet-4-5", "claude-sonnet-4-6",
+    "claude-opus", "claude-opus-4-6", "claude-haiku",
 }
 
 # [v5.4] 需要 reasoning_effort 的服务：chat 创建用 /api/chats + chat_settings, 消息带 options
-REASONING_SERVICES = {"gemini-3.1-pro", "grok"}
+# [v5.7] o-series 也属于 reasoning 服务（需要 reasoning_effort options）
+REASONING_SERVICES = {"gemini-3.1-pro", "gemini-3-pro", "grok", "gpt-o1", "gpt-o1-mini", "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini"}
 
 FALLBACK_CHAINS: dict[str, list[str]] = {
     "gpt-5":            ["gpt-5.5",   "gpt-5.4",  "gpt-4-1",  "gpt-4o-mini"],
@@ -345,7 +400,9 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
     "gpt5.2":           ["gpt5.1",    "gpt-5",    "gpt-5.5",  "gpt-4-1"],
     "gpt-4-1":          ["gpt-5.4",   "gpt-5",    "gpt-4o-mini"],
     "gpt-4o-mini":      ["gpt-4-1",   "gpt-5.4",  "gpt-5"],
-    "claude-opus-4-6":  ["claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet"],
+    "claude-opus-4-6":  ["claude-opus", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet"],
+    "claude-opus":      ["claude-opus-4-6", "claude-sonnet-4-6", "claude-sonnet"],
+    "claude-haiku":     ["claude-sonnet", "claude-sonnet-4-5"],
     "claude-sonnet-4-6":["claude-sonnet-4-5", "claude-sonnet",     "claude-opus-4-6"],
     "claude-sonnet-4-5":["claude-sonnet-4-6", "claude-sonnet",     "claude-opus-4-6"],
     "claude-sonnet":    ["claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-6"],
@@ -356,17 +413,17 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
 
 MODEL_ALIASES = {
     "gpt-4": "gpt-4-1", "gpt-4-turbo": "gpt-4-1", "gpt-4-turbo-preview": "gpt-4-1",
-    "gpt-4.1": "gpt-4-1", "gpt-4o": "gpt-4-1", "gpt-4o-search": "gpt-4-1",
+    "gpt-4.1": "gpt-4-1", "gpt-4o": "gpt-4o", "gpt-4o-search": "gpt-4o",
     "gpt-4.5": "gpt-4-1", "gpt-4o-2024-11-20": "gpt-4-1",
     "gpt-4o-mini-2024-07-18": "gpt-4o-mini", "gpt-4o-mini-search": "gpt-4o-mini",
     "gpt-3.5-turbo": "gpt-4o-mini", "gpt-3.5-turbo-0613": "gpt-4o-mini",
     "gpt-3.5-turbo-16k": "gpt-4o-mini", "text-davinci-003": "gpt-4o-mini",
-    "o1": "gpt-5.5", "o1-mini": "gpt-5.5", "o1-pro": "gpt-5.5",
-    "o1-preview": "gpt-5.5", "o3": "gpt-5.5", "o3-mini": "gpt-5.5",
-    "o4-mini": "gpt-5.5", "o4": "gpt-5.5",
+    "o1": "gpt-o1", "o1-mini": "gpt-o1-mini", "o1-pro": "gpt-o1",
+    "o1-preview": "gpt-o1", "o3": "gpt-o3", "o3-mini": "gpt-o3-mini",
+    "o4-mini": "gpt-o4-mini", "o4": "gpt-o3-pro",
     "gpt-5-turbo": "gpt-5", "chatgpt-5": "gpt-5", "chatgpt-5-turbo": "gpt-5",
     "chatgpt-5.5": "gpt-5.5", "chatgpt-5.5-turbo": "gpt-5.5", "chatgpt": "gpt-5.5",
-    "claude-opus": "claude-opus-4-6", "claude-opus-4": "claude-opus-4-6",
+    "claude-opus": "claude-opus", "claude-opus-4": "claude-opus",
     "claude-opus-4-5": "claude-opus-4-6", "claude-opus-4.5": "claude-opus-4-6",
     "claude-opus-4.6": "claude-opus-4-6", "claude-opus-4-latest": "claude-opus-4-6",
     "claude-opus-latest": "claude-opus-4-6",
@@ -374,13 +431,15 @@ MODEL_ALIASES = {
     "claude": "claude-sonnet", "claude-sonnet-4": "claude-sonnet",
     "claude-3-7-sonnet": "claude-sonnet", "claude-3-7-sonnet-20250219": "claude-sonnet",
     "claude-3-5-sonnet": "claude-sonnet", "claude-3-5-sonnet-20241022": "claude-sonnet",
-    "claude-3-5-haiku": "claude-sonnet", "claude-3-5-haiku-20241022": "claude-sonnet",
-    "claude-3-haiku": "claude-sonnet", "claude-3-haiku-20240307": "claude-sonnet",
+    "claude-3-5-haiku": "claude-haiku", "claude-3-5-haiku-20241022": "claude-haiku",
+    "claude-haiku-3-5": "claude-haiku",
+    "claude-3-haiku": "claude-haiku", "claude-3-haiku-20240307": "claude-haiku",
     "claude-3-sonnet": "claude-sonnet", "claude-3-sonnet-20240229": "claude-sonnet",
     "claude-haiku": "claude-sonnet", "claude-3-5-sonnet-latest": "claude-sonnet",
     "claude-3-7-sonnet-latest": "claude-sonnet", "claude-sonnet-latest": "claude-sonnet",
     # [v5.4] gemini: 所有别名 → gemini-3.1-pro（原生支持）
     "gemini": "gemini-3.1-pro", "gemini-pro": "gemini-3.1-pro",
+    "gemini-3": "gemini-3-pro", "gemini-3-flash": "gemini-3-pro",
     "gemini-flash": "gemini-3.1-pro", "gemini-ultra": "gemini-3.1-pro",
     "gemini-2.5-pro": "gemini-3.1-pro", "gemini-2.5-flash": "gemini-3.1-pro",
     "gemini-2.0-pro": "gemini-3.1-pro", "gemini-2.0-flash": "gemini-3.1-pro",
@@ -408,9 +467,10 @@ MODELS_LIST  = [{"id": m, "object": "model", "created": 1700000000, "owned_by": 
 
 # ─── 核心 API 调用 ───────────────────────────────────────────────────────────
 def _api(method: str, path: str, body=None, ssid: str = ""):
+    """v5.7: 直连 unitool.ai (保持原 urllib 路径；socks5h 仅用于 balance/session 健康检查)"""
     data = json.dumps(body).encode() if body is not None else None
     req  = Request(f"{BASE}{path}", data=data, headers=_hdrs(ssid), method=method)
-    with urlopen(req, context=ctx, timeout=30) as r:
+    with urlopen(req, context=ctx, timeout=35) as r:
         return json.loads(r.read())
 
 def _fmt(messages: list) -> str:
@@ -476,7 +536,7 @@ def _send_and_collect_core(entry: dict, service_id: str, content: str,
                           "chat_settings": _rsettings},
                     ssid=entry["ssid"])
     else:
-        chat = _api("POST", "/api/provider-runtime/chats",
+        chat = _api("POST", "/api/chats",
                     body={"service_id": service_id, "title": ""}, ssid=entry["ssid"])
     chat_id = chat.get("id")
     if not chat_id:
@@ -488,6 +548,12 @@ def _send_and_collect_core(entry: dict, service_id: str, content: str,
     result = _api("POST", f"/api/chats/{chat_id}/messages",
                   body={"content": content, "attachments": [], "options": _msg_opts},
                   ssid=entry["ssid"])
+    # [v5.9] 检测 "Unsupported service" (账号无 regular 余额，bonus 无法使用付费服务)
+    if result.get("error"):
+        err_msg = result["error"]
+        if "Unsupported service" in err_msg or "Unknown" in err_msg:
+            raise Exception(f"unsupported_service: {err_msg}")
+        raise Exception(f"msg_send_error: {err_msg}")
     user_msg_id = result.get("message", {}).get("id")
     if not user_msg_id:
         raise Exception(f"no message id: {result}")
@@ -496,7 +562,7 @@ def _send_and_collect_core(entry: dict, service_id: str, content: str,
     deadline        = time.time() + timeout
     prev_content    = ""
     active_stable   = 0   # 连续 "active" 且内容不变的次数，到 2 次则视为完成
-    interval        = 1.5
+    interval        = 0.8  # [v5.8] 缩短初始间隔，更快感知 ended 状态
 
     while time.time() < deadline:
         time.sleep(interval)
@@ -520,13 +586,14 @@ def _send_and_collect_core(entry: dict, service_id: str, content: str,
                 raise Exception(f"service_error: {cur_txt[:300]}")
             if status in ("ended", "done") and cur_txt:
                 return cur_txt
-            # "active" 且连续 2 轮内容不变 → 视为完成
+            # "active" 且连续多轮内容不变 → 兜底退出（主信号是 status=ended/done）
+            # [v5.8] 阈值从 2 提升到 10（≈10秒无变化），避免截断长输出（ds-free-api 教训）
             if status == "active" and cur_txt:
                 active_stable += 1
-                if active_stable >= 2:
+                if active_stable >= 10:
                     return cur_txt
             break   # 找到匹配消息后退出 for，防止历史消息错误重置 active_stable
-        interval = 1.0
+        interval = 0.7  # [v5.8] 快轮询
 
     raise TimeoutError(f"timeout chat={chat_id} service={service_id}")
 
@@ -565,6 +632,10 @@ def _try_service(service_id: str, content: str, entries: list,
             last_err = e
             continue
         except Exception as e:
+            err = str(e)
+            if "unsupported_service" in err:
+                # [v5.9] 账号无 regular 余额 → 标记 balance_exhausted (24h)
+                _mark_dead(entry["ssid"], secs=86400, reason="balance_exhausted")
             last_err = e
             continue
     raise Exception(f"all ssids failed for {service_id}: {last_err}")
@@ -788,15 +859,15 @@ class ThreadedServer(HTTPServer):
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.4] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.9] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.4] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.6] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.4] balance monitor started", flush=True)
+    print("[unitool-proxy v5.8] balance monitor started", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()

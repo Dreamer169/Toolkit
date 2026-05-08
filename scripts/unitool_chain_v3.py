@@ -282,11 +282,14 @@ def _api_check_ref_code(ssid: str, account_id: int = 0) -> tuple:
     if entry and (time.time() - entry.get("ts", 0)) < REF_CODE_CACHE_TTL:
         return (entry.get("code", ""), entry.get("conversions", 0))
     try:
+        _rc_port = RESI_PORTS[hash(str(account_id)) % len(RESI_PORTS)]
         r = subprocess.run(
-            ["curl", "-s", "-b", f"__Secure-unitool-ssid={ssid}",
-             "-H", "Accept: application/json", "--max-time", "8",
+            ["curl", "-s",
+             "--socks5-hostname", f"127.0.0.1:{_rc_port}",
+             "-b", f"__Secure-unitool-ssid={ssid}",
+             "-H", "Accept: application/json", "--max-time", "10",
              "https://unitool.ai/api/user/ref-code"],
-            capture_output=True, text=True, timeout=12)
+            capture_output=True, text=True, timeout=15)
         raw = r.stdout.strip()
         if raw == "null" or not raw:
             cache[key] = {"code": "", "conversions": 0, "ts": time.time()}
