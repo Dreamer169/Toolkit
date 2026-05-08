@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.11
+unitool.ai → OpenAI 兼容反代 v5.11.1
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -352,19 +352,27 @@ def _check_balance(ssid: str) -> float | None:
     except Exception:
         return None
 
-def _check_session_valid(ssid: str) -> bool:
+def _check_session_valid(ssid: str) -> bool | None:
+    """返回 True=有效, False=明确失效(401/无user), None=网络异常无法判断。
+    Bug fix: 网络超时/RESI不通不应等同于 auth 失败，避免启动时误杀所有账号。"""
     try:
         port = _pick_resi_port(ssid)
         sess = _get_resi_session(port)
         resp = sess.get(f"{BASE}/api/auth/session",
                         headers=_hdrs(ssid), timeout=8, verify=True)
-        if resp.status_code != 200:
+        if resp.status_code == 401:
             return False
+        if resp.status_code != 200:
+            return None   # 其他状态码：网络/服务问题，不确定
         d = resp.json()
+        if d.get("error"):          # {"error":"Session cookie not found"}
+            return False
         user = (d.get("auth") or {}).get("user") or d.get("user")
         return bool(user and user.get("id"))
+    except (_rq.exceptions.Timeout, _rq.exceptions.ConnectionError):
+        return None   # 网络问题，不确定
     except Exception:
-        return False
+        return None
 
 def _balance_monitor_loop():
     time.sleep(120)
@@ -380,7 +388,13 @@ def _balance_monitor_loop():
                     continue
                 lbl = e["label"]
                 sess_ok = _check_session_valid(e["ssid"])
-                if not sess_ok:
+                if sess_ok is None:
+                    # 网络不通/RESI超时，无法判断，跳过本轮不 mark dead
+                    print(f"[SES] ? {lbl}: session check inconclusive (network)", flush=True)
+                    e["_balance_ts"] = now
+                    time.sleep(1)
+                    continue
+                if sess_ok is False:
                     print(f"[SES] ⚠ {lbl}: session invalid (ssid expired)", flush=True)
                     _mark_dead(e["ssid"], secs=300, reason="auth_error")
                     e["_balance_ts"] = now
@@ -539,39 +553,53 @@ def _is_retryable(msg: str) -> bool:
 
 def _pick_entry(entries: list) -> dict:
     """v5.11: 空闲最长优先（对标 DS AccountPool.get_account idle-longest-first）。
-    选取 _last_released 最小（最久未使用）的 SSID，最大化冷却间隔。"""
+    选取 _last_released 最小（最久未使用）的 SSID，最大化冷却间隔。
+    Bug fix v5.11.1: 初始 _last_released 全为 0 时加随机扰动，避免所有请求
+    集中打第一个 entry（round-robin 退化问题）。"""
+    import random
     if len(entries) == 1:
         return entries[0]
-    now = time.time()
-    # 按空闲时间降序（空闲最久的在前）
-    return min(entries, key=lambda e: e.get("_last_released", 0.0))
+    # 为 _last_released=0 的条目（从未使用）加微小随机扰动，保证均匀分散
+    def _sort_key(e):
+        ts = e.get("_last_released", 0.0)
+        if ts == 0.0:
+            # 从未使用的 entry 等价排序，用随机数打散，避免永远选第一个
+            return -random.random()
+        return ts
+    return min(entries, key=_sort_key)
 
 # ─── v5.11: paginatedMessages 辅助 ──────────────────────────────────────────
 _CONN_RESET_ERRS = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
 
 def _api_paginated(chat_id: int, ssid: str, limit: int = 20) -> list:
     """GET /api/chats/{id}/paginatedMessages via socks5h → data[] list.
-    连接重置时自动刷新会话重试一次。"""
-    port = _pick_resi_port(ssid)
-    for attempt in range(2):
+    Bug fix v5.11.1: 捕获 ReadTimeout（不只是 ConnectionError），
+    超时时换用不同 RESI 端口重试一次。"""
+    primary_port = _pick_resi_port(ssid)
+    # 超时时换不同端口重试
+    import random
+    alt_ports = [p for p in RESI_PORTS if p != primary_port]
+    ports_to_try = [primary_port, random.choice(alt_ports) if alt_ports else primary_port]
+    for port in ports_to_try:
         sess = _get_resi_session(port)
         try:
             r = sess.get(
                 f"{BASE}/api/chats/{chat_id}/paginatedMessages",
                 params={"limit": limit},
                 headers=_hdrs(ssid),
-                timeout=15,
+                timeout=12,
             )
             return r.json().get("data", [])
-        except _rq.exceptions.ConnectionError as e:
+        except (_rq.exceptions.ConnectionError, _rq.exceptions.Timeout) as e:
+            # 清除坏会话，尝试下一个端口
             _drop_resi_session(port)
-            if attempt == 0:
-                continue
-            print(f"[paginatedMessages] chat={chat_id} conn error (retry exhausted): {e}", flush=True)
-            return []
+            print(f"[paginatedMessages] chat={chat_id} port={port} net_err: {type(e).__name__}", flush=True)
+            continue
         except Exception as e:
             print(f"[paginatedMessages] chat={chat_id} error: {e}", flush=True)
             return []
+    print(f"[paginatedMessages] chat={chat_id} all ports exhausted", flush=True)
+    return []
 
 # ─── v5.11: widget/stream 真实 SSE（改进 SSE 解析器） ───────────────────────
 def _widget_stream_sse(chat_id: int, msgs_snapshot: list, ssid: str,
@@ -641,7 +669,8 @@ def _widget_stream_sse(chat_id: int, msgs_snapshot: list, ssid: str,
                                     chunk_cb(delta)
                         except Exception:
                             pass
-    except _rq.exceptions.ConnectionError as e:
+    except (_rq.exceptions.ConnectionError, _rq.exceptions.Timeout) as e:
+        # Bug fix v5.11.1: ReadTimeout 也需要清除会话并上抛，让 _try_service 计 conn_errors
         _drop_resi_session(port)
         raise
     return full
@@ -793,8 +822,9 @@ def _try_service(service_id: str, content: str, entries: list,
         try:
             return _send_and_collect(entry, service_id, content,
                                      chunk_cb=chunk_cb, abort=abort)
-        except _rq.exceptions.ConnectionError as e:
-            # v5.11: 连续连接错误计数
+        except (_rq.exceptions.ConnectionError, _rq.exceptions.Timeout) as e:
+            # v5.11.1 Bug fix: ReadTimeout 也属于连接错误，需计数
+            # _rq.exceptions.Timeout 不是 Python 内置 TimeoutError，之前漏掉了
             with _lock:
                 entry["_conn_errors"] = entry.get("_conn_errors", 0) + 1
                 cerrs = entry["_conn_errors"]
@@ -918,7 +948,7 @@ class Handler(BaseHTTPRequestHandler):
                     "relogin":     e.get("_relogin_pending", False),
                     "active":      e.get("_active", 0),
                     "conn_errors": e.get("_conn_errors", 0),
-                    "idle_secs":   round(now - e.get("_last_released", 0), 1),
+                    "idle_secs":   round(now - e["_last_released"], 1) if e.get("_last_released") else None,
                 } for e in _pool]
             live = sum(1 for a in info if not a["dead"])
             return self._json(200, {"pool_size": len(_pool), "live": live, "accounts": info})
@@ -1059,16 +1089,16 @@ class ThreadedServer(HTTPServer):
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.11] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.11.1] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.11] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.11.1] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.11] balance monitor started", flush=True)
-    print("[unitool-proxy v5.11] features: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc", flush=True)
+    print("[unitool-proxy v5.11.1] balance monitor started", flush=True)
+    print("[unitool-proxy v5.11.1] features: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|BugFix3", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
