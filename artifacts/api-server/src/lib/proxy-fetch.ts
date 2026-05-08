@@ -1,6 +1,7 @@
 import { Buffer } from "buffer";
 import { execFileSync } from "child_process";
 import { ProxyAgent, type Dispatcher } from "undici";
+import { nestingFetch as _nestingFetch } from "./nesting-pool.js";
 
 // ============================================================================
 // Microsoft outbound HTTP proxy resolver
@@ -144,6 +145,20 @@ function isProxyConnectError(err: unknown): boolean {
 export async function microsoftFetch(input: Parameters<typeof fetch>[0], init: RequestInit = {}, preferredProxy?: string | null): Promise<Response> {
   const now = Date.now();
   if (now < circuitOpenUntil) return fetch(input, init);
+
+  // v2 NESTING: 无指定代理时优先走 jimjio nesting-proxy Worker (不消耗 jimhacker 配额)
+  if (!preferredProxy) {
+    try {
+      return await _nestingFetch(input, init);
+    } catch (err) {
+      // fallback to xray SS pool below
+      const msg = String((err as { message?: string })?.message ?? err ?? "");
+      if (!msg.includes("circuit open")) {
+        // transient error — log silently, do not re-throw
+      }
+    }
+  }
+
   const dispatcher = createProxyAgent(preferredProxy);
   if (!dispatcher) return fetch(input, init);
   try {

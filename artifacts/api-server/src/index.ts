@@ -6,6 +6,7 @@ import { startLiveVerifyPoller } from "./lib/live-verify-poller.js";
 import { startAccountHealthcheck } from "./lib/account-healthcheck.js";
 import { startReplitReplayAudit } from "./lib/replit-replay-audit.js";
 import { startCfPoolMaintainer } from "./lib/cf-pool-maintainer.js";
+import { startNestingPool } from "./lib/nesting-pool.js";
 import { startProxyMaintenance } from "./routes/data.js";
 import { attachCdpRelayWebSocket } from "./lib/cdp_relay_ws.js";
 import { PersistenceManager } from "./lib/persistence-manager.js";
@@ -63,6 +64,7 @@ const server = await _listenWithRetry();
   // v7.78r — Replit 账号 replay-audit 周期校验 (默认 6h, env REPLAY_AUDIT_INTERVAL_HOURS)
   startReplitReplayAudit();
   startCfPoolMaintainer();
+  startNestingPool();   // jimjio Worker pool — SOCKS5 多 Colo 出口
   startProxyMaintenance();
   attachCdpRelayWebSocket(server);
   // v1: 启动时回收上次 api-server 退出后留下的 'running' 僵尸 job
