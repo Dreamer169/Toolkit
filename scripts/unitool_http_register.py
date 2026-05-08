@@ -584,6 +584,7 @@ async def _pydoll_register(
             result["raw"] = raw_body
 
             # ── Step 3: 解析 RSC 响应 ────────────────────────────────────────
+            # Turnstile digest 错误（CF 拒绝 token）
             digest_m = re.search(r'"digest"\s*:\s*"(\d+)"', raw_body)
             if digest_m:
                 d = digest_m.group(1)
@@ -596,20 +597,28 @@ async def _pydoll_register(
             if bid:
                 result["build_id"] = bid.group(1)
 
-            # 成功判断：HTTP 200 且无 error digest
-            if http_status == 200 and "1:E{" not in raw_body and not digest_m:
+            # 业务逻辑错误（RSC stream: 1:{"error":"..."}）
+            # v3.2: 区分 CF 验证错误 vs 业务错误（invalid email / already registered 等）
+            biz_err_m = re.search(r'1:\{"error"\s*:\s*"([^"]+)"', raw_body)
+            if biz_err_m:
+                biz_msg = biz_err_m.group(1)
+                result["error"] = biz_msg[:120]
+                result["error_type"] = "business"
+                log(f"[pydoll] 业务错误: {biz_msg[:80]}")
+            elif http_status == 200 and "1:E{" not in raw_body and not digest_m:
+                # 无 CF 错误 + 无业务错误 → 成功（邮件已发出）
                 result["ok"] = True
                 log(f"[pydoll] ✓ 注册成功 {email}")
-            # 兜底：邮件提示词
+            elif not digest_m and not biz_err_m:
+                result["error"] = fetch_result.get("error", f"http_{http_status}")
+
+            # 兜底：邮件提示词（后端有时直接返回文本）
             raw_lower = raw_body.lower()
             if any(w in raw_lower for w in ("sent link", "check your email",
                                              "verify your email", "follow the link")):
                 result["ok"] = True
+                result.pop("error", None)
                 log(f"[pydoll] ✓ 邮件确认词检测到")
-
-            if not result["ok"] and not digest_m:
-                # fetch 本身 error（网络等）
-                result["error"] = fetch_result.get("error", f"http_{http_status}")
 
     except Exception as e:
         result["error"] = str(e)[:200]
@@ -740,7 +749,7 @@ async def http_register_hybrid(
     log(f"[hybrid] {email} ref={ref_code or '-'} port={port}")
 
     result = await _pydoll_register(email, password, ref_code=ref_code, resi_port=port)
-    result["method"] = "hybrid_v3.1"
+    result["method"] = "hybrid_v3.2"
 
     if result.get("ok"):
         log(f"[hybrid] ✓ 注册成功 {email}")
