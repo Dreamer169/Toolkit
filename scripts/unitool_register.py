@@ -325,19 +325,28 @@ def click_verify_link(verify_url):
     cookie_file = "/tmp/unitool_verify_cookies.txt"
     log(f"[verify] 点击链接: {verify_url[:80]}...")
     
-    result = subprocess.run([
-        "curl", "-s", "-D", "-",
-        "-c", cookie_file, "-b", cookie_file,
-        "-L", "--max-redirs", "5",
-        "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-        "-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "-H", "Accept-Language: en-US,en;q=0.5",
-        "-o", "/tmp/unitool_verify_resp.html",
-        verify_url
-    ], capture_output=True, text=True, timeout=30)
-    
-    headers = result.stdout
-    log(f"  [verify] curl status: {result.returncode}")
+    _cv_proc = subprocess.Popen(
+        ["curl", "-s", "-D", "-",
+         "-c", cookie_file, "-b", cookie_file,
+         "-L", "--max-redirs", "5",
+         "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+         "-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+         "-H", "Accept-Language: en-US,en;q=0.5",
+         "-o", "/tmp/unitool_verify_resp.html",
+         verify_url],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        _cv_out, _ = _cv_proc.communicate(timeout=30)
+    except KeyboardInterrupt:
+        try: _cv_proc.kill(); _cv_proc.communicate()
+        except Exception: pass
+        raise
+    except subprocess.TimeoutExpired:
+        try: _cv_proc.kill(); _cv_proc.communicate()
+        except Exception: pass
+        _cv_out = b""
+    headers = _cv_out.decode("utf-8", errors="ignore")
+    log(f"  [verify] curl status: {_cv_proc.returncode}")
     
     # 从headers找Set-Cookie: __Secure-unitool-ssid
     ssid_from_header = ""
@@ -675,11 +684,21 @@ async def unitool_login_for_ssid(email, password):
     log(f"[unitool_login] 登录: {email}")
     
     env = {**os.environ, "DISPLAY": DISPLAY, "PYTHONUNBUFFERED": "1"}
-    result = subprocess.run(
+    _ls_proc = subprocess.Popen(
         ["python3", login_script, "--email", email, "--password", password, "--no-headless"],
-        capture_output=True, text=True, timeout=180, env=env
-    )
-    for line in result.stdout.split("\n"):
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    try:
+        _ls_out, _ls_err = _ls_proc.communicate(timeout=180)
+    except KeyboardInterrupt:
+        try: _ls_proc.kill(); _ls_proc.communicate()
+        except Exception: pass
+        raise
+    except subprocess.TimeoutExpired:
+        try: _ls_proc.kill(); _ls_proc.communicate()
+        except Exception: pass
+        log("  [login] timeout after 180s")
+        return ""
+    for line in _ls_out.decode("utf-8", errors="ignore").splitlines():
         if line.startswith("[OK]"):
             parts = line.split("|")
             if len(parts) >= 3:
@@ -688,9 +707,9 @@ async def unitool_login_for_ssid(email, password):
                 return ssid
         if line.startswith("[FAIL]"):
             log(f"  [login] FAIL: {line}")
-    
-    if result.stderr:
-        log(f"  [login] stderr: {result.stderr[-300:]}")
+    _ls_err_txt = _ls_err.decode("utf-8", errors="ignore") if _ls_err else ""
+    if _ls_err_txt:
+        log(f"  [login] stderr: {_ls_err_txt[-300:]}")
     return ""
 
 # ── 完整pipeline ─────────────────────────────────────────────────────────────
