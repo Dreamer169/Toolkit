@@ -1,6 +1,6 @@
 # unitool 反向代理技术文档
 
-> **当前版本**：unitool_proxy.py **v5.28**
+> **当前版本**：unitool_proxy.py **v5.29**
 > **最后更新**：2026-05-08
 > **文件位置**：VPS `45.205.27.69` → `/data/Toolkit/artifacts/api-server/unitool_proxy.py`
 > **PM2 进程**：id=72，名称 `unitool-proxy`，端口 **8089**
@@ -82,6 +82,7 @@ unitool_proxy :8089
     ├── [文本服务] _do_chat()
     │     ├── _resolve_model() → service_id + FALLBACK_CHAINS
     │     ├── ImmediateFallback? → skip to fallback[0]  (v5.28)
+    │     ├── OSeriesChainFix: o-series chain → gpt-5/gpt-5.5 directly  (v5.29)
     │     ├── _try_service()   → 遍历 SSID 池
     │     └── _send_and_collect_core()
     │           ├── POST /api/chats → chat_id
@@ -451,6 +452,17 @@ curl http://localhost:8089/reload-ssids
 
 ## 12. Bug 修复历史
 
+### v5.29（2026-05-08）— OSeriesChainFix
+
+| Bug | 修复方式 |
+|-----|---------|
+| **o-series ImmediateFallback 后仍超时 60s** | 链里的其他 o-series（如 gpt-o3-mini→gpt-o4-mini）也是坏的；v5.29 将所有 o-series 链改为直接跳 `[gpt-5, gpt-5.5, gpt-5.4, gpt-4-1]` |
+
+**验证（2026-05-08 串行）：**
+- gpt-o3-mini：OK 18s（→gpt-5）
+- gpt-o4-mini：OK 13.8s（→gpt-5）
+- gpt-5-nano：OK 10.5s（→gpt-5）
+
 ### v5.28（2026-05-08）— ImmediateFallback
 
 | Bug | 修复方式 |
@@ -524,6 +536,7 @@ OSeriesFallback      — o-series 链末加入 gpt-5/gpt-5.5（v5.27）
 NanoReasoning        — gpt-5-nano 注入 reasoning_effort=high（v5.27）
 SvcErrFallback       — 非 retryable service_error 也走 fallback 链（v5.27）
 ImmediateFallback    — 已知坏服务直接跳 fallback，不等 90s（v5.28）
+OSeriesChainFix      — o-series fallback 链移除其他 o-series，直接到 gpt-5（v5.29）
 ```
 
 ---
@@ -557,4 +570,4 @@ pm2 logs xray --lines 20 --nostream
 
 ---
 
-*文档由 Replit Agent 维护，基于实探验证。v5.28 — 2026-05-08*
+*文档由 Replit Agent 维护，基于实探验证。v5.29 — 2026-05-08*
