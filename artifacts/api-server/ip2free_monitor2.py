@@ -237,7 +237,26 @@ def solve_one(email, pw, port):
             page.wait_for_timeout(3000)
             page.wait_for_selector("#email", timeout=12000)
 
+            # ip2free MUI input starts as readOnly — click triggers React onFocus to make editable
+            page.locator("#email").click()
+            page.wait_for_timeout(800)
+            # Force-remove readOnly via JS if React hasn't cleared it yet
+            page.evaluate("""
+                (function() {
+                    var inp = document.querySelector('#email');
+                    if (inp && inp.readOnly) {
+                        Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+                        inp.removeAttribute('readonly');
+                        inp.readOnly = false;
+                        inp.dispatchEvent(new Event('focus', {bubbles: true}));
+                        inp.dispatchEvent(new Event('click', {bubbles: true}));
+                    }
+                })()
+            """)
+            page.wait_for_timeout(300)
             page.locator("#email").fill(email)
+            page.locator("#password").click()
+            page.wait_for_timeout(300)
             page.locator("#password").fill(pw)
             page.wait_for_timeout(300)
             # Accept terms checkbox if present

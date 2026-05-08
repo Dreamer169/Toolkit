@@ -14,8 +14,9 @@ Usage:
 import sys, time, subprocess, json, argparse, datetime, concurrent.futures
 sys.path.insert(0, "/root/Toolkit/scripts")
 
-PROBE_TARGET  = "https://www.google.com/generate_204"
-PROBE_TIMEOUT = 5
+PROBE_TARGET  = "http://www.gstatic.com/generate_204"  # HTTP (not HTTPS) works through more cheap proxies
+PROBE_TARGET2 = "http://connectivitycheck.gstatic.com/generate_204"  # fallback
+PROBE_TIMEOUT = 3
 MAX_INJECT    = 20   # max proxies to add per run
 MAX_PROBE_W   = 30   # parallel probe workers
 LOG_FILE      = "/tmp/proxyscrape_manager.log"
@@ -52,17 +53,19 @@ def fetch_proxy_list() -> list:
 
 
 def probe_proxy(proxy_str: str) -> bool:
-    try:
-        p = subprocess.Popen(
-            ["curl", "-s", "--max-time", str(PROBE_TIMEOUT),
-             "--proxy", f"socks5h://{proxy_str}",
-             "-o", "/dev/null", "-w", "%{http_code}", PROBE_TARGET],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out, _ = p.communicate(timeout=PROBE_TIMEOUT + 2)
-        ok = out.decode().strip() not in ("", "000")
-        return ok
-    except Exception:
-        return False
+    for target in (PROBE_TARGET, PROBE_TARGET2):
+        try:
+            p = subprocess.Popen(
+                ["curl", "-s", "--max-time", str(PROBE_TIMEOUT),
+                 "--proxy", f"socks5h://{proxy_str}",
+                 "-o", "/dev/null", "-w", "%{http_code}", target],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            out, _ = p.communicate(timeout=PROBE_TIMEOUT + 2)
+            if out.decode().strip() not in ("", "000"):
+                return True
+        except Exception:
+            pass
+    return False
 
 
 def run(max_inject: int = MAX_INJECT) -> dict:
@@ -80,18 +83,31 @@ def run(max_inject: int = MAX_INJECT) -> dict:
         log("ERROR: no proxies fetched")
         return {"ok": False, "injected": 0}
 
-    # 2. Probe in parallel
-    log(f"Probing up to {len(raw)} proxies ({MAX_PROBE_W} workers)...")
+    # 2. Probe in parallel — shuffle + cap candidates to avoid timeout
+    import random
+    random.shuffle(raw)
+    candidates = raw[:min(150, len(raw))]  # max 150 to probe per run
+    log(f"Probing {len(candidates)} candidates ({MAX_PROBE_W} workers, timeout={PROBE_TIMEOUT}s)...")
     t1 = time.time()
     good = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_PROBE_W) as ex:
-        futs = {ex.submit(probe_proxy, p): p for p in raw}
-        for fut in concurrent.futures.as_completed(futs):
+    # Use manual future tracking to cancel early once we have enough
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_PROBE_W)
+    futs = {ex.submit(probe_proxy, p): p for p in candidates}
+    try:
+        for fut in concurrent.futures.as_completed(futs, timeout=90):
             if fut.result():
                 good.append(futs[fut])
+                log(f"  alive: {futs[fut]} ({len(good)}/{max_inject})")
                 if len(good) >= max_inject:
                     break
-    log(f"Probe done: {len(good)}/{len(raw)} alive in {time.time()-t1:.1f}s")
+    except concurrent.futures.TimeoutError:
+        log("WARN: probe round timed out at 90s")
+    finally:
+        # Cancel remaining futures and shutdown without waiting
+        for f in futs:
+            f.cancel()
+        ex.shutdown(wait=False)
+    log(f"Probe done: {len(good)}/{len(candidates)} alive in {time.time()-t1:.1f}s")
 
     # 3. Inject into resi_pool
     injected = 0
