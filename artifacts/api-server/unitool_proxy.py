@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.30
+unitool.ai → OpenAI 兼容反代 v5.32
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -682,11 +682,17 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
 # Confirmed broken 2026-05-08: all o-series (TypeError/no choices/404) +
 # gpt-5-nano (sends reasoning_effort but paginatedMessages never receives reply).
 IMMEDIATE_FALLBACK_SERVICES: set[str] = {
+    # o-series: TypeError/no choices/404 confirmed broken (2026-05-08 probe)
     "gpt-o1", "gpt-o1-mini",
     "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini",
-    "gpt-5-nano",  # reasoning_effort sent OK, but model hangs at unitool (2026-05-08)
-    "claude-opus", # paginatedMessages returns status=error (400 max_tokens) but reply_to
-                   # mismatch causes proxy to miss error and poll until 90s timeout (v5.30)
+    # confirmed broken via 2026-05-08 probe (joshua, balance=10.0):
+    "gpt-5-nano",    # reasoning_effort hang — 400 "Reasoning is mandatory"
+    "claude-opus",   # 400 max_tokens: 32768 > 32000 (max for claude-opus-4-20250514)
+    "gpt-4-5",       # 400 Unsupported service
+    "grok",          # 500 Unexpected end of JSON input
+    "claude-haiku",  # 500 404 model: claude-3-5-haiku-20241022 not found
+    "gemini-3.1-pro",# 500 Unexpected end of JSON input
+    "gemini-3-pro",  # 500 Unexpected end of JSON input
 }
 
 MODEL_ALIASES = {
@@ -1084,6 +1090,13 @@ def _paginated_poll(chat_id: int, user_msg_id: int, ssid: str,
                 updating_streak = 0
             break
         if not matched:
+            # v5.31: claude-opus fix — catch error msgs even if reply_to doesn't match.
+            # unitool may set reply_to=None or wrong id on error responses (e.g. max_tokens 400).
+            for _em in msgs:
+                if _em.get("role") == "assistant" and _em.get("status") == "error":
+                    _etxt = _em.get("content", "") or ""
+                    if _etxt:
+                        raise Exception(f"service_error: {_etxt[:300]}")
             updating_streak = 0
             empty_streak += 1
             if empty_streak >= MAX_EMPTY:
@@ -1509,45 +1522,31 @@ def _do_chat(model: str, messages: list, ssid_override: str | None,
     if not entries:
         raise Exception("ssid pool empty — please login first")
 
-    chain    = [primary_id] + [s for s in FALLBACK_CHAINS.get(primary_id, []) if s != primary_id]
-    last_err = None
-    # v5.30: ImmediateFallback — skip services confirmed broken at unitool API level
-    if primary_id in IMMEDIATE_FALLBACK_SERVICES and len(chain) > 1:
-        print(f"[FALLBACK] {primary_id} immediate-skip (known broken) → {chain[1]}", flush=True)
-        chain = chain[1:]
-    for idx, service_id in enumerate(chain):
-        if idx > 0:
-            print(f"[FALLBACK] {chain[idx-1]} → {service_id}", flush=True)
-        try:
-            return _try_service(service_id, content, entries,
-                                chunk_cb=chunk_cb, abort=abort)
-        except TimeoutError as e:
-            print(f"[FALLBACK] {service_id} timeout", flush=True); last_err = e; continue
-        except Exception as e:
-            err = str(e)
-            if "client_disconnected" in err:
-                raise
-            if "service_error:" in err:
-                detail = err.split("service_error:", 1)[-1].strip()
-                # v5.30: always try fallback chain (retryable or not) if more services remain;
-                # previously non-retryable service_error raised immediately, skipping fallback.
-                if _is_retryable(detail):
-                    print(f"[FALLBACK] {service_id} retryable: {detail[:60]}", flush=True)
-                elif idx < len(chain) - 1:
-                    print(f"[FALLBACK] {service_id} svc_err → {chain[idx+1]}: {detail[:60]}", flush=True)
-                else:
-                    raise
-                last_err = e; continue
-            # v5.25: fallback on HTTP errors + service-level failures + maintenance
-            _fb_triggers = ("500", "404", "400", "service_not_found",
-                            "service_stuck_updating", "service_maintenance",
-                            "backend_error_500", "service_error")
-            if any(t in err for t in _fb_triggers) and idx < len(chain) - 1:
-                print(f"[FALLBACK] {service_id} -> {chain[idx+1]}: {err[:80]}", flush=True)
-                last_err = e; continue
-            raise
-
-    raise Exception(f"all services failed ({chain}): {last_err}")
+    # v5.31: NO model fallback — return actual error for requested model.
+    # SSID-level retry still happens inside _try_service (multiple SSIDs, same service).
+    # For confirmed-broken services, fail fast with clear error instead of 90s hang.
+    if primary_id in IMMEDIATE_FALLBACK_SERVICES:
+        _reasons = {
+            "gpt-o1":     "o-series TypeError/no-choices confirmed broken at unitool (2026-05-08)",
+            "gpt-o1-mini":"o-series TypeError/no-choices confirmed broken at unitool (2026-05-08)",
+            "gpt-o3":     "o-series TypeError/no-choices confirmed broken at unitool (2026-05-08)",
+            "gpt-o3-mini":"o-series TypeError/no-choices confirmed broken at unitool (2026-05-08)",
+            "gpt-o3-pro": "o-series TypeError/no-choices confirmed broken at unitool (2026-05-08)",
+            "gpt-o4-mini":"o-series TypeError/no-choices confirmed broken at unitool (2026-05-08)",
+            "gpt-5-nano":    "reasoning_effort hang + 400 'Reasoning is mandatory' — broken",
+            "claude-opus":   "400 max_tokens: 32768 > 32000 for claude-opus-4-20250514",
+            "gpt-4-5":       "400 Unsupported service — dead at unitool (2026-05-08 probe)",
+            "grok":          "500 Unexpected end of JSON input — backend broken (2026-05-08)",
+            "claude-haiku":  "500 404 model: claude-3-5-haiku-20241022 not found (2026-05-08)",
+            "gemini-3.1-pro":"500 Unexpected end of JSON input — backend broken (2026-05-08)",
+            "gemini-3-pro":  "500 Unexpected end of JSON input — backend broken (2026-05-08)",
+        }
+        reason = _reasons.get(primary_id, "confirmed broken at unitool API level")
+        print(f"[ERR] {primary_id} broken: {reason}", flush=True)
+        raise Exception(
+            f"model_not_available: unitool.ai service '{primary_id}' is currently broken — {reason}"
+        )
+    return _try_service(primary_id, content, entries, chunk_cb=chunk_cb, abort=abort)
 
 # ─── HTTP Handler ─────────────────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
@@ -1775,9 +1774,9 @@ def _startup_resi_health_check():
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.30] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.32] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.30] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.32] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
@@ -1787,8 +1786,8 @@ if __name__ == "__main__":
     except (KeyboardInterrupt, SystemExit):
         pass  # PM2 SIGINT during startup — skip check, continue
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.30] balance monitor started", flush=True)
-    print("[unitool-proxy v5.30] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc|GrokReasoningStrip|GeminiMaintenance|GrokFallback|OSeriesFallback|NanoReasoning|SvcErrFallback|ImmediateFallback|OSeriesChainFix|ClaudeOpusFallback: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking", flush=True)
+    print("[unitool-proxy v5.32] balance monitor started", flush=True)
+    print("[unitool-proxy v5.32] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc|GrokReasoningStrip|GeminiMaintenance|GrokFallback|OSeriesFallback|NanoReasoning|SvcErrFallback|ImmediateFallback|OSeriesChainFix|ClaudeOpusFallback: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking|NoModelFallback|ClaudeOpusErrFix|ProbeConfirmed2026-05-08", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
