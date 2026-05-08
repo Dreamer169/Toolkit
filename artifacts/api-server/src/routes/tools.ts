@@ -6008,8 +6008,8 @@ router.post("/tools/unitool/login", async (req, res) => {
     return;
   }
 
-  const jobId = await jobQueue.create("unitool-login", {});
-  res.json({ success: true, jobId });
+  const job = await jobQueue.create("unitool_login_" + Date.now());
+  res.json({ success: true, jobId: job.jobId });
 
   const args = accounts
     ? ["--accounts", JSON.stringify(accounts), headless ? "--headless" : "--no-headless"]
@@ -6019,8 +6019,6 @@ router.post("/tools/unitool/login", async (req, res) => {
   const proc = _spawnUnitoolLogin("python3", [UNITOOL_LOGIN_SCRIPT, ...args], {
     env: { ...process.env, DISPLAY: ":99", PYTHONUNBUFFERED: "1" },
   });
-
-  // job 对象已由 jobQueue.create 返回，无需再 get
 
   const results: Array<{ ok: boolean; email: string; ssid?: string; reason?: string; cookies?: unknown[] }> = [];
 
@@ -6057,7 +6055,7 @@ router.post("/tools/unitool/login", async (req, res) => {
     const ok = results.filter(r => r.ok).length;
     const total = results.length;
     job.logs.push({ type: ok > 0 ? "ok" : "error", message: `完成: ${ok}/${total} 成功` });
-    await jobQueue.finish(jobId, code ?? -1, ok > 0 ? "done" : "failed");
+    await jobQueue.finish(job.jobId, code ?? -1, ok > 0 ? "done" : "failed");
   });
 });
 
