@@ -627,7 +627,9 @@ class PatchrightController(BaseController):
                 "--disable-infobars",
                 "--disable-extensions",
                 "--disable-gpu",
-                "--disable-software-rasterizer",
+                # v9.50: REMOVED --disable-software-rasterizer
+                # headless Chrome uses SwiftShader (software rasterizer) as its ONLY renderer;
+                # disabling it leaves Chrome with NO rendering backend → renderer crash (TargetClosedError)
                 "--disable-web-security",
                 "--no-first-run",
                 "--no-default-browser-check",
@@ -641,6 +643,7 @@ class PatchrightController(BaseController):
                 "--disable-renderer-backgrounding",
                 # v9.45: 安全内存节省（不干扰多进程架构）
                 "--disable-features=Translate,BackForwardCache,OptimizationHints",
+                "--js-flags=--max-old-space-size=512",  # v9.50: cap per-renderer JS heap
                 # v9.46: (reverted - disable-site-isolation caused renderer crashes)
             ],
             proxy=self._build_proxy_cfg(),

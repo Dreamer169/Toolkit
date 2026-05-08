@@ -1,5 +1,9 @@
 """
 xray CF VLESS relay v3 (dynamic-first)
+v9.48 fixes:
+  - WORKER_IPS: fixed server address list (only DNS-resolved IPs route to Worker)
+  - _make_xray_config: cf_ip now used as ProxyIP param (not server address)
+  - VLESS address roundrobins WORKER_IPS so Worker is always reachable
 v9.47 fixes:
   - VLESS_PATH: add ProxyIP param (sync with /root/Toolkit/xray.json proxy-0)
   - wsSettings: use top-level 'host' field (xray 26+ deprecated headers.Host)
@@ -14,9 +18,20 @@ XRAY_BIN   = os.path.join(os.path.dirname(__file__), "xray", "xray")
 VLESS_UUID = "b3be1361-709c-4cad-824a-732e434ea06f"
 VLESS_SNI  = "iam.jimhacker.qzz.io"
 VLESS_HOST = "iam.jimhacker.qzz.io"
-# v9.47 FIX: include ProxyIP param — must match /root/Toolkit/xray.json proxy-0
-VLESS_PATH = "/?ed=2048&p=ProxyIP.HK.CMLiussss.net%3A443&rm=no"
 VLESS_PORT = 443
+# v9.48 FIX: only these two DNS IPs actually route to jimhacker Worker;
+# random CF pool IPs (104.x.x.x etc.) connect to CF TCP but miss the Worker routing.
+# We use these as the VLESS server address and pass the random pool IP as ProxyIP.
+WORKER_IPS = ["172.67.199.22", "104.21.21.136", "104.21.40.74", "172.67.181.55"]  # all 4 from xray.json
+_worker_ip_cursor = 0
+_worker_ip_lock = threading.Lock()
+
+def _next_worker_ip() -> str:
+    global _worker_ip_cursor
+    with _worker_ip_lock:
+        ip = WORKER_IPS[_worker_ip_cursor % len(WORKER_IPS)]
+        _worker_ip_cursor += 1
+    return ip
 
 # Static port pool (confirmed working via main xray process)
 # ss-in ports exit via real ISP IPs (proxy:false); in-socks exit via CF (fallback)
@@ -81,13 +96,18 @@ def _find_free_port(start: int = 20000, end: int = 29999) -> int:
     raise RuntimeError("no free port")
 
 
-def _make_xray_config(cf_ip: str, socks_port: int) -> dict:
+def _make_xray_config(proxy_ip: str, socks_port: int) -> dict:
     """
-    v9.47 FIX:
-      - wsSettings uses top-level 'host' field (xray 26+ format)
-      - no 'flow' in users (matches main xray.json proxy-0 exactly)
-      - no alpn (forcing h2 breaks WebSocket upgrade on CF Workers)
+    v9.49 FIX:
+      - server address: roundrobin WORKER_IPS (172.67.199.22 / 104.21.21.136)
+        These are the only CF IPs that actually route to jimhacker Worker via SNI.
+      - ProxyIP: fixed ProxyIP.HK.CMLiussss.net:443 (matches working proxy-0 in xray.json)
+        Random CF pool IPs cannot act as ProxyIP relay — only domain-based ProxyIP works.
+      - proxy_ip param (CF pool IP) is logged but not used in routing.
     """
+    worker_ip = _next_worker_ip()
+    FIXED_PATH = "/?ed=2048&p=ProxyIP.HK.CMLiussss.net%3A443&rm=no"
+    print(f"[xray_relay] VLESS server={worker_ip} ProxyIP=ProxyIP.HK.CMLiussss.net (pool_ip={proxy_ip} logged)", flush=True)
     return {
         "log": {"loglevel": "warning"},
         "inbounds": [{
@@ -100,7 +120,7 @@ def _make_xray_config(cf_ip: str, socks_port: int) -> dict:
             "protocol": "vless",
             "settings": {
                 "vnext": [{
-                    "address": cf_ip,
+                    "address": worker_ip,
                     "port": VLESS_PORT,
                     "users": [{"id": VLESS_UUID, "encryption": "none"}]
                 }]
@@ -111,11 +131,10 @@ def _make_xray_config(cf_ip: str, socks_port: int) -> dict:
                 "tlsSettings": {
                     "serverName": VLESS_SNI,
                     "fingerprint": "chrome"
-                    # no alpn: CF auto-negotiates HTTP/1.1 for WS
                 },
                 "wsSettings": {
-                    "path": VLESS_PATH,
-                    "host": VLESS_HOST   # v9.47 FIX: top-level 'host', not headers.Host
+                    "path": FIXED_PATH,
+                    "host": VLESS_HOST
                 }
             }
         }]
@@ -161,7 +180,7 @@ class XrayRelay:
         # Launch dynamic xray instance
         self.socks_port = _find_free_port()
         self.socks5_url = f"socks5://127.0.0.1:{self.socks_port}"
-        cfg = _make_xray_config(self.cf_ip, self.socks_port)
+        cfg = _make_xray_config(self.cf_ip, self.socks_port)  # cf_ip -> ProxyIP; WORKER_IPS -> server addr
         fd, self._cfg_path = tempfile.mkstemp(suffix=".json", prefix="xray_")
         with os.fdopen(fd, "w") as f:
             json.dump(cfg, f)
