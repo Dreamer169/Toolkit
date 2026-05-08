@@ -43,12 +43,12 @@ def _recv_exact(sock: socket.socket, n: int) -> bytes:
     return buf
 
 
-def _socks5_connect(host: str, port: int, socks5_port: int, timeout: int = 10) -> socket.socket:
+def _socks5_connect(host: str, port: int, socks5_port: int, timeout: int = 10, socks5_host: str = "127.0.0.1") -> socket.socket:
     """
     goproxy ConnectDial concept: establish TCP tunnel to (host,port) via SOCKS5.
     Implements RFC 1928 SOCKS5 CONNECT handshake without external libraries.
     """
-    sock = socket.create_connection(("127.0.0.1", socks5_port), timeout=timeout)
+    sock = socket.create_connection((socks5_host, socks5_port), timeout=timeout)
     # Greeting: no-auth
     sock.sendall(b"\x05\x01\x00")
     resp = _recv_exact(sock, 2)
@@ -123,17 +123,20 @@ class NestProxy(http.server.BaseHTTPRequestHandler):
 
         if _USE_RESI:
             tried = set()
+            _sticky_key = f"connect:{host}"
             for _ in range(5):
-                socks_port = _rpool.pick()
-                if socks_port in tried:
-                    continue
-                tried.add(socks_port)
+                proxy_ref = _rpool.pick_sticky(_sticky_key)
+                if proxy_ref in tried:
+                    proxy_ref = _rpool.pick()  # fallback round-robin on repeat
+                tried.add(proxy_ref)
+                p_host, p_port = _rpool.proxy_host_port(proxy_ref)
                 try:
-                    remote = _socks5_connect(host, port, socks_port, timeout=10)
-                    _rpool.report_success(socks_port)
+                    remote = _socks5_connect(host, port, p_port, timeout=10, socks5_host=p_host)
+                    _rpool.report_ref_success(proxy_ref)
                     break
                 except Exception:
-                    _rpool.report_failure(socks_port)
+                    _rpool.report_ref_failure(proxy_ref)
+                    _rpool.release_session(_sticky_key)
 
         if remote is None:
             # Fallback: direct TCP (VPS IP)

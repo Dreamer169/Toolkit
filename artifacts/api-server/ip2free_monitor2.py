@@ -4,6 +4,13 @@ ip2free 监控 + 自动求解器 v2.0 — 修复 JS 双大括号 + 使用 locato
 """
 import sys, json, time, os, base64, datetime
 sys.path.insert(0, "/root/Toolkit/artifacts/api-server")
+sys.path.insert(0, "/root/Toolkit/scripts")
+try:
+    import resi_pool as _rpool
+    _HAS_RPOOL = True
+except ImportError:
+    _HAS_RPOOL = False
+
 import warnings; warnings.filterwarnings("ignore")
 import urllib3; urllib3.disable_warnings()
 import requests as _req
@@ -491,6 +498,46 @@ def solve_one(email, pw, port):
     return result
 
 
+
+def fetch_and_inject_proxies(email, pw, port):
+    """After successful ip2free task, fetch free proxy list and inject into resi_pool."""
+    if not _HAS_RPOOL:
+        log("  [inject] resi_pool unavailable, skipping")
+        return 0
+    try:
+        s = api_session(port)
+        lr = s.post(f"{BASE_API}/api/account/login?",
+            data=json.dumps({"email": email, "password": pw}),
+            headers={"Content-Type": "text/plain;charset=UTF-8"}, timeout=15)
+        tok = lr.json().get("data", {}).get("token")
+        if not tok:
+            log(f"  [inject] login failed for {email}")
+            return 0
+        s.headers["x-token"] = tok
+        resp = s.get(f"{BASE_API}/api/ip/freeList", timeout=12)
+        data = resp.json()
+        raw = data.get("data", {})
+        proxies = (raw.get("list") if isinstance(raw, dict) else raw) or []
+        injected = 0
+        for item in proxies:
+            h = (item.get("ip") or item.get("host") or item.get("addr") or "").strip()
+            p_raw = item.get("port", 0)
+            try:
+                p = int(str(p_raw).split(":")[0])
+            except (ValueError, TypeError):
+                continue
+            if not h or not p:
+                continue
+            if _rpool.add_external(h, p, probe=False):
+                injected += 1
+                log(f"  [inject] + {h}:{p}")
+        log(f"  [inject] {injected}/{len(proxies)} proxies from {email} injected into resi_pool")
+        return injected
+    except Exception as e:
+        log(f"  [inject] error: {e}")
+        return 0
+
+
 def main():
     log("\n" + "=" * 60)
     log("ip2free Monitor + Auto Solver v2.0 (locator-fill fix)")
@@ -530,7 +577,11 @@ def main():
             log(f"  RESULT: {email} → {res}")
             RESULTS[email] = res
 
-            if res in ("success", "already_done"):
+            if res == "success":
+                log(f"  SUCCESS {email}, fetching free proxies for resi_pool...")
+                fetch_and_inject_proxies(email, pw, port)
+                DONE.add(email)
+            elif res == "already_done":
                 DONE.add(email)
 
         pending = [a[0] for a in ACCOUNTS if a[0] not in DONE]

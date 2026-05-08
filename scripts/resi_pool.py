@@ -1,44 +1,69 @@
 #!/usr/bin/env python3
 """
-resi_pool.py v1.0 -- Residential SOCKS5 Port Pool Manager
+resi_pool.py v2.0 -- Residential SOCKS5 Pool Manager
+  + sticky sessions (nesting-proxy route-pool style)
+  + external proxy injection (ip2free / proxyscrape)
 
 Inspired by:
   easy_proxies (jasonwong1991): failure threshold + TTL blacklist + round-robin
   goproxy (elazarl): cascadeproxy single-endpoint multi-upstream SOCKS5
-
-Port ranges (xray.json):
-  10851-10859: ss-in-1..9  -> Shadowsocks residential (confirmed alive)
-  10870-10889: ps-in-0..19 -> SOCKS5 upstream (ALL DEAD — ps-out upstreams offline)
+  nesting-proxy (ydddp): sticky routing per session key
 """
 from __future__ import annotations
-import subprocess, threading, time, concurrent.futures
-from typing import List
+import subprocess, threading, time, concurrent.futures, json, os
+from typing import List, Dict, Tuple, Union
 
-# ps-in-0..19 (10870-10889) probe dead: all ps-out upstreams offline (38.60.209.88, 206.123.156.x etc.)
-# Only retain ss-in-0..8 (10851-10859) which are Shadowsocks-based and healthy.
 RESI_CANDIDATE_PORTS: List[int] = list(range(10851, 10860))
 PROBE_TARGET    = "https://www.google.com/generate_204"
 PROBE_TIMEOUT   = 6
-PROBE_CACHE_TTL = 300  # 5 min (same as existing scripts)
-FAIL_THRESHOLD  = 3    # easy_proxies: FailureThreshold
-BLACKLIST_TTL   = 300  # easy_proxies: BlacklistDuration
+PROBE_CACHE_TTL = 300
+FAIL_THRESHOLD  = 3
+BLACKLIST_TTL   = 300
+SESSION_TTL     = 1800  # 30 min sticky binding
+EXTERNAL_FILE   = "/tmp/resi_pool_external.json"
+MAX_EXTERNALS   = 40
 
-_lock              = threading.Lock()
-_healthy_ports:    List[int] = []
-_last_good_healthy: List[int] = []   # fallback when live probe yields nothing
-_health_ts:        float = 0.0
-_rr_idx:           int = 0
-_fail_counts:      dict = {}
-_blacklisted:      dict = {}
+# ProxyRef: int = local xray port, str = "host:port" external
+ProxyRef = Union[int, str]
 
+_lock                = threading.Lock()
+_healthy_ports:      List[int] = []
+_last_good_healthy:  List[int] = []
+_health_ts:          float = 0.0
+_rr_idx:             int = 0
+_fail_counts:        Dict[int, int] = {}
+_blacklisted:        Dict[int, float] = {}
+
+_externals:          List[str] = []
+_ext_failed:         Dict[str, int] = {}
+_ext_blacklist:      Dict[str, float] = {}
+
+_sessions:           Dict[str, Tuple[ProxyRef, float]] = {}
+
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+def proxy_url(ref: ProxyRef) -> str:
+    if isinstance(ref, int):
+        return f"socks5h://127.0.0.1:{ref}"
+    return f"socks5h://{ref}"
+
+
+def proxy_host_port(ref: ProxyRef) -> Tuple[str, int]:
+    if isinstance(ref, int):
+        return ("127.0.0.1", ref)
+    h, p = ref.rsplit(":", 1)
+    return (h, int(p))
+
+
+# ── probing ───────────────────────────────────────────────────────────────────
 
 def _probe_port(port: int) -> bool:
     try:
         p = subprocess.Popen(
             ["curl", "-s", "--max-time", str(PROBE_TIMEOUT),
              "--proxy", f"socks5h://127.0.0.1:{port}",
-             "-o", "/dev/null", "-w", "%{http_code}",
-             PROBE_TARGET],
+             "-o", "/dev/null", "-w", "%{http_code}", PROBE_TARGET],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             out, _ = p.communicate(timeout=PROBE_TIMEOUT + 2)
@@ -49,8 +74,94 @@ def _probe_port(port: int) -> bool:
         return False
 
 
+def _probe_external(proxy_str: str) -> bool:
+    try:
+        p = subprocess.Popen(
+            ["curl", "-s", "--max-time", str(PROBE_TIMEOUT),
+             "--proxy", f"socks5h://{proxy_str}",
+             "-o", "/dev/null", "-w", "%{http_code}", PROBE_TARGET],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            out, _ = p.communicate(timeout=PROBE_TIMEOUT + 2)
+        except subprocess.TimeoutExpired:
+            p.kill(); p.communicate(); return False
+        return out.decode().strip() not in ("", "000")
+    except Exception:
+        return False
+
+
+# ── external proxy management ─────────────────────────────────────────────────
+
+def _load_externals_file() -> None:
+    global _externals
+    try:
+        if os.path.exists(EXTERNAL_FILE):
+            data = json.loads(open(EXTERNAL_FILE).read())
+            with _lock:
+                for entry in data.get("proxies", []):
+                    if entry not in _externals:
+                        _externals.append(entry)
+    except Exception:
+        pass
+
+
+def _save_externals_file() -> None:
+    try:
+        with open(EXTERNAL_FILE, "w") as f:
+            json.dump({"proxies": list(_externals), "ts": time.time()}, f)
+    except Exception:
+        pass
+
+
+def add_external(host: str, port: int, probe: bool = False) -> bool:
+    """Add external SOCKS5 proxy. probe=True tests connectivity first."""
+    entry = f"{host}:{port}"
+    if probe and not _probe_external(entry):
+        return False
+    with _lock:
+        if entry not in _externals:
+            _externals.append(entry)
+            if len(_externals) > MAX_EXTERNALS:
+                _externals.pop(0)
+        _save_externals_file()
+    return True
+
+
+def remove_external(host: str, port: int) -> None:
+    entry = f"{host}:{port}"
+    with _lock:
+        if entry in _externals:
+            _externals.remove(entry)
+        _ext_failed.pop(entry, None)
+        _ext_blacklist.pop(entry, None)
+        _save_externals_file()
+
+
+def report_external_failure(proxy_str: str) -> None:
+    with _lock:
+        _ext_failed[proxy_str] = _ext_failed.get(proxy_str, 0) + 1
+        if _ext_failed[proxy_str] >= FAIL_THRESHOLD:
+            _ext_blacklist[proxy_str] = time.time() + BLACKLIST_TTL
+            if proxy_str in _externals:
+                _externals.remove(proxy_str)
+            _save_externals_file()
+
+
+def report_external_success(proxy_str: str) -> None:
+    with _lock:
+        _ext_failed[proxy_str] = 0
+        _ext_blacklist.pop(proxy_str, None)
+
+
+def _available_externals() -> List[str]:
+    now = time.time()
+    bl = {p for p, u in _ext_blacklist.items() if now < u}
+    return [p for p in _externals if p not in bl]
+
+
+# ── local port management ─────────────────────────────────────────────────────
+
 def _expire_blacklist() -> None:
-    """Clear expired blacklist entries (caller holds _lock)."""
     now = time.time()
     for p in [k for k, v in list(_blacklisted.items()) if now >= v]:
         del _blacklisted[p]
@@ -58,7 +169,6 @@ def _expire_blacklist() -> None:
 
 
 def refresh(force: bool = False) -> List[int]:
-    """Probe all candidate ports in parallel; update healthy list."""
     global _healthy_ports, _health_ts
     with _lock:
         if not force and _healthy_ports and time.time() - _health_ts < PROBE_CACHE_TTL:
@@ -71,34 +181,28 @@ def refresh(force: bool = False) -> List[int]:
     if healthy:
         with _lock:
             _healthy_ports = healthy
-            _last_good_healthy[:] = healthy   # save for fallback
+            _last_good_healthy[:] = healthy
             _health_ts = time.time()
         return list(healthy)
-    # Probe returned nothing — network blip or all ports dead
-    # Use last known good list (safe fallback), else first-range ports (SS range)
     with _lock:
         fallback = list(_last_good_healthy) if _last_good_healthy else list(range(10851, 10860))
         bl = {p for p, u in _blacklisted.items() if time.time() < u}
         fallback = [p for p in fallback if p not in bl] or fallback
         _healthy_ports = fallback
         _health_ts = time.time()
-    import sys as _sys; print(f"[resi_pool] WARN: probe found 0 healthy — using fallback {fallback}", file=_sys.stderr)
+    import sys as _sys
+    print(f"[resi_pool] WARN: probe found 0 healthy — using fallback {fallback}", file=_sys.stderr)
     return list(fallback)
 
 
 def _available() -> List[int]:
-    """Healthy ports not currently blacklisted (caller holds _lock)."""
     now = time.time()
     bl = {p for p, u in _blacklisted.items() if now < u}
     return [p for p in _healthy_ports if p not in bl]
 
 
 def pick(hint: int = 0) -> int:
-    """
-    Select a healthy RESI SOCKS5 port.
-    hint=0  -> round-robin (goproxy cascadeproxy style)
-    hint>0  -> deterministic hash (same account -> same IP region)
-    """
+    """Select local RESI port (backward compatible). hint>0 = deterministic hash."""
     global _rr_idx
     with _lock:
         if _healthy_ports and time.time() - _health_ts < PROBE_CACHE_TTL:
@@ -122,10 +226,6 @@ def pick(hint: int = 0) -> int:
 
 
 def report_failure(port: int) -> None:
-    """
-    Record port failure (easy_proxies FailureThreshold logic).
-    After FAIL_THRESHOLD consecutive failures -> blacklist BLACKLIST_TTL sec.
-    """
     global _healthy_ports
     with _lock:
         _fail_counts[port] = _fail_counts.get(port, 0) + 1
@@ -135,35 +235,112 @@ def report_failure(port: int) -> None:
 
 
 def report_success(port: int) -> None:
-    """Reset failure count; remove from blacklist."""
     with _lock:
         _fail_counts[port] = 0
         _blacklisted.pop(port, None)
 
 
+# ── sticky session (nesting-proxy route-pool style) ───────────────────────────
+
+def _clean_expired_sessions() -> None:
+    now = time.time()
+    expired = [k for k, (_, exp) in list(_sessions.items()) if now >= exp]
+    for k in expired:
+        del _sessions[k]
+
+
+def _pick_any() -> ProxyRef:
+    global _rr_idx
+    avail_local = _available()
+    avail_ext = _available_externals()
+    combined = avail_local + avail_ext
+    if not combined:
+        return list(RESI_CANDIDATE_PORTS)[0]
+    idx = _rr_idx % len(combined)
+    _rr_idx = (idx + 1) % len(combined)
+    return combined[idx]
+
+
+def pick_sticky(session_key: str, ttl: int = SESSION_TTL) -> ProxyRef:
+    """
+    Sticky session pick (nesting-proxy route-pool concept).
+    Same key returns same proxy within TTL. On expiry or dead proxy -> reassign.
+    """
+    now = time.time()
+    with _lock:
+        _clean_expired_sessions()
+        if session_key in _sessions:
+            ref, expires = _sessions[session_key]
+            still_ok = False
+            if isinstance(ref, int):
+                still_ok = ref in _healthy_ports and ref not in _blacklisted
+            else:
+                bl = {p for p, u in _ext_blacklist.items() if now < u}
+                still_ok = ref in _externals and ref not in bl
+            if still_ok and now < expires:
+                return ref
+    # Refresh local pool if stale
+    with _lock:
+        needs_refresh = not _healthy_ports or time.time() - _health_ts >= PROBE_CACHE_TTL
+    if needs_refresh:
+        refresh()
+    with _lock:
+        ref = _pick_any()
+        _sessions[session_key] = (ref, now + ttl)
+    return ref
+
+
+def release_session(session_key: str) -> None:
+    with _lock:
+        _sessions.pop(session_key, None)
+
+
+def report_ref_failure(ref: ProxyRef) -> None:
+    if isinstance(ref, int):
+        report_failure(ref)
+    else:
+        report_external_failure(ref)
+
+
+def report_ref_success(ref: ProxyRef) -> None:
+    if isinstance(ref, int):
+        report_success(ref)
+    else:
+        report_external_success(ref)
+
+
+# ── status & startup ──────────────────────────────────────────────────────────
+
 def status() -> dict:
-    """Return pool status dict for monitoring."""
     with _lock:
         now = time.time()
         bl_ttl = {p: round(u - now, 0) for p, u in _blacklisted.items() if now < u}
         avail = _available()
+        avail_ext = _available_externals()
+        sess_count = len([k for k, (_, exp) in _sessions.items() if now < exp])
         return {
-            "healthy": list(_healthy_ports),
-            "available": avail,
-            "available_count": len(avail),
-            "blacklisted": bl_ttl,
-            "fail_counts": dict(_fail_counts),
+            "healthy_local": list(_healthy_ports),
+            "available_local": avail,
+            "available_local_count": len(avail),
+            "externals_total": len(_externals),
+            "externals_available": len(avail_ext),
+            "externals_sample": avail_ext[:5],
+            "blacklisted_local": bl_ttl,
+            "fail_counts_local": dict(_fail_counts),
+            "active_sessions": sess_count,
             "cache_age_s": round(now - _health_ts, 1) if _health_ts else None,
             "candidates": RESI_CANDIDATE_PORTS,
         }
 
 
 def startup_check(log_fn=print) -> List[int]:
-    """Full probe at process startup."""
+    _load_externals_file()
     t0 = time.time()
     healthy = refresh(force=True)
     total = len(RESI_CANDIDATE_PORTS)
-    log_fn(f"[resi_pool] startup: alive={healthy} ({len(healthy)}/{total}) in {time.time()-t0:.1f}s")
+    with _lock:
+        ext_count = len(_externals)
+    log_fn(f"[resi_pool v2.0] startup: local={healthy} ({len(healthy)}/{total}), externals={ext_count}, elapsed={time.time()-t0:.1f}s")
     return healthy
 
 
