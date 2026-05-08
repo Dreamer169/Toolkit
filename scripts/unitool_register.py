@@ -29,7 +29,7 @@ DB_URL = "postgresql://postgres:postgres@localhost/toolkit"
 CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
 DISPLAY = ":99"
 # 住宅代理端口列表（与 chain_v3 / unitool_batch_refcode 保持一致）
-RESI_PORTS = list(range(10851, 10860)) + list(range(10870, 10890))  # 29 candidates via resi_pool
+RESI_PORTS = list(range(10851, 10860))  # 9 SS ports; ps-in-0..19 (10870-10889) all dead
 
 # v5.23: RESI health delegated to resi_pool (easy_proxies failure-threshold + TTL blacklist)
 def _get_healthy_resi_ports() -> list:
@@ -640,7 +640,11 @@ async def unitool_register(email, password, ref_code=""):
             return reg_success, reg_error
 
     except Exception as e:
-        return False, str(e)[:200]
+        _e_str = str(e)
+        if 'ERR_CONNECTION_RESET' in _e_str or 'ERR_TIMED_OUT' in _e_str or 'net::ERR_' in _e_str:
+            _rpool.report_failure(_resi_port)
+            log(f'[unitool_reg] RESI port {_resi_port} reported failure: {_e_str[:80]}')
+        return False, _e_str[:200]
     finally:
         if env_backup:
             os.environ["DISPLAY"] = env_backup
