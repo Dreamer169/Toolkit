@@ -75,6 +75,33 @@ def get_pending_account():
     row = cur.fetchone(); conn.close()
     return row
 
+def get_relogin_account():
+    """v5.14: 选一个 ref_activated 但 SSID 失效/缺失的账号直接重登
+    跳过邮件验证流程，直接调用 unitool_login.py 拿新 SSID。"""
+    conn = db_connect(); cur = conn.cursor()
+    cur.execute("""
+        SELECT a.id, a.email, a.password
+        FROM accounts a
+        WHERE a.ref_activated = true
+          AND a.platform = 'outlook'
+          AND LENGTH(COALESCE(a.password,'')) >= 8
+          AND a.tags NOT LIKE '%unitool_processing%'
+          AND a.tags NOT LIKE '%balance_exhausted%'
+          AND a.tags NOT LIKE '%unitool_rescue_dead%'
+          AND NOT EXISTS (
+            SELECT 1 FROM unitool_ssids s
+            WHERE s.source_email = a.email
+              AND s.is_valid = true
+              AND s.ssid IS NOT NULL
+              AND s.ssid != ''
+          )
+        ORDER BY a.updated_at ASC NULLS LAST
+        LIMIT 1
+    """)
+    row = cur.fetchone(); conn.close()
+    return row  # (id, email, password) or None
+
+
 def mark_tag(account_id, tag):
     conn = db_connect(); cur = conn.cursor()
     cur.execute("SELECT tags FROM accounts WHERE id=%s", (account_id,))
@@ -295,8 +322,36 @@ def main():
 
     row = get_pending_account()
     if not row:
-        log("[main] no pending account → sleep 180s")
-        import time as _t; _t.sleep(180); return
+        # v5.14: batch re-login for ref_activated accounts with expired/missing SSID
+        relogin_row = get_relogin_account()
+        if relogin_row:
+            _rl_id, _rl_email, _rl_pw = relogin_row
+            _account_id = _rl_id
+            log(f"[relogin] {_rl_email} id={_rl_id}")
+            mark_tag(_rl_id, "unitool_processing")
+            _rl_ssid = login_via_script(_rl_email, _rl_pw)
+            if _rl_ssid:
+                log(f"[relogin] SUCCESS len={len(_rl_ssid)}")
+                save_ssid(_rl_id, _rl_email, _rl_ssid)
+                _success_flag = True
+            else:
+                log(f"[relogin] FAIL — unlock processing")
+                try:
+                    _conn_rl = db_connect(); _cur_rl = _conn_rl.cursor()
+                    _cur_rl.execute("""
+                        UPDATE accounts SET
+                          tags = TRIM(BOTH ',' FROM
+                            regexp_replace(tags, ',?unitool_processing', '', 'g')),
+                          updated_at = NOW()
+                        WHERE id = %s
+                    """, (_rl_id,))
+                    _conn_rl.commit(); _conn_rl.close()
+                except Exception as _e_rl:
+                    log(f"[relogin] unlock err: {_e_rl}")
+            log("=== unitool_verify_rescue relogin done ===")
+            return
+        log("[main] no pending/relogin accounts → sleep 60s")
+        import time as _t; _t.sleep(60); return
 
     account_id, email, password, refresh_token = row
     _account_id = account_id

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.13
+unitool.ai → OpenAI 兼容反代 v5.14
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -58,7 +58,8 @@ def _pick_resi_port(ssid: str) -> int:
 
 
 _resi_sessions: dict = {}
-_resi_sess_lock = threading.Lock()
+_resi_sess_lock               = threading.Lock()
+_pool_release_event = threading.Event()  # v5.14: AcquireWait — set on SSID release (mirrors ds2api AcquireWait)
 
 def _get_resi_session(port: int) -> _rq.Session:
     with _resi_sess_lock:
@@ -231,6 +232,24 @@ def _rebuild_pool():
     for (label, ssid) in _load_from_db():
         if ssid not in sources:
             sources[ssid] = label
+    # v5.14: deduplicate by email — legacy file "a_hill378_outlook_com" == DB "a.hill378@outlook.com"
+    _em_seen: dict = {}
+    _deduped: dict = {}
+    for _ss, _lb in sources.items():
+        _em = _label_to_email(_lb)
+        if _em in _em_seen:
+            _old = _em_seen[_em]
+            # prefer DB entry (has "@") over legacy file entry
+            if "@" in _lb and "@" not in _deduped.get(_old, ""):
+                del _deduped[_old]
+                _deduped[_ss] = _lb
+                _em_seen[_em] = _ss
+        else:
+            _em_seen[_em] = _ss
+            _deduped[_ss] = _lb
+    if len(_deduped) < len(sources):
+        print(f"[POOL] dedup: {len(sources)} → {len(_deduped)} (-{len(sources)-len(_deduped)} dupes)", flush=True)
+    sources = _deduped
     with _lock:
         existing = {e["ssid"]: e for e in _pool}
         new_pool = []
@@ -256,12 +275,27 @@ def _reload_pool_if_needed():
 
 MAX_CONCURRENCY_PER_SSID = 2
 
+# v5.14: known underscore-encoded email suffixes (from legacy save_to_file encoding)
+_KNOWN_EMAIL_SUFFIXES = [
+    ("_outlook_com",    "@outlook.com"),   ("_gmail_com",       "@gmail.com"),
+    ("_hotmail_com",    "@hotmail.com"),   ("_yahoo_com",       "@yahoo.com"),
+    ("_live_com",       "@live.com"),      ("_icloud_com",      "@icloud.com"),
+    ("_protonmail_com", "@protonmail.com"),("_msn_com",         "@msn.com"),
+    ("_hotmail_co_uk",  "@hotmail.co.uk"), ("_live_cn",         "@live.cn"),
+    ("_mail_com",       "@mail.com"),
+]
+
 def _label_to_email(label: str) -> str:
     if "@" in label:
         return label
     m = re.match(r"^(.+?)__(.+)$", label)
     if m:
         return "{}@{}".format(m.group(1), m.group(2).replace("_", "."))
+    # v5.14: reverse old save_to_file underscore-encoding
+    # e.g. a_hill378_outlook_com → a_hill378@outlook.com
+    for sfx, domain in _KNOWN_EMAIL_SUFFIXES:
+        if label.endswith(sfx):
+            return label[:-len(sfx)] + domain
     return label
 
 def _make_entry(ssid: str, label: str, email: str = "") -> dict:
@@ -815,6 +849,7 @@ def _send_and_collect(entry: dict, service_id: str, content: str,
     finally:
         with _lock:
             entry["_active"] = max(0, entry.get("_active", 0) - 1)
+        _pool_release_event.set()  # v5.14: wake AcquireWait waiters on SSID release
 
 
 def _send_and_collect_core(entry: dict, service_id: str, content: str,
@@ -870,7 +905,19 @@ def _send_and_collect_core(entry: dict, service_id: str, content: str,
                 text = _widget_stream_sse(chat_id, msgs_snapshot, entry["ssid"],
                                           chunk_cb, deadline, abort)
                 if text:
-                    print(f"[v5.13] stream ok chat={chat_id} len={len(text)}", flush=True)
+                    # v5.14: AutoContinue — verify stream completed
+                    # mirrors ds2api INCOMPLETE detection guard
+                    _ac_msgs = _api_paginated(chat_id, entry["ssid"], limit=5)
+                    for _ac_m in _ac_msgs:
+                        if (_ac_m.get("role") == "assistant"
+                                and _ac_m.get("reply_to") == user_msg_id):
+                            if _ac_m.get("status") == "ended":
+                                print(f"[v5.14] stream+ok chat={chat_id} len={len(text)}", flush=True)
+                                return text
+                            print(f"[v5.14] stream early-end → autocontinue chat={chat_id}", flush=True)
+                            return _paginated_poll(chat_id, user_msg_id, entry["ssid"],
+                                                   chunk_cb, deadline, text, abort)
+                    print(f"[v5.14] stream ok chat={chat_id} len={len(text)}", flush=True)
                     return text
                 print(f"[v5.13] stream empty → fallback poll chat={chat_id}", flush=True)
             except Exception as e:
@@ -905,7 +952,19 @@ def _try_service(service_id: str, content: str, entries: list,
             and e.get("_active", 0) < MAX_CONCURRENCY_PER_SSID
         ]
         if not live_now:
-            live_now = [e for e in entries if e["dead_until"] <= now] or entries
+            # v5.14: AcquireWait — all slots busy; wait ≤30s for a release
+            # mirrors ds2api AccountPool.AcquireWait channel pattern
+            if any(e["dead_until"] <= now for e in entries):
+                _pool_release_event.wait(timeout=30.0)
+                _pool_release_event.clear()
+                now = time.time()
+                live_now = [
+                    e for e in entries
+                    if e["dead_until"] <= now
+                    and e.get("_active", 0) < MAX_CONCURRENCY_PER_SSID
+                ]
+            if not live_now:
+                live_now = [e for e in entries if e["dead_until"] <= now] or entries
         entry = _pick_entry(live_now)
         try:
             return _send_and_collect(entry, service_id, content,
@@ -1188,16 +1247,16 @@ class ThreadedServer(HTTPServer):
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.13] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.14] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.13] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.14] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
 
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.13] balance monitor started", flush=True)
-    print("[unitool-proxy v5.13] features: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter", flush=True)
+    print("[unitool-proxy v5.14] balance monitor started", flush=True)
+    print("[unitool-proxy v5.14] features: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
