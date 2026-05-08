@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.35
+unitool.ai → OpenAI 兼容反代 v5.36
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -1283,6 +1283,8 @@ def _try_service(service_id: str, content: str, entries: list,
     """v5.11: 新增连续 ConnectionReset 计数（对标 DS error_count → Invalid）。
     同一 SSID 连续 MAX_CONN_ERRORS 次连接错误 → mark_dead(90s) 强制换号。"""
     last_err = None
+    maint_retries = 0  # v5.36: count per-request maintenance retries
+    MAX_MAINT_RETRIES = 3  # new chat on different SSID usually recovers
     max_attempts = max(len(entries) * 2, 4)
     for attempt in range(max_attempts):
         if abort and abort.is_set():
@@ -1351,9 +1353,20 @@ def _try_service(service_id: str, content: str, entries: list,
             if "unsupported_service" in err:
                 # v5.24: service missing, SSID fine — raise for fallback
                 raise Exception(f"service_not_found: {service_id}")
-            if ("service_stuck_updating" in err or "service_not_found" in err
-                    or "service_maintenance" in err or "backend_error_500" in err):
-                raise  # v5.25: bubble to _do_chat fallback (SSID fine)
+            if "service_stuck_updating" in err or "service_not_found" in err:
+                raise  # immediate bubble — not SSID related
+            if "service_maintenance" in err or "backend_error_500" in err:
+                # v5.36: maintenance is per-chat-session, NOT global service down.
+                # A fresh chat_id on any SSID usually resolves it immediately.
+                # GuardedChat already deleted the stuck chat in finally.
+                # Retry up to MAX_MAINT_RETRIES times before giving up.
+                maint_retries += 1
+                print(f"[MAINT] {service_id} maint#{maint_retries} — retry new chat", flush=True)
+                if maint_retries > MAX_MAINT_RETRIES:
+                    raise  # exhausted; let _do_chat cache briefly
+                last_err = e
+                time.sleep(1.0)  # brief pause between maint retries
+                continue
             last_err = e
             # v5.13: short backoff on upstream errors
             time.sleep(_retry_delay(attempt, transport=False))
@@ -1592,13 +1605,16 @@ def _do_chat(model: str, messages: list, ssid_override: str | None,
             f"model_not_available: unitool.ai service '{primary_id}' is permanently broken — {reason}"
         )
 
-    # v5.33: try service, catch maintenance → mark dead 24h so next calls skip immediately
+    # v5.36: _try_service now retries maintenance internally (new chat per attempt).
+    # Only mark svc_dead if ALL retries exhausted (true persistent maintenance).
     try:
         return _try_service(primary_id, content, entries, chunk_cb=chunk_cb, abort=abort)
     except Exception as e:
         err = str(e)
         if "service_maintenance" in err:
-            _mark_svc_dead(primary_id, secs=1800, reason=err)  # v5.35: 30min not 24h
+            # Short cache (5 min) so we don't hammer a genuinely broken service,
+            # but a new conversation will clear it immediately via /v1/svc-status/clear.
+            _mark_svc_dead(primary_id, secs=300, reason=err)  # v5.36: 5min fallback
         raise
 
 # ─── HTTP Handler ─────────────────────────────────────────────────────────────
@@ -1726,7 +1742,7 @@ class Handler(BaseHTTPRequestHandler):
                 services_out.append({"service": sid, "status": st})
 
             return self._json(200, {
-                "version": "v5.35",
+                "version": "v5.36",
                 "pool_live": sum(1 for e in _pool if e["dead_until"] <= now),
                 "pool_total": len(_pool),
                 "rpm": _get_rpm(),
