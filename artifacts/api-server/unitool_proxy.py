@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.29
+unitool.ai → OpenAI 兼容反代 v5.30
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -522,7 +522,7 @@ NATIVE_SERVICES = {
     # ChatGPT（实探 /api/services?parent_id=chatgpt 确认，含 minimum_balance）
     "gpt-5", "gpt-5.5", "gpt-5.4", "gpt-5-nano",
     "gpt5.1", "gpt5.2",
-    "gpt-4o", "gpt-4o-mini", "gpt-4-1", "gpt-4-5",  # v5.29: gpt-4-5 back (active=1 confirmed 2026-05-08)
+    "gpt-4o", "gpt-4o-mini", "gpt-4-1", "gpt-4-5",  # v5.30: gpt-4-5 back (active=1 confirmed 2026-05-08)
     "gpt-o1", "gpt-o1-mini", "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini",
     # Gemini
     "gemini-3.1-pro", "gemini-3-pro",
@@ -536,7 +536,7 @@ NATIVE_SERVICES = {
 # 需要 reasoning_effort 的服务
 REASONING_SERVICES = {"gemini-3.1-pro", "gemini-3-pro", "grok",
                       "gpt-o1", "gpt-o1-mini", "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini",
-                      "gpt-5-nano",  # v5.29: unitool requires reasoning_effort for this endpoint
+                      "gpt-5-nano",  # v5.30: unitool requires reasoning_effort for this endpoint
 }
 
 # v5.11: 从 API 实探更新 minimum_balance（用于日志报警，balance=0 的服务不 mark dead）
@@ -556,7 +556,7 @@ POLL_PRIMARY_SERVICES = {
     "claude-sonnet", "claude-opus",
     "claude-opus-4-6",   # v5.24: stream empty but poll returns CHERRY
     "grok",              # v5.25: widget/stream embeds reasoning-block-marker div; poll clean
-    # o-series reasoning models (v5.29): widget/stream unreliable; paginatedMessages returns clean answer
+    # o-series reasoning models (v5.30): widget/stream unreliable; paginatedMessages returns clean answer
     "gpt-o1", "gpt-o1-mini",
     "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini",
 }
@@ -661,21 +661,21 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
     "gemini-3-pro":     ["gemini-3.1-pro","gpt-5.5",   "gpt-5"],
     # o-series reasoning models: all broken at unitool API (TypeError/No choices/404)
     # v5.27: added non-o-series fallback (gpt-5/gpt-5.5)
-    # v5.29: ImmediateFallback skips primary — but chain still had o-series entries that also hung
-    # v5.29: o-series chains now go DIRECTLY to gpt-5/gpt-5.5, no other broken o-series
+    # v5.30: ImmediateFallback skips primary — but chain still had o-series entries that also hung
+    # v5.30: o-series chains now go DIRECTLY to gpt-5/gpt-5.5, no other broken o-series
     "gpt-o1":       ["gpt-5", "gpt-5.5", "gpt-5.4", "gpt-4-1"],
     "gpt-o1-mini":  ["gpt-5", "gpt-5.5", "gpt-5.4", "gpt-4-1"],
     "gpt-o3":       ["gpt-5", "gpt-5.5", "gpt-5.4", "gpt-4-1"],
     "gpt-o3-mini":  ["gpt-5", "gpt-5.5", "gpt-5.4", "gpt-4-1"],
     "gpt-o3-pro":   ["gpt-5", "gpt-5.5", "gpt-5.4", "gpt-4-1"],
     "gpt-o4-mini":  ["gpt-5", "gpt-5.5", "gpt-5.4", "gpt-4-1"],
-    # gpt-4-5 back (v5.29: unitool API active=1 confirmed)
+    # gpt-4-5 back (v5.30: unitool API active=1 confirmed)
     "gpt-4-5":      ["gpt-4-1", "gpt-5", "gpt-5.5"],
-    # grok (v5.29: HTTP 500 from unitool; add non-grok fallback)
+    # grok (v5.30: HTTP 500 from unitool; add non-grok fallback)
     "grok":         ["gpt-5.5", "gpt-5", "gpt5.2"],
 }
 
-# v5.29: Services confirmed completely broken at unitool API level.
+# v5.30: Services confirmed completely broken at unitool API level.
 # Requesting them causes a hang (no response ever arrives) rather than an
 # immediate service_error, so the proxy would waste ~90s before falling back.
 # When primary_id is in this set, _do_chat skips it and starts at fallback[0].
@@ -685,10 +685,12 @@ IMMEDIATE_FALLBACK_SERVICES: set[str] = {
     "gpt-o1", "gpt-o1-mini",
     "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini",
     "gpt-5-nano",  # reasoning_effort sent OK, but model hangs at unitool (2026-05-08)
+    "claude-opus", # paginatedMessages returns status=error (400 max_tokens) but reply_to
+                   # mismatch causes proxy to miss error and poll until 90s timeout (v5.30)
 }
 
 MODEL_ALIASES = {
-    "gpt-4": "gpt-4-1",  # v5.29: gpt-4-5 removed from aliases (real service again)
+    "gpt-4": "gpt-4-1",  # v5.30: gpt-4-5 removed from aliases (real service again)
     "gpt-4-turbo": "gpt-4-1", "gpt-4-turbo-preview": "gpt-4-1",
     "gpt-4.1": "gpt-4-1", "gpt-4o": "gpt-4o", "gpt-4o-search": "gpt-4o",
     "gpt-4.5": "gpt-4-1", "gpt-4o-2024-11-20": "gpt-4-1",
@@ -1042,7 +1044,7 @@ def _paginated_poll(chat_id: int, user_msg_id: int, ssid: str,
     - 连续空结果检测：连续 N 次无法获取消息 → 提前放弃
     """
     empty_streak = 0
-    updating_streak = 0  # v5.29: was missing, caused UnboundLocalError on first poll
+    updating_streak = 0  # v5.30: was missing, caused UnboundLocalError on first poll
     MAX_EMPTY    = 10   # 连续 10 次（7s）无有效消息 → 认定 chat 失效
     while time.time() < deadline:
         if abort and abort.is_set():
@@ -1067,7 +1069,7 @@ def _paginated_poll(chat_id: int, user_msg_id: int, ssid: str,
             if status == "ended":
                 if cur_txt:
                     return cur_txt
-                raise Exception("service_error: service ended with empty content")  # v5.29
+                raise Exception("service_error: service ended with empty content")  # v5.30
             # v5.24: backend hang guard (gemini status=updating with no content)
             if status in ("updating", "wait", "") and not cur_txt:
                 updating_streak += 1
@@ -1509,7 +1511,7 @@ def _do_chat(model: str, messages: list, ssid_override: str | None,
 
     chain    = [primary_id] + [s for s in FALLBACK_CHAINS.get(primary_id, []) if s != primary_id]
     last_err = None
-    # v5.29: ImmediateFallback — skip services confirmed broken at unitool API level
+    # v5.30: ImmediateFallback — skip services confirmed broken at unitool API level
     if primary_id in IMMEDIATE_FALLBACK_SERVICES and len(chain) > 1:
         print(f"[FALLBACK] {primary_id} immediate-skip (known broken) → {chain[1]}", flush=True)
         chain = chain[1:]
@@ -1527,7 +1529,7 @@ def _do_chat(model: str, messages: list, ssid_override: str | None,
                 raise
             if "service_error:" in err:
                 detail = err.split("service_error:", 1)[-1].strip()
-                # v5.29: always try fallback chain (retryable or not) if more services remain;
+                # v5.30: always try fallback chain (retryable or not) if more services remain;
                 # previously non-retryable service_error raised immediately, skipping fallback.
                 if _is_retryable(detail):
                     print(f"[FALLBACK] {service_id} retryable: {detail[:60]}", flush=True)
@@ -1773,9 +1775,9 @@ def _startup_resi_health_check():
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.29] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.30] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.29] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.30] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
@@ -1785,8 +1787,8 @@ if __name__ == "__main__":
     except (KeyboardInterrupt, SystemExit):
         pass  # PM2 SIGINT during startup — skip check, continue
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.29] balance monitor started", flush=True)
-    print("[unitool-proxy v5.29] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc|GrokReasoningStrip|GeminiMaintenance|GrokFallback|OSeriesFallback|NanoReasoning|SvcErrFallback|ImmediateFallback|OSeriesChainFix: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking", flush=True)
+    print("[unitool-proxy v5.30] balance monitor started", flush=True)
+    print("[unitool-proxy v5.30] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc|GrokReasoningStrip|GeminiMaintenance|GrokFallback|OSeriesFallback|NanoReasoning|SvcErrFallback|ImmediateFallback|OSeriesChainFix|ClaudeOpusFallback: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
