@@ -145,20 +145,27 @@ def mark_rescue_fail(account_id):
 
 def save_ssid(account_id, email, ssid):
     conn = db_connect(); cur = conn.cursor()
+    # Fix-8a: add ssid_ok tag; strip all transient tags
     cur.execute("""
         UPDATE accounts SET
-          tags  = regexp_replace(
-                    CASE WHEN COALESCE(tags,'')='' THEN 'unitool_registered'
-                         ELSE tags || ',unitool_registered' END,
-                    ',?unitool_(processing|fail|verify_pending)', '', 'g'),
+          tags  = TRIM(BOTH ',' FROM regexp_replace(
+                    COALESCE(tags,'') || ',ssid_ok,unitool_registered',
+                    ',?unitool_(processing|fail|verify_pending|reg_retry)', '', 'g')),
           notes = COALESCE(notes,'') || E'\nunitool_ssid=' || %s || E'\nat=' || %s,
           updated_at = NOW()
         WHERE id=%s
     """, (ssid, time.strftime("%Y-%m-%d %H:%M:%S"), account_id))
+    # Fix-8b: insert into unitool_ssids with source_account_id
+    try:
+        cur.execute("""
+            INSERT INTO unitool_ssids (source_account_id, source_email, ssid, collected_at, is_valid)
+            VALUES (%s, %s, %s, NOW(), TRUE)
+        """, (account_id, email, ssid))
+    except Exception as _ei:
+        log(f"[DB] unitool_ssids insert warn: {_ei}")
     conn.commit(); conn.close()
     log(f"[DB] ssid saved {email} id={account_id} len={len(ssid)}")
     # v5.15b: write to /data/unitool_ssids/<email>.txt
-    # Avoids /tmp/unitool_ssidN.txt sprawl; proxy loads with proper email label
     SSID_DIR_VR = "/data/unitool_ssids"
     try:
         os.makedirs(SSID_DIR_VR, exist_ok=True)
@@ -169,6 +176,16 @@ def save_ssid(account_id, email, ssid):
         log(f"[proxy] wrote {fname}")
     except Exception as e:
         log(f"[proxy] warn: {e}")
+    # Fix-8c: hotpush to proxy pool immediately (PROXY_PORT=8089)
+    try:
+        _data = json.dumps({"ssid": ssid, "label": email}).encode()
+        _req  = urllib.request.Request(
+            "http://localhost:8089/add-ssid", data=_data,
+            headers={"Content-Type": "application/json"})
+        _resp = json.loads(urllib.request.urlopen(_req, timeout=5).read())
+        log(f"[proxy] hotpush OK pool_size={_resp.get('pool_size','?')}")
+    except Exception as _ep:
+        log(f"[proxy] hotpush warn: {_ep}")
     print(f"[OK] {email} | {ssid}", flush=True)
 
 # ── Graph API ─────────────────────────────────────────────────────────────────
