@@ -34,7 +34,7 @@ TARGET       = "https://unitool.ai/en/entry"
 LOGIN_NA     = "60e02e33f743e14f5dab1dc42181ba1e746fd4d925"
 AUTH_COOKIE  = "__Secure-unitool-ssid"
 # 住宅代理端口列表（与 chain_v3 保持一致）
-RESI_PORTS = list(range(10851, 10860)) + list(range(10870, 10890))  # 29 ports (matches resi_pool)
+RESI_PORTS = list(range(10851, 10860))  # 9 live ports only (Fix-6a: 10870-10889 dead)
 
 # v5.14: RESI port health check cache (valid 5 min)
 _resi_healthy_ports: list = []
@@ -347,6 +347,12 @@ async def login_one(email: str, password: str, headless: bool = True,
                         "we have just sent", "sent link to your email")):
                     _log(f"  [{email}]   email verification required (early detect)")
                     return {"ok": False, "email": email, "reason": "email_not_verified"}
+                # Fix-6b: home page content at /en/entry = SPA redirected silently (email unverified)
+                if any(kw in pg_body.lower() for kw in (
+                        "get 10 tokens", "tokens for registration",
+                        "inviting friends", "join thousands", "chatgpt")):
+                    _log(f"  [{email}]   home page at entry = email not verified (SPA redirect)")
+                    return {"ok": False, "email": email, "reason": "email_not_verified"}
 
         if not logged_in:
             # 再检查一次 body 内容
@@ -359,6 +365,11 @@ async def login_one(email: str, password: str, headless: bool = True,
                     "verify your email", "confirm your", "check your email",
                     "email not verified", "please verify", "activation link",
                     "we have just sent", "sent link to your email")):
+                return {"ok": False, "email": email, "reason": "email_not_verified"}
+            # Fix-6b: home page shown at /en/entry = email not verified (SPA silent redirect)
+            if any(kw in pg_body.lower() for kw in (
+                    "get 10 tokens", "tokens for registration",
+                    "inviting friends", "join thousands", "chatgpt")):
                 return {"ok": False, "email": email, "reason": "email_not_verified"}
             return {"ok": False, "email": email, "reason": "login_timeout"}
 
