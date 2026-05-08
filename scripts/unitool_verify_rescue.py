@@ -4,7 +4,7 @@ unitool_verify_rescue.py — 专门处理 unitool_verify_pending 账号
 流程: 选pending账号 → 锁定 → 刷新Graph token → 查JunkEmail(60s) → curl点击验证 → unitool_login.py登录拿ssid
 持续循环运行，无账号时sleep 60s
 """
-import atexit, glob, json, os, re, subprocess, time
+import atexit, glob, json, os, re, signal, subprocess, sys, time
 import urllib.parse, urllib.request
 import psycopg2
 
@@ -41,6 +41,12 @@ def _atexit_handler():
         log(f"[atexit] err: {e}")
 
 atexit.register(_atexit_handler)
+
+# SIGTERM → sys.exit(0) so atexit fires cleanly when pm2 stops/restarts
+def _sigterm_handler(signum, frame):
+    log("[signal] SIGTERM received — exiting cleanly")
+    sys.exit(0)
+signal.signal(signal.SIGTERM, _sigterm_handler)
 
 # ── DB ────────────────────────────────────────────────────────────────────────
 def db_connect():
@@ -210,12 +216,19 @@ def login_via_script(email, password):
     if not os.path.exists(LOGIN_SCRIPT):
         log(f"[login] not found: {LOGIN_SCRIPT}"); return ""
     env = {**os.environ, "DISPLAY": ":99", "PYTHONUNBUFFERED": "1"}
+    proc = None
     try:
-        r = subprocess.run(
+        proc = subprocess.Popen(
             ["python3", LOGIN_SCRIPT, "--email", email, "--password", password, "--no-headless"],
-            capture_output=True, text=True, timeout=180, env=env
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env
         )
-        for line in r.stdout.splitlines():
+        try:
+            stdout, stderr = proc.communicate(timeout=180)
+        except subprocess.TimeoutExpired:
+            proc.kill(); proc.communicate()
+            log("[login] timeout")
+            return ""
+        for line in stdout.splitlines():
             if line.startswith("[OK]"):
                 parts = line.split("|")
                 if len(parts) >= 3:
@@ -224,9 +237,13 @@ def login_via_script(email, password):
                     return ssid
             if line.startswith("[FAIL]"):
                 log(f"[login] {line}")
-        if r.stderr: log(f"[login] stderr: {r.stderr[-200:]}")
-    except subprocess.TimeoutExpired:
-        log("[login] timeout")
+        if stderr: log(f"[login] stderr: {stderr[-200:]}")
+    except KeyboardInterrupt:
+        if proc:
+            try: proc.kill(); proc.communicate()
+            except Exception: pass
+        log("[login] KeyboardInterrupt — killing child and re-raising")
+        raise
     except Exception as e:
         log(f"[login] err: {e}")
     return ""

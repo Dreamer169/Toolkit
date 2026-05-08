@@ -20,7 +20,7 @@ PM2 模式：每次处理一个账号后退出，PM2 自动重启继续下一个
 
 日志：/tmp/unitool_chain_v3.log
 """
-import atexit, glob, json, os, re, subprocess, sys, time
+import atexit, glob, json, os, re, signal, subprocess, sys, time
 import urllib.parse, urllib.request
 import psycopg2
 
@@ -92,6 +92,12 @@ def _atexit_handler():
         log(f"[atexit] err: {e}")
 
 atexit.register(_atexit_handler)
+
+# SIGTERM → sys.exit(0) so atexit fires cleanly when pm2 stops/restarts
+def _sigterm_handler(signum, frame):
+    log("[signal] SIGTERM received — exiting cleanly")
+    sys.exit(0)
+signal.signal(signal.SIGTERM, _sigterm_handler)
 
 # ── DB 工具 ───────────────────────────────────────────────────────────────────
 def db_connect():
@@ -618,12 +624,23 @@ def _run(cmd, timeout=900, label=""):
     env = {**os.environ, "DISPLAY": ":99", "PYTHONUNBUFFERED": "1",
            "PLAYWRIGHT_BROWSERS_PATH": "/data/cache/ms-playwright"}
     log(f"[cmd] {label or ''} {' '.join(str(c) for c in cmd[:6])}...")
+    proc = None
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
-        return r.stdout, r.stderr, r.returncode
-    except subprocess.TimeoutExpired:
-        log(f"[cmd] TIMEOUT {timeout}s: {label}")
-        return "", "TIMEOUT", -1
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, env=env)
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill(); proc.communicate()
+            log(f"[cmd] TIMEOUT {timeout}s: {label}")
+            return "", "TIMEOUT", -1
+        return stdout, stderr, proc.returncode
+    except KeyboardInterrupt:
+        if proc:
+            try: proc.kill(); proc.communicate()
+            except Exception: pass
+        log(f"[cmd] KeyboardInterrupt — killing child and re-raising")
+        raise
     except Exception as e:
         log(f"[cmd] ERR {e}")
         return "", str(e), -1
