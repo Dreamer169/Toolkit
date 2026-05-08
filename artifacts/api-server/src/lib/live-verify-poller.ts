@@ -11,6 +11,8 @@ const SUBJECT_FILTER  = "verify";
 let _enabled    = true;
 let _running    = false;
 let _regBusy    = 0;   // registration jobs in progress: skip verify poll
+let _regBusyTs  = 0;   // timestamp of last incRegBusy (ms)
+const REG_BUSY_TIMEOUT_MS = 15 * 60 * 1000; // 15min: 超时自动归零防泄漏
 let _intervalId: ReturnType<typeof setInterval> | null = null;
 let _lastRun: string | null = null;
 let _lastStats: { total: number; clicked: number; skipped: number; failed: number; ok: number } = { total: 0, clicked: 0, skipped: 0, failed: 0, ok: 0 };
@@ -38,7 +40,7 @@ function isRecentlyHandled(msgId: string): boolean {
 /** 当前正在执行的 python 子进程集合，关闭时统一 kill */
 const _inflightChildren = new Set<import("child_process").ChildProcess>();
 
-export function incRegBusy() { _regBusy++; logger.info({ _regBusy }, "[live-verify] regBusy++"); }
+export function incRegBusy() { _regBusy++; _regBusyTs = Date.now(); logger.info({ _regBusy }, "[live-verify] regBusy++"); }
 export function decRegBusy() { _regBusy = Math.max(0, _regBusy - 1); logger.info({ _regBusy }, "[live-verify] regBusy--"); }
 export function setLiveVerifyEnabled(val: boolean) {
   _enabled = val;
@@ -112,6 +114,11 @@ async function refreshToken(rt: string, proxy?: string | null): Promise<{ token:
 
 async function runOnce() {
   if (_running) { logger.info("[live-verify] 上次轮询尚未结束，跳过"); return; }
+  // 超时保护：注册进程崩溃/卡死时 close 事件不触发，regBusy 永久泄漏
+  if (_regBusy > 0 && _regBusyTs > 0 && Date.now() - _regBusyTs > REG_BUSY_TIMEOUT_MS) {
+    logger.warn({ _regBusy, elapsedMin: Math.floor((Date.now() - _regBusyTs) / 60000) }, "[live-verify] regBusy 超过15min未归零，自动清零");
+    _regBusy = 0;
+  }
   if (_regBusy > 0) { logger.info({ _regBusy }, "[live-verify] 注册中，跳过本轮"); return; }
   _running = true;
   const stats = { total: 0, clicked: 0, skipped: 0, failed: 0, ok: 0 };

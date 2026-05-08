@@ -303,6 +303,63 @@ def _try_firebase_verify(verify_url: str) -> dict:
 # 浏览器仍停留在 https://replit.com/verify?goto=/~?authModal=signup，
 # 账号在 Replit DB 中 verified=false。所以 Replit/Reseek URL 必须直接走
 # 带 cookie 的浏览器路径触发 SPA 内的 backend sync XHR。
+
+# ── Unitool AI verify: 直接 HTTP GET，无需浏览器 ─────────────────────────────
+# URL 格式: https://unitool.ai/api/auth/email?token=JWT
+# 该接口是标准 REST endpoint，GET 一次即完成验证，patchright 完全没必要且会被注册进程占用的 Chromium 打断
+if re.search(r"unitool\.ai", verify_url, re.I):
+    print(f"[click_verify] 检测到 Unitool AI verify URL，直接 HTTP GET 验证", flush=True)
+    try:
+        import urllib.request as _ur
+        _req = _ur.Request(
+            verify_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+            }
+        )
+        # allow_redirects by default in urllib
+        _opener = _ur.build_opener(_ur.HTTPRedirectHandler())
+        with _opener.open(_req, timeout=20) as _r:
+            _resp_body = _r.read().decode("utf-8", errors="replace")
+            _resp_status = _r.status
+        _resp_low = _resp_body.lower()
+        _unitool_ok = any(k in _resp_low for k in (
+            "success", "verified", "email verified", "verification successful",
+            "已验证", "登录成功", "welcome", "logged in",
+        )) or _resp_status in (200, 201)
+        if _unitool_ok:
+            print(f"[click_verify] ✅ Unitool AI 验证成功 (status={_resp_status})", flush=True)
+            print(json.dumps({"success": True, "verify_url": verify_url, "final_url": verify_url,
+                              "verified_marker": "success", "title": "Unitool AI Email Verified",
+                              "http_status": _resp_status, "body_snippet": _resp_body[:200]}))
+            sys.exit(0)
+        else:
+            print(f"[click_verify] Unitool AI HTTP {_resp_status}, body={_resp_body[:200]}", flush=True)
+            print(json.dumps({"success": False, "error": f"HTTP {_resp_status}",
+                              "verify_url": verify_url, "http_status": _resp_status,
+                              "verified_marker": "failure", "body_snippet": _resp_body[:300]}))
+            sys.exit(0)
+    except urllib.error.HTTPError as _he:
+        try:
+            _he_body = _he.read().decode("utf-8", errors="replace")
+        except Exception:
+            _he_body = str(_he)
+        print(f"[click_verify] Unitool AI HTTPError {_he.code}: {_he_body[:200]}", flush=True)
+        if _he.code in (301, 302, 303, 307, 308):
+            print(json.dumps({"success": True, "verify_url": verify_url, "final_url": verify_url,
+                              "verified_marker": "success", "http_status": _he.code}))
+        else:
+            print(json.dumps({"success": False, "error": f"HTTPError {_he.code}: {_he_body[:100]}",
+                              "verify_url": verify_url, "http_status": _he.code,
+                              "verified_marker": "", "body_snippet": _he_body[:300]}))
+        sys.exit(0)
+    except Exception as _ue:
+        print(f"[click_verify] Unitool AI 直接请求异常: {_ue}，降级浏览器", flush=True)
+        # 降级到下方 patchright 流程
+# ─────────────────────────────────────────────────────────────────────────────
+
 _is_custom_action_handler = bool(re.search(r"replit\.com|reseek\.com", verify_url, re.I))
 if not _is_custom_action_handler:
     print("[click_verify] 尝试 Firebase REST API 验证...", flush=True)
