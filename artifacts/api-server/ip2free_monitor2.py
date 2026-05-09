@@ -532,8 +532,23 @@ def solve_one(email, pw, port):
                     page.wait_for_timeout(2000)
                     continue
 
-                png_bytes = blob_to_png(page, blob_url)
-                log(f"    PNG: {len(png_bytes) if png_bytes else 0}b")
+                # Extract UUID from blob URL: blob:https://domain/UUID
+                _blob_uuid = blob_url.split("/")[-1] if blob_url else ""
+                if _blob_uuid and not LAST_API.get("captcha_code"):
+                    LAST_API["captcha_code"] = _blob_uuid
+                    log(f"    captcha UUID from blob: {_blob_uuid}")
+
+                # on_response already saves PNG to file; blob fetch returns 0b due to browser security
+                import os as _os, time as _tm2
+                _cap_file = f"{SS_DIR}/cap_{email.split(chr(64))[0]}.png"
+                png_bytes = None
+                if _os.path.exists(_cap_file) and _tm2.time() - _os.path.getmtime(_cap_file) < 30:
+                    with open(_cap_file, "rb") as _cf:
+                        png_bytes = _cf.read()
+                    log(f"    PNG from file: {len(png_bytes)}b")
+                if not png_bytes or len(png_bytes) < 100:
+                    png_bytes = blob_to_png(page, blob_url)
+                    log(f"    PNG from blob fallback: {len(png_bytes) if png_bytes else 0}b")
 
                 if not png_bytes or len(png_bytes) < 100:
                     _empty_png_count = _empty_png_count + 1 if "_empty_png_count" in dir() else 1
@@ -698,7 +713,16 @@ def solve_one(email, pw, port):
                             page.wait_for_timeout(1500)
                             new_blob = page.evaluate(GET_BLOB_URL_JS)
                             if new_blob and new_blob != blob_url:
-                                new_png = blob_to_png(page, new_blob)
+                                # Try saved file first (fresh write by on_response), else blob
+                                import os as _os2, time as _tm3
+                                _ncap_file = f"{SS_DIR}/cap_{email.split(chr(64))[0]}.png"
+                                new_png = None
+                                if _os2.path.exists(_ncap_file) and _tm3.time() - _os2.path.getmtime(_ncap_file) < 30:
+                                    with open(_ncap_file, "rb") as _ncf:
+                                        new_png = _ncf.read()
+                                    log(f"    new PNG from file: {len(new_png)}b")
+                                if not new_png or len(new_png) < 100:
+                                    new_png = blob_to_png(page, new_blob)
                                 if new_png and len(new_png) > 100:
                                     new_cands = ocr_png(new_png,
                                         f"{SS_DIR}/{email.split('@')[0]}_r{attempt}.png")
