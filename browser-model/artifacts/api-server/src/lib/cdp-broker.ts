@@ -771,9 +771,11 @@ async function getBrowser(): Promise<Browser> {
     } catch { _browserPromise = null; }
   }
   if (_browserPromise) return _browserPromise;
+  const _fpBin = "/opt/fingerprint-chromium/squashfs-root/opt/ungoogled-chromium/chrome";
+  const _useFp = require("fs").existsSync(_fpBin);
   const exe = process.env.REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE
     || process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
-    || undefined;
+    || (_useFp ? _fpBin : undefined);
   const proxyEnv = process.env.BROWSER_PROXY;
   // 如果有 DISPLAY（生产环境的 Xvfb :99），就跑 headed Chromium —— 真 X 显示器
   // 上的 Chrome 比 headless Chromium 难被反爬检测（Cloudflare / hCaptcha 等）
@@ -838,6 +840,18 @@ async function getBrowser(): Promise<Browser> {
     "--dns-over-https-mode=secure",
     "--dns-over-https-templates=https://1.1.1.1/dns-query,https://dns.google/dns-query",
   );
+  // fingerprint-chromium kernel-level spoofing
+  if (_useFp) {
+    args.push(
+      `--fingerprint=${Math.floor(Math.random() * 0x7fffffff)}`,
+      "--fingerprint-platform=linux",
+      "--fingerprint-brand=Chrome",
+      "--fingerprint-brand-version=145",
+      "--fingerprint-hardware-concurrency=8",
+      "--timezone=America/Los_Angeles",
+      "--disable-non-proxied-udp",
+    );
+  }
   if (useHeaded) {
     // GPU 走 ANGLE+SwiftShader：headed Chromium 在 Xvfb 上需要软件 GL 后端，
     //   否则 WebGL 直接关闭 → fingerprint 上一眼识破

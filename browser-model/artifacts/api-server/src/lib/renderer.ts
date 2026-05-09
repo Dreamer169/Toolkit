@@ -459,8 +459,10 @@ async function getBrowser(): Promise<Browser> {
     }
   }
   if (!browserPromise) {
+    const _fpChromeBin = "/opt/fingerprint-chromium/squashfs-root/opt/ungoogled-chromium/chrome";
+    const _useFpChrome = fs.existsSync(_fpChromeBin);
     const executablePath = process.env.REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE
-      || "/data/cache/ms-playwright/chromium-1208/chrome-linux64/chrome";
+      || (_useFpChrome ? _fpChromeBin : "/data/cache/ms-playwright/chromium-1208/chrome-linux64/chrome");
     const proxyServer = process.env.BROWSER_PROXY || undefined;
     const userDataDir = "/tmp/broker-chromium-profile";
     try { fs.mkdirSync(userDataDir, { recursive: true }); } catch { /* ignore */ }
@@ -493,6 +495,18 @@ async function getBrowser(): Promise<Browser> {
       "--enable-features=AsyncDns,DnsOverHttpsUpgrade,NetworkServiceInProcess",
       "--dns-over-https-templates=https://1.1.1.1/dns-query,https://dns.google/dns-query",
       ...(proxyServer ? [`--proxy-server=${proxyServer}`, "--disable-quic"] : []),
+      // fingerprint-chromium kernel-level spoofing (Chrome 144 AppImage)
+      ...(_useFpChrome ? [
+        `--fingerprint=${(Math.random() * 0x7fffffff | 0)}`,
+        "--fingerprint-platform=linux",
+        "--fingerprint-brand=Chrome",
+        "--fingerprint-brand-version=145",
+        "--fingerprint-hardware-concurrency=8",
+        "--lang=en-US",
+        "--accept-lang=en-US,en",
+        "--timezone=America/Los_Angeles",
+        "--disable-non-proxied-udp",
+      ] : []),
       "about:blank",
     ];
     killChromiumProc();

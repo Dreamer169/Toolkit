@@ -332,6 +332,91 @@ def fingerprint_script(profile: BrowserProfile) -> str:
     try {{
         localStorage.setItem('device_id',  '{p.machine_id}');
         localStorage.setItem('machine_id', '{p.machine_id}');
+
+    // ── navigator.connection (NetworkInformation API) ────────────────────
+    try {{
+        Object.defineProperty(Navigator.prototype, 'connection', {{
+            get: () => ({{ effectiveType: '4g', rtt: 50, downlink: 10,
+                           saveData: false, type: 'wifi', downlinkMax: Infinity,
+                           addEventListener(){{{{}}}}  , removeEventListener(){{{{}}}} }}),
+            configurable: true,
+        }});
+    }} catch(e) {{}}
+
+    // ── navigator.permissions — notifications → 'default' ────────────────
+    try {{
+        const _origQ = navigator.permissions && navigator.permissions.query
+                       && navigator.permissions.query.bind(navigator.permissions);
+        if (_origQ) {{
+            navigator.permissions.query = (p) =>
+                p && p.name === 'notifications'
+                  ? Promise.resolve({{ state: 'default', name: 'notifications', onchange: null }})
+                  : _origQ(p);
+        }}
+    }} catch(e) {{}}
+
+    // ── navigator.userAgentData (UA Client Hints JS API) ─────────────────
+    try {{
+        const _brands = [
+            {{ brand: 'Chromium',      version: '{p.ch_ver}' }},
+            {{ brand: 'Not:A-Brand',   version: '24' }},
+            {{ brand: 'Google Chrome', version: '{p.ch_ver}' }},
+        ];
+        const _fullList = [
+            {{ brand: 'Chromium',      version: '{p.ch_ver}.0.0.0' }},
+            {{ brand: 'Not:A-Brand',   version: '24.0.0.0' }},
+            {{ brand: 'Google Chrome', version: '{p.ch_ver}.0.0.0' }},
+        ];
+        const _os = '{p.platform_str}' === 'Win32' ? 'Windows' : 'macOS';
+        const _high = {{
+            architecture: 'x86', bitness: '64', model: '', mobile: false,
+            platform: _os, platformVersion: '10.0.0',
+            uaFullVersion: '{p.ch_ver}.0.0.0', wow64: false,
+            formFactors: ['Desktop'], fullVersionList: _fullList, brands: _brands,
+        }};
+        const _uaData = {{
+            brands: _brands, mobile: false, platform: _os,
+            getHighEntropyValues(hints) {{
+                const out = {{ brands: _brands, mobile: false, platform: _os }};
+                (hints || []).forEach((h) => {{ if (h in _high) out[h] = _high[h]; }});
+                return Promise.resolve(out);
+            }},
+            toJSON() {{ return {{ brands: _brands, mobile: false, platform: _os }}; }},
+        }};
+        Object.defineProperty(Navigator.prototype, 'userAgentData',
+            {{ get: () => _uaData, configurable: true }});
+    }} catch(e) {{}}
+
+    // ── chrome.* stubs ────────────────────────────────────────────────────
+    try {{
+        if (!window.chrome) window.chrome = {{}};
+        if (!window.chrome.runtime) window.chrome.runtime = {{
+            id: undefined,
+            sendMessage() {{ throw new Error('no extension'); }},
+            connect()     {{ throw new Error('no extension'); }},
+            PlatformOs:   {{ WIN: 'win', LINUX: 'linux', MAC: 'mac' }},
+            PlatformArch: {{ X86_64: 'x86-64', ARM64: 'arm64' }},
+        }};
+        window.chrome.csi = window.chrome.csi || function() {{ return {{}}; }};
+        window.chrome.loadTimes = window.chrome.loadTimes || function() {{
+            return {{ requestTime: Date.now()/1000, startLoadTime: Date.now()/1000,
+                      firstPaintTime: 0, finishDocumentLoadTime: 0, finishLoadTime: 0,
+                      wasNpnNegotiated: true, npnNegotiatedProtocol: 'h2',
+                      connectionInfo: 'h2' }};
+        }};
+    }} catch(e) {{}}
+
+    // ── pdfViewerEnabled ──────────────────────────────────────────────────
+    try {{ Object.defineProperty(Navigator.prototype, 'pdfViewerEnabled',
+        {{ get: () => true, configurable: true }}); }} catch(e) {{}}
+
+    // ── outerWidth/outerHeight headless leak ──────────────────────────────
+    try {{
+        if (!window.outerWidth)
+            Object.defineProperty(window, 'outerWidth',  {{ get: () => window.innerWidth }});
+        if (!window.outerHeight)
+            Object.defineProperty(window, 'outerHeight', {{ get: () => window.innerHeight + 88 }});
+    }} catch(e) {{}}
     }} catch(e) {{}}
 }})();
 """
