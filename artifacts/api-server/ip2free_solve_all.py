@@ -445,4 +445,4 @@ def main():
     LOG_F.close()
 
 
-main()
+if __name__ == "__main__": main()
