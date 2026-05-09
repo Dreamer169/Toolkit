@@ -235,6 +235,7 @@ class KiroRegister:
         self._workflow_result_handle=None  # step 10 redirect URL 中的 workflowResultHandle
         self._step11_state=None        # step 11 redirect URL 中的 state
         self._auth_code=None  # auth code from kiro redirect
+        self._portal_bearer=None  # portal SSO bearer token (from step12a)
 
     def log(self,msg): print(f"[{self.tag}] {msg}")
 
@@ -1050,7 +1051,9 @@ class KiroRegister:
                     if at:
                         self.log(f"  ✅ accessToken={at[:60]}...")
                         self.log(f"  ✅ csrfToken={ct[:30] if ct else ''}")
-                        return {"accessToken": at, "sessionToken": "", "csrfToken": ct, "expiresIn": ei}
+                        pb = self._fetch_portal_bearer()
+                        if pb: self._portal_bearer = pb
+                        return {"accessToken": at, "sessionToken": self._portal_bearer or "", "csrfToken": ct, "expiresIn": ei}
                     self.log(f"  no accessToken: {rd}")
                 except Exception as ex2:
                     self.log(f"  CBOR fail: {ex2}")
@@ -1103,6 +1106,7 @@ class KiroRegister:
             return None
         sso_resp = r.json()
         bearer_token = sso_resp.get("token", "")
+        self._portal_bearer = bearer_token
         sso_redirect = sso_resp.get("redirectUrl", "")
         if not bearer_token:
             self.log(f"  ❌ 无 bearer token: {json.dumps(sso_resp, ensure_ascii=False)[:300]}")
@@ -1265,6 +1269,42 @@ class KiroRegister:
     #   - POST /device_authorization/associate_token   (AssociateTokenWithDevice, JSON, withBearerToken:false)
     # SPA 通过 view.awsapps.com/api/oidc/ 代理调用, 代理用 SSO session cookie 认证
     # 我们直接调用 portal.sso 用 bearer token 认证
+    def _fetch_portal_bearer(self):
+        """Run step12a to get portal.sso bearer token for device auth confirmation."""
+        PORTAL = "https://portal.sso.us-east-1.amazonaws.com"
+        if not self._portal_csrf_token or not self._workflow_result_handle or not self._step11_state:
+            self.log("  _fetch_portal_bearer: missing required data, skipping")
+            return None
+        try:
+            sso_h = {
+                **UA,
+                "accept": "application/json, text/plain, */*",
+                "content-type": "application/x-www-form-urlencoded",
+                "x-amz-sso-csrf-token": self._portal_csrf_token,
+                "origin": "https://view.awsapps.com",
+                "referer": "https://view.awsapps.com/",
+                "sec-fetch-site": "cross-site",
+                "sec-fetch-mode": "cors",
+                "sec-fetch-dest": "empty",
+            }
+            sso_body = urlencode({
+                "authCode": self._workflow_result_handle,
+                "state": self._step11_state,
+                "orgId": "view",
+            })
+            r = self.s.post(f"{PORTAL}/auth/sso-token", headers=sso_h, data=sso_body)
+            self.log(f"  _fetch_portal_bearer: status={r.status_code}")
+            if r.status_code == 200:
+                token = r.json().get("token", "")
+                if token:
+                    self.log(f"  _fetch_portal_bearer: OK token={token[:60]}...")
+                    return token
+            else:
+                self.log(f"  _fetch_portal_bearer: failed {r.text[:200]}")
+        except Exception as e:
+            self.log(f"  _fetch_portal_bearer: exception {e}")
+        return None
+
     def step12f_device_auth(self, bearer_token):
         """通过 OIDC Device Authorization 获取 refreshToken.
         
@@ -1566,7 +1606,8 @@ class KiroRegister:
         session_token = tokens.get("sessionToken", "")
 
         # Step 12f: Device Auth → refreshToken + clientId + clientSecret
-        device_result = self.step12f_device_auth(session_token)
+        bearer_for_device = self._portal_bearer or session_token or ""
+        device_result = self.step12f_device_auth(bearer_for_device)
         refresh_token = ""
         client_id = ""
         client_secret = ""

@@ -90,14 +90,18 @@ def save_kiro_account(outlook_id: int, email: str, password: str,
     cur.close(); conn.close()
     return new_id
 
-def mark_outlook_kiro_done(account_id: int, success: bool):
+def mark_outlook_kiro_done(account_id: int, success: bool, permanent: bool = False):
     conn = _db()
     cur = conn.cursor()
     if success:
         cur.execute("UPDATE accounts SET kiro_used=true, kiro_used_at=NOW() WHERE id=%s",
                     (account_id,))
+    elif permanent:
+        # 永久失败 (如 refresh_token 过期): 标记为已用, 不再重试
+        cur.execute("UPDATE accounts SET kiro_used=true, kiro_used_at=NOW(), status='inactive' WHERE id=%s",
+                    (account_id,))
     else:
-        # 失败时释放锁，允许下次重试
+        # 暂时失败时释放锁，允许下次重试
         cur.execute("UPDATE accounts SET kiro_used=false WHERE id=%s", (account_id,))
     conn.commit(); cur.close(); conn.close()
 
@@ -132,6 +136,9 @@ def wait_for_aws_otp(refresh_token: str, timeout: int = 120, tag: str = "") -> s
         new_refresh = tok.get("refresh_token", refresh_token)
     except Exception as e:
         print(f"{prefix}❌ refresh token 失败: {e}", flush=True)
+        # 400 = refresh_token 过期，向上抛以触发永久失败标记
+        if "400" in str(e) or "400" in str(type(e)):
+            raise RuntimeError(f"refresh_token_expired:{e}")
         return None
 
     def graph_get(path):
@@ -210,7 +217,13 @@ def run_kiro_register(email: str, refresh_token: str, proxy: str | None,
     name = f"Kiro User {secrets.token_hex(3)}"
 
     reg = kiro_core.KiroRegister(proxy=proxy, tag=tag)
-    ok, info = reg.register(email, pwd=password, name=name, mail_token=None)
+    try:
+        ok, info = reg.register(email, pwd=password, name=name, mail_token=None)
+    except RuntimeError as rte:
+        err_str = str(rte)
+        if "refresh_token_expired" in err_str:
+            return {"ok": False, "email": email, "error": err_str, "permanent": True}
+        raise
 
     if ok and info:
         info.setdefault("password", password)
@@ -276,8 +289,9 @@ def main():
         print(json.dumps(result, ensure_ascii=False, indent=2))
         sys.exit(0)
     else:
-        mark_outlook_kiro_done(account["id"], success=False)
-        print(f"❌ 注册失败: {result.get('error')} ({elapsed}s)", flush=True)
+        permanent = result.get("permanent", False)
+        mark_outlook_kiro_done(account["id"], success=False, permanent=permanent)
+        print(f"❌ 注册失败: {result.get('error')} (permanent={permanent}) ({elapsed}s)", flush=True)
         sys.exit(1)
 
 if __name__ == "__main__":
