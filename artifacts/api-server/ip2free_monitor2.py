@@ -143,9 +143,10 @@ def ocr_png(png_bytes, save_path=None):
 
 def blob_to_png(page, blob_url):
     # Capture captcha via getBoundingClientRect clip screenshot
+    # Wait for naturalWidth > 0 (image fully loaded) before screenshotting
     import time as _t2
     _DLG = '[role="dialog"]'
-    for _w in range(10):
+    for _w in range(15):
         try:
             _bu = blob_url.replace("'", "\\'")
             _js = (
@@ -157,7 +158,7 @@ def blob_to_png(page, blob_url):
                 'if(!img){'
                 'var all=Array.from(d.querySelectorAll(\'img\'));'
                 'img=all.find(function(i){return i.naturalWidth>60;})'
-                '||all.find(function(i){return i.src===\'' + _bu + '\';})'
+                '||all.find(function(i){return i.src===\'' + _bu + '\' && i.naturalWidth>0;})'
                 '||null;}'
                 'if(!img){return null;}'
                 'var r=img.getBoundingClientRect();'
@@ -165,17 +166,25 @@ def blob_to_png(page, blob_url):
                 'nw:img.naturalWidth,nh:img.naturalHeight};})()'
             )
             rect = page.evaluate(_js)
-            if rect and rect.get('width', 0) > 30 and rect.get('height', 0) > 15:
-                clip = {k: rect[k] for k in ('x', 'y', 'width', 'height')}
-                png_bytes = page.screenshot(clip=clip)
-                if png_bytes and len(png_bytes) > 300:
-                    log(f"    captcha rect: {rect['nw']}x{rect['nh']} {len(png_bytes)}b")
-                    return png_bytes
+            if rect:
+                nw = rect.get('nw', 0)
+                nh = rect.get('nh', 0)
+                w = rect.get('width', 0)
+                h = rect.get('height', 0)
+                log(f"    rect check: nw={nw} nh={nh} w={w:.0f} h={h:.0f}")
+                if nw > 30 and nh > 10 and w > 30 and h > 10:
+                    clip = {k: rect[k] for k in ('x', 'y', 'width', 'height')}
+                    png_bytes = page.screenshot(clip=clip)
+                    if png_bytes and len(png_bytes) > 500:
+                        log(f"    captcha rect OK: {nw}x{nh} {len(png_bytes)}b")
+                        return png_bytes
+                else:
+                    log(f"    waiting for img load (nw={nw})...")
             else:
-                log(f"    rect not ready ({rect}), retrying...")
+                log(f"    no rect yet ({_w})")
         except Exception as _e:
             log(f"    rect err {_w}: {_e}")
-        _t2.sleep(0.4)
+        _t2.sleep(0.5)
     return None
 
 
@@ -314,7 +323,13 @@ def solve_one(email, pw, port):
             if "api.ip2free.com/api" in resp.url:
                 name = resp.url.split("/api/")[-1].split("?")[0]
                 try:
-                    b = resp.body()
+                    try:
+                        b = resp.body()
+                    except Exception as _be:
+                        log(f"    <- {name} body() ERR: {_be}")
+                        b = b""
+                    if name == "account/captcha" and not (b and b[:4] == b"\x89PNG"):
+                        log(f"    <- captcha body len={len(b)} head={b[:8] if b else b!r}")
                     if b and b[:4] == b"\x89PNG":
                         # Capture captcha code from URL query param (?code=UUID)
                         # needed for checkCaptcha POST body
