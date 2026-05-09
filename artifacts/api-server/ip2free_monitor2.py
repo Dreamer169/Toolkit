@@ -448,6 +448,40 @@ def solve_one(email, pw, port):
 
         ctx.on("response", on_response)
         ctx.on("request", on_request)
+        # Route interceptor: capture captcha PNG via route.fetch() (properly decompresses gzip)
+        # on_response resp.body() returns 0 bytes for gzip-encoded PNG responses via CDP.
+        # route.fetch() correctly decompresses and returns actual PNG bytes.
+        _cap_file_ref = [f"{SS_DIR}/cap_{email.split('@')[0]}.png"]
+        def _handle_captcha_route(route, request):
+            try:
+                _rsp = route.fetch()
+                _rb = _rsp.body()
+                _ct = _rsp.headers.get("content-type", "")
+                log(f"    ROUTE captcha: {len(_rb)}b ct={_ct[:30]}")
+                if _rb and len(_rb) > 100 and _rb[:4] == b"\x89PNG":
+                    # Save PNG for blob_to_png to read
+                    with open(_cap_file_ref[0], "wb") as _rf:
+                        _rf.write(_rb)
+                    log(f"    ROUTE saved cap file: {len(_rb)}b")
+                    route.fulfill(
+                        body=_rb,
+                        headers={"content-type": "image/png",
+                                 "access-control-allow-origin": "*"},
+                    )
+                elif _rb and len(_rb) > 100:
+                    # Non-PNG response (maybe gzip not decompressed) — save anyway
+                    with open(_cap_file_ref[0], "wb") as _rf:
+                        _rf.write(_rb)
+                    log(f"    ROUTE saved non-PNG: {_rb[:8].hex()} ct={_ct[:30]}")
+                    route.fulfill(response=_rsp)
+                else:
+                    log(f"    ROUTE empty, continuing")
+                    route.continue_()
+            except Exception as _re:
+                log(f"    ROUTE captcha err: {_re}")
+                route.continue_()
+        page.route("**/api/account/captcha**", _handle_captcha_route)
+
         page = ctx.new_page()
         result = "failed"
 
