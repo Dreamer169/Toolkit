@@ -381,29 +381,6 @@ def solve_one(email, pw, port):
         ctx.on("response", on_response)
         ctx.on("request", on_request)
         page = ctx.new_page()
-
-        # page.route for captcha — the ONLY reliable way to read binary response body
-        # ctx.on("response") can't read PNG bodies; page.route with route.fetch() can
-        _cap_route_data = {}
-
-        def _captcha_route(route, request):
-            try:
-                response = route.fetch()
-                body = response.body()
-                if body and body[:4] == b"\x89PNG":
-                    _cap_route_data["png"] = body
-                    _cap_route_data["ts"] = _t.time()
-                    log(f"    [route] captcha PNG captured: {len(body)}b")
-                else:
-                    # non-PNG (e.g., JSON error) — let on_response handle via ctx events
-                    pass
-                route.fulfill(response=response)
-            except Exception as _re:
-                log(f"    [route] captcha route err: {_re}")
-                route.continue_()
-
-        page.route("**/api/account/captcha*", _captcha_route)
-
         result = "failed"
 
         try:
@@ -563,30 +540,18 @@ def solve_one(email, pw, port):
                     page.wait_for_timeout(2000)
                     continue
 
-                # --- Get captcha PNG ---
-                # Priority 1: page.route captured PNG (freshest, most reliable)
-                # Priority 2: blob URL extraction fallback
-                route_png = _cap_route_data.get("png")
-                route_ts  = _cap_route_data.get("ts", 0)
-                png_bytes = None
+                # --- Get captcha PNG via blob URL ---
+                blob_url = page.evaluate(GET_BLOB_URL_JS)
+                log(f"    blob: {blob_url}")
 
-                if route_png and len(route_png) >= 100 and (_t.time() - route_ts) < 60:
-                    png_bytes = route_png
-                    log(f"    PNG (route): {len(png_bytes)}b  age={int(_t.time()-route_ts)}s")
-                    # Clear so next attempt gets fresh captcha
-                    _cap_route_data.clear()
-                else:
-                    # Fallback: blob URL
-                    blob_url = page.evaluate(GET_BLOB_URL_JS)
-                    log(f"    blob: {blob_url}")
-                    if blob_url and blob_url.startswith("blob:"):
-                        png_bytes = blob_to_png(page, blob_url)
-                        log(f"    PNG (blob): {len(png_bytes) if png_bytes else 0}b")
-                    else:
-                        log("    no route PNG and no blob url, closing modal")
-                        page.evaluate(CLOSE_MODAL_JS)
-                        page.wait_for_timeout(2000)
-                        continue
+                if not blob_url or not blob_url.startswith("blob:"):
+                    log("    no blob url, closing modal")
+                    page.evaluate(CLOSE_MODAL_JS)
+                    page.wait_for_timeout(2000)
+                    continue
+
+                png_bytes = blob_to_png(page, blob_url)
+                log(f"    PNG: {len(png_bytes) if png_bytes else 0}b")
 
                 if not png_bytes or len(png_bytes) < 100:
                     _empty_png_count = _empty_png_count + 1 if "_empty_png_count" in dir() else 1
