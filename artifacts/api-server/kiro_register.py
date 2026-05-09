@@ -136,7 +136,8 @@ def wait_for_aws_otp(refresh_token: str, timeout: int = 120, tag: str = "") -> s
 
     def graph_get(path):
         import urllib.parse as up
-        url = f"https://graph.microsoft.com/v1.0{path}"
+        # URL-encode spaces in query string
+        url = "https://graph.microsoft.com/v1.0" + path.replace(" ", "%20")
         req = urllib.request.Request(url, headers={
             "Authorization": f"Bearer {access_token}",
             "Accept": "application/json",
