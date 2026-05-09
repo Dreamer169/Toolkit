@@ -143,26 +143,28 @@ def ocr_png(png_bytes, save_path=None):
 
 def blob_to_png(page, blob_url):
     # Capture captcha via getBoundingClientRect clip screenshot
-    import time as _t2, json as _json2
+    import time as _t2
+    _DLG = '[role="dialog"]'
     for _w in range(10):
         try:
-            _blob_safe = blob_url.replace("'", "\'")
-            _rect_js = (
-                "(function() {"
-                "var dialogs=Array.from(document.querySelectorAll('[role=\"dialog\"]'))"
-                ".filter(function(x){return x.offsetParent!==null;});"
-                "var d=dialogs[0];if(!d){return null;}"
-                "var img=d.querySelector('img.captcha-img');"
-                "if(!img){var all=Array.from(d.querySelectorAll('img'));"
-                "img=all.find(function(i){return i.naturalWidth>60;})"
-                f"||all.find(function(i){{return i.src==='{_blob_safe}';}})"
-                "||null;}"
-                "if(!img){return null;}"
-                "var r=img.getBoundingClientRect();"
-                "return {x:r.left,y:r.top,width:r.width,height:r.height,"
-                "nw:img.naturalWidth,nh:img.naturalHeight};})()",
+            _bu = blob_url.replace("'", "\\'")
+            _js = (
+                '(function() {'
+                'var d=Array.from(document.querySelectorAll(\'' + _DLG + '\'))'
+                '.filter(function(x){return x.offsetParent!==null;})[0];'
+                'if(!d){return null;}'
+                'var img=d.querySelector(\'img.captcha-img\');'
+                'if(!img){'
+                'var all=Array.from(d.querySelectorAll(\'img\'));'
+                'img=all.find(function(i){return i.naturalWidth>60;})'
+                '||all.find(function(i){return i.src===\'' + _bu + '\';})'
+                '||null;}'
+                'if(!img){return null;}'
+                'var r=img.getBoundingClientRect();'
+                'return {x:r.left,y:r.top,width:r.width,height:r.height,'
+                'nw:img.naturalWidth,nh:img.naturalHeight};})()'
             )
-            rect = page.evaluate(_rect_js)
+            rect = page.evaluate(_js)
             if rect and rect.get('width', 0) > 30 and rect.get('height', 0) > 15:
                 clip = {k: rect[k] for k in ('x', 'y', 'width', 'height')}
                 png_bytes = page.screenshot(clip=clip)
@@ -175,6 +177,7 @@ def blob_to_png(page, blob_url):
             log(f"    rect err {_w}: {_e}")
         _t2.sleep(0.4)
     return None
+
 
 CLICK_CLAIM_BTN_JS = """
 (function() {
