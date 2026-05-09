@@ -97,62 +97,44 @@ def check_task_done_api(email, pw, port):
         return False
 
 def ocr_png(png_bytes, save_path=None):
+    """Fast OCR using only ddddocr (easyocr is too slow and inaccurate for these captchas).
+    Tries: beta-orig, std-orig, beta-upscale3x, std-upscale3x.
+    RGBA→RGB conversion with white background before processing.
+    """
     if save_path:
         with open(save_path, "wb") as f:
             f.write(png_bytes)
     results = []
-    import io
-    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
-    # Preprocess: RGBA→RGB (white bg), upscale 3x for better OCR
-    base_img = Image.open(io.BytesIO(png_bytes))
-    if base_img.mode == "RGBA":
-        bg = Image.new("RGB", base_img.size, (255, 255, 255))
-        bg.paste(base_img, mask=base_img.split()[3])
-        base_img = bg
-    else:
-        base_img = base_img.convert("RGB")
-    w, h = base_img.size
-    upscale = base_img.resize((w * 3, h * 3), Image.LANCZOS)
-    # 1. easyocr Chinese (primary — best for Chinese captcha)
+    import io, tempfile, os
+    from PIL import Image, ImageEnhance
+    # RGBA→RGB with white background (captcha uses transparency)
     try:
-        import easyocr, numpy as np
-        _reader = easyocr.Reader(["ch_sim", "en"], gpu=False, verbose=False)
-        for proc_name, proc_img in [
-            ("up3x", upscale),
-            ("up3x_contrast", ImageEnhance.Contrast(upscale.convert("L")).enhance(3.0).convert("RGB")),
-            ("raw", base_img),
-        ]:
-            try:
-                arr = np.array(proc_img)
-                texts = _reader.readtext(arr, detail=0, paragraph=True)
-                for t in texts:
-                    t = t.strip()
-                    if t and t not in results:
-                        log(f"    OCR easyocr[{proc_name}]: {t!r}")
-                        results.append(t)
-            except Exception as e:
-                log(f"    OCR easyocr[{proc_name}] err: {e}")
-    except Exception as e:
-        log(f"    OCR easyocr load err: {e}")
-    # 2. ddddocr — try both original bytes and preprocessed upscaled PNG
-    import tempfile, os
-    try:
-        # Save upscaled RGB as PNG for ddddocr
+        base_img = Image.open(io.BytesIO(png_bytes))
+        if base_img.mode == "RGBA":
+            bg = Image.new("RGB", base_img.size, (255, 255, 255))
+            bg.paste(base_img, mask=base_img.split()[3])
+            base_img = bg
+        else:
+            base_img = base_img.convert("RGB")
+        w, h = base_img.size
+        # 3x upscale — helps ddddocr read small 120×40 Chinese characters
+        upscale = base_img.resize((w * 3, h * 3), Image.LANCZOS)
         _tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
         upscale.save(_tmp.name)
         _tmp.close()
         up_bytes = open(_tmp.name, "rb").read()
         os.unlink(_tmp.name)
-    except:
+    except Exception as e:
+        log(f"    OCR preprocess err: {e}")
         up_bytes = png_bytes
+    # ddddocr: try beta then std, on orig + upscaled
     for label, ocr in [("beta", _ocr_beta), ("std", _ocr_std)]:
         if ocr is None:
             continue
         for lbl2, bts in [("orig", png_bytes), ("up3x", up_bytes)]:
             try:
                 txt = ocr.classification(bts).strip()
-                key = f"dddd[{label}/{lbl2}]"
-                log(f"    OCR {key}: {txt!r}")
+                log(f"    OCR dddd[{label}/{lbl2}]: {txt!r}")
                 if txt and txt not in results:
                     results.append(txt)
             except Exception as e:
