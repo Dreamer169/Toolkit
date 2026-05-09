@@ -250,7 +250,7 @@ async function runCheck() {
           const _freshRow = await query<{ tags: string | null }>("SELECT tags FROM accounts WHERE id=$1", [acc.id]);
           const _freshTags = _freshRow[0]?.tags ?? "";
           if (_freshTags.includes("not_found")) {
-            await execute("UPDATE accounts SET status='suspended', updated_at=NOW() WHERE id=$1", [acc.id]);
+            await execute("UPDATE accounts SET status='suspended', tags=CASE WHEN COALESCE(tags,'')='' THEN 'abuse_mode' WHEN tags NOT LIKE '%abuse_mode%' THEN tags||',abuse_mode' ELSE tags END, updated_at=NOW() WHERE id=$1", [acc.id]);
             logger.warn({ email: acc.email }, "[healthcheck] MS报告账号不存在(not_found)，已自动暂停，停止重试");
           } else {
             await execute("UPDATE accounts SET status='needs_oauth', updated_at=NOW() WHERE id=$1", [acc.id]);
