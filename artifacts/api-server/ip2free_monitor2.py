@@ -142,44 +142,61 @@ def ocr_png(png_bytes, save_path=None):
     return results
 
 def blob_to_png(page, blob_url):
-    # Strategy: full dialog screenshot (no cropping) for OCR
-    # Also debug: log all child elements in dialog to find actual captcha element
-    import time as _t2, base64 as _b64
-    for _w in range(5):
-        try:
-            # Debug: inspect dialog contents
-            _debug = page.evaluate(
-                "(function() {"
-                "var d = document.querySelector('[role=\"dialog\"]');"
-                "if (!d) return null;"
-                "var els = Array.from(d.querySelectorAll('*')).slice(0,30);"
-                "return els.map(function(e) {"
-                "var tag = e.tagName.toLowerCase();"
-                "var r = {tag:tag};"
-                "if (tag==='img') r.src=(e.src||'').slice(0,60);"
-                "if (tag==='canvas') r.sz=e.width+'x'+e.height;"
-                "r.cls = (e.className||'').toString().slice(0,40);"
-                "return r;});})()"
-            )
-            log(f"    dlg els: {str(_debug)[:300]}")
-        except Exception as _de:
-            log(f"    dlg debug err: {_de}")
+    # Strategy: on_response saves PNG to {SS_DIR}/cap_{username}.png
+    # Wait for that file to appear (on_response fires when browser gets response)
+    # Fall back to dialog screenshot if file never appears
+    import time as _t2, os as _os2, base64 as _b64
+    # Derive cap file path from blob_url context (email is in closure via outer scope)
+    # Use glob to find any cap_*.png written in last 10 seconds
+    _cap_glob_pat = SS_DIR + "/cap_*.png"
+    import glob as _gl
 
+    # Delete stale cap files first so we detect fresh writes
+    for _old in _gl.glob(_cap_glob_pat):
         try:
-            # Full dialog screenshot (no crop)
-            dlg_loc = page.locator('[role="dialog"]').first
-            if dlg_loc.count() > 0:
-                dlg_png = dlg_loc.screenshot(timeout=3000)
-                if dlg_png and len(dlg_png) > 500:
-                    log(f"    full dialog screenshot: {len(dlg_png)}b")
-                    return dlg_png
-                else:
-                    log(f"    dialog screenshot small: {len(dlg_png) if dlg_png else 0}b")
-            else:
-                log(f"    dialog not found ({_w})")
-        except Exception as _e:
-            log(f"    dialog err {_w}: {_e}")
+            if _t2.time() - _os2.path.getmtime(_old) > 5:
+                _os2.remove(_old)
+        except:
+            pass
+
+    # Wait up to 6 seconds for on_response to write a fresh PNG
+    for _w in range(12):
         _t2.sleep(0.5)
+        for _fp in _gl.glob(_cap_glob_pat):
+            try:
+                if _t2.time() - _os2.path.getmtime(_fp) < 8:
+                    with open(_fp, "rb") as _fcap:
+                        _data = _fcap.read()
+                    if _data and _data[:4] == b"\x89PNG" and len(_data) > 200:
+                        log(f"    PNG from on_response file: {len(_data)}b ({_os2.path.basename(_fp)})")
+                        return _data
+            except:
+                pass
+
+        # Also check window.__captchaPNG from createObjectURL interceptor
+        try:
+            _r = page.evaluate(
+                "(function(){return {b64:window.__captchaPNG||'',size:window.__captchaPNGSize||0};})()"
+            )
+            if _r and _r.get('size', 0) > 200:
+                _png_bytes = _b64.b64decode(_r['b64'] + '==')
+                log(f"    PNG from window interceptor: {_r['size']}b")
+                return _png_bytes
+        except:
+            pass
+
+    # Last resort: full dialog screenshot for OCR
+    try:
+        dlg_loc = page.locator('[role="dialog"]').first
+        if dlg_loc.count() > 0:
+            dlg_png = dlg_loc.screenshot(timeout=3000)
+            if dlg_png and len(dlg_png) > 3000:
+                log(f"    dialog screenshot fallback: {len(dlg_png)}b")
+                return dlg_png
+    except Exception as _e:
+        log(f"    dialog fallback err: {_e}")
+
+    log("    blob_to_png: no PNG found")
     return None
 
 
@@ -416,22 +433,6 @@ def solve_one(email, pw, port):
         page = ctx.new_page()
         result = "failed"
 
-        # Route intercept: capture captcha PNG before browser consumes it
-        _cap_file_ref = [f"{SS_DIR}/cap_{email.split(chr(64))[0]}.png"]
-        def _handle_captcha_route(route, request):
-            try:
-                _rsp = route.fetch()
-                _rb = _rsp.body()
-                _ct = _rsp.headers.get("content-type", "")
-                log(f"    ROUTE captcha: {len(_rb)}b ct={_ct[:40]}")
-                if _rb and len(_rb) > 100:
-                    with open(_cap_file_ref[0], "wb") as _rf:
-                        _rf.write(_rb)
-                route.fulfill(response=_rsp)
-            except Exception as _re:
-                log(f"    ROUTE captcha err: {_re}")
-                route.continue_()
-        page.route("**/api/account/captcha**", _handle_captcha_route)
 
         try:
             # ── Login ──────────────────────────────────────────────
