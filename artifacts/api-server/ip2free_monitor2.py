@@ -142,53 +142,50 @@ def ocr_png(png_bytes, save_path=None):
     return results
 
 def blob_to_png(page, blob_url):
-    # Method 1: Canvas from img element (blob fetch returns 0b due to browser security)
+    """Capture captcha via dialog screenshot (most reliable; bypasses blob/canvas issues)."""
+    import io
+    # Strategy 1: screenshot the dialog bounding box
     try:
-        CANVAS_JS = (
+        box = page.evaluate(
             "() => {"
-            "  try {"
-            "    var ds=Array.from(document.querySelectorAll('[role=\"dialog\"]'))"
-            "      .filter(function(x){return x.offsetParent!==null;});"
-            "    var d=ds.length?ds[0]:document;"
-            "    var img=d.querySelector('img.captcha-img')||d.querySelector('img');"
-            "    if(!img||!img.complete||!img.naturalWidth) return null;"
-            "    var cv=document.createElement('canvas');"
-            "    cv.width=img.naturalWidth; cv.height=img.naturalHeight;"
-            "    cv.getContext('2d').drawImage(img,0,0);"
-            "    return cv.toDataURL('image/png').split(',')[1];"
-            "  } catch(e){return null;}"
+            "  var ds=Array.from(document.querySelectorAll('[role=\"dialog\"]'))"
+            "    .filter(function(x){return x.offsetParent!==null;});"
+            "  if(!ds.length) return null;"
+            "  var r=ds[0].getBoundingClientRect();"
+            "  return {x:r.left,y:r.top,width:r.width,height:r.height};"
             "}"
         )
-        result = page.evaluate(CANVAS_JS)
+        if box and box.get('width', 0) > 10:
+            clip = {'x': max(0, box['x']), 'y': max(0, box['y']),
+                    'width': min(box['width'], 800), 'height': min(box['height'], 400)}
+            png_bytes = page.screenshot(clip=clip, type='png')
+            if png_bytes and len(png_bytes) > 500:
+                log(f"    dialog screenshot: {len(png_bytes)}b")
+                return png_bytes
+    except Exception as e:
+        log(f"    screenshot err: {e}")
+    # Strategy 2: Canvas read from img element
+    try:
+        result = page.evaluate(
+            "() => {"
+            "  var ds=Array.from(document.querySelectorAll('[role=\"dialog\"]'))"
+            "    .filter(function(x){return x.offsetParent!==null;});"
+            "  var d=ds.length?ds[0]:document;"
+            "  var img=d.querySelector('img.captcha-img')||d.querySelector('img');"
+            "  if(!img) return null;"
+            "  var cv=document.createElement('canvas');"
+            "  cv.width=img.naturalWidth||120; cv.height=img.naturalHeight||40;"
+            "  cv.getContext('2d').drawImage(img,0,0);"
+            "  return cv.toDataURL('image/png').split(',')[1];"
+            "}"
+        )
         if result:
             raw = base64.b64decode(result)
-            if len(raw) > 50:
+            if len(raw) > 100:
+                log(f"    canvas PNG: {len(raw)}b")
                 return raw
     except Exception as e:
         log(f"    canvas err: {e}")
-    # Method 2: blob fetch fallback
-    try:
-        FETCH_JS = (
-            "async (blobUrl) => {"
-            "  try {"
-            "    const r=await fetch(blobUrl);"
-            "    const ab=await r.arrayBuffer();"
-            "    const b=new Uint8Array(ab);"
-            "    if(!b.length) return null;"
-            "    let s='';"
-            "    for(let i=0;i<b.length;i+=8192){"
-            "      s+=btoa(String.fromCharCode(...b.subarray(i,i+8192)));"
-            "    }"
-            "    return s;"
-            "  } catch(e){return null;}"
-            "}"
-        )
-        result = page.evaluate(FETCH_JS, blob_url)
-        if result:
-            raw = base64.b64decode(result)
-            return raw if len(raw) > 50 else None
-    except Exception as e:
-        log(f"    fetch err: {e}")
     return None
 
 # --- Pure JS snippets (no Python format braces) ---
