@@ -1,6 +1,6 @@
 # 代理管理系统文档
 
-> **版本**：proxy_manager.py **v1.1**
+> **版本**：proxy_manager.py **v1.2**
 > **最后更新**：2026-05-09
 > **文件位置**：VPS `45.205.27.69` → `/data/Toolkit/scripts/proxy_manager.py`
 > **数据库**：`/data/proxy_db.json`（自动持久化，重启不丢失）
@@ -50,7 +50,6 @@ Python Library / CLI
   ProxyManager
       │
       ├── ip2free       -- 住宅 SOCKS5（user:pass 认证）
-      ├── novproxy      -- 住宅 SOCKS5（user:pass 认证）
       ├── local_xray    -- 本地 xray SOCKS5 (127.0.0.1:10850-10859)
       ├── proxyscrape   -- 免费匿名 SOCKS5（无认证）
       └── manual        -- 手动添加（无限制）
@@ -68,7 +67,6 @@ Python Library / CLI
 | 代理来源 | 不能用于 | 原因 |
 |---------|---------|------|
 | `ip2free` | ip2free 注册 | 同平台出口 IP，必然被识别 |
-| `novproxy` | novproxy 注册 | 同上 |
 | `local_xray` | 无限制 | 本地独立出口，可用于任何平台 |
 | `proxyscrape` | 无限制 | 无平台关联 |
 | `manual` | 无限制 | 手动添加默认无限制 |
@@ -83,8 +81,6 @@ pm = ProxyManager()
 # 注册 ip2free 时，必须排除 ip2free 来源
 proxy = pm.pick(not_for="ip2free")
 
-# 注册 novproxy 时
-proxy = pm.pick(not_for="novproxy")
 
 # 通用场景（无限制）
 proxy = pm.pick()
@@ -191,48 +187,7 @@ cat /data/ip2free_new_accounts.json    # 新注册的账号列表
 
 ---
 
-## 4. novproxy 代理详解
-
-### 4.1 注册获取代理
-
-```bash
-# 方式一：纯 API（推荐，mail.tm 临时邮箱，无浏览器）
-python3 /data/Toolkit/scripts/novproxy_register_final.py --count 3
-
-# 方式二：pydoll 浏览器（需 Outlook 邮箱读取验证码）
-python3 /data/Toolkit/scripts/novproxy_register_worker.py \
-  --accounts '[["email@domain.com","password"]]' \
-  --proxy socks5://127.0.0.1:10850
-
-# 账号文件（proxy_manager 自动加载）
-cat /data/novproxy_accounts.json
-```
-
-### 4.2 注册脚本指纹质量对比
-
-| 脚本 | 浏览器引擎 | 反指纹措施 | 风险 |
-|------|-----------|-----------|------|
-| novproxy_register_worker.py | pydoll (CDP) | 仅 webrtc_leak_protection | ⚠️ navigator.webdriver 暴露 |
-| novproxy_register_final.py | 无（纯 requests） | N/A | ✅ API 直连，无需反指纹 |
-| ip2free_reg_final.py | patchright | AutomationControlled + UA | ✅ 反检测完善 |
-| ip2free_register_invite.py | 无（纯 requests） | N/A | ✅ API 直连 |
-| outlook_factory_sandbox.py | patchright | 完整 stealth | ✅ 最强防检测 |
-
-**novproxy_register_worker.py 指纹风险详情**：
-- pydoll 不注入 `navigator.webdriver = false`（CF 机器人检测必查此字段）
-- 缺少 locale / timezone / canvas / WebGL 指纹伪装
-- 改进方案（在 `_make_options()` 中添加）：
-
-```python
-options.add_argument('--disable-blink-features=AutomationControlled')
-options.add_argument('--lang=en-US')
-```
-
-- 或直接切换为 `novproxy_register_final.py`（API 方式，成功率更高）
-
----
-
-## 5. local_xray 代理
+## 4. local_xray 代理
 
 - 端口：`10850–10859`（10 个端口）
 - 偶数端口（10850/10852/10854/10856/10858）：VLESS，经 jimhacker CF Worker
@@ -253,7 +208,7 @@ const resp = await microsoftFetch(url, init, proxy);
 
 ---
 
-## 6. proxyscrape 免费代理
+## 5. proxyscrape 免费代理
 
 - 来源：proxyscrape.com API（SOCKS5，匿名）
 - 每次刷新最多注入 30 个，存活率约 60-80%
@@ -261,7 +216,7 @@ const resp = await microsoftFetch(url, init, proxy);
 
 ---
 
-## 7. 代理选取算法（pick）
+## 6. 代理选取算法（pick）
 
 ```
 pick(not_for="ip2free") 执行流程：
@@ -308,14 +263,11 @@ python3 proxy_manager.py daemon --interval 1800                  # 守护进程
 | scripts/ip2free_reg_final.py | ip2free 注册（patchright 浏览器） |
 | scripts/ip2free_solve_v4.py | ip2free 活动任务求解（领奖代理） |
 | scripts/ip2free_monitor2.py | ip2free 账号监控 + 自动任务完成 |
-| scripts/novproxy_register_worker.py | novproxy 注册（pydoll + Outlook 邮箱） |
-| scripts/novproxy_register_final.py | novproxy 注册（纯 API + mail.tm） |
 | artifacts/api-server/src/lib/proxy-fetch.ts | TypeScript xray 代理选取 |
 | /data/proxy_db.json | 代理数据库（运行时） |
 | /data/proxy_accounts.json | 账号覆盖文件（可选，覆盖内置列表） |
 | /data/ip2free_invite_state.json | 邀请码使用进度追踪 |
 | /data/ip2free_new_accounts.json | 邀请注册的新账号列表 |
-| /data/novproxy_accounts.json | novproxy 账号及代理凭据 |
 
 ---
 
@@ -327,7 +279,6 @@ python3 proxy_manager.py daemon --interval 1800                  # 守护进程
 | ip2free 登录「密码错误」 | 密码被修改 | emily_gomez98 已知失效，忽略 |
 | ip2free 登录「用户名不存在」 | 注册失败，账号未激活 | 已从账号列表移除（v1.1） |
 | `pick` 返回 None | 代理池耗尽或全死 | 先 `probe --force` 再 `refresh` |
-| novproxy 注册失败率高 | pydoll 无 stealth，CF 检测 | 改用 `novproxy_register_final.py` |
 | I3qD20OQyg 奖励无法领取 | emily 密码丢失 | 用其他账号邀请码（如 9A8a27QSKi） |
 | 代理进了黑名单 | fail_count >= 3 | 等 5 分钟（BLACKLIST_TTL）自动解除 |
 | 活动代理 task_id=6 未领 | 每天限 1 次 | 用 ip2free_monitor2.py 自动每日领取 |
@@ -347,6 +298,6 @@ python3 proxy_manager.py daemon --interval 1800                  # 守护进程
 
 ### v1.0（初始版本）
 
-- 支持 ip2free / novproxy / local_xray / proxyscrape / manual 五大来源
+- 支持 ip2free / local_xray / proxyscrape / manual 五大来源
 - 平台排除规则（ip2free 不能用于 ip2free 注册）
 - 持久化 JSON 数据库、存活探测、黑名单机制、守护进程模式

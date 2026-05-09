@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-proxy_manager.py v1.1 -- Unified Proxy Manager
+proxy_manager.py v1.2 -- Unified Proxy Manager
 
 Sources:
   ip2free    -- residential SOCKS5 w/ auth (user:pass), NOT usable for ip2free registration
-  novproxy   -- residential SOCKS5 w/ auth, NOT usable for novproxy registration
   local_xray -- local xray SOCKS5 ports 10850-10859, no restriction
   proxyscrape-- anonymous free SOCKS5, no restriction
   manual     -- manually added, no restriction
 
 Platform exclusion rule:
   pick(not_for="ip2free")  --> exclude all proxies with source="ip2free"
-  pick(not_for="novproxy") --> exclude all proxies with source="novproxy"
 
 Persistent DB:  /data/proxy_db.json
 Account config: /data/proxy_accounts.json  (optional override of built-in list)
@@ -113,7 +111,6 @@ PROXYSCRAPE_URLS = [
 # Source -> list of platforms this source's proxies CANNOT be used for
 EXCLUSION_RULES: Dict[str, List[str]] = {
     "ip2free":    ["ip2free"],
-    "novproxy":   ["novproxy"],
     "local_xray": [],
     "proxyscrape":[],
     "manual":     [],
@@ -571,57 +568,6 @@ class ProxyManager:
         return added
 
     # ------------------------------------------------------------------
-    # Source: novproxy  (from /data/novproxy_accounts.json)
-    # ------------------------------------------------------------------
-
-    def refresh_novproxy(self, log_fn=None) -> int:
-        """
-        Load novproxy credentials from /data/novproxy_accounts.json.
-
-        Expected format (produced by novproxy_login_worker.py):
-        [{"email":"...", "proxy_user":"...", "proxy_pass":"...",
-          "server":"us.novproxy.io", "proxy_port": 1000,
-          "traffic_bytes": 524288000}, ...]
-        """
-        log = log_fn or (lambda m: print(f"[novproxy] {m}"))
-        acc_file = Path("/data/novproxy_accounts.json")
-        if not acc_file.exists():
-            log("No /data/novproxy_accounts.json — skipping "
-                "(populate with novproxy_login_worker.py output)")
-            return 0
-        try:
-            accts = json.loads(acc_file.read_text())
-        except Exception as e:
-            log(f"Load error: {e}"); return 0
-
-        added = updated = 0
-        for a in accts:
-            pu = a.get("proxy_user", ""); pp = a.get("proxy_pass", "")
-            sv = a.get("server", "us.novproxy.io")
-            pt = int(a.get("proxy_port", 1000))
-            tb = int(a.get("traffic_bytes", 0))
-            if not pu:
-                continue
-            uid = f"novproxy:{pu}@{sv}:{pt}"
-            ex = self.db.get(uid)
-            if ex is None:
-                self.db.put(ProxyEntry(
-                    uid=uid, proto="socks5",
-                    host=sv, port=pt, user=pu, passwd=pp,
-                    source="novproxy", source_account=a.get("email",""),
-                    proxy_type="residential",
-                    not_for=list(EXCLUSION_RULES["novproxy"]),
-                    meta={"traffic_bytes": tb,
-                          "traffic_gb": round(tb/1e9, 3)},
-                ), save=False); added += 1
-            else:
-                ex.meta["traffic_bytes"] = tb; self.db.put(ex, save=False); updated += 1
-
-        self.db._save()
-        log(f"Done: +{added} new, {updated} updated")
-        return added
-
-    # ------------------------------------------------------------------
     # Import from JSON file
     # ------------------------------------------------------------------
 
@@ -638,7 +584,7 @@ class ProxyManager:
             log(f"Error reading {path}: {e}"); return 0
 
         items = data.get("proxies", [])
-        proxy_type = "residential" if source in ("ip2free", "novproxy") else "unknown"
+        proxy_type = "residential" if source == "ip2free" else "unknown"
         not_for    = list(EXCLUSION_RULES.get(source, []))
         added = 0
         for p in items:
@@ -676,7 +622,6 @@ class ProxyManager:
         results["local_xray"]  = self.refresh_local_xray(log_fn=log)
         results["ip2free"]     = self.refresh_ip2free(log_fn=log)
         results["proxyscrape"] = self.refresh_proxyscrape(log_fn=log)
-        results["novproxy"]    = self.refresh_novproxy(log_fn=log)
         # Auto-load temp files if present
         for f in ["/tmp/ip2free_proxies_all.json",
                   "/tmp/ip2free_proxies_live.json",
@@ -959,7 +904,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     p_rs = sub.add_parser("refresh-source", help="Refresh one source")
     p_rs.add_argument("source",
-                      choices=["ip2free","proxyscrape","local_xray","novproxy"])
+                      choices=["ip2free","proxyscrape","local_xray"])
 
     p_probe = sub.add_parser("probe", help="Probe all proxies")
     p_probe.add_argument("--force",   action="store_true")

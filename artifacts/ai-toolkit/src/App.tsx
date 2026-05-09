@@ -117,14 +117,13 @@ import ReplitRegister from "@/pages/ReplitRegister";
 import CaptchaRecognition from "@/pages/CaptchaRecognition";
 import WafBypass from "@/pages/WafBypass";
 import UnitoolLogin from "@/pages/UnitoolLogin";
-import NovproxyPanel from "@/pages/NovproxyPanel";
 import SmsCenter from "@/pages/SmsCenter";
 import WebshareRegister from "@/pages/WebshareRegister";
 import OxylabsRegister from "@/pages/OxylabsRegister";
 
 const queryClient = new QueryClient();
 
-type Tab = "home" | "agent" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "machine-reset" | "fingerprint" | "outlook" | "mail-center" | "cursor-register" | "replit-register" | "sub2api" | "team-register" | "openai-pool" | "data-manager" | "full-workflow" | "monitor" | "sms-center" | "captcha" | "waf-bypass" | "unitool-login" | "novproxy" | "webshare-register" | "oxylabs-register";
+type Tab = "home" | "agent" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "machine-reset" | "fingerprint" | "outlook" | "mail-center" | "cursor-register" | "replit-register" | "sub2api" | "team-register" | "openai-pool" | "data-manager" | "full-workflow" | "monitor" | "sms-center" | "captcha" | "waf-bypass" | "unitool-login" | "webshare-register" | "oxylabs-register";
 
 const tabs: { id: Tab; label: string; icon: string; badge?: string }[] = [
   { id: "home",             label: "工具导航",        icon: "🗂️" },
@@ -142,7 +141,6 @@ const tabs: { id: Tab; label: string; icon: string; badge?: string }[] = [
   { id: "captcha",          label: "验证码识别",        icon: "🔢", badge: "CNN" },
   { id: "waf-bypass",      label: "WAF 绕过",          icon: "🛡️", badge: "pydoll" },
   { id: "unitool-login",    label: "unitool 自动登录",   icon: "🔓", badge: "SSID" },
-  { id: "novproxy",         label: "Novproxy 工作流",   icon: "🔐", badge: "pydoll" },
   { id: "sms-center",      label: "短信接收中心",       icon: "📱", badge: "免费号码" },
   { id: "webshare-register", label: "Webshare 注册",    icon: "🌐", badge: "全自动" },
   { id: "oxylabs-register",  label: "Oxylabs 注册",    icon: "🌱", badge: "全自动" },
@@ -242,9 +240,7 @@ function App() {
             {tab === "replit-register" && <ReplitRegister />}
             {tab === "captcha" && <CaptchaRecognition />}
             {tab === "waf-bypass" && <WafBypass />}
-            {tab === "unitool-login" && <UnitoolLogin />}
-            {tab === "novproxy" && <NovproxyPanel />}
-            {tab === "sms-center" && <SmsCenter />}
+            {tab === "unitool-login" && <UnitoolLogin />}            {tab === "sms-center" && <SmsCenter />}
             {tab === "webshare-register" && <WebshareRegister />}
             {tab === "oxylabs-register"  && <OxylabsRegister  />}
             {tab === "sub2api" && <Sub2ApiManager />}
