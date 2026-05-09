@@ -565,16 +565,20 @@ FREE_SERVICES = {"gpt-4o-mini", "gpt-5-nano"}  # minimum_balance=0，余额耗�
 
 # v5.23: Services where widget/stream is intercepted — returns Russian restriction
 # message instead of real AI response. paginatedMessages returns real response.
-# CONFIRMED intercepted (2026-05-08 tests):
-#   gpt-5.5, gpt-5-nano, gpt-4-1, claude-sonnet, claude-opus
-# CONFIRMED clean (widget/stream ok):
-#   gpt-4o-mini, gpt-4o, gpt-5, gpt5.1, gpt5.2, gpt-o3-mini, gpt-o3, gpt-o4-mini,
-#   claude-sonnet-4-5, claude-sonnet-4-6
+# CONFIRMED intercepted (probe v3.0, 2026-05-09 with __Secure-unitool-ssid cookie):
+#   gpt-5.5, gpt-5-nano, gpt-4-1, claude-sonnet, claude-opus,
+#   gpt-4o, gpt-4o-mini  <- v5.38: newly confirmed intercepted (were listed as clean)
+#   claude-sonnet-4-6    <- v5.38: newly confirmed intercepted (were listed as clean)
+# CONFIRMED clean (widget/stream ok, v5.38 re-test):
+#   gpt-5, gpt5.1, gpt5.2, gpt-o3-mini, gpt-o3, gpt-o4-mini,
+#   claude-sonnet-4-5
 # _send_and_collect_core skips widget/stream for POLL_PRIMARY_SERVICES;
 # _STREAM_INTERCEPT_RU is a safety net for any unlisted intercepted services.
 POLL_PRIMARY_SERVICES = {
     "gpt-5.5", "gpt-5-nano", "gpt-4-1",
+    "gpt-4o", "gpt-4o-mini",  # v5.38: confirmed stream-intercepted 2026-05-09
     "claude-sonnet", "claude-opus",
+    "claude-sonnet-4-6",  # v5.38: confirmed stream-intercepted 2026-05-09
     "claude-opus-4-6",   # v5.24: stream empty but poll returns CHERRY
     "grok",              # v5.25: widget/stream embeds reasoning-block-marker div; poll clean
     # o-series reasoning models (v5.30): widget/stream unreliable; paginatedMessages returns clean answer
