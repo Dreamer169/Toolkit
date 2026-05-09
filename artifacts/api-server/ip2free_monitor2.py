@@ -293,6 +293,19 @@ def solve_one(email, pw, port):
                 try:
                     b = resp.body()
                     if b and b[:4] == b"\x89PNG":
+                        # Capture captcha code from URL query param (?code=UUID)
+                        # needed for checkCaptcha POST body
+                        try:
+                            from urllib.parse import urlparse, parse_qs
+                            _qp = parse_qs(urlparse(resp.url).query)
+                            _cap_code = (_qp.get("code") or [None])[0]
+                            if _cap_code:
+                                LAST_API["captcha_code"] = _cap_code
+                                log(f"    <- captcha PNG code={_cap_code}")
+                            else:
+                                log(f"    <- captcha PNG (no code in URL: {resp.url})")
+                        except Exception as _ce:
+                            log(f"    <- captcha PNG (url parse err: {_ce})")
                         with open(f"{SS_DIR}/cap_{email.split('@')[0]}.png", "wb") as f:
                             f.write(b)
                         return
@@ -307,7 +320,18 @@ def solve_one(email, pw, port):
                 except:
                     pass
 
+        def on_request(req):
+            if "api.ip2free.com/api" in req.url:
+                rname = req.url.split("/api/")[-1].split("?")[0]
+                if rname in ("account/checkCaptcha", "account/finishTask"):
+                    try:
+                        pd = req.post_data or ""
+                        log(f"    -> {rname} REQ: {pd[:150]}")
+                    except:
+                        pass
+
         ctx.on("response", on_response)
+        ctx.on("request", on_request)
         page = ctx.new_page()
         result = "failed"
 
@@ -362,6 +386,8 @@ def solve_one(email, pw, port):
             log(f"    ✅ logged in: {page.url}")
 
             # ── Activity page (SPA-safe navigation) ─────────────────
+            # Save login token BEFORE clearing LAST_API — linkClick needs it below
+            _saved_login_raw = LAST_API.get("account/login", "")
             LAST_API.clear()
             log("    navigating to freeProxy activity page...")
             _navigate_spa(page, "https://www.ip2free.com/cn/freeProxy?tab=activity", 15000)
@@ -379,9 +405,9 @@ def solve_one(email, pw, port):
 
             # linkClick: ip2free requires visiting ad-link before captcha image is served
             try:
-                # Token from captured login API response (not localStorage)
+                # Token from login API response saved BEFORE LAST_API.clear()
                 import json as _json
-                _login_raw = LAST_API.get("account/login", "")
+                _login_raw = _saved_login_raw
                 _tok = ""
                 if _login_raw:
                     try: _tok = (_json.loads(_login_raw).get("data") or {}).get("token", "")
@@ -587,6 +613,30 @@ def solve_one(email, pw, port):
                     ft = LAST_API.get("account/finishTask", "")
                     log(f"    checkCaptcha: {cc[:100]}")
                     log(f"    finishTask:   {ft[:100]}")
+
+                    # Direct API fallback: if browser didn't call checkCaptcha,
+                    # call it manually using the captured captcha_code UUID
+                    if not cc:
+                        _cap_code = LAST_API.get("captcha_code", "")
+                        if _cap_code and cap_clean:
+                            log(f"    checkCaptcha fallback: code={_cap_code} captcha={cap_clean!r}")
+                            try:
+                                _cc_resp = page.request.post(
+                                    "https://api.ip2free.com/api/account/checkCaptcha",
+                                    headers={
+                                        "X-Token": _tok, "Domain": "www.ip2free.com",
+                                        "WebName": "IP2FREE", "Lang": "cn",
+                                        "Content-Type": "application/json",
+                                    },
+                                    data=json.dumps({"captcha": cap_clean, "code": _cap_code}),
+                                )
+                                cc = _cc_resp.text()
+                                LAST_API["account/checkCaptcha"] = cc
+                                log(f"    checkCaptcha fallback resp: {cc[:120]}")
+                            except Exception as _ccfe:
+                                log(f"    checkCaptcha fallback err: {_ccfe}")
+                        else:
+                            log(f"    checkCaptcha fallback skipped: code={_cap_code!r} cap={cap_clean!r}")
 
                     if '"code":0' in cc or FINISH_SUCCESS[0]:
                         log("    ✅ captcha accepted!")
