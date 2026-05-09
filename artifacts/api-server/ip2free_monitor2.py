@@ -101,19 +101,28 @@ def ocr_png(png_bytes, save_path=None):
         with open(save_path, "wb") as f:
             f.write(png_bytes)
     results = []
+    import io
+    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+    # Preprocess: RGBA→RGB (white bg), upscale 3x for better OCR
+    base_img = Image.open(io.BytesIO(png_bytes))
+    if base_img.mode == "RGBA":
+        bg = Image.new("RGB", base_img.size, (255, 255, 255))
+        bg.paste(base_img, mask=base_img.split()[3])
+        base_img = bg
+    else:
+        base_img = base_img.convert("RGB")
+    w, h = base_img.size
+    upscale = base_img.resize((w * 3, h * 3), Image.LANCZOS)
     # 1. easyocr Chinese (primary — best for Chinese captcha)
     try:
-        import easyocr, io, numpy as np
-        from PIL import Image, ImageEnhance, ImageFilter
+        import easyocr, numpy as np
         _reader = easyocr.Reader(["ch_sim", "en"], gpu=False, verbose=False)
-        img = Image.open(io.BytesIO(png_bytes))
         for proc_name, proc_img in [
-            ("raw", img),
-            ("enhanced", ImageEnhance.Contrast(img.convert("L")).enhance(2.5).convert("RGB")),
-            ("sharpened", img.filter(ImageFilter.SHARPEN)),
+            ("up3x", upscale),
+            ("up3x_contrast", ImageEnhance.Contrast(upscale.convert("L")).enhance(3.0).convert("RGB")),
+            ("raw", base_img),
         ]:
             try:
-                # easyocr requires bytes, numpy array, or file path — NOT PIL Image
                 arr = np.array(proc_img)
                 texts = _reader.readtext(arr, detail=0, paragraph=True)
                 for t in texts:
@@ -125,17 +134,29 @@ def ocr_png(png_bytes, save_path=None):
                 log(f"    OCR easyocr[{proc_name}] err: {e}")
     except Exception as e:
         log(f"    OCR easyocr load err: {e}")
-    # 2. ddddocr fallback
+    # 2. ddddocr — try both original bytes and preprocessed upscaled PNG
+    import tempfile, os
+    try:
+        # Save upscaled RGB as PNG for ddddocr
+        _tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        upscale.save(_tmp.name)
+        _tmp.close()
+        up_bytes = open(_tmp.name, "rb").read()
+        os.unlink(_tmp.name)
+    except:
+        up_bytes = png_bytes
     for label, ocr in [("beta", _ocr_beta), ("std", _ocr_std)]:
         if ocr is None:
             continue
-        try:
-            txt = ocr.classification(png_bytes).strip()
-            log(f"    OCR dddd[{label}]: {txt!r}")
-            if txt and txt not in results:
-                results.append(txt)
-        except Exception as e:
-            log(f"    OCR dddd[{label}] err: {e}")
+        for lbl2, bts in [("orig", png_bytes), ("up3x", up_bytes)]:
+            try:
+                txt = ocr.classification(bts).strip()
+                key = f"dddd[{label}/{lbl2}]"
+                log(f"    OCR {key}: {txt!r}")
+                if txt and txt not in results:
+                    results.append(txt)
+            except Exception as e:
+                log(f"    OCR dddd[{label}/{lbl2}] err: {e}")
     return results
 
 def blob_to_png(page, blob_url):
@@ -360,6 +381,29 @@ def solve_one(email, pw, port):
         ctx.on("response", on_response)
         ctx.on("request", on_request)
         page = ctx.new_page()
+
+        # page.route for captcha — the ONLY reliable way to read binary response body
+        # ctx.on("response") can't read PNG bodies; page.route with route.fetch() can
+        _cap_route_data = {}
+
+        def _captcha_route(route, request):
+            try:
+                response = route.fetch()
+                body = response.body()
+                if body and body[:4] == b"\x89PNG":
+                    _cap_route_data["png"] = body
+                    _cap_route_data["ts"] = _t.time()
+                    log(f"    [route] captcha PNG captured: {len(body)}b")
+                else:
+                    # non-PNG (e.g., JSON error) — let on_response handle via ctx events
+                    pass
+                route.fulfill(response=response)
+            except Exception as _re:
+                log(f"    [route] captcha route err: {_re}")
+                route.continue_()
+
+        page.route("**/api/account/captcha*", _captcha_route)
+
         result = "failed"
 
         try:
@@ -519,18 +563,30 @@ def solve_one(email, pw, port):
                     page.wait_for_timeout(2000)
                     continue
 
-                # Get blob URL
-                blob_url = page.evaluate(GET_BLOB_URL_JS)
-                log(f"    blob: {blob_url}")
+                # --- Get captcha PNG ---
+                # Priority 1: page.route captured PNG (freshest, most reliable)
+                # Priority 2: blob URL extraction fallback
+                route_png = _cap_route_data.get("png")
+                route_ts  = _cap_route_data.get("ts", 0)
+                png_bytes = None
 
-                if not blob_url or not blob_url.startswith("blob:"):
-                    log("    no blob url, closing modal")
-                    page.evaluate(CLOSE_MODAL_JS)
-                    page.wait_for_timeout(2000)
-                    continue
-
-                png_bytes = blob_to_png(page, blob_url)
-                log(f"    PNG: {len(png_bytes) if png_bytes else 0}b")
+                if route_png and len(route_png) >= 100 and (_t.time() - route_ts) < 60:
+                    png_bytes = route_png
+                    log(f"    PNG (route): {len(png_bytes)}b  age={int(_t.time()-route_ts)}s")
+                    # Clear so next attempt gets fresh captcha
+                    _cap_route_data.clear()
+                else:
+                    # Fallback: blob URL
+                    blob_url = page.evaluate(GET_BLOB_URL_JS)
+                    log(f"    blob: {blob_url}")
+                    if blob_url and blob_url.startswith("blob:"):
+                        png_bytes = blob_to_png(page, blob_url)
+                        log(f"    PNG (blob): {len(png_bytes) if png_bytes else 0}b")
+                    else:
+                        log("    no route PNG and no blob url, closing modal")
+                        page.evaluate(CLOSE_MODAL_JS)
+                        page.wait_for_timeout(2000)
+                        continue
 
                 if not png_bytes or len(png_bytes) < 100:
                     _empty_png_count = _empty_png_count + 1 if "_empty_png_count" in dir() else 1
@@ -538,7 +594,7 @@ def solve_one(email, pw, port):
                     page.evaluate(CLOSE_MODAL_JS)
                     page.wait_for_timeout(2000)
                     if _empty_png_count >= 2:
-                        log("    2x empty PNG → captcha rate-limited, bailing")
+                        log("    2x empty PNG → rate-limited; doing fresh login to reset session")
                         result = "captcha_blocked"
                         break
                     continue
