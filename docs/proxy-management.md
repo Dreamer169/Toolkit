@@ -353,3 +353,46 @@ python3 /data/Toolkit/scripts/ip2free_daily_tasks.py --all
 ```
 
 每天 UTC 08:05（北京时间 16:05）在 ip2free 每日任务重置后自动领取。
+
+---
+
+## 7. 代理统一管理系统 v2.0 (proxy_manager.py)
+
+### 架构总览
+
+
+
+### 代理来源与池结构
+
+| 来源 | 数量 | 类型 | 认证 | 禁止用于 | 说明 |
+|------|------|------|------|----------|------|
+| local_xray | 25 活跃 | residential | 无 | — | SOCKS5 端口 10820-10889，7 个独立出口 IP |
+| ip2free | 10 | residential | user:pass | ip2free 注册 | 9 账号，每天刷新 |
+| webshare | 10 | datacenter/HTTP | user:pass | webshare 注册 | API key 内置，每日自动同步 |
+| proxyscrape | 90 | unknown | 无 | — | 免费 SOCKS5，每 2 小时自动抓取 |
+| ip2free 活动代理 | 12 | residential | user:pass | ip2free 注册 | 每日任务领取，24h 有效 |
+
+### 平台选代理策略 (PLATFORM_POLICIES)
+
+
+
+### 脚本 API（Python）
+
+
+
+### CLI 命令
+
+
+
+### xray 本地端口映射（当前）
+
+
+
+### 数据库集成
+
+API server (Node.js) 使用 PostgreSQL  表的  函数：
+- ： → 25 个 SOCKS5 端口
+- ： → 10 个 HTTP 代理
+- ：其余（ip2free residential、proxyscrape）
+
+每次  会同时更新 SQLite 和 PostgreSQL。
