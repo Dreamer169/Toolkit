@@ -317,16 +317,31 @@ def solve_one(email, pw, port):
                     if name == "account/finishTask" and '"code":0' in txt:
                         FINISH_SUCCESS[0] = True
                         log("    🎉 finishTask code=0!")
+                    # Extract captcha UUID from JSON account/captcha response
+                    # Server may return {"data":"UUID","code":0} or {"data":"java.lang.Object@...","code":-202}
+                    if name == "account/captcha":
+                        try:
+                            import json as _jj
+                            _cj = _jj.loads(txt)
+                            _cdata = (_cj.get("data") or "")
+                            if _cdata and isinstance(_cdata, str) and not _cdata.startswith("java.lang.Object"):
+                                LAST_API["captcha_code"] = _cdata
+                                log(f"    captcha UUID from JSON: {_cdata}")
+                        except:
+                            pass
                 except:
                     pass
 
         def on_request(req):
             if "api.ip2free.com/api" in req.url:
                 rname = req.url.split("/api/")[-1].split("?")[0]
-                if rname in ("account/checkCaptcha", "account/finishTask"):
+                _skip = ("ad/getList", "account/profile", "wallet/balance",
+                         "ip/freeList", "coupon/my", "website/link", "account/taskList")
+                if rname not in _skip:
                     try:
                         pd = req.post_data or ""
-                        log(f"    -> {rname} REQ: {pd[:150]}")
+                        _url_tail = req.url.split("api.ip2free.com")[-1][-90:]
+                        log(f"    -> {rname} REQ url={_url_tail} body={pd[:120]}")
                     except:
                         pass
 
@@ -614,12 +629,13 @@ def solve_one(email, pw, port):
                     log(f"    checkCaptcha: {cc[:100]}")
                     log(f"    finishTask:   {ft[:100]}")
 
-                    # Direct API fallback: if browser didn't call checkCaptcha,
-                    # call it manually using the captured captcha_code UUID
-                    if not cc:
+                    # Direct API fallback: if browser didn't return checkCaptcha code=0,
+                    # call it manually using the captured captcha UUID
+                    # API format: {"captcha": UUID_session_code, "code": OCR_text_typed}
+                    if not cc or '"code":0' not in cc:
                         _cap_code = LAST_API.get("captcha_code", "")
                         if _cap_code and cap_clean:
-                            log(f"    checkCaptcha fallback: code={_cap_code} captcha={cap_clean!r}")
+                            log(f"    checkCaptcha fallback: captcha(UUID)={_cap_code[:20]} code(text)={cap_clean!r}")
                             try:
                                 _cc_resp = page.request.post(
                                     "https://api.ip2free.com/api/account/checkCaptcha",
@@ -628,7 +644,7 @@ def solve_one(email, pw, port):
                                         "WebName": "IP2FREE", "Lang": "cn",
                                         "Content-Type": "application/json",
                                     },
-                                    data=json.dumps({"captcha": cap_clean, "code": _cap_code}),
+                                    data=json.dumps({"captcha": _cap_code, "code": cap_clean}),
                                 )
                                 cc = _cc_resp.text()
                                 LAST_API["account/checkCaptcha"] = cc
@@ -636,7 +652,7 @@ def solve_one(email, pw, port):
                             except Exception as _ccfe:
                                 log(f"    checkCaptcha fallback err: {_ccfe}")
                         else:
-                            log(f"    checkCaptcha fallback skipped: code={_cap_code!r} cap={cap_clean!r}")
+                            log(f"    checkCaptcha fallback skipped: uuid={_cap_code!r} text={cap_clean!r}")
 
                     if '"code":0' in cc or FINISH_SUCCESS[0]:
                         log("    ✅ captcha accepted!")
