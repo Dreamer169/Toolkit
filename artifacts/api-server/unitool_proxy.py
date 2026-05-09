@@ -539,16 +539,23 @@ def _balance_monitor_loop():
         time.sleep(60)
 
 # ─── 服务/模型映射（v5.11: 从 API 实探更新，新增 gpt-5）─────────────────────
-# v5.38 probe backend identity (AI self-report, 2026-05-09):
-#   gpt-4o        -> GPT-4o
+# v5.38 probe backend identity (AI self-report, probe v3.0, 2026-05-09):
+#   gpt-4o        -> GPT-4o (AI self-report confirmed)
 #   gpt-4o-mini   -> ChatGPT-3.5 / ChatGPT-4.0 (rotates)
-#   gpt-4-1       -> GPT-4o (same backend as gpt-4o!)
-#   gpt5.1        -> GPT-4.1
+#   gpt-4-1       -> GPT-4o (SAME backend as gpt-4o! both self-report GPT-4o)
+#   gpt5.1        -> GPT-4.1 (AI self-report confirmed)
 #   claude-sonnet -> Claude 3.5 Sonnet
-#   claude-sonnet-4-5 -> Claude 3.5/3.7 Sonnet (backend rotates)
-#   gpt-5/gpt-5.4/gpt5.2/gpt-5.5 -> refused to reveal ("unknown"/"unavailable")
+#   claude-sonnet-4-5 -> Claude 3.5/3.7 Sonnet (backend rotates between versions)
+#   claude-sonnet-4-6 -> Claude 3.5/3.7 Sonnet (rotates; stream intercepted v5.38)
+#   claude-opus-4-6 -> claude-sonnet-4-20250514 (!!!) — unitool routes Opus label to
+#                      Sonnet 4 backend; confirmed by identity probe (cost=13 direct reply)
+#                      200k ctx, extended thinking: yes, cutoff: early 2025
+#   gpt-5.5       -> GPT-4o or GPT-4.1 (128k ctx, June 2024 cutoff, no o1-reasoning)
+#                    identity/stream probes fail (internal stream ended unexpectedly)
+#                    but cutoff+context narrow to GPT-4o/4.1 family, NOT real GPT-5
+#   gpt-5/gpt-5.4/gpt5.2 -> refused to reveal ("unknown"/"unavailable")
 #   o-series: broken (TypeError/no-choices/no endpoints) at unitool backend
-#   grok/gemini: work via paginatedMessages poll; model identity not revealed
+#   grok/gemini: work via paginatedMessages poll; model identity not revealed by AI
 NATIVE_SERVICES = {
     # ChatGPT（实探 /api/services?parent_id=chatgpt 确认，含 minimum_balance）
     "gpt-5", "gpt-5.5", "gpt-5.4", "gpt-5-nano",
