@@ -61,6 +61,16 @@ PROBE_TARGET    = "http://www.gstatic.com/generate_204"
 PROBE_TIMEOUT   = 5
 PROBE_CACHE_TTL = 300    # seconds before re-probe
 BLACKLIST_TTL   = 300    # seconds proxy stays blacklisted after FAIL_THRESHOLD
+# Per-source override: some sources need longer cooldown (e.g. ip2free creds rotate slowly)
+SOURCE_BLACKLIST_TTL: dict = {
+    "ip2free":    10800,  # 3h  — creds rotate on ip2free side, not every 5min
+    "webshare":   0,      # bandwidth exhaustion handled separately
+    "proxyscrape": 600,   # 10min — free proxies die fast, retry sooner
+}
+
+def _bl_ttl(source: str) -> float:
+    """Return blacklist TTL seconds for a given proxy source."""
+    return SOURCE_BLACKLIST_TTL.get(source, BLACKLIST_TTL)
 IP2FREE_STALE_DAYS   = 1.5   # ip2free rotates creds ~3x/day; >1.5d without re-verify = stale
 FAIL_THRESHOLD  = 3
 
@@ -783,7 +793,7 @@ class ProxyManager:
         if not alive:
             e.fail_count += 1
             if e.fail_count >= FAIL_THRESHOLD:
-                e.blacklist_until = time.time() + BLACKLIST_TTL
+                e.blacklist_until = time.time() + _bl_ttl(e.source)
         else:
             e.fail_count = 0; e.blacklist_until = None
         self.db.put(e)
@@ -810,7 +820,7 @@ class ProxyManager:
             if not alive:
                 e.fail_count += 1
                 if e.fail_count >= FAIL_THRESHOLD:
-                    e.blacklist_until = time.time() + BLACKLIST_TTL
+                    e.blacklist_until = time.time() + _bl_ttl(e.source)
             else:
                 e.fail_count = 0; e.blacklist_until = None
             self.db.put(e, save=False)
