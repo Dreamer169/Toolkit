@@ -142,48 +142,32 @@ def ocr_png(png_bytes, save_path=None):
     return results
 
 def blob_to_png(page, blob_url):
-    # Capture captcha via getBoundingClientRect clip screenshot
-    # Wait for naturalWidth > 0 (image fully loaded) before screenshotting
-    import time as _t2
-    _DLG = '[role="dialog"]'
-    for _w in range(15):
+    # Read captcha blob via in-browser fetch (blob: URLs are same-origin accessible)
+    import time as _t2, base64 as _b64
+    FETCH_BLOB_JS = (
+        "async function readBlob(url) {"
+        "try {"
+        "var resp = await fetch(url);"
+        "var blob = await resp.blob();"
+        "var buf = await blob.arrayBuffer();"
+        "var bytes = new Uint8Array(buf);"
+        "var bin = '';"
+        "for (var i=0;i<bytes.length;i++) { bin += String.fromCharCode(bytes[i]); }"
+        "return {ok: true, b64: btoa(bin), size: bytes.length};"
+        "} catch(e) { return {ok: false, err: String(e), size: 0}; }"
+        "} return readBlob(arguments[0]);"
+    )
+    for _w in range(6):
         try:
-            _bu = blob_url.replace("'", "\\'")
-            _js = (
-                '(function() {'
-                'var d=Array.from(document.querySelectorAll(\'' + _DLG + '\'))'
-                '.filter(function(x){return x.offsetParent!==null;})[0];'
-                'if(!d){return null;}'
-                'var img=d.querySelector(\'img.captcha-img\');'
-                'if(!img){'
-                'var all=Array.from(d.querySelectorAll(\'img\'));'
-                'img=all.find(function(i){return i.naturalWidth>60;})'
-                '||all.find(function(i){return i.src===\'' + _bu + '\' && i.naturalWidth>0;})'
-                '||null;}'
-                'if(!img){return null;}'
-                'var r=img.getBoundingClientRect();'
-                'return {x:r.left,y:r.top,width:r.width,height:r.height,'
-                'nw:img.naturalWidth,nh:img.naturalHeight};})()'
-            )
-            rect = page.evaluate(_js)
-            if rect:
-                nw = rect.get('nw', 0)
-                nh = rect.get('nh', 0)
-                w = rect.get('width', 0)
-                h = rect.get('height', 0)
-                log(f"    rect check: nw={nw} nh={nh} w={w:.0f} h={h:.0f}")
-                if nw > 30 and nh > 10 and w > 30 and h > 10:
-                    clip = {k: rect[k] for k in ('x', 'y', 'width', 'height')}
-                    png_bytes = page.screenshot(clip=clip)
-                    if png_bytes and len(png_bytes) > 500:
-                        log(f"    captcha rect OK: {nw}x{nh} {len(png_bytes)}b")
-                        return png_bytes
-                else:
-                    log(f"    waiting for img load (nw={nw})...")
+            result = page.evaluate(FETCH_BLOB_JS, blob_url)
+            if result and result.get('ok') and result.get('size', 0) > 100:
+                png_bytes = _b64.b64decode(result['b64'])
+                log(f"    blob fetch OK: {result['size']}b")
+                return png_bytes
             else:
-                log(f"    no rect yet ({_w})")
+                log(f"    blob fetch: {result}")
         except Exception as _e:
-            log(f"    rect err {_w}: {_e}")
+            log(f"    blob fetch err {_w}: {_e}")
         _t2.sleep(0.5)
     return None
 
