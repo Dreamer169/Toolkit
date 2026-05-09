@@ -52,8 +52,24 @@ def proxy_url(ref: ProxyRef) -> str:
 def proxy_host_port(ref: ProxyRef) -> Tuple[str, int]:
     if isinstance(ref, int):
         return ("127.0.0.1", ref)
-    h, p = ref.rsplit(":", 1)
+    # Strip user:pass@ auth prefix if present (format: user:pass@host:port)
+    addr = ref.rsplit("@", 1)[-1]
+    h, p = addr.rsplit(":", 1)
     return (h, int(p))
+
+
+def add_external_full(auth_str: str, probe: bool = False) -> bool:
+    """Add external proxy using full auth string: user:pass@host:port or host:port.
+    Unlike add_external(), this preserves credentials for authenticated proxies."""
+    if probe and not _probe_external(auth_str):
+        return False
+    with _lock:
+        if auth_str not in _externals:
+            _externals.append(auth_str)
+            if len(_externals) > MAX_EXTERNALS:
+                _externals.pop(0)
+        _save_externals_file()
+    return True
 
 
 # ── probing ───────────────────────────────────────────────────────────────────
