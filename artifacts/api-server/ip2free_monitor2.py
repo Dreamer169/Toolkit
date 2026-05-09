@@ -142,50 +142,37 @@ def ocr_png(png_bytes, save_path=None):
     return results
 
 def blob_to_png(page, blob_url):
-    """Capture captcha via dialog screenshot (most reliable; bypasses blob/canvas issues)."""
-    import io
-    # Strategy 1: screenshot the dialog bounding box
-    try:
-        box = page.evaluate(
-            "() => {"
-            "  var ds=Array.from(document.querySelectorAll('[role=\"dialog\"]'))"
-            "    .filter(function(x){return x.offsetParent!==null;});"
-            "  if(!ds.length) return null;"
-            "  var r=ds[0].getBoundingClientRect();"
-            "  return {x:r.left,y:r.top,width:r.width,height:r.height};"
-            "}"
-        )
-        if box and box.get('width', 0) > 10:
-            clip = {'x': max(0, box['x']), 'y': max(0, box['y']),
-                    'width': min(box['width'], 800), 'height': min(box['height'], 400)}
-            png_bytes = page.screenshot(clip=clip, type='png')
-            if png_bytes and len(png_bytes) > 500:
-                log(f"    dialog screenshot: {len(png_bytes)}b")
-                return png_bytes
-    except Exception as e:
-        log(f"    screenshot err: {e}")
-    # Strategy 2: Canvas read from img element
-    try:
-        result = page.evaluate(
-            "() => {"
-            "  var ds=Array.from(document.querySelectorAll('[role=\"dialog\"]'))"
-            "    .filter(function(x){return x.offsetParent!==null;});"
-            "  var d=ds.length?ds[0]:document;"
-            "  var img=d.querySelector('img.captcha-img')||d.querySelector('img');"
-            "  if(!img) return null;"
-            "  var cv=document.createElement('canvas');"
-            "  cv.width=img.naturalWidth||120; cv.height=img.naturalHeight||40;"
-            "  cv.getContext('2d').drawImage(img,0,0);"
-            "  return cv.toDataURL('image/png').split(',')[1];"
-            "}"
-        )
-        if result:
-            raw = base64.b64decode(result)
-            if len(raw) > 100:
-                log(f"    canvas PNG: {len(raw)}b")
-                return raw
-    except Exception as e:
-        log(f"    canvas err: {e}")
+    """Capture captcha image via locator screenshot (most reliable playwright API)."""
+    import time as _t2
+    # Wait up to 3s for captcha img with blob src in dialog
+    for _w in range(6):
+        try:
+            # Try locator screenshot of the captcha img element
+            loc = page.locator(
+                '[role="dialog"] img[src^="blob:"], [role="dialog"] img.captcha-img'
+            ).first
+            if loc.count() > 0:
+                try:
+                    png_bytes = loc.screenshot(timeout=3000)
+                    if png_bytes and len(png_bytes) > 200:
+                        log(f"    locator screenshot: {len(png_bytes)}b")
+                        return png_bytes
+                except Exception as _le:
+                    log(f"    locator screenshot err: {_le}")
+            # Fallback: screenshot full dialog box
+            dloc = page.locator('[role="dialog"]').first
+            if dloc.count() > 0:
+                try:
+                    png_bytes = dloc.screenshot(timeout=3000)
+                    if png_bytes and len(png_bytes) > 200:
+                        log(f"    dialog screenshot: {len(png_bytes)}b")
+                        return png_bytes
+                except Exception as _de:
+                    log(f"    dialog screenshot err: {_de}")
+        except Exception as _e:
+            log(f"    screenshot wait err {_w}: {_e}")
+        if _w < 5:
+            _t2.sleep(0.5)
     return None
 
 # --- Pure JS snippets (no Python format braces) ---
