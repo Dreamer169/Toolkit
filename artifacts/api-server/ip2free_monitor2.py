@@ -142,24 +142,24 @@ def ocr_png(png_bytes, save_path=None):
     return results
 
 def blob_to_png(page, blob_url):
-    # Read captcha blob via in-browser fetch (blob: URLs are same-origin accessible)
+    # Read captcha blob via in-browser async fetch (blob: URLs are same-origin accessible)
     import time as _t2, base64 as _b64
-    FETCH_BLOB_JS = (
-        "async function readBlob(url) {"
-        "try {"
-        "var resp = await fetch(url);"
-        "var blob = await resp.blob();"
-        "var buf = await blob.arrayBuffer();"
-        "var bytes = new Uint8Array(buf);"
-        "var bin = '';"
-        "for (var i=0;i<bytes.length;i++) { bin += String.fromCharCode(bytes[i]); }"
-        "return {ok: true, b64: btoa(bin), size: bytes.length};"
-        "} catch(e) { return {ok: false, err: String(e), size: 0}; }"
-        "} return readBlob(arguments[0]);"
-    )
     for _w in range(6):
         try:
-            result = page.evaluate(FETCH_BLOB_JS, blob_url)
+            _bu = blob_url.replace('\\', '\\\\').replace("'", "\\'")
+            _js = (
+                "(async () => { try {"
+                "var resp = await fetch('" + _bu + "');"
+                "var blob = await resp.blob();"
+                "var buf = await blob.arrayBuffer();"
+                "var bytes = new Uint8Array(buf);"
+                "var bin = '';"
+                "for (var i=0;i<bytes.length;i++){bin+=String.fromCharCode(bytes[i]);}"
+                "return {ok:true,b64:btoa(bin),size:bytes.length};"
+                "} catch(e){return {ok:false,err:String(e),size:0};}"
+                "})()"
+            )
+            result = page.evaluate(_js)
             if result and result.get('ok') and result.get('size', 0) > 100:
                 png_bytes = _b64.b64decode(result['b64'])
                 log(f"    blob fetch OK: {result['size']}b")
