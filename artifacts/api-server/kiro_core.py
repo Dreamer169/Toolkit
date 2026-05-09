@@ -233,8 +233,8 @@ class KiroRegister:
         self._orchestrator_id=None     # step 2 redirect chain 中的 orchestrator_id
         self._callback_url=None        # step 2 redirect chain 中的 callback_url
         self._workflow_result_handle=None  # step 10 redirect URL 中的 workflowResultHandle
-        self._step11_state=None        # step 11 redirect URL
-        self._auth_code=None 中的 state
+        self._step11_state=None        # step 11 redirect URL 中的 state
+        self._auth_code=None  # auth code from kiro redirect
 
     def log(self,msg): print(f"[{self.tag}] {msg}")
 
@@ -1279,50 +1279,6 @@ class KiroRegister:
         12i: POST oidc/token → accessToken(OIDC), refreshToken
         """
         OIDC = "https://oidc.us-east-1.amazonaws.com"
-        # SHORTCUT: step11 kiro redirect gave auth_code directly
-        if getattr(self, "_auth_code", None) and getattr(self, "_step11_state", None):
-            self.log("  SHORTCUT: ExchangeToken direct (skip 12a-12d)")
-            exc_body = cbor2.dumps({
-                "code": self._auth_code,
-                "codeVerifier": self.cv,
-                "idp": "BuilderId",
-                "redirectUri": f"{KIRO}/signin/oauth",
-                "state": self._step11_state,
-            })
-            exc_h = {
-                **UA,
-                "accept": "application/cbor",
-                "content-type": "application/cbor",
-                "smithy-protocol": "rpc-v2-cbor",
-                "origin": KIRO,
-                "referer": f"{KIRO}/signin",
-                "x-kiro-visitorid": self.vid,
-                "amz-sdk-invocation-id": _uuid(),
-                "amz-sdk-request": "attempt=1; max=1",
-                "x-amz-user-agent": "aws-sdk-js/1.0.0 ua/2.1 os/macOS lang/js md/browser#Chromium_131 m/N,M,E",
-            }
-            r = self.s.post(
-                f"{KIRO}/service/KiroWebPortalService/operation/ExchangeToken",
-                headers=exc_h, data=exc_body, cookies={"kiro-visitor-id": self.vid})
-            self.log(f"  ExchangeToken status: {r.status_code}")
-            if r.status_code == 200:
-                try:
-                    rd = cbor2.loads(r.content)
-                    at = rd.get("accessToken", "")
-                    ct = rd.get("csrfToken", "")
-                    ei = rd.get("expiresIn", 0)
-                    if at:
-                        self.log(f"  ✅ accessToken={at[:60]}...")
-                        self.log(f"  ✅ csrfToken={ct[:30] if ct else ''}")
-                        return {"accessToken": at, "sessionToken": "", "csrfToken": ct, "expiresIn": ei}
-                    self.log(f"  no accessToken: {rd}")
-                except Exception as ex2:
-                    self.log(f"  CBOR fail: {ex2}")
-            else:
-                try: self.log(f"  fail body: {r.text[:300]}")
-                except: pass
-            self.log("  SHORTCUT failed, falling through to portal.sso flow")
-
         PORTAL = "https://portal.sso.us-east-1.amazonaws.com"
         self.log("Step 12f: OIDC Device Auth → refreshToken...")
 
