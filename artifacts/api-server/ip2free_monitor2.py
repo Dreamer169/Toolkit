@@ -142,37 +142,24 @@ def ocr_png(png_bytes, save_path=None):
     return results
 
 def blob_to_png(page, blob_url):
-    """Capture captcha image via locator screenshot (most reliable playwright API)."""
+    """Capture captcha by screenshotting the exact img with this blob src."""
     import time as _t2
-    # Wait up to 3s for captcha img with blob src in dialog
-    for _w in range(6):
+    # Try finding img by exact blob src (most precise)
+    for _w in range(8):
         try:
-            # Try locator screenshot of the captcha img element
-            loc = page.locator(
-                '[role="dialog"] img[src^="blob:"], [role="dialog"] img.captcha-img'
-            ).first
+            # Direct src match
+            loc = page.locator(f'img[src="{blob_url}"]').first
             if loc.count() > 0:
                 try:
-                    png_bytes = loc.screenshot(timeout=3000)
-                    if png_bytes and len(png_bytes) > 200:
-                        log(f"    locator screenshot: {len(png_bytes)}b")
+                    png_bytes = loc.screenshot(timeout=4000)
+                    if png_bytes and len(png_bytes) > 300:
+                        log(f"    captcha img screenshot: {len(png_bytes)}b")
                         return png_bytes
                 except Exception as _le:
-                    log(f"    locator screenshot err: {_le}")
-            # Fallback: screenshot full dialog box
-            dloc = page.locator('[role="dialog"]').first
-            if dloc.count() > 0:
-                try:
-                    png_bytes = dloc.screenshot(timeout=3000)
-                    if png_bytes and len(png_bytes) > 200:
-                        log(f"    dialog screenshot: {len(png_bytes)}b")
-                        return png_bytes
-                except Exception as _de:
-                    log(f"    dialog screenshot err: {_de}")
+                    log(f"    captcha img err: {_le}")
         except Exception as _e:
-            log(f"    screenshot wait err {_w}: {_e}")
-        if _w < 5:
-            _t2.sleep(0.5)
+            log(f"    locate err {_w}: {_e}")
+        _t2.sleep(0.4)
     return None
 
 # --- Pure JS snippets (no Python format braces) ---
