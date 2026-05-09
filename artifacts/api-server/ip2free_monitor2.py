@@ -473,10 +473,14 @@ def solve_one(email, pw, port):
             except Exception as _lce:
                 log(f"    linkClick err: {_lce}")
 
+            _current_cap_uuid = [""]
             for attempt in range(12):
                 log(f"    ── attempt {attempt+1}/12 ──")
+                _saved_cap = LAST_API.get("captcha_code", "") or _current_cap_uuid[0]
                 LAST_API.clear()
                 FINISH_SUCCESS[0] = False
+                if _saved_cap:
+                    LAST_API["captcha_code"] = _saved_cap
 
                 page.evaluate("window.scrollTo(0, 400)")
                 page.wait_for_timeout(400)
@@ -530,8 +534,9 @@ def solve_one(email, pw, port):
 
                 # Extract UUID from blob URL: blob:https://domain/UUID
                 _blob_uuid = blob_url.split("/")[-1] if blob_url else ""
-                if _blob_uuid and not LAST_API.get("captcha_code"):
+                if _blob_uuid:
                     LAST_API["captcha_code"] = _blob_uuid
+                    _current_cap_uuid[0] = _blob_uuid
                     log(f"    captcha UUID from blob: {_blob_uuid}")
 
                 # on_response already saves PNG to file; blob fetch returns 0b due to browser security
@@ -605,8 +610,11 @@ def solve_one(email, pw, port):
                             continue
 
                     page.wait_for_timeout(500)
+                    _saved_cap2 = LAST_API.get("captcha_code", "") or _current_cap_uuid[0]
                     LAST_API.clear()
                     FINISH_SUCCESS[0] = False
+                    if _saved_cap2:
+                        LAST_API["captcha_code"] = _saved_cap2
 
                     # Click submit button in dialog
                     try:
