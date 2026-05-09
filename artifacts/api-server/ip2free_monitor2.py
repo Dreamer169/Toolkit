@@ -101,16 +101,39 @@ def ocr_png(png_bytes, save_path=None):
         with open(save_path, "wb") as f:
             f.write(png_bytes)
     results = []
+    # 1. easyocr Chinese (primary — best for Chinese captcha)
+    try:
+        import easyocr, io
+        from PIL import Image, ImageEnhance, ImageFilter
+        _reader = easyocr.Reader(["ch_sim", "en"], gpu=False, verbose=False)
+        img = Image.open(io.BytesIO(png_bytes))
+        for proc_name, proc_img in [
+            ("raw", img),
+            ("enhanced", ImageEnhance.Contrast(img.convert("L")).enhance(2.5).convert("RGB")),
+            ("sharpened", img.filter(ImageFilter.SHARPEN)),
+        ]:
+            try:
+                texts = _reader.readtext(proc_img, detail=0, paragraph=True)
+                for t in texts:
+                    t = t.strip()
+                    if t and t not in results:
+                        log(f"    OCR easyocr[{proc_name}]: {t!r}")
+                        results.append(t)
+            except Exception as e:
+                log(f"    OCR easyocr[{proc_name}] err: {e}")
+    except Exception as e:
+        log(f"    OCR easyocr load err: {e}")
+    # 2. ddddocr fallback
     for label, ocr in [("beta", _ocr_beta), ("std", _ocr_std)]:
         if ocr is None:
             continue
         try:
             txt = ocr.classification(png_bytes).strip()
-            log(f"    OCR {label}: {txt!r}")
+            log(f"    OCR dddd[{label}]: {txt!r}")
             if txt and txt not in results:
                 results.append(txt)
         except Exception as e:
-            log(f"    OCR {label} err: {e}")
+            log(f"    OCR dddd[{label}] err: {e}")
     return results
 
 def blob_to_png(page, blob_url):
@@ -354,6 +377,50 @@ def solve_one(email, pw, port):
                     br.close()
                     return "already_done"
 
+            # linkClick: ip2free requires visiting ad-link before captcha image is served
+            try:
+                # Token from captured login API response (not localStorage)
+                import json as _json
+                _login_raw = LAST_API.get("account/login", "")
+                _tok = ""
+                if _login_raw:
+                    try: _tok = (_json.loads(_login_raw).get("data") or {}).get("token", "")
+                    except: pass
+                if not _tok:
+                    _tok = page.evaluate("window.localStorage.getItem('Mall-token') || ''")
+                log(f"    linkClick tok: {(_tok or 'EMPTY')[:20]}...")
+                # Fetch link list
+                _wl = page.request.get(
+                    "https://api.ip2free.com/api/website/link",
+                    headers={
+                        "X-Token": _tok, "Domain": "www.ip2free.com",
+                        "WebName": "IP2FREE", "Lang": "cn",
+                        "AffId": "", "InviteCode": "", "ServiceId": "",
+                    },
+                )
+                _wl_j = _wl.json()
+                _cats = (_wl_j.get("data") or {}).get("categories") or []
+                # Real path: cats[0].subCategories[0].links[0].id
+                _lid = None
+                for _cat in _cats:
+                    for _sub in (_cat.get("subCategories") or []):
+                        _links = _sub.get("links") or []
+                        if _links:
+                            _lid = _links[0]["id"]
+                            break
+                    if _lid: break
+                if _lid:
+                    # linkClick = plain GET (no auth), like window.open
+                    _lc = page.request.get(
+                        f"https://api.ip2free.com/api/website/linkClick?id={_lid}",
+                    )
+                    log(f"    linkClick id={_lid} status={_lc.status}")
+                    _safe_wait(page, 2500)
+                else:
+                    log(f"    linkClick: no links found in {str(_wl_j)[:80]}")
+            except Exception as _lce:
+                log(f"    linkClick err: {_lce}")
+
             for attempt in range(12):
                 log(f"    ── attempt {attempt+1}/12 ──")
                 LAST_API.clear()
@@ -413,9 +480,14 @@ def solve_one(email, pw, port):
                 log(f"    PNG: {len(png_bytes) if png_bytes else 0}b")
 
                 if not png_bytes or len(png_bytes) < 100:
-                    log("    PNG empty, closing modal")
+                    _empty_png_count = _empty_png_count + 1 if "_empty_png_count" in dir() else 1
+                    log(f"    PNG empty (#{_empty_png_count}), closing modal")
                     page.evaluate(CLOSE_MODAL_JS)
                     page.wait_for_timeout(2000)
+                    if _empty_png_count >= 2:
+                        log("    2x empty PNG → captcha rate-limited, bailing")
+                        result = "captcha_blocked"
+                        break
                     continue
 
                 candidates = ocr_png(png_bytes,
@@ -642,14 +714,8 @@ def main():
                 RESULTS[email] = "already_done"
                 continue
 
-            cap_sz = check_captcha_size(email, pw, port)
-            log(f"  captcha: {cap_sz} bytes")
-
-            if cap_sz <= 100:
-                log(f"  → blocked, skip")
-                continue
-
-            log(f"  → captcha available ({cap_sz}b)! Solving...")
+            # NOTE: Cloudflare blocks direct API captcha fetch → always use patchright browser
+            log(f"  → launching patchright to solve captcha...")
             res = solve_one(email, pw, port)
             log(f"  RESULT: {email} → {res}")
             RESULTS[email] = res
@@ -669,8 +735,21 @@ def main():
             break
 
         if pending:
-            log(f"Sleeping {CHECK_INTERVAL}s...")
-            time.sleep(CHECK_INTERVAL)
+            # If ALL pending accounts returned captcha_blocked, sleep until UTC+8 midnight reset
+            pending_results = [RESULTS.get(e, "") for e in pending]
+            all_blocked = all(r == "captcha_blocked" for r in pending_results if r)
+            if all_blocked and len(pending_results) > 0:
+                import datetime as _dt
+                _now = _dt.datetime.utcnow()
+                _reset = _now.replace(hour=16, minute=5, second=0, microsecond=0)
+                if _now.hour >= 16:
+                    _reset += _dt.timedelta(days=1)
+                _wait = max((_reset - _now).total_seconds(), 300)
+                log(f"All accounts captcha-blocked; sleeping {_wait/3600:.1f}h until {_reset.strftime('%Y-%m-%d %H:%M UTC')} (UTC+8 reset)")
+                time.sleep(_wait)
+            else:
+                log(f"Sleeping {CHECK_INTERVAL}s...")
+                time.sleep(CHECK_INTERVAL)
 
     log("\n" + "=" * 60)
     log("FINAL RESULTS:")
