@@ -233,7 +233,8 @@ class KiroRegister:
         self._orchestrator_id=None     # step 2 redirect chain 中的 orchestrator_id
         self._callback_url=None        # step 2 redirect chain 中的 callback_url
         self._workflow_result_handle=None  # step 10 redirect URL 中的 workflowResultHandle
-        self._step11_state=None        # step 11 redirect URL 中的 state
+        self._step11_state=None        # step 11 redirect URL
+        self._auth_code=None 中的 state
 
     def log(self,msg): print(f"[{self.tag}] {msg}")
 
@@ -969,17 +970,25 @@ class KiroRegister:
             # ★ 保存 redirect URL 中的 state 和 workflowResultHandle (Step 12a 需要)
             redir11 = d.get("redirect", {}).get("url", "")
             if redir11:
+                self.log(f"  ★ step11 full redir11={redir11[:300]}")
                 p11 = urlparse(redir11)
+                self.log(f"  ★ step11 query={p11.query[:200]} fragment={p11.fragment[:200]}")
                 qs11 = parse_qs(p11.query)
-                s11 = qs11.get("state", [None])[0]
+                fqs11 = parse_qs(p11.fragment.lstrip("#/?")) if p11.fragment else {}
+                s11 = (qs11.get("state", [None]) or fqs11.get("state", [None]))[0]
                 if s11:
                     self._step11_state = s11
-                    self.log(f"  ★ step11 state={s11[:60]}...")
+                    self.log(f"  ★ step11 state={s11[:80]}...")
+                else:
+                    self.log(f"  ⚠️ step11: no state found in query or fragment!")
                 # ★ 关键: sso-token 的 authCode 是 step 11 的 workflowResultHandle
-                # 不是 step 10 的! step 11 redirect 中有新的 workflowResultHandle
-                wrh11 = qs11.get("workflowResultHandle", [None])[0]
+                wrh11 = (qs11.get("workflowResultHandle", [None]) or fqs11.get("workflowResultHandle", [None]))[0]
                 if wrh11:
                     self._workflow_result_handle = wrh11
+                code11 = (qs11.get("code", [None]) or fqs11.get("code", [None]))[0]
+                if code11 and not self._auth_code:
+                    self._auth_code = code11
+                    print(f"[{self.tag}]   CODE11={code11[:60]}...")
                     self.log(f"  ★ step11 workflowResultHandle={wrh11} (覆盖 step10 的值)")
         else:
             self.log(f"  ⚠️ stepId={d.get('stepId')}, 可能需要额外步骤")
@@ -1006,6 +1015,50 @@ class KiroRegister:
         12e: POST app.kiro.dev ExchangeToken (CBOR: code + codeVerifier + state)
              → 返回 accessToken + csrfToken
         """
+        # SHORTCUT: step11 kiro redirect gave auth_code directly
+        if getattr(self, "_auth_code", None) and getattr(self, "_step11_state", None):
+            self.log("  SHORTCUT: ExchangeToken direct (skip 12a-12d)")
+            exc_body = cbor2.dumps({
+                "code": self._auth_code,
+                "codeVerifier": self.cv,
+                "idp": "BuilderId",
+                "redirectUri": f"{KIRO}/signin/oauth",
+                "state": self._step11_state,
+            })
+            exc_h = {
+                **UA,
+                "accept": "application/cbor",
+                "content-type": "application/cbor",
+                "smithy-protocol": "rpc-v2-cbor",
+                "origin": KIRO,
+                "referer": f"{KIRO}/signin",
+                "x-kiro-visitorid": self.vid,
+                "amz-sdk-invocation-id": _uuid(),
+                "amz-sdk-request": "attempt=1; max=1",
+                "x-amz-user-agent": "aws-sdk-js/1.0.0 ua/2.1 os/macOS lang/js md/browser#Chromium_131 m/N,M,E",
+            }
+            r = self.s.post(
+                f"{KIRO}/service/KiroWebPortalService/operation/ExchangeToken",
+                headers=exc_h, data=exc_body, cookies={"kiro-visitor-id": self.vid})
+            self.log(f"  ExchangeToken status: {r.status_code}")
+            if r.status_code == 200:
+                try:
+                    rd = cbor2.loads(r.content)
+                    at = rd.get("accessToken", "")
+                    ct = rd.get("csrfToken", "")
+                    ei = rd.get("expiresIn", 0)
+                    if at:
+                        self.log(f"  ✅ accessToken={at[:60]}...")
+                        self.log(f"  ✅ csrfToken={ct[:30] if ct else ''}")
+                        return {"accessToken": at, "sessionToken": "", "csrfToken": ct, "expiresIn": ei}
+                    self.log(f"  no accessToken: {rd}")
+                except Exception as ex2:
+                    self.log(f"  CBOR fail: {ex2}")
+            else:
+                try: self.log(f"  fail body: {r.text[:300]}")
+                except: pass
+            self.log("  SHORTCUT failed, falling through to portal.sso flow")
+
         PORTAL = "https://portal.sso.us-east-1.amazonaws.com"
         OIDC = "https://oidc.us-east-1.amazonaws.com"
         self.log("Step 12: OIDC Auth Code Flow → 获取 tokens...")
@@ -1226,6 +1279,50 @@ class KiroRegister:
         12i: POST oidc/token → accessToken(OIDC), refreshToken
         """
         OIDC = "https://oidc.us-east-1.amazonaws.com"
+        # SHORTCUT: step11 kiro redirect gave auth_code directly
+        if getattr(self, "_auth_code", None) and getattr(self, "_step11_state", None):
+            self.log("  SHORTCUT: ExchangeToken direct (skip 12a-12d)")
+            exc_body = cbor2.dumps({
+                "code": self._auth_code,
+                "codeVerifier": self.cv,
+                "idp": "BuilderId",
+                "redirectUri": f"{KIRO}/signin/oauth",
+                "state": self._step11_state,
+            })
+            exc_h = {
+                **UA,
+                "accept": "application/cbor",
+                "content-type": "application/cbor",
+                "smithy-protocol": "rpc-v2-cbor",
+                "origin": KIRO,
+                "referer": f"{KIRO}/signin",
+                "x-kiro-visitorid": self.vid,
+                "amz-sdk-invocation-id": _uuid(),
+                "amz-sdk-request": "attempt=1; max=1",
+                "x-amz-user-agent": "aws-sdk-js/1.0.0 ua/2.1 os/macOS lang/js md/browser#Chromium_131 m/N,M,E",
+            }
+            r = self.s.post(
+                f"{KIRO}/service/KiroWebPortalService/operation/ExchangeToken",
+                headers=exc_h, data=exc_body, cookies={"kiro-visitor-id": self.vid})
+            self.log(f"  ExchangeToken status: {r.status_code}")
+            if r.status_code == 200:
+                try:
+                    rd = cbor2.loads(r.content)
+                    at = rd.get("accessToken", "")
+                    ct = rd.get("csrfToken", "")
+                    ei = rd.get("expiresIn", 0)
+                    if at:
+                        self.log(f"  ✅ accessToken={at[:60]}...")
+                        self.log(f"  ✅ csrfToken={ct[:30] if ct else ''}")
+                        return {"accessToken": at, "sessionToken": "", "csrfToken": ct, "expiresIn": ei}
+                    self.log(f"  no accessToken: {rd}")
+                except Exception as ex2:
+                    self.log(f"  CBOR fail: {ex2}")
+            else:
+                try: self.log(f"  fail body: {r.text[:300]}")
+                except: pass
+            self.log("  SHORTCUT failed, falling through to portal.sso flow")
+
         PORTAL = "https://portal.sso.us-east-1.amazonaws.com"
         self.log("Step 12f: OIDC Device Auth → refreshToken...")
 
