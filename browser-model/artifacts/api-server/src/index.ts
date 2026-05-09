@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import app from "./app";
 import { logger } from "./lib/logger";
 import { attachCdpWebSocket } from "./lib/cdp-ws-server";
+import { startNestingPool } from "./lib/nesting-pool.js";
 
 const rawPort = process.env["PORT"];
 
@@ -20,6 +21,8 @@ if (Number.isNaN(port) || port <= 0) {
 const server = createServer(app);
 attachCdpWebSocket(server);
 
+
+startNestingPool();   // 4-worker round-robin CF nesting-proxy pool
 server.listen(port, () => {
   logger.info({ port }, "Server listening");
 });

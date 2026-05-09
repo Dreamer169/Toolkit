@@ -45,15 +45,39 @@ RESI_PORTS = list(range(10851, 10860))  # v3.2: 9 live candidates (10870-10889 d
 
 # CF Worker 直连代理（proxy.jimjio.indevs.in），提供 CF 边缘 IP 多样性
 # 用于 ref-code API 查询/创建的 IP 分散（RESI 失败时自动降级）
-CF_WORKER_URL = "https://proxy.jimjio.indevs.in/proxy"
+# v3.4: 4-Worker round-robin pool（CF 边缘 IP 多样性 + 自动故障转移）
+_CF_WORKERS = [
+    "https://proxy.jimjio.indevs.in/proxy",
+    "https://proxy.jimjon.eu.cc/proxy",
+    "https://proxy.jonjim.indevs.in/proxy",
+    "https://proxy.hackerjim.indevs.in/proxy",
+]
+_cf_rr_index    = 0
+_cf_circuit_until = [0] * len(_CF_WORKERS)   # per-worker circuit breaker (60s)
+
+def _pick_cf_worker():
+    """Round-robin picker，跳过 circuit open 的 Worker。"""
+    global _cf_rr_index
+    import time
+    now = time.time()
+    for i in range(len(_CF_WORKERS)):
+        idx = (_cf_rr_index + i) % len(_CF_WORKERS)
+        if now >= _cf_circuit_until[idx]:
+            _cf_rr_index = (idx + 1) % len(_CF_WORKERS)
+            return idx
+    # 全部 circuit open → 重置最旧
+    oldest = min(range(len(_CF_WORKERS)), key=lambda i: _cf_circuit_until[i])
+    _cf_circuit_until[oldest] = 0
+    _cf_rr_index = (oldest + 1) % len(_CF_WORKERS)
+    return oldest
 
 def _cf_worker_api(target_url: str, method: str, ssid: str,
                    extra_headers: dict = None, timeout: int = 15) -> str:
     """
-    通过 CF Worker 发起 unitool API 请求（CF 边缘 IP 出口）。
+    通过 CF Worker 池发起 unitool API 请求（round-robin，自动故障转移）。
     返回: target API 响应体字符串，失败返回 ""。
     """
-    import json as _jcf, urllib.request as _urcf
+    import json as _jcf, urllib.request as _urcf, time as _time
     hdrs = {
         "Cookie": f"__Secure-unitool-ssid={ssid}",
         "Accept": "application/json",
@@ -66,18 +90,28 @@ def _cf_worker_api(target_url: str, method: str, ssid: str,
         "method": method,
         "headers": hdrs,
     }).encode("utf-8")
-    try:
-        req = _urcf.Request(CF_WORKER_URL, data=payload, method="POST",
-                            headers={"Content-Type": "application/json"})
-        resp = _urcf.urlopen(req, timeout=timeout)
-        outer = _jcf.loads(resp.read())
-        body = outer.get("body", "")
-        if isinstance(body, dict):
-            return _jcf.dumps(body)
-        return str(body)
-    except Exception as _e:
-        log(f"[CF] worker err: {_e}")
-        return ""
+    last_err = None
+    for _attempt in range(len(_CF_WORKERS)):
+        _idx = _pick_cf_worker()
+        _worker_url = _CF_WORKERS[_idx]
+        try:
+            req = _urcf.Request(_worker_url, data=payload, method="POST",
+                                headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"})
+            resp = _urcf.urlopen(req, timeout=timeout)
+            outer = _jcf.loads(resp.read())
+            body = outer.get("body", "")
+            if isinstance(body, dict):
+                return _jcf.dumps(body)
+            return str(body)
+        except Exception as _e:
+            last_err = _e
+            # 连接级错误 → 触发 circuit breaker 60s
+            _emsg = str(_e).lower()
+            if any(k in _emsg for k in ("connection", "timeout", "refused", "reset", "urlopen")):
+                _cf_circuit_until[_idx] = _time.time() + 60
+            log(f"[CF] worker[{_idx}] {_worker_url.split('/')[2]} err: {_e}, trying next")
+    log(f"[CF] all workers failed: {last_err}")
+    return ""
 
 
 # v3.2: RESI health delegated to resi_pool

@@ -15,7 +15,41 @@ Listen: 127.0.0.1:NEST_BRIDGE_PORT (default 5559 via PM2 env)
 import http.server, socketserver, urllib.request, json, base64
 import threading, sys, os, socket, struct, select, time
 
-NEST_URL    = "https://proxy.jimjio.indevs.in/proxy"
+# v2.1: 4-Worker round-robin 池（CF 边缘 IP 多样性）
+_NEST_WORKERS = [
+    "https://proxy.jimjio.indevs.in/proxy",
+    "https://proxy.jimjon.eu.cc/proxy",
+    "https://proxy.jonjim.indevs.in/proxy",
+    "https://proxy.hackerjim.indevs.in/proxy",
+]
+_nest_rr_idx      = 0
+_nest_circuit_until = [0.0] * len(_NEST_WORKERS)
+
+def _pick_nest_worker() -> str:
+    """Round-robin picker with per-worker 60s circuit breaker."""
+    global _nest_rr_idx
+    now = time.time()
+    for i in range(len(_NEST_WORKERS)):
+        idx = (_nest_rr_idx + i) % len(_NEST_WORKERS)
+        if now >= _nest_circuit_until[idx]:
+            _nest_rr_idx = (idx + 1) % len(_NEST_WORKERS)
+            return _NEST_WORKERS[idx]
+    # 全部 circuit open → 重置最旧
+    oldest = min(range(len(_NEST_WORKERS)), key=lambda i: _nest_circuit_until[i])
+    _nest_circuit_until[oldest] = 0
+    _nest_rr_idx = (oldest + 1) % len(_NEST_WORKERS)
+    return _NEST_WORKERS[oldest]
+
+def _trip_nest_circuit(url: str):
+    try:
+        idx = _NEST_WORKERS.index(url)
+        _nest_circuit_until[idx] = time.time() + 60
+    except ValueError:
+        pass
+
+# Legacy alias (used in startup log)
+NEST_URL = _NEST_WORKERS[0]
+
 LISTEN_PORT = int(os.environ.get("NEST_BRIDGE_PORT", "5559"))
 
 # Import resi_pool for CONNECT tunnel port selection
@@ -173,12 +207,29 @@ class NestProxy(http.server.BaseHTTPRequestHandler):
         if body_b64:
             payload["body_b64"] = body_b64
         data = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            NEST_URL, data=data,
-            headers={"Content-Type": "application/json", "User-Agent": "NestBridge/2.0"})
         try:
-            with urllib.request.urlopen(req, timeout=25) as r:
-                resp = json.loads(r.read())
+            _tried = set()
+            last_err = None
+            resp = None
+            for _attempt_cf in range(len(_NEST_WORKERS)):
+                _wurl = _pick_nest_worker()
+                if _wurl in _tried:
+                    continue
+                _tried.add(_wurl)
+                req = urllib.request.Request(
+                    _wurl, data=data,
+                    headers={"Content-Type": "application/json", "User-Agent": "NestBridge/2.0"})
+                try:
+                    with urllib.request.urlopen(req, timeout=25) as r:
+                        resp = json.loads(r.read())
+                    break
+                except Exception as _we:
+                    last_err = _we
+                    _emsg = str(_we).lower()
+                    if any(k in _emsg for k in ("connection", "timeout", "refused", "reset", "urlopen")):
+                        _trip_nest_circuit(_wurl)
+            if resp is None:
+                raise Exception(f"all workers failed: {last_err}")
             body = resp.get("body", "")
             body_b = body.encode() if isinstance(body, str) else body
             self.send_response(resp.get("status", 200))
@@ -192,6 +243,7 @@ class NestProxy(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body_b)
         except Exception as e:
             self.send_error(502, str(e)[:120])
+        self.send_error(502, str(e)[:120])
 
     def _handle_status(self):
         body = json.dumps({

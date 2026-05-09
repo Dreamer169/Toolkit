@@ -539,6 +539,16 @@ def _balance_monitor_loop():
         time.sleep(60)
 
 # ─── 服务/模型映射（v5.11: 从 API 实探更新，新增 gpt-5）─────────────────────
+# v5.38 probe backend identity (AI self-report, 2026-05-09):
+#   gpt-4o        -> GPT-4o
+#   gpt-4o-mini   -> ChatGPT-3.5 / ChatGPT-4.0 (rotates)
+#   gpt-4-1       -> GPT-4o (same backend as gpt-4o!)
+#   gpt5.1        -> GPT-4.1
+#   claude-sonnet -> Claude 3.5 Sonnet
+#   claude-sonnet-4-5 -> Claude 3.5/3.7 Sonnet (backend rotates)
+#   gpt-5/gpt-5.4/gpt5.2/gpt-5.5 -> refused to reveal ("unknown"/"unavailable")
+#   o-series: broken (TypeError/no-choices/no endpoints) at unitool backend
+#   grok/gemini: work via paginatedMessages poll; model identity not revealed
 NATIVE_SERVICES = {
     # ChatGPT（实探 /api/services?parent_id=chatgpt 确认，含 minimum_balance）
     "gpt-5", "gpt-5.5", "gpt-5.4", "gpt-5-nano",
@@ -754,9 +764,11 @@ MODEL_ALIASES = {
     "claude": "claude-sonnet", "claude-sonnet-4": "claude-sonnet",
     "claude-3-7-sonnet": "claude-sonnet", "claude-3-7-sonnet-20250219": "claude-sonnet",
     "claude-3-5-sonnet": "claude-sonnet", "claude-3-5-sonnet-20241022": "claude-sonnet",
-    "claude-3-5-haiku": "claude-haiku", "claude-3-5-haiku-20241022": "claude-haiku",
-    "claude-haiku-3-5": "claude-haiku",
-    "claude-3-haiku": "claude-haiku", "claude-3-haiku-20240307": "claude-haiku",
+    # v5.38: claude-haiku dead (404 at unitool), re-route to claude-sonnet-4-5
+    "claude-3-5-haiku": "claude-sonnet-4-5", "claude-3-5-haiku-20241022": "claude-sonnet-4-5",
+    "claude-haiku-3-5": "claude-sonnet-4-5",
+    "claude-3-haiku": "claude-sonnet-4-5", "claude-3-haiku-20240307": "claude-sonnet-4-5",
+    "claude-haiku": "claude-sonnet-4-5",  # v5.38: re-routed from dead claude-haiku service
     "claude-3-sonnet": "claude-sonnet", "claude-3-sonnet-20240229": "claude-sonnet",
     "claude-3-5-sonnet-latest": "claude-sonnet",
     "claude-3-7-sonnet-latest": "claude-sonnet", "claude-sonnet-latest": "claude-sonnet",
@@ -1942,9 +1954,9 @@ def _startup_resi_health_check():
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.34] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.38] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.34] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.38] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
@@ -1954,8 +1966,8 @@ if __name__ == "__main__":
     except (KeyboardInterrupt, SystemExit):
         pass  # PM2 SIGINT during startup — skip check, continue
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.34] balance monitor started", flush=True)
-    print("[unitool-proxy v5.34] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc|GrokReasoningStrip|GeminiMaintenance|GrokFallback|OSeriesFallback|NanoReasoning|SvcErrFallback|ImmediateFallback|OSeriesChainFix|ClaudeOpusFallback: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking|NoModelFallback|ClaudeOpusErrFix|SvcDeadCache24h|SvcStatusAPI|ProbeConfirmed2026-05-08", flush=True)
+    print("[unitool-proxy v5.38] balance monitor started", flush=True)
+    print("[unitool-proxy v5.38] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc|GrokReasoningStrip|GeminiMaintenance|GrokFallback|OSeriesFallback|NanoReasoning|SvcErrFallback|ImmediateFallback|OSeriesChainFix|ClaudeOpusFallback: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking|NoModelFallback|ClaudeOpusErrFix|SvcDeadCache24h|SvcStatusAPI|ProbeConfirmed2026-05-08|PollPrimaryGpt4o|RobustCookie2026-05-09", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()

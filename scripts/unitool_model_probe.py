@@ -186,7 +186,7 @@ def probe_one(svc_id, ssid, prompt=None):
         chat_id = chat["id"]
 
         # 2. Send message
-        opts = {reasoning_effort:high} if svc_id in REASONING_SERVICES else ""
+        opts = '{"reasoning_effort":"high"}' if svc_id in REASONING_SERVICES else ""
         st, send_res = api("POST", "/api/chats/{}/messages".format(chat_id),
                            {"content": prompt, "attachments": [], "options": opts},
                            ssid)

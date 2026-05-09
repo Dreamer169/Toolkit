@@ -2,12 +2,12 @@
 """
 mailtm_client.py — mail.tm API 客户端
 =====================================
-Replit 不封锁 deltajohnsons.com，可通过 API 自动收件。
+Replit 不封锁 wshu.net，可通过 API 自动收件。
 """
 import json, secrets, string, time, urllib.request, urllib.error
 
 BASE = "https://api.mail.tm"
-DOMAIN = "deltajohnsons.com"   # mail.tm 当前有效域名
+DOMAIN = "wshu.net"   # mail.tm 当前有效域名
 
 def _req(method, path, data=None, token=None, timeout=20):
     url = BASE + path

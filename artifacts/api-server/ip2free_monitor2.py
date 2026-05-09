@@ -594,7 +594,7 @@ def fetch_and_inject_proxies(email, pw, port):
         resp = s.get(f"{BASE_API}/api/ip/freeList", timeout=12)
         data = resp.json()
         raw = data.get("data", {})
-        proxies = (raw.get("list") if isinstance(raw, dict) else raw) or []
+        proxies = (raw.get("free_ip_list") if isinstance(raw, dict) else raw) or []
         injected = 0
         for item in proxies:
             h = (item.get("ip") or item.get("host") or item.get("addr") or "").strip()
