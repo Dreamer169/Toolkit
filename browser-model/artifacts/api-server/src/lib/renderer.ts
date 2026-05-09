@@ -600,6 +600,24 @@ export const STEALTH_INIT = `
       });
     }
   } catch (_) {}
+
+  // === console detection protection (Kasada/CF 'b' field) ===
+  try {
+    var _cm = ["log","warn","error","info","debug","trace","dir","table","count","countReset","group","groupCollapsed","groupEnd","time","timeEnd","timeLog","assert","clear"];
+    _cm.forEach(function(m) {
+      try { if (typeof console[m] === "function") fakeFns.add(console[m]); } catch(_) {}
+    });
+  } catch(_) {}
+
+  // === Worker userAgentData patch ===
+  try {
+    if (typeof window === "undefined" && typeof self !== "undefined") {
+      var _wB = [{brand:"Chromium",version:"144"},{brand:"Not:A-Brand",version:"99"},{brand:"Google Chrome",version:"144"}];
+      var _wH = {brands:_wB,mobile:false,platform:"Linux",platformVersion:"5.15.0",architecture:"x86",bitness:"64",model:"",uaFullVersion:"144.0.7559.132",fullVersionList:[{brand:"Chromium",version:"144.0.7559.132"},{brand:"Not:A-Brand",version:"99.0.0.0"},{brand:"Google Chrome",version:"144.0.7559.132"}],wow64:false,formFactors:["Desktop"]};
+      try { Object.defineProperty(self.navigator,"userAgentData",{get:function(){return {brands:_wB,mobile:false,platform:"Linux",getHighEntropyValues:function(h){var o={brands:_wB,mobile:false,platform:"Linux"};(h||[]).forEach(function(k){if(k in _wH)o[k]=_wH[k];});return Promise.resolve(o);},toJSON:function(){return {brands:_wB,mobile:false,platform:"Linux"};}};},configurable:true}); } catch(_) {}
+      try { Object.defineProperty(self.navigator,"entryPoints",{get:function(){return [];},configurable:true}); } catch(_) {}
+    }
+  } catch(_) {}
 })();
 `;
 
@@ -661,6 +679,7 @@ async function getBrowser(): Promise<Browser> {
         "--fingerprint-brand=Chrome",
         "--fingerprint-brand-version=144",
         "--fingerprint-hardware-concurrency=8",
+        "--disable-spoofing=gpu",
         "--lang=en-US",
         "--accept-lang=en-US,en",
         "--timezone=America/Los_Angeles",
