@@ -62,7 +62,9 @@ export const STEALTH_INIT = `
   try { delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol; } catch(_) {}
 
   // languages
-  try { Object.defineProperty(Navigator.prototype, 'languages', { get: () => ['en-US', 'en'], configurable: true }); } catch (_) {}
+  // languages — patch prototype first, then instance (handles ungoogled-chromium non-configurable)
+  try { Object.defineProperty(Navigator.prototype, 'languages', { get: () => ['en-US', 'en'], configurable: true, enumerable: true }); } catch (_) {}
+  try { Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'], configurable: true, enumerable: true }); } catch (_) {}
 
   // platform / hardwareConcurrency / deviceMemory
   try { Object.defineProperty(Navigator.prototype, 'platform', { get: () => 'Linux x86_64', configurable: true }); } catch (_) {}
@@ -93,14 +95,100 @@ export const STEALTH_INIT = `
     Object.defineProperty(Navigator.prototype, 'plugins', { get: () => arr, configurable: true });
   } catch (_) {}
 
-  // chrome.runtime stub
+  // ── chrome.* stubs (comprehensive — direct assignment to bypass configurable:false) ──
   try {
     if (!window.chrome) window.chrome = {};
-    window.chrome.runtime = window.chrome.runtime || { OnInstalledReason: {}, OnRestartRequiredReason: {}, PlatformArch: {}, PlatformOs: {}, RequestUpdateCheckStatus: {} };
-    window.chrome.app = window.chrome.app || { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } };
-    window.chrome.csi = window.chrome.csi || function(){return{};};
-    window.chrome.loadTimes = window.chrome.loadTimes || function(){return{requestTime: Date.now()/1000, startLoadTime: Date.now()/1000, commitLoadTime: Date.now()/1000, finishDocumentLoadTime: 0, finishLoadTime: 0, firstPaintTime: 0, firstPaintAfterLoadTime: 0, navigationType: 'Other', wasFetchedViaSpdy: false, wasNpnNegotiated: true, npnNegotiatedProtocol: 'h2', wasAlternateProtocolAvailable: false, connectionInfo: 'h2'};};
-  } catch (_) {}
+    const _c = window.chrome;
+    const _mk = () => ({
+      addListener()    { /* no-op */ },
+      removeListener() { /* no-op */ },
+      hasListener()    { return false; },
+      hasListeners()   { return false; },
+    });
+
+    // chrome.runtime — direct assign (ungoogled-chromium has no runtime natively)
+    _c.runtime = {
+      id: undefined,
+      lastError: null,
+      onConnect:              _mk(), onConnectExternal:    _mk(),
+      onMessage:              _mk(), onMessageExternal:    _mk(),
+      onInstalled:            _mk(), onStartup:            _mk(),
+      onSuspend:              _mk(), onSuspendCanceled:    _mk(),
+      onUpdateAvailable:      _mk(), onRestartRequired:    _mk(),
+      connect()         { throw new Error('Extension context not available.'); },
+      connectNative()   { throw new Error('Extension context not available.'); },
+      sendMessage()     { throw new Error('Extension context not available.'); },
+      sendNativeMessage(){ throw new Error('Extension context not available.'); },
+      getManifest()     { return undefined; },
+      getURL(p)         { return 'chrome-extension://undefined/' + (p || ''); },
+      reload()          { location.reload(); },
+      setUninstallURL() { /* no-op */ },
+      openOptionsPage() { /* no-op */ },
+      getContexts()     { return Promise.resolve([]); },
+      getPlatformInfo(cb) {
+        const info = { os: 'linux', arch: 'x86-64', nacl_arch: 'x86-64' };
+        if (cb) cb(info); return Promise.resolve(info);
+      },
+      requestUpdateCheck(cb) { if (cb) cb('no_update', {}); },
+      PlatformOs:  { ANDROID:'android', CROS:'cros', LINUX:'linux', MAC:'mac', OPENBSD:'openbsd', WIN:'win' },
+      PlatformArch:{ ARM:'arm', ARM64:'arm64', MIPS:'mips', MIPS64:'mips64', X86_32:'x86-32', X86_64:'x86-64' },
+      PlatformNaclArch: { ARM:'arm', MIPS:'mips', MIPS64:'mips64', X86_32:'x86-32', X86_64:'x86-64' },
+      OnInstalledReason:        { CHROME_UPDATE:'chrome_update', INSTALL:'install', SHARED_MODULE_UPDATE:'shared_module_update', UPDATE:'update' },
+      OnRestartRequiredReason:  { APP_UPDATE:'app_update', OS_UPDATE:'os_update', PERIODIC:'periodic' },
+      RequestUpdateCheckStatus: { NO_UPDATE:'no_update', THROTTLED:'throttled', UPDATE_AVAILABLE:'update_available' },
+    };
+
+    // chrome.loadTimes — realistic timing
+    const _t0 = Date.now() / 1000 - (Math.random() * 0.3 + 0.1);
+    _c.loadTimes = function() {
+      return {
+        requestTime: _t0, startLoadTime: _t0, commitLoadTime: _t0 + 0.05,
+        finishDocumentLoadTime: _t0 + 0.4, finishLoadTime: _t0 + 0.5,
+        firstPaintTime: _t0 + 0.15, firstPaintAfterLoadTime: 0,
+        navigationType: 'Other',
+        wasFetchedViaSpdy: true, wasNpnNegotiated: true,
+        npnNegotiatedProtocol: 'h2', wasAlternateProtocolAvailable: false,
+        connectionInfo: 'h2',
+      };
+    };
+
+    // chrome.csi
+    _c.csi = function() {
+      return { startE: Date.now(), onloadT: Date.now(), pageT: Math.random() * 800 + 200, tran: 15 };
+    };
+
+    // chrome.app
+    _c.app = _c.app || {
+      isInstalled: false,
+      getDetails()    { return null; },
+      getIsInstalled(){ return false; },
+      installState(cb){ if (cb) cb('not_installed'); },
+      runningState()  { return 'cannot_run'; },
+      InstallState: { DISABLED:'disabled', INSTALLED:'installed', NOT_INSTALLED:'not_installed' },
+      RunningState:  { CANNOT_RUN:'cannot_run', READY_TO_RUN:'ready_to_run', RUNNING:'running' },
+    };
+
+    // chrome.webstore — stub (checked by some fp tools)
+    _c.webstore = {
+      onInstallStageChanged: _mk(),
+      onDownloadProgress:    _mk(),
+      install()  { return Promise.reject(new Error('Webstore not available')); },
+      ErrorCode: { ABORTED:'ABORTED', BLACKLISTED:'BLACKLISTED', BLOCKED_BY_POLICY:'BLOCKED_BY_POLICY' },
+      InstallStage: { DOWNLOADING:'downloading', INSTALLING:'installing' },
+    };
+
+    // chrome.dom
+    _c.dom = {
+      openOrClosedShadowRoot(el) {
+        try { return el.openOrClosedShadowRoot || null; } catch(e) { return null; }
+      },
+    };
+
+    // chrome.action / chrome.scripting stubs
+    _c.action    = _c.action    || { onClicked: _mk() };
+    _c.scripting = _c.scripting || { executeScript(){ return Promise.resolve([]); }, insertCSS(){ return Promise.resolve(); } };
+
+  } catch (_e) { /* silent */ }
 
   // permissions: notifications quirk
   try {
@@ -282,14 +370,14 @@ export const STEALTH_INIT = `
   // 返 Headless 标记 → CF 一眼判定 bot. 这里强制全套自洽返回值.
   try {
     var _brands = [
-      { brand: "Chromium", version: "145" },
+      { brand: "Chromium", version: "144" },
       { brand: "Not:A-Brand", version: "99" },
-      { brand: "Google Chrome", version: "145" },
+      { brand: "Google Chrome", version: "144" },
     ];
     var _fullVerList = [
-      { brand: "Chromium", version: "145.0.7049.114" },
+      { brand: "Chromium", version: "144.0.7559.132" },
       { brand: "Not:A-Brand", version: "99.0.0.0" },
-      { brand: "Google Chrome", version: "145.0.7049.114" },
+      { brand: "Google Chrome", version: "144.0.7559.132" },
     ];
     var _highEntropy = {
       brands: _brands,
@@ -299,7 +387,7 @@ export const STEALTH_INIT = `
       architecture: "x86",
       bitness: "64",
       model: "",
-      uaFullVersion: "145.0.7049.114",
+      uaFullVersion: "144.0.7559.132",
       fullVersionList: _fullVerList,
       wow64: false,
       formFactors: ["Desktop"],
@@ -500,7 +588,7 @@ async function getBrowser(): Promise<Browser> {
         `--fingerprint=${(Math.random() * 0x7fffffff | 0)}`,
         "--fingerprint-platform=linux",
         "--fingerprint-brand=Chrome",
-        "--fingerprint-brand-version=145",
+        "--fingerprint-brand-version=144",
         "--fingerprint-hardware-concurrency=8",
         "--lang=en-US",
         "--accept-lang=en-US,en",
@@ -557,7 +645,7 @@ async function newFreshContext(): Promise<BrowserContext> {
   const browser = await getBrowser();
   const ctx = await browser.newContext({
     userAgent:
-      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
     viewport: { width: 1920, height: 1040 },
     screen: { width: 1920, height: 1080 },
     deviceScaleFactor: 1,
@@ -569,14 +657,14 @@ async function newFreshContext(): Promise<BrowserContext> {
     ignoreHTTPSErrors: true,
     extraHTTPHeaders: {
       "Accept-Language": "en-US,en;q=0.9",
-      "sec-ch-ua": "\"Chromium\";v=\"145\", \"Not:A-Brand\";v=\"99\", \"Google Chrome\";v=\"145\"",
+      "sec-ch-ua": "\"Chromium\";v=\"144\", \"Not:A-Brand\";v=\"99\", \"Google Chrome\";v=\"144\"",
       "sec-ch-ua-mobile": "?0",
       "sec-ch-ua-platform": "\"Linux\"",
       "sec-ch-ua-bitness": "\"64\"",
       "sec-ch-ua-arch": "\"x86\"",
-      "sec-ch-ua-full-version": "\"145.0.7049.114\"",
+      "sec-ch-ua-full-version": "\"144.0.7559.132\"",
       "sec-ch-ua-platform-version": "\"6.5.0\"",
-      "sec-ch-ua-full-version-list": "\"Chromium\";v=\"145.0.7049.114\", \"Not:A-Brand\";v=\"99.0.0.0\", \"Google Chrome\";v=\"145.0.7049.114\"",
+      "sec-ch-ua-full-version-list": "\"Chromium\";v=\"144.0.7559.132\", \"Not:A-Brand\";v=\"99.0.0.0\", \"Google Chrome\";v=\"144.0.7559.132\"",
       "sec-ch-ua-model": "\"\"",
       "sec-ch-ua-wow64": "?0",
     },
@@ -632,7 +720,7 @@ async function getStickyContext(hostname: string): Promise<BrowserContext> {
   const browser = await getBrowser();
   const p = browser.newContext({
     userAgent:
-      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
     viewport: { width: 1920, height: 1040 },
     screen: { width: 1920, height: 1080 },
     deviceScaleFactor: 1,
@@ -644,14 +732,14 @@ async function getStickyContext(hostname: string): Promise<BrowserContext> {
     ignoreHTTPSErrors: true,
     extraHTTPHeaders: {
       "Accept-Language": "en-US,en;q=0.9",
-      "sec-ch-ua": "\"Chromium\";v=\"145\", \"Not:A-Brand\";v=\"99\", \"Google Chrome\";v=\"145\"",
+      "sec-ch-ua": "\"Chromium\";v=\"144\", \"Not:A-Brand\";v=\"99\", \"Google Chrome\";v=\"144\"",
       "sec-ch-ua-mobile": "?0",
       "sec-ch-ua-platform": "\"Linux\"",
       "sec-ch-ua-bitness": "\"64\"",
       "sec-ch-ua-arch": "\"x86\"",
-      "sec-ch-ua-full-version": "\"145.0.7049.114\"",
+      "sec-ch-ua-full-version": "\"144.0.7559.132\"",
       "sec-ch-ua-platform-version": "\"6.5.0\"",
-      "sec-ch-ua-full-version-list": "\"Chromium\";v=\"145.0.7049.114\", \"Not:A-Brand\";v=\"99.0.0.0\", \"Google Chrome\";v=\"145.0.7049.114\"",
+      "sec-ch-ua-full-version-list": "\"Chromium\";v=\"144.0.7559.132\", \"Not:A-Brand\";v=\"99.0.0.0\", \"Google Chrome\";v=\"144.0.7559.132\"",
       "sec-ch-ua-model": "\"\"",
       "sec-ch-ua-wow64": "?0",
     },
@@ -1005,7 +1093,7 @@ export function writeCachedGoogleCookies(cookies: CK[]): void {
 async function harvestGoogleCookiesFresh(): Promise<CK[]> {
   const browser = await getBrowser();
   const ctx = await browser.newContext({
-    userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+    userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
     viewport: { width: 1920, height: 1040 },
     locale: "en-US",
     timezoneId: "America/Los_Angeles",
@@ -1158,7 +1246,7 @@ async function _bootstrapGoogleTrust(browser: Browser): Promise<void> {
   try {
     console.log("[v8.23] google-trust REAL-human bootstrap START (~50s, will click replit.com)");
     ctx = await browser.newContext({
-      userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
       viewport: { width: 1920, height: 1040 },
       screen: { width: 1920, height: 1080 },
       locale: "en-US",
@@ -1166,7 +1254,7 @@ async function _bootstrapGoogleTrust(browser: Browser): Promise<void> {
       ignoreHTTPSErrors: true,
       extraHTTPHeaders: {
         "Accept-Language": "en-US,en;q=0.9",
-        "sec-ch-ua": '"Chromium";v="145", "Not:A-Brand";v="99", "Google Chrome";v="145"',
+        "sec-ch-ua": '"Chromium";v="144", "Not:A-Brand";v="99", "Google Chrome";v="144"',
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Linux"',
       },
