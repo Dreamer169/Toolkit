@@ -147,9 +147,9 @@ PLATFORM_POLICIES: Dict[str, dict] = {
         "notes": "Can't use webshare-sourced proxies (self-referential)",
     },
     "outlook": {
-        "preferred_sources": ["local_xray", "ip2free", "webshare"],
+        "preferred_sources": ["local_xray", "ip2free"],
         "preferred_types":   ["residential", "unknown"],
-        "notes": "Outlook blocks most datacenter IPs; use residential",
+        "notes": "Outlook blocks most datacenter IPs; must use residential; webshare datacenter excluded",
     },
     "obvious": {
         "preferred_sources": ["local_xray", "ip2free", "webshare", "proxyscrape"],
@@ -162,9 +162,9 @@ PLATFORM_POLICIES: Dict[str, dict] = {
         "notes": "AI proxy — any proxy OK",
     },
     "talordata": {
-        "preferred_sources": ["local_xray", "ip2free", "webshare"],
+        "preferred_sources": ["local_xray", "ip2free"],
         "preferred_types":   ["residential", "unknown"],
-        "notes": "E-commerce scraping — residential preferred",
+        "notes": "E-commerce — must be residential; webshare datacenter excluded",
     },
     "unitool": {
         "preferred_sources": ["local_xray", "ip2free", "webshare", "proxyscrape"],
@@ -172,9 +172,9 @@ PLATFORM_POLICIES: Dict[str, dict] = {
         "notes": "AI tool — any proxy OK",
     },
     "replit": {
-        "preferred_sources": ["local_xray", "ip2free", "webshare"],
+        "preferred_sources": ["local_xray", "ip2free"],
         "preferred_types":   ["residential", "unknown"],
-        "notes": "Developer platform — residential preferred",
+        "notes": "Developer platform — must be residential; webshare datacenter excluded",
     },
     "generic": {
         "preferred_sources": ["local_xray", "ip2free", "webshare", "proxyscrape"],
@@ -182,6 +182,53 @@ PLATFORM_POLICIES: Dict[str, dict] = {
         "notes": "Generic fallback — any proxy OK",
     },
 }
+
+# ---------------------------------------------------------------------------
+# Proxy limit rules
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ProxyLimitRule:
+    """Describes operational limits for a proxy source."""
+    source:           str
+    max_ttl_hours:    Optional[float] = None   # hours from claim before proxy expires
+    max_traffic_mb:   Optional[float] = None   # MB bandwidth cap (None=unlimited)
+    max_concurrent:   int = 0                  # 0=unlimited
+    notes:            str = ""
+
+PROXY_LIMIT_RULES: Dict[str, "ProxyLimitRule"] = {
+    "ip2free": ProxyLimitRule(
+        source="ip2free",
+        max_ttl_hours=24.0,
+        max_traffic_mb=None,
+        notes="Claimed from ip2free daily tasks; valid ~24h from claim time",
+    ),
+    "proxyscrape": ProxyLimitRule(
+        source="proxyscrape",
+        max_ttl_hours=48.0,
+        max_traffic_mb=None,
+        notes="Free public SOCKS5; typically last 24-72h; re-fetched every 2h via cron",
+    ),
+    "webshare": ProxyLimitRule(
+        source="webshare",
+        max_ttl_hours=None,
+        max_traffic_mb=None,
+        notes="Free tier: 10 proxies, datacenter HTTP, NOT for residential-required platforms",
+    ),
+    "local_xray": ProxyLimitRule(
+        source="local_xray",
+        max_ttl_hours=None,
+        max_traffic_mb=None,
+        notes="Local xray SOCKS5; no expiry as long as xray service runs",
+    ),
+    "manual": ProxyLimitRule(
+        source="manual",
+        max_ttl_hours=None,
+        max_traffic_mb=None,
+        notes="Manually added; check meta for custom limits",
+    ),
+}
+
 
 # Source -> list of platforms this source's proxies CANNOT be used for
 EXCLUSION_RULES: Dict[str, List[str]] = {
@@ -510,6 +557,8 @@ class ProxyManager:
                         continue
                     seen.add(uid)
                     expire_ts = _parse_expire(p.get("expire_time") or p.get("expires_at"))
+                    if expire_ts is None:  # ip2free often omits expire_time; default 24h TTL
+                        expire_ts = time.time() + 86400
                     ex = self.db.get(uid)
                     lca = p.get("last_checked_at", "")
                     if ex is None:
@@ -581,7 +630,7 @@ class ProxyManager:
                             country=p.get("country_code",""), city=p.get("city",""),
                             proxy_type="residential",
                             not_for=list(EXCLUSION_RULES["ip2free"]),
-                            expire_ts=_parse_expire(p.get("expire_time")),
+                            expire_ts=_parse_expire(p.get("expire_time")) or time.time() + 86400,
                             meta={"proxy_uid": str(raw_uid)},
                         ), save=False); added += 1
             except Exception as e:
@@ -682,7 +731,8 @@ class ProxyManager:
                 source=source, source_account=p.get("source_account",""),
                 country=p.get("country_code",""), city=p.get("city",""),
                 proxy_type=proxy_type, not_for=not_for,
-                expire_ts=_parse_expire(p.get("expire_time") or p.get("expires_at")),
+                expire_ts=(_parse_expire(p.get("expire_time") or p.get("expires_at"))
+                          or (time.time() + 86400 if source == "ip2free" else None)),
                 meta={"proxy_uid": str(raw_uid)},
             ), save=False); added += 1
         self.db._save()
@@ -920,7 +970,8 @@ class ProxyManager:
                 meta={"ws_id": ws_id, "asn_name": p.get("asn_name", ""),
                       "formatted": formatted,
                       "last_verification": p.get("last_verification", ""),
-                      "created_at": p.get("created_at", "")},
+                      "created_at": p.get("created_at", ""),
+                      "bandwidth_exhausted": False},
             )
             if existing:
                 # Preserve usage stats
@@ -935,7 +986,57 @@ class ProxyManager:
             self.db.put(entry, save=False)
         self.db._save()
         log(f"Webshare: {len(results)} proxies fetched  +{added} new  {updated} updated")
+        # Quick bandwidth self-check: try one proxy; mark all dead on 402
+        self._webshare_check_bandwidth(log_fn=log)
         return added
+
+    def _webshare_check_bandwidth(self, log_fn=None):
+        """Probe one webshare proxy; if 402 bandwidthlimit → blacklist all until next month."""
+        log = log_fn or (lambda m: print(f"[webshare_bw] {m}"))
+        import subprocess as _sp, datetime as _dt, calendar as _cal
+        ws = [e for e in self.db.all() if e.source == "webshare" and e.user]
+        if not ws:
+            return
+        e = ws[0]
+        try:
+            r = _sp.run(
+                ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                 "--max-time", "8",
+                 "--proxy", f"http://{e.user}:{e.passwd}@{e.host}:{e.port}",
+                 "https://api.ipify.org"],
+                capture_output=True, text=True, timeout=10)
+            code = r.stdout.strip()
+        except Exception:
+            code = "error"
+        if code == "200":
+            log("Bandwidth OK — proxies are usable")
+            for en in self.db.all():
+                if en.source == "webshare":
+                    en.alive = True
+                    en.blacklist_until = None
+                    en.fail_count = 0
+                    en.meta["bandwidth_exhausted"] = False
+                    self.db.put(en, save=False)
+            self.db._save()
+        elif code in ("402", "407"):
+            now = _dt.datetime.utcnow()
+            if now.month == 12:
+                reset = _dt.datetime(now.year + 1, 1, 1)
+            else:
+                reset = _dt.datetime(now.year, now.month + 1, 1)
+            reset_ts = reset.timestamp()
+            log(f"Bandwidth EXHAUSTED (HTTP {code}), blacklisting until {reset.strftime('%Y-%m-%d')}")
+            for en in self.db.all():
+                if en.source == "webshare":
+                    en.alive = False
+                    en.blacklist_until = reset_ts
+                    en.meta["bandwidth_exhausted"] = True
+                    en.meta["bandwidth_reset_at"] = reset.strftime("%Y-%m-%d")
+                    self.db.put(en, save=False)
+            self.db._save()
+        else:
+            log(f"Bandwidth check inconclusive (code={code})")
+
 
     # ------------------------------------------------------------------
     # Source: local_xray auto-discover  (replaces static port list)
@@ -1012,7 +1113,7 @@ class ProxyManager:
         Respects per-entry not_for restrictions.
 
         Args:
-            platform: e.g. "ip2free", "webshare", "outlook", "obvious", "generic"
+            platform: e.g. "ip2free", "outlook", "obvious", "generic"
             country:  ISO-2 country filter (optional)
             probe_if_unknown: launch background probe for unknown-alive proxies
 
@@ -1194,6 +1295,53 @@ class ProxyManager:
             log(f"SQLite sync error: {ex}")
             return 0
 
+
+
+    def check_limits(self, entry: "ProxyEntry") -> dict:
+        """
+        Check if a proxy is still within its operational limits.
+        Returns dict with keys: ok(bool), reason(str), ttl_remaining_h(float|None)
+        """
+        import time as _t
+        rule = PROXY_LIMIT_RULES.get(entry.source)
+        if rule is None:
+            return {"ok": True, "reason": "no_rule", "ttl_remaining_h": None}
+
+        # TTL check
+        if rule.max_ttl_hours and entry.last_probe_ts:
+            age_h = (_t.time() - entry.last_probe_ts) / 3600
+            if age_h >= rule.max_ttl_hours:
+                return {
+                    "ok": False,
+                    "reason": f"ttl_expired ({age_h:.1f}h > {rule.max_ttl_hours}h)",
+                    "ttl_remaining_h": 0,
+                }
+            return {
+                "ok": True,
+                "reason": "within_ttl",
+                "ttl_remaining_h": rule.max_ttl_hours - age_h,
+            }
+
+        # Explicit expire_ts
+        if entry.expire_ts and _t.time() > entry.expire_ts:
+            return {"ok": False, "reason": "expire_ts_passed", "ttl_remaining_h": 0}
+
+        return {"ok": True, "reason": "no_ttl_limit", "ttl_remaining_h": None}
+
+    def limits_report(self, log_fn=None):
+        """Print a table of all proxies with their limit status."""
+        log = log_fn or print
+        import time as _t
+        log("\n=== PROXY LIMITS REPORT ===")
+        log(f"  {'Source':<12} {'UID':<35} {'Alive':>5} {'Status':<20} {'TTL Remaining':>14}")
+        log("  " + "-"*90)
+        for e in sorted(self.db.all(), key=lambda x: (x.source, x.uid)):
+            lim = self.check_limits(e)
+            alive_s = "yes" if e.alive is True else ("no" if e.alive is False else "?")
+            ttl_s   = (f"{lim['ttl_remaining_h']:.1f}h" if lim['ttl_remaining_h'] else
+                       "unlimited" if lim["reason"] == "no_ttl_limit" else "EXPIRED")
+            stat_s  = lim["reason"][:20]
+            log(f"  {e.source:<12} {e.uid:<35} {alive_s:>5} {stat_s:<20} {ttl_s:>14}")
 
     def sync_postgres(self,
                       db_url: str = "postgresql://postgres:postgres@localhost/toolkit",
@@ -1469,6 +1617,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_ru.add_argument("platform", help="Platform name")
     p_ru.add_argument("outcome",  choices=["success","fail","attempt"])
 
+
+    sub.add_parser("limits", help="Show limit rules for all proxy sources")
+    sub.add_parser("limits-report", help="Show per-proxy TTL / expiry status")
+
     p_daemon = sub.add_parser("daemon",
                                help="Run refresh+probe daemon")
     p_daemon.add_argument("--interval",       type=int, default=1800,
@@ -1578,6 +1730,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.cmd == "report-use":
         pm.report_use(args.uid, args.platform, args.outcome)
         print(f"Recorded: {args.uid}  platform={args.platform}  outcome={args.outcome}")
+        return 0
+
+
+    if args.cmd == "limits":
+        print("\n=== PROXY SOURCE LIMIT RULES ===")
+        print(f"  {'Source':<14} {'TTL(h)':>8} {'Traffic':>10}  Notes")
+        print("  " + "-"*70)
+        for src, rule in PROXY_LIMIT_RULES.items():
+            ttl   = f"{rule.max_ttl_hours}h" if rule.max_ttl_hours else "unlimited"
+            traff = f"{rule.max_traffic_mb}MB" if rule.max_traffic_mb else "unlimited"
+            print(f"  {src:<14} {ttl:>8} {traff:>10}  {rule.notes}")
+        print()
+        return 0
+
+    if args.cmd == "limits-report":
+        pm.limits_report()
         return 0
 
     if args.cmd == "inject-resi-pool":
