@@ -383,7 +383,7 @@ export const STEALTH_INIT = `
       brands: _brands,
       mobile: false,
       platform: "Linux",
-      platformVersion: "6.5.0",
+      platformVersion: "6.8.0",
       architecture: "x86",
       bitness: "64",
       model: "",
@@ -528,6 +528,77 @@ export const STEALTH_INIT = `
   // === pdfViewerEnabled (Chrome ≥ 105) ===
   try {
     Object.defineProperty(Navigator.prototype, 'pdfViewerEnabled', { get: () => true, configurable: true });
+  } catch (_) {}
+
+  // === Speech Synthesis — headless has 0 voices; inject realistic Google voices ===
+  try {
+    const _fakeVoices = [
+      { voiceURI:'Google US English',               name:'Google US English',               lang:'en-US', localService:false, default:true  },
+      { voiceURI:'Google UK English Female',         name:'Google UK English Female',         lang:'en-GB', localService:false, default:false },
+      { voiceURI:'Google UK English Male',           name:'Google UK English Male',           lang:'en-GB', localService:false, default:false },
+      { voiceURI:'Google Deutsch',                   name:'Google Deutsch',                   lang:'de-DE', localService:false, default:false },
+      { voiceURI:'Google español',                   name:'Google español',                   lang:'es-ES', localService:false, default:false },
+      { voiceURI:'Google español de Estados Unidos', name:'Google español de Estados Unidos', lang:'es-US', localService:false, default:false },
+      { voiceURI:'Google français',                  name:'Google français',                  lang:'fr-FR', localService:false, default:false },
+      { voiceURI:'Google हिन्दी',                   name:'Google हिन्दी',                   lang:'hi-IN', localService:false, default:false },
+      { voiceURI:'Google Indonesia',                 name:'Google Indonesia',                 lang:'id-ID', localService:false, default:false },
+      { voiceURI:'Google italiano',                  name:'Google italiano',                  lang:'it-IT', localService:false, default:false },
+      { voiceURI:'Google 日本語',                    name:'Google 日本語',                    lang:'ja-JP', localService:false, default:false },
+      { voiceURI:'Google 한국의',                    name:'Google 한국의',                    lang:'ko-KR', localService:false, default:false },
+      { voiceURI:'Google Nederlands',                name:'Google Nederlands',                lang:'nl-NL', localService:false, default:false },
+      { voiceURI:'Google polski',                    name:'Google polski',                    lang:'pl-PL', localService:false, default:false },
+      { voiceURI:'Google português do Brasil',       name:'Google português do Brasil',       lang:'pt-BR', localService:false, default:false },
+      { voiceURI:'Google русский',                   name:'Google русский',                   lang:'ru-RU', localService:false, default:false },
+      { voiceURI:'Google 普通话（中国大陆）',          name:'Google 普通话（中国大陆）',          lang:'zh-CN', localService:false, default:false },
+      { voiceURI:'Google 粤語（香港）',               name:'Google 粤語（香港）',               lang:'zh-HK', localService:false, default:false },
+      { voiceURI:'Google 國語（臺灣）',               name:'Google 國語（臺灣）',               lang:'zh-TW', localService:false, default:false },
+    ];
+    // Make each voice look like a real SpeechSynthesisVoice
+    _fakeVoices.forEach(v => { Object.setPrototypeOf(v, SpeechSynthesisVoice?.prototype || Object.prototype); });
+    if (typeof speechSynthesis !== 'undefined') {
+      Object.defineProperty(speechSynthesis, 'getVoices', {
+        value: function() { return _fakeVoices; },
+        writable: true, configurable: true,
+      });
+      // Dispatch voiceschanged so scripts waiting on it resolve immediately
+      try { speechSynthesis.dispatchEvent(new Event('voiceschanged')); } catch (_) {}
+    }
+    if (typeof SpeechSynthesis !== 'undefined') {
+      Object.defineProperty(SpeechSynthesis.prototype, 'getVoices', {
+        value: function() { return _fakeVoices; },
+        writable: true, configurable: true,
+      });
+    }
+  } catch (_) {}
+
+  // === Keyboard / input device presence (headless leak: no keyboard events) ===
+  // navigator.keyboard exists on real Chrome; headless may suppress it
+  try {
+    if (navigator.keyboard && typeof navigator.keyboard.getLayoutMap === 'function') {
+      // Already present — no-op
+    } else if (!navigator.keyboard) {
+      Object.defineProperty(Navigator.prototype, 'keyboard', {
+        get: () => ({ getLayoutMap: () => Promise.resolve(new Map()) }),
+        configurable: true,
+      });
+    }
+  } catch (_) {}
+
+  // === Permissions API — override headless "denied" defaults ===
+  try {
+    const _origPQ = navigator.permissions?.query?.bind(navigator.permissions);
+    if (_origPQ) {
+      Object.defineProperty(navigator.permissions, 'query', {
+        value: function query(desc) {
+          const name = desc?.name;
+          // headless returns "denied" for these; real Chrome returns "default"/"granted"
+          if (name === 'notifications') return Promise.resolve({ state: 'default', onchange: null });
+          if (name === 'clipboard-read' || name === 'clipboard-write') return Promise.resolve({ state: 'prompt', onchange: null });
+          return _origPQ(desc);
+        },
+        writable: true, configurable: true,
+      });
+    }
   } catch (_) {}
 })();
 `;

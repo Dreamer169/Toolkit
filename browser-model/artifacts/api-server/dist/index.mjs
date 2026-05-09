@@ -58687,7 +58687,7 @@ var STEALTH_INIT = `
       brands: _brands,
       mobile: false,
       platform: "Linux",
-      platformVersion: "6.5.0",
+      platformVersion: "6.8.0",
       architecture: "x86",
       bitness: "64",
       model: "",
@@ -58832,6 +58832,77 @@ var STEALTH_INIT = `
   // === pdfViewerEnabled (Chrome \u2265 105) ===
   try {
     Object.defineProperty(Navigator.prototype, 'pdfViewerEnabled', { get: () => true, configurable: true });
+  } catch (_) {}
+
+  // === Speech Synthesis \u2014 headless has 0 voices; inject realistic Google voices ===
+  try {
+    const _fakeVoices = [
+      { voiceURI:'Google US English',               name:'Google US English',               lang:'en-US', localService:false, default:true  },
+      { voiceURI:'Google UK English Female',         name:'Google UK English Female',         lang:'en-GB', localService:false, default:false },
+      { voiceURI:'Google UK English Male',           name:'Google UK English Male',           lang:'en-GB', localService:false, default:false },
+      { voiceURI:'Google Deutsch',                   name:'Google Deutsch',                   lang:'de-DE', localService:false, default:false },
+      { voiceURI:'Google espa\xF1ol',                   name:'Google espa\xF1ol',                   lang:'es-ES', localService:false, default:false },
+      { voiceURI:'Google espa\xF1ol de Estados Unidos', name:'Google espa\xF1ol de Estados Unidos', lang:'es-US', localService:false, default:false },
+      { voiceURI:'Google fran\xE7ais',                  name:'Google fran\xE7ais',                  lang:'fr-FR', localService:false, default:false },
+      { voiceURI:'Google \u0939\u093F\u0928\u094D\u0926\u0940',                   name:'Google \u0939\u093F\u0928\u094D\u0926\u0940',                   lang:'hi-IN', localService:false, default:false },
+      { voiceURI:'Google Indonesia',                 name:'Google Indonesia',                 lang:'id-ID', localService:false, default:false },
+      { voiceURI:'Google italiano',                  name:'Google italiano',                  lang:'it-IT', localService:false, default:false },
+      { voiceURI:'Google \u65E5\u672C\u8A9E',                    name:'Google \u65E5\u672C\u8A9E',                    lang:'ja-JP', localService:false, default:false },
+      { voiceURI:'Google \uD55C\uAD6D\uC758',                    name:'Google \uD55C\uAD6D\uC758',                    lang:'ko-KR', localService:false, default:false },
+      { voiceURI:'Google Nederlands',                name:'Google Nederlands',                lang:'nl-NL', localService:false, default:false },
+      { voiceURI:'Google polski',                    name:'Google polski',                    lang:'pl-PL', localService:false, default:false },
+      { voiceURI:'Google portugu\xEAs do Brasil',       name:'Google portugu\xEAs do Brasil',       lang:'pt-BR', localService:false, default:false },
+      { voiceURI:'Google \u0440\u0443\u0441\u0441\u043A\u0438\u0439',                   name:'Google \u0440\u0443\u0441\u0441\u043A\u0438\u0439',                   lang:'ru-RU', localService:false, default:false },
+      { voiceURI:'Google \u666E\u901A\u8BDD\uFF08\u4E2D\u56FD\u5927\u9646\uFF09',          name:'Google \u666E\u901A\u8BDD\uFF08\u4E2D\u56FD\u5927\u9646\uFF09',          lang:'zh-CN', localService:false, default:false },
+      { voiceURI:'Google \u7CA4\u8A9E\uFF08\u9999\u6E2F\uFF09',               name:'Google \u7CA4\u8A9E\uFF08\u9999\u6E2F\uFF09',               lang:'zh-HK', localService:false, default:false },
+      { voiceURI:'Google \u570B\u8A9E\uFF08\u81FA\u7063\uFF09',               name:'Google \u570B\u8A9E\uFF08\u81FA\u7063\uFF09',               lang:'zh-TW', localService:false, default:false },
+    ];
+    // Make each voice look like a real SpeechSynthesisVoice
+    _fakeVoices.forEach(v => { Object.setPrototypeOf(v, SpeechSynthesisVoice?.prototype || Object.prototype); });
+    if (typeof speechSynthesis !== 'undefined') {
+      Object.defineProperty(speechSynthesis, 'getVoices', {
+        value: function() { return _fakeVoices; },
+        writable: true, configurable: true,
+      });
+      // Dispatch voiceschanged so scripts waiting on it resolve immediately
+      try { speechSynthesis.dispatchEvent(new Event('voiceschanged')); } catch (_) {}
+    }
+    if (typeof SpeechSynthesis !== 'undefined') {
+      Object.defineProperty(SpeechSynthesis.prototype, 'getVoices', {
+        value: function() { return _fakeVoices; },
+        writable: true, configurable: true,
+      });
+    }
+  } catch (_) {}
+
+  // === Keyboard / input device presence (headless leak: no keyboard events) ===
+  // navigator.keyboard exists on real Chrome; headless may suppress it
+  try {
+    if (navigator.keyboard && typeof navigator.keyboard.getLayoutMap === 'function') {
+      // Already present \u2014 no-op
+    } else if (!navigator.keyboard) {
+      Object.defineProperty(Navigator.prototype, 'keyboard', {
+        get: () => ({ getLayoutMap: () => Promise.resolve(new Map()) }),
+        configurable: true,
+      });
+    }
+  } catch (_) {}
+
+  // === Permissions API \u2014 override headless "denied" defaults ===
+  try {
+    const _origPQ = navigator.permissions?.query?.bind(navigator.permissions);
+    if (_origPQ) {
+      Object.defineProperty(navigator.permissions, 'query', {
+        value: function query(desc) {
+          const name = desc?.name;
+          // headless returns "denied" for these; real Chrome returns "default"/"granted"
+          if (name === 'notifications') return Promise.resolve({ state: 'default', onchange: null });
+          if (name === 'clipboard-read' || name === 'clipboard-write') return Promise.resolve({ state: 'prompt', onchange: null });
+          return _origPQ(desc);
+        },
+        writable: true, configurable: true,
+      });
+    }
   } catch (_) {}
 })();
 `;
@@ -60594,7 +60665,7 @@ var import_websocket_server = __toESM(require_websocket_server(), 1);
 
 // src/lib/cdp-broker.ts
 import { chromium as chromium2 } from "playwright";
-var STEALTH_WORKER_BODY = "\n      try { Object.defineProperty(WorkerNavigator.prototype, 'hardwareConcurrency', { get: function(){return 8;}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'deviceMemory', { get: function(){return 8;}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'platform', { get: function(){return 'Linux x86_64';}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'language', { get: function(){return 'en-US';}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'languages', { get: function(){return ['en-US','en'];}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'userAgent', { get: function(){return 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36';}, configurable: true }); } catch (e) {}\n      try {\n        var brands = [{brand:'Chromium',version:'144'},{brand:'Not:A-Brand',version:'99'},{brand:'Google Chrome',version:'144'}];\n        var fullList = [{brand:'Chromium',version:'144.0.7559.132'},{brand:'Not:A-Brand',version:'99.0.0.0'},{brand:'Google Chrome',version:'144.0.7559.132'}];\n        var high = { architecture:'x86', bitness:'64', model:'', mobile:false, platform:'Linux', platformVersion:'6.14.0', uaFullVersion:'144.0.7559.132', wow64:false, formFactors:['Desktop'], fullVersionList:fullList, brands:brands };\n        var uaData = { brands: brands, mobile: false, platform: 'Linux',\n          getHighEntropyValues: function(hints){ var o={brands:brands, mobile:false, platform:'Linux'}; (hints||[]).forEach(function(h){ if(h in high) o[h]=high[h]; }); return Promise.resolve(o); },\n          toJSON: function(){ return {brands:brands, mobile:false, platform:'Linux'}; }\n        };\n        Object.defineProperty(WorkerNavigator.prototype, 'userAgentData', { get: function(){return uaData;}, configurable: true });\n      } catch (e) {}\n      try {\n        if (typeof WebGLRenderingContext !== 'undefined') {\n          var gp = WebGLRenderingContext.prototype.getParameter;\n          WebGLRenderingContext.prototype.getParameter = function(p){ if(p===37445)return 'Google Inc. (Intel)'; if(p===37446)return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)'; return gp.apply(this, arguments); };\n        }\n        if (typeof WebGL2RenderingContext !== 'undefined') {\n          var gp2 = WebGL2RenderingContext.prototype.getParameter;\n          WebGL2RenderingContext.prototype.getParameter = function(p){ if(p===37445)return 'Google Inc. (Intel)'; if(p===37446)return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)'; return gp2.apply(this, arguments); };\n        }\n      } catch (e) {}\n      try {\n        var gtoOrig = Date.prototype.getTimezoneOffset;\n        Date.prototype.getTimezoneOffset = function(){ var v = gtoOrig.call(this); if (v === 0) { var m = this.getUTCMonth(); return (m>=2 && m<=10) ? 420 : 480; } return v; };\n      } catch (e) {}\n      try {\n        var roOrig = Intl.DateTimeFormat.prototype.resolvedOptions;\n        Intl.DateTimeFormat.prototype.resolvedOptions = function(){ var r = roOrig.apply(this, arguments); if (!r.timeZone || r.timeZone === 'UTC') r.timeZone = 'America/Los_Angeles'; if (!r.locale || /^(zh|en-GB|de|fr|ja|ru|ko)/.test(r.locale)) r.locale = 'en-US'; return r; };\n      } catch (e) {}\n    ";
+var STEALTH_WORKER_BODY = "\n      try { Object.defineProperty(WorkerNavigator.prototype, 'hardwareConcurrency', { get: function(){return 8;}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'deviceMemory', { get: function(){return 8;}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'platform', { get: function(){return 'Linux x86_64';}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'language', { get: function(){return 'en-US';}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'languages', { get: function(){return ['en-US','en'];}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'userAgent', { get: function(){return 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36';}, configurable: true }); } catch (e) {}\n      try {\n        var brands = [{brand:'Chromium',version:'144'},{brand:'Not:A-Brand',version:'99'},{brand:'Google Chrome',version:'144'}];\n        var fullList = [{brand:'Chromium',version:'144.0.7559.132'},{brand:'Not:A-Brand',version:'99.0.0.0'},{brand:'Google Chrome',version:'144.0.7559.132'}];\n        var high = { architecture:'x86', bitness:'64', model:'', mobile:false, platform:'Linux', platformVersion:'6.8.0', uaFullVersion:'144.0.7559.132', wow64:false, formFactors:['Desktop'], fullVersionList:fullList, brands:brands };\n        var uaData = { brands: brands, mobile: false, platform: 'Linux',\n          getHighEntropyValues: function(hints){ var o={brands:brands, mobile:false, platform:'Linux'}; (hints||[]).forEach(function(h){ if(h in high) o[h]=high[h]; }); return Promise.resolve(o); },\n          toJSON: function(){ return {brands:brands, mobile:false, platform:'Linux'}; }\n        };\n        Object.defineProperty(WorkerNavigator.prototype, 'userAgentData', { get: function(){return uaData;}, configurable: true });\n      } catch (e) {}\n      try {\n        if (typeof WebGLRenderingContext !== 'undefined') {\n          var gp = WebGLRenderingContext.prototype.getParameter;\n          WebGLRenderingContext.prototype.getParameter = function(p){ if(p===37445)return 'Google Inc. (Intel)'; if(p===37446)return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)'; return gp.apply(this, arguments); };\n        }\n        if (typeof WebGL2RenderingContext !== 'undefined') {\n          var gp2 = WebGL2RenderingContext.prototype.getParameter;\n          WebGL2RenderingContext.prototype.getParameter = function(p){ if(p===37445)return 'Google Inc. (Intel)'; if(p===37446)return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)'; return gp2.apply(this, arguments); };\n        }\n      } catch (e) {}\n      try {\n        var gtoOrig = Date.prototype.getTimezoneOffset;\n        Date.prototype.getTimezoneOffset = function(){ var v = gtoOrig.call(this); if (v === 0) { var m = this.getUTCMonth(); return (m>=2 && m<=10) ? 420 : 480; } return v; };\n      } catch (e) {}\n      try {\n        var roOrig = Intl.DateTimeFormat.prototype.resolvedOptions;\n        Intl.DateTimeFormat.prototype.resolvedOptions = function(){ var r = roOrig.apply(this, arguments); if (!r.timeZone || r.timeZone === 'UTC') r.timeZone = 'America/Los_Angeles'; if (!r.locale || /^(zh|en-GB|de|fr|ja|ru|ko)/.test(r.locale)) r.locale = 'en-US'; return r; };\n      } catch (e) {}\n      try {\n        var _wself = (typeof self !== 'undefined') ? self : this;\n        if (!_wself.chrome) _wself.chrome = {};\n        var _wmk=function(){return{addListener:function(){},removeListener:function(){},hasListener:function(){return false;},hasListeners:function(){return false;}};};\n        _wself.chrome.runtime={id:undefined,lastError:null,onConnect:_wmk(),onMessage:_wmk(),onInstalled:_wmk(),onStartup:_wmk(),getManifest:function(){return undefined;},getPlatformInfo:function(cb){var i={os:'linux',arch:'x86-64',nacl_arch:'x86-64'};if(cb)cb(i);return Promise.resolve(i);}};\n        var _wt0=Date.now()/1000-(Math.random()*0.3+0.1);\n        _wself.chrome.loadTimes=function(){return{requestTime:_wt0,startLoadTime:_wt0,commitLoadTime:_wt0+0.05,finishDocumentLoadTime:_wt0+0.4,finishLoadTime:_wt0+0.5,firstPaintTime:_wt0+0.15,firstPaintAfterLoadTime:0,navigationType:'Other',wasFetchedViaSpdy:true,wasNpnNegotiated:true,npnNegotiatedProtocol:'h2',wasAlternateProtocolAvailable:false,connectionInfo:'h2'};};\n        _wself.chrome.csi=function(){return{startE:Date.now(),onloadT:Date.now(),pageT:Math.random()*800+200,tran:15};};\n      } catch(e) {}\n      try {\n        if(typeof AudioBuffer!=='undefined'&&AudioBuffer.prototype.getChannelData){\n          var _wOrigGCD=AudioBuffer.prototype.getChannelData;\n          AudioBuffer.prototype.getChannelData=function(){var d=_wOrigGCD.apply(this,arguments);try{var f=1+(Math.random()-0.5)*1e-7;for(var i=0;i<Math.min(d.length,512);i++)d[i]=d[i]*f;}catch(ee){}return d;};\n        }\n      } catch(e) {}\n    ";
 var STEALTH_WORKER_IIFE = "(function(){" + STEALTH_WORKER_BODY + "})();";
 var STEALTH_INIT2 = `
 (() => {
@@ -61032,7 +61103,7 @@ var STEALTH_INIT2 = `
       try {
         var brands = [{brand:'Chromium',version:'144'},{brand:'Not:A-Brand',version:'99'},{brand:'Google Chrome',version:'144'}];
         var fullList = [{brand:'Chromium',version:'144.0.7559.132'},{brand:'Not:A-Brand',version:'99.0.0.0'},{brand:'Google Chrome',version:'144.0.7559.132'}];
-        var high = { architecture:'x86', bitness:'64', model:'', mobile:false, platform:'Linux', platformVersion:'6.14.0', uaFullVersion:'144.0.7559.132', wow64:false, formFactors:['Desktop'], fullVersionList:fullList, brands:brands };
+        var high = { architecture:'x86', bitness:'64', model:'', mobile:false, platform:'Linux', platformVersion:'6.8.0', uaFullVersion:'144.0.7559.132', wow64:false, formFactors:['Desktop'], fullVersionList:fullList, brands:brands };
         var uaData = { brands: brands, mobile: false, platform: 'Linux',
           getHighEntropyValues: function(hints){ var o={brands:brands, mobile:false, platform:'Linux'}; (hints||[]).forEach(function(h){ if(h in high) o[h]=high[h]; }); return Promise.resolve(o); },
           toJSON: function(){ return {brands:brands, mobile:false, platform:'Linux'}; }
