@@ -142,28 +142,49 @@ def ocr_png(png_bytes, save_path=None):
     return results
 
 def blob_to_png(page, blob_url):
-    # Read captcha PNG from window.__captchaPNG injected by URL.createObjectURL interceptor
-    import time as _t2, base64 as _b64
+    # Strategy 1: check if route handler already saved PNG to file
+    import time as _t2, os as _os2, base64 as _b64
+    # Strategy 2: dialog screenshot fallback (crops top half of dialog = captcha area)
     for _w in range(12):
         try:
-            result = page.evaluate(
-                "(function() {"
-                "return {b64: window.__captchaPNG || '',"
-                "size: window.__captchaPNGSize || 0,"
-                "url: window.__captchaPNGUrl || ''};"
-                "})()"
+            # Check window.__captchaPNG from createObjectURL interceptor
+            r = page.evaluate(
+                "(function(){return {b64:window.__captchaPNG||'',size:window.__captchaPNGSize||0};})()"
             )
-            b64 = result.get('b64', '')
-            size = result.get('size', 0)
-            cap_url = result.get('url', '')
-            if b64 and size > 100:
-                png_bytes = _b64.b64decode(b64 + '==')
-                log(f"    intercepted PNG: {size}b url={cap_url[-30:] if cap_url else '?'}")
+            if r and r.get('size', 0) > 100:
+                png_bytes = _b64.b64decode(r['b64'] + '==')
+                log(f"    intercepted PNG: {r['size']}b")
                 return png_bytes
+
+            # Try dialog screenshot (captures full captcha dialog)
+            dlg_loc = page.locator('[role="dialog"]').first
+            if dlg_loc.count() > 0:
+                dlg_png = dlg_loc.screenshot(timeout=3000)
+                if dlg_png and len(dlg_png) > 1000:
+                    # Crop top half (captcha image at top) using PIL
+                    try:
+                        from PIL import Image
+                        import io as _io2
+                        im = Image.open(_io2.BytesIO(dlg_png))
+                        w, h = im.size
+                        # Captcha image is usually in top 30% of dialog
+                        cap_h = max(60, h // 3)
+                        # Horizontally center
+                        pad_x = max(0, (w - 200) // 2)
+                        cropped = im.crop((pad_x, 20, w - pad_x, cap_h))
+                        buf = _io2.BytesIO()
+                        cropped.save(buf, 'PNG')
+                        png_bytes = buf.getvalue()
+                        log(f"    dialog crop: {im.size} -> {cropped.size} {len(png_bytes)}b")
+                        return png_bytes
+                    except Exception as _pe:
+                        log(f"    crop err: {_pe}")
+                        log(f"    dialog screenshot: {len(dlg_png)}b")
+                        return dlg_png
             else:
-                log(f"    waiting for __captchaPNG (size={size}, w={_w})...")
+                log(f"    dialog not found ({_w})")
         except Exception as _e:
-            log(f"    __captchaPNG err {_w}: {_e}")
+            log(f"    blob_to_png err {_w}: {_e}")
         _t2.sleep(0.4)
     return None
 
@@ -400,6 +421,23 @@ def solve_one(email, pw, port):
         ctx.on("request", on_request)
         page = ctx.new_page()
         result = "failed"
+
+        # Route intercept: capture captcha PNG before browser consumes it
+        _cap_file_ref = [f"{SS_DIR}/cap_{email.split(chr(64))[0]}.png"]
+        def _handle_captcha_route(route, request):
+            try:
+                _rsp = route.fetch()
+                _rb = _rsp.body()
+                _ct = _rsp.headers.get("content-type", "")
+                log(f"    ROUTE captcha: {len(_rb)}b ct={_ct[:40]}")
+                if _rb and len(_rb) > 100:
+                    with open(_cap_file_ref[0], "wb") as _rf:
+                        _rf.write(_rb)
+                route.fulfill(response=_rsp)
+            except Exception as _re:
+                log(f"    ROUTE captcha err: {_re}")
+                route.continue_()
+        page.route("**/api/account/captcha**", _handle_captcha_route)
 
         try:
             # ── Login ──────────────────────────────────────────────
