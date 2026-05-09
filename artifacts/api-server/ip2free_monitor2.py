@@ -143,23 +143,26 @@ def ocr_png(png_bytes, save_path=None):
 
 def blob_to_png(page, blob_url):
     # Capture captcha via getBoundingClientRect clip screenshot
-    import time as _t2
-    _dlg_sel = '[role="dialog"]'
-    GET_RECT_JS = ("(function(blobUrl) {"
-        "var dialogs=Array.from(document.querySelectorAll('" + _dlg_sel + "')).filter(function(x){return x.offsetParent!==null;});"
-        "var d=dialogs[0];if(!d){return null;}"
-        "var img=d.querySelector('img.captcha-img');"
-        "if(!img){var all=Array.from(d.querySelectorAll('img'));"
-        "img=all.find(function(i){return i.naturalWidth>60;})"
-        "||all.find(function(i){return i.src===blobUrl;})"
-        "||null;}"
-        "if(!img){return null;}"
-        "var r=img.getBoundingClientRect();"
-        "return {x:r.left,y:r.top,width:r.width,height:r.height,"
-        "nw:img.naturalWidth,nh:img.naturalHeight};})(arguments[0])")
+    import time as _t2, json as _json2
     for _w in range(10):
         try:
-            rect = page.evaluate(GET_RECT_JS, blob_url)
+            _blob_safe = blob_url.replace("'", "\'")
+            _rect_js = (
+                "(function() {"
+                "var dialogs=Array.from(document.querySelectorAll('[role=\"dialog\"]'))"
+                ".filter(function(x){return x.offsetParent!==null;});"
+                "var d=dialogs[0];if(!d){return null;}"
+                "var img=d.querySelector('img.captcha-img');"
+                "if(!img){var all=Array.from(d.querySelectorAll('img'));"
+                "img=all.find(function(i){return i.naturalWidth>60;})"
+                f"||all.find(function(i){{return i.src==='{_blob_safe}';}})"
+                "||null;}"
+                "if(!img){return null;}"
+                "var r=img.getBoundingClientRect();"
+                "return {x:r.left,y:r.top,width:r.width,height:r.height,"
+                "nw:img.naturalWidth,nh:img.naturalHeight};})()",
+            )
+            rect = page.evaluate(_rect_js)
             if rect and rect.get('width', 0) > 30 and rect.get('height', 0) > 15:
                 clip = {k: rect[k] for k in ('x', 'y', 'width', 'height')}
                 png_bytes = page.screenshot(clip=clip)
