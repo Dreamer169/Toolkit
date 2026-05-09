@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-proxy_manager.py v1.2 -- Unified Proxy Manager
+proxy_manager.py v2.0 -- Unified Proxy Manager
 
 Sources:
-  ip2free    -- residential SOCKS5 w/ auth (user:pass), NOT usable for ip2free registration
-  local_xray -- local xray SOCKS5 ports 10850-10859, no restriction
+  ip2free    -- residential SOCKS5 w/ auth, NOT for ip2free registration
+  local_xray -- local xray SOCKS5 ports 10820-10889 (auto-discover alive), no restriction
   proxyscrape-- anonymous free SOCKS5, no restriction
+  webshare   -- Webshare HTTP datacenter proxies, NOT for webshare registration
   manual     -- manually added, no restriction
 
 Platform exclusion rule:
@@ -63,7 +64,7 @@ BLACKLIST_TTL   = 300    # seconds proxy stays blacklisted after FAIL_THRESHOLD
 IP2FREE_STALE_DAYS   = 1.5   # ip2free rotates creds ~3x/day; >1.5d without re-verify = stale
 FAIL_THRESHOLD  = 3
 
-LOCAL_XRAY_PORTS: List[int] = list(range(10850, 10860))
+LOCAL_XRAY_PORTS: List[int] = list(range(10850, 10860))  # legacy; auto-discover uses LOCAL_XRAY_PORT_RANGE
 
 IP2FREE_API     = "https://api.ip2free.com"
 IP2FREE_HEADERS = {
@@ -107,12 +108,87 @@ PROXYSCRAPE_URLS = [
     "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=3000&country=all&simplified=true",
     "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=socks5&timeout=3000&country=all&simplified=true",
 ]
+# ---------------------------------------------------------------------------
+# Webshare
+# ---------------------------------------------------------------------------
+
+WEBSHARE_API_KEY  = "lx7r5124cubob5mfmofbdtjvdti5bqy2lxdg06ho"
+WEBSHARE_API_BASE = "https://proxy.webshare.io/api/v2"
+
+# ---------------------------------------------------------------------------
+# SQLite integration (api-server DB)
+# ---------------------------------------------------------------------------
+
+SQLITE_DB = Path("/data/Toolkit/artifacts/api-server/data.db")
+
+# ---------------------------------------------------------------------------
+# Local xray port discovery range (probed at runtime)
+# ---------------------------------------------------------------------------
+
+LOCAL_XRAY_PORT_RANGE: List[int] = list(range(10820, 10890))
+
+# ---------------------------------------------------------------------------
+# Per-platform proxy selection policies
+# ---------------------------------------------------------------------------
+# Each entry: preferred_sources (tried in order), preferred_types (tried in order).
+# The not_for mechanism on ProxyEntry already handles source-level exclusions
+# (e.g. ip2free proxies have not_for=["ip2free"]).
+# pick_for(platform) uses both this policy AND per-entry not_for checks.
+
+PLATFORM_POLICIES: Dict[str, dict] = {
+    "ip2free": {
+        "preferred_sources": ["local_xray", "proxyscrape", "webshare"],
+        "preferred_types":   ["residential", "unknown"],
+        "notes": "Can't use ip2free-sourced proxies (self-referential)",
+    },
+    "webshare": {
+        "preferred_sources": ["local_xray", "ip2free", "proxyscrape"],
+        "preferred_types":   ["residential", "unknown"],
+        "notes": "Can't use webshare-sourced proxies (self-referential)",
+    },
+    "outlook": {
+        "preferred_sources": ["local_xray", "ip2free", "webshare"],
+        "preferred_types":   ["residential", "unknown"],
+        "notes": "Outlook blocks most datacenter IPs; use residential",
+    },
+    "obvious": {
+        "preferred_sources": ["local_xray", "ip2free", "webshare", "proxyscrape"],
+        "preferred_types":   ["residential", "unknown", "datacenter"],
+        "notes": "AI coding sandbox — any proxy OK",
+    },
+    "airforce": {
+        "preferred_sources": ["local_xray", "ip2free", "webshare", "proxyscrape"],
+        "preferred_types":   ["residential", "unknown", "datacenter"],
+        "notes": "AI proxy — any proxy OK",
+    },
+    "talordata": {
+        "preferred_sources": ["local_xray", "ip2free", "webshare"],
+        "preferred_types":   ["residential", "unknown"],
+        "notes": "E-commerce scraping — residential preferred",
+    },
+    "unitool": {
+        "preferred_sources": ["local_xray", "ip2free", "webshare", "proxyscrape"],
+        "preferred_types":   ["residential", "unknown", "datacenter"],
+        "notes": "AI tool — any proxy OK",
+    },
+    "replit": {
+        "preferred_sources": ["local_xray", "ip2free", "webshare"],
+        "preferred_types":   ["residential", "unknown"],
+        "notes": "Developer platform — residential preferred",
+    },
+    "generic": {
+        "preferred_sources": ["local_xray", "ip2free", "webshare", "proxyscrape"],
+        "preferred_types":   ["residential", "unknown", "datacenter"],
+        "notes": "Generic fallback — any proxy OK",
+    },
+}
 
 # Source -> list of platforms this source's proxies CANNOT be used for
 EXCLUSION_RULES: Dict[str, List[str]] = {
     "ip2free":    ["ip2free"],
     "local_xray": [],
     "proxyscrape":[],
+    "webshare":   ["webshare"],
     "manual":     [],
 }
 
@@ -143,6 +219,9 @@ class ProxyEntry:
     success_count:   int = 0
     blacklist_until: Optional[float] = None
     meta:            dict = field(default_factory=dict)
+    use_count:       int  = 0
+    last_used_ts:    Optional[float] = None
+    last_used_for:   str  = ""   # last platform this proxy was used for
 
     @property
     def url(self) -> str:
@@ -622,6 +701,7 @@ class ProxyManager:
         results["local_xray"]  = self.refresh_local_xray(log_fn=log)
         results["ip2free"]     = self.refresh_ip2free(log_fn=log)
         results["proxyscrape"] = self.refresh_proxyscrape(log_fn=log)
+        results["webshare"]    = self.refresh_webshare(log_fn=log)
         # Auto-load temp files if present
         for f in ["/tmp/ip2free_proxies_all.json",
                   "/tmp/ip2free_proxies_live.json",
@@ -630,6 +710,12 @@ class ProxyManager:
                 n = self.load_from_json_file(f, source="ip2free", log_fn=log)
                 results[f"file:{Path(f).name}"] = n
         log(f"[proxy_manager] Refresh complete: {results}")
+        # Auto-sync to databases after full refresh
+        try:
+            self.sync_sqlite()
+            self.sync_postgres()
+        except Exception as _se:
+            log(f"[proxy_manager] DB sync warn: {_se}")
         return results
 
     # ------------------------------------------------------------------
@@ -788,6 +874,421 @@ class ProxyManager:
             e.blacklist_until = time.time() + BLACKLIST_TTL
         self.db.put(e)
 
+
+    # ------------------------------------------------------------------
+    # Source: Webshare  (HTTP datacenter proxies, 10 free slots)
+    # ------------------------------------------------------------------
+
+    def refresh_webshare(self, log_fn=None) -> int:
+        """Fetch all Webshare proxies via API and upsert into proxy DB."""
+        log = log_fn or (lambda m: print(f"[webshare] {m}"))
+        import urllib.request as _ul
+        try:
+            req = _ul.Request(
+                f"{WEBSHARE_API_BASE}/proxy/list/?mode=direct&page=1&page_size=100",
+                headers={"Authorization": f"Token {WEBSHARE_API_KEY}",
+                         "User-Agent": "proxy_manager/2.0"})
+            with _ul.urlopen(req, timeout=15) as r:
+                data = json.loads(r.read())
+        except Exception as e:
+            log(f"API error: {e}"); return 0
+
+        results = data.get("results", [])
+        added = updated = 0
+        for p in results:
+            ws_id  = p.get("id", "")
+            uid    = f"webshare:{ws_id}"
+            host   = p.get("proxy_address", "")
+            port   = int(p.get("port", 0))
+            user   = p.get("username", "")
+            passwd = p.get("password", "")
+            cc     = p.get("country_code", "")
+            city   = p.get("city_name", "")
+            valid  = p.get("valid", False)
+            if not host or not port:
+                continue
+            formatted = f"http://{user}:{passwd}@{host}:{port}"
+            existing = self.db.get(uid)
+            entry = ProxyEntry(
+                uid=uid, proto="http",
+                host=host, port=port, user=user, passwd=passwd,
+                source="webshare", source_account="nnhginhn",
+                country=cc, city=city,
+                proxy_type="datacenter",
+                not_for=list(EXCLUSION_RULES["webshare"]),
+                alive=valid or None,
+                meta={"ws_id": ws_id, "asn_name": p.get("asn_name", ""),
+                      "formatted": formatted,
+                      "last_verification": p.get("last_verification", ""),
+                      "created_at": p.get("created_at", "")},
+            )
+            if existing:
+                # Preserve usage stats
+                entry.use_count      = existing.use_count
+                entry.last_used_ts   = existing.last_used_ts
+                entry.last_used_for  = existing.last_used_for
+                entry.success_count  = existing.success_count
+                entry.fail_count     = existing.fail_count
+                updated += 1
+            else:
+                added += 1
+            self.db.put(entry, save=False)
+        self.db._save()
+        log(f"Webshare: {len(results)} proxies fetched  +{added} new  {updated} updated")
+        return added
+
+    # ------------------------------------------------------------------
+    # Source: local_xray auto-discover  (replaces static port list)
+    # ------------------------------------------------------------------
+
+    def refresh_local_xray_discover(self, log_fn=None) -> int:
+        """Probe LOCAL_XRAY_PORT_RANGE and register all alive ports."""
+        log = log_fn or (lambda m: print(f"[local_xray_discover] {m}"))
+        log(f"Probing {len(LOCAL_XRAY_PORT_RANGE)} ports ({LOCAL_XRAY_PORT_RANGE[0]}-{LOCAL_XRAY_PORT_RANGE[-1]})...")
+
+        def _probe(port):
+            try:
+                p = subprocess.Popen(
+                    ["curl", "-s", "--max-time", "5", "--connect-timeout", "4",
+                     "--socks5", f"127.0.0.1:{port}",
+                     "https://api.ipify.org"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                out, _ = p.communicate(timeout=7)
+                ip = out.decode().strip()
+                return (port, ip if ip and "." in ip else None)
+            except Exception:
+                return (port, None)
+
+        alive_ports = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
+            for port, ip in ex.map(_probe, LOCAL_XRAY_PORT_RANGE):
+                if ip:
+                    alive_ports[port] = ip
+
+        unique_ips = set(alive_ports.values())
+        log(f"Found {len(alive_ports)} alive ports  {len(unique_ips)} unique IPs")
+
+        added = 0
+        for port, exit_ip in alive_ports.items():
+            uid = f"local_xray:{port}"
+            existing = self.db.get(uid)
+            entry = ProxyEntry(
+                uid=uid, proto="socks5",
+                host="127.0.0.1", port=port,
+                source="local_xray", proxy_type="residential",
+                not_for=list(EXCLUSION_RULES["local_xray"]),
+                alive=True, last_probe_ts=time.time(),
+                meta={"exit_ip": exit_ip},
+            )
+            if existing:
+                existing.alive = True
+                existing.last_probe_ts = time.time()
+                existing.meta["exit_ip"] = exit_ip
+                self.db.put(existing, save=False)
+            else:
+                self.db.put(entry, save=False)
+                added += 1
+
+        # Mark previously registered ports that are now dead
+        for e in self.db.all():
+            if e.source == "local_xray" and e.port not in alive_ports:
+                e.alive = False
+                self.db.put(e, save=False)
+
+        self.db._save()
+        log(f"local_xray: +{added} new ports registered  {len(alive_ports)} total alive")
+        return added
+
+    # ------------------------------------------------------------------
+    # Platform-aware proxy selection
+    # ------------------------------------------------------------------
+
+    def pick_for(self, platform: str,
+                 country: Optional[str] = None,
+                 probe_if_unknown: bool = True) -> Optional["ProxyEntry"]:
+        """
+        Pick the best proxy for a given platform.
+        Uses PLATFORM_POLICIES to try preferred sources/types in order.
+        Respects per-entry not_for restrictions.
+
+        Args:
+            platform: e.g. "ip2free", "webshare", "outlook", "obvious", "generic"
+            country:  ISO-2 country filter (optional)
+            probe_if_unknown: launch background probe for unknown-alive proxies
+
+        Returns:
+            Best available ProxyEntry, or None if nothing matches.
+        """
+        policy = PLATFORM_POLICIES.get(platform.lower(),
+                                       PLATFORM_POLICIES["generic"])
+        preferred_srcs  = policy["preferred_sources"]
+        preferred_types = policy["preferred_types"]
+
+        # Try preferred sources in policy order, each source in preferred type order
+        for src in preferred_srcs:
+            for ptype in preferred_types:
+                e = self.pick(not_for=platform, source=src,
+                              proxy_type=ptype, country=country,
+                              probe_if_unknown=probe_if_unknown)
+                if e:
+                    return e
+            # Try source without type restriction (broader fallback)
+            e = self.pick(not_for=platform, source=src, country=country,
+                          probe_if_unknown=probe_if_unknown)
+            if e:
+                return e
+
+        # Final fallback: any proxy not excluded for this platform
+        return self.pick(not_for=platform, country=country,
+                         probe_if_unknown=probe_if_unknown)
+
+    def pick_for_url(self, platform: str, **kwargs) -> Optional[str]:
+        """Return proxy URL for platform or None."""
+        e = self.pick_for(platform, **kwargs)
+        if e is None:
+            return None
+        if e.is_local():
+            return f"socks5h://127.0.0.1:{e.port}"
+        if e.proto == "http":
+            return e.url  # http:// for http proxies
+        return e.socks5h_url
+
+    # ------------------------------------------------------------------
+    # Usage tracking
+    # ------------------------------------------------------------------
+
+    def report_use(self, uid: str, platform: str = "",
+                   outcome: str = "success"):
+        """Track proxy usage. outcome: 'success' | 'fail' | 'attempt'"""
+        e = self.db.get(uid)
+        if not e:
+            return
+        e.use_count    += 1
+        e.last_used_ts  = time.time()
+        e.last_used_for = platform
+        if outcome == "success":
+            e.success_count += 1
+            e.fail_count    = 0
+            e.alive         = True
+            e.blacklist_until = None
+        elif outcome == "fail":
+            e.fail_count += 1
+            e.alive = False if e.fail_count >= FAIL_THRESHOLD else e.alive
+            if e.fail_count >= FAIL_THRESHOLD:
+                e.blacklist_until = time.time() + BLACKLIST_TTL
+        self.db.put(e)
+
+    # ------------------------------------------------------------------
+    # SQLite sync
+    # ------------------------------------------------------------------
+
+    def sync_sqlite(self, db_path: Path = SQLITE_DB,
+                    log_fn=None) -> int:
+        """
+        Sync all proxy entries to SQLite proxies table.
+        Creates the table if it doesn't exist.
+        Returns number of rows upserted.
+        """
+        log = log_fn or (lambda m: print(f"[sync_sqlite] {m}"))
+        try:
+            import sqlite3 as _sq
+            conn = _sq.connect(str(db_path))
+            cur  = conn.cursor()
+
+            # Create table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS proxies (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    uid          TEXT    UNIQUE NOT NULL,
+                    source       TEXT    NOT NULL,
+                    proto        TEXT    DEFAULT 'socks5',
+                    host         TEXT    NOT NULL,
+                    port         INTEGER NOT NULL,
+                    username     TEXT    DEFAULT '',
+                    password     TEXT    DEFAULT '',
+                    formatted    TEXT,
+                    country      TEXT    DEFAULT '',
+                    city         TEXT    DEFAULT '',
+                    proxy_type   TEXT    DEFAULT 'unknown',
+                    alive        INTEGER DEFAULT NULL,
+                    not_for      TEXT    DEFAULT '[]',
+                    expire_ts    REAL    DEFAULT NULL,
+                    fail_count   INTEGER DEFAULT 0,
+                    success_count INTEGER DEFAULT 0,
+                    use_count    INTEGER DEFAULT 0,
+                    last_used    TEXT    DEFAULT NULL,
+                    last_used_for TEXT   DEFAULT '',
+                    last_probe_ts REAL   DEFAULT NULL,
+                    status       TEXT    DEFAULT 'active',
+                    raw          TEXT    DEFAULT '{}',
+                    created_at   TEXT    DEFAULT (datetime('now')),
+                    updated_at   TEXT    DEFAULT (datetime('now'))
+                )
+            """)
+
+            upserted = 0
+            for e in self.db.all():
+                # Build formatted URL
+                if e.is_local():
+                    fmt = f"socks5h://127.0.0.1:{e.port}"
+                elif e.proto == "http" and e.user:
+                    fmt = f"http://{e.user}:{e.passwd}@{e.host}:{e.port}"
+                elif e.user:
+                    fmt = f"socks5h://{e.user}:{e.passwd}@{e.host}:{e.port}"
+                else:
+                    fmt = f"socks5h://{e.host}:{e.port}"
+
+                alive_int = (1 if e.alive is True
+                             else (0 if e.alive is False else None))
+                status = ("expired" if e.is_expired()
+                          else ("blacklisted" if e.is_blacklisted()
+                                else "active"))
+                last_used = None
+                if e.last_used_ts:
+                    import datetime as _dt
+                    last_used = _dt.datetime.fromtimestamp(
+                        e.last_used_ts).strftime("%Y-%m-%d %H:%M:%S")
+
+                cur.execute("""
+                    INSERT INTO proxies
+                        (uid, source, proto, host, port, username, password,
+                         formatted, country, city, proxy_type, alive, not_for,
+                         expire_ts, fail_count, success_count, use_count,
+                         last_used, last_used_for, last_probe_ts, status, raw,
+                         updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
+                    ON CONFLICT(uid) DO UPDATE SET
+                        source=excluded.source, proto=excluded.proto,
+                        host=excluded.host, port=excluded.port,
+                        username=excluded.username, password=excluded.password,
+                        formatted=excluded.formatted,
+                        country=excluded.country, city=excluded.city,
+                        proxy_type=excluded.proxy_type,
+                        alive=excluded.alive, not_for=excluded.not_for,
+                        expire_ts=excluded.expire_ts,
+                        fail_count=excluded.fail_count,
+                        success_count=excluded.success_count,
+                        use_count=excluded.use_count,
+                        last_used=excluded.last_used,
+                        last_used_for=excluded.last_used_for,
+                        last_probe_ts=excluded.last_probe_ts,
+                        status=excluded.status, raw=excluded.raw,
+                        updated_at=datetime('now')
+                """, (
+                    e.uid, e.source, e.proto,
+                    e.host, e.port, e.user, e.passwd,
+                    fmt, e.country, e.city, e.proxy_type,
+                    alive_int, json.dumps(e.not_for),
+                    e.expire_ts, e.fail_count, e.success_count,
+                    e.use_count, last_used, e.last_used_for,
+                    e.last_probe_ts, status,
+                    json.dumps(e.to_dict()),
+                ))
+                upserted += 1
+
+            conn.commit()
+            conn.close()
+            log(f"Synced {upserted} proxies → SQLite {db_path}")
+            return upserted
+        except Exception as ex:
+            log(f"SQLite sync error: {ex}")
+            return 0
+
+
+    def sync_postgres(self,
+                      db_url: str = "postgresql://postgres:postgres@localhost/toolkit",
+                      log_fn=None) -> int:
+        """
+        Sync proxy entries into the PostgreSQL toolkit.proxies table.
+        Schema: formatted(UNIQUE), host, port, username, password,
+                status, used_count, last_used, raw.
+        Inserts new proxies and updates existing ones.
+        Skips local_xray ports not in range 10820-10860 (not useful to API server).
+        """
+        log = log_fn or (lambda m: print(f"[sync_postgres] {m}"))
+        try:
+            import psycopg2 as _pg
+        except ImportError:
+            try:
+                import subprocess as _sp
+                _sp.run(["pip3","install","psycopg2-binary","-q"], check=False)
+                import psycopg2 as _pg
+            except Exception as e:
+                log(f"psycopg2 not available: {e}"); return 0
+        try:
+            conn = _pg.connect(db_url)
+            cur  = conn.cursor()
+            upserted = 0
+            for e in self.db.all():
+                # Build formatted URL matching API server conventions
+                if e.is_local():
+                    # Only sync xray ports in the range API server uses
+                    if not (10820 <= e.port <= 10889):
+                        continue
+                    fmt = f"socks5://127.0.0.1:{e.port}"
+                elif e.proto == "http" and e.user:
+                    fmt = f"http://{e.user}:{e.passwd}@{e.host}:{e.port}"
+                elif e.user:
+                    fmt = f"socks5h://{e.user}:{e.passwd}@{e.host}:{e.port}"
+                else:
+                    fmt = f"socks5h://{e.host}:{e.port}"
+
+                # Map alive status → postgres status
+                status = ("active" if e.alive is True
+                          else ("banned" if e.alive is False
+                                else "idle"))
+                if e.is_blacklisted():
+                    status = "banned"
+
+                import json as _j, datetime as _dt
+                last_used = None
+                if e.last_used_ts:
+                    last_used = _dt.datetime.fromtimestamp(e.last_used_ts)
+
+                raw = _j.dumps({
+                    "uid":         e.uid,
+                    "source":      e.source,
+                    "proxy_type":  e.proxy_type,
+                    "country":     e.country,
+                    "city":        e.city,
+                    "not_for":     e.not_for,
+                    "expire_ts":   e.expire_ts,
+                    "fail_count":  e.fail_count,
+                    "last_used_for": e.last_used_for,
+                    **(e.meta or {}),
+                })
+
+                cur.execute("""
+                    INSERT INTO proxies
+                        (formatted, host, port, username, password, status,
+                         used_count, last_used, raw)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (formatted) DO UPDATE SET
+                        host       = EXCLUDED.host,
+                        port       = EXCLUDED.port,
+                        username   = EXCLUDED.username,
+                        password   = EXCLUDED.password,
+                        status     = CASE
+                            WHEN proxies.status = 'banned' AND EXCLUDED.status != 'active'
+                                THEN 'banned'
+                            ELSE EXCLUDED.status
+                        END,
+                        used_count = GREATEST(proxies.used_count, EXCLUDED.used_count),
+                        last_used  = COALESCE(EXCLUDED.last_used, proxies.last_used),
+                        raw        = EXCLUDED.raw
+                """, (fmt, e.host, e.port,
+                        e.user or "", e.passwd or "",
+                        status, e.use_count, last_used, raw))
+                upserted += 1
+
+            conn.commit()
+            cur.close(); conn.close()
+            log(f"Synced {upserted} proxies → PostgreSQL {db_url.split('@')[-1]}")
+            return upserted
+        except Exception as ex:
+            log(f"PostgreSQL sync error: {ex}")
+            return 0
+
     # ------------------------------------------------------------------
     # resi_pool bridge
     # ------------------------------------------------------------------
@@ -895,7 +1396,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         argv = sys.argv[1:]
 
     ap = argparse.ArgumentParser(
-        description="proxy_manager.py v1.0 — Unified Proxy Manager")
+        description="proxy_manager.py v2.0 — Unified Proxy Manager")
     ap.add_argument("--db", default=str(DB_FILE))
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -939,6 +1440,32 @@ def main(argv: Optional[List[str]] = None) -> int:
                        help="Comma-separated platform names to exclude")
     p_add.add_argument("--country",   default="")
     p_add.add_argument("--type",      default="unknown", dest="proxy_type")
+
+
+    # webshare-sync
+    sub.add_parser("webshare-sync", help="Fetch Webshare proxies from API")
+
+    # local-discover
+    sub.add_parser("local-discover",
+                   help="Auto-probe xray ports 10820-10889 and register alive ones")
+
+    # pick-for
+    p_pf = sub.add_parser("pick-for",
+                           help="Pick best proxy for a given platform (uses PLATFORM_POLICIES)")
+    p_pf.add_argument("platform", help="e.g. ip2free / webshare / outlook / obvious / generic")
+    p_pf.add_argument("--country", default=None)
+
+    # sync-db
+    sub.add_parser("sync-db", help="Sync proxy_db.json to SQLite proxies table")
+
+    # platform-rules
+    sub.add_parser("platform-rules", help="Show PLATFORM_POLICIES table")
+
+    # report-use
+    p_ru = sub.add_parser("report-use", help="Record proxy usage outcome")
+    p_ru.add_argument("uid",      help="Proxy UID")
+    p_ru.add_argument("platform", help="Platform name")
+    p_ru.add_argument("outcome",  choices=["success","fail","attempt"])
 
     p_daemon = sub.add_parser("daemon",
                                help="Run refresh+probe daemon")
@@ -1002,6 +1529,53 @@ def main(argv: Optional[List[str]] = None) -> int:
                 nf = ",".join(e.not_for) if e.not_for else "-"
                 print(f"  {e.source:<12} {e.country:<3} {e.proxy_type:<12} "
                       f"{alive_s:<5} {e.fail_count:>5}  {nf:<12}  {url}")
+        return 0
+
+
+    if args.cmd == "webshare-sync":
+        n = pm.refresh_webshare(log_fn=print)
+        print(f"Webshare sync: +{n} new proxies")
+        pm.print_status(); return 0
+
+    if args.cmd == "local-discover":
+        n = pm.refresh_local_xray_discover(log_fn=print)
+        print(f"local_xray discover: +{n} new ports registered")
+        pm.print_status(); return 0
+
+    if args.cmd == "pick-for":
+        e = pm.pick_for(args.platform, country=getattr(args,"country",None),
+                        probe_if_unknown=False)
+        if e:
+            url = pm.pick_for_url(args.platform, country=getattr(args,"country",None),
+                                  probe_if_unknown=False)
+            # Re-pick since pick_for_url calls pick_for again — just print what we have
+            u2 = (f"socks5h://127.0.0.1:{e.port}" if e.is_local()
+                  else (e.url if e.proto=="http" else e.socks5h_url))
+            print(u2)
+            print(f"  uid={e.uid}", file=sys.stderr)
+            print(f"  source={e.source}  type={e.proxy_type}  "
+                  f"country={e.country}  alive={e.alive}", file=sys.stderr)
+            return 0
+        print(f"None — no proxy available for platform={args.platform!r}"); return 1
+
+    if args.cmd == "sync-db":
+        n  = pm.sync_sqlite(log_fn=print)
+        n2 = pm.sync_postgres(log_fn=print)
+        print(f"Synced {n} proxies to SQLite, {n2} proxies to PostgreSQL"); return 0
+
+    if args.cmd == "platform-rules":
+        print(f"\n{'Platform':<12} {'Preferred Sources':<46} {'Types':<40}")
+        print("-"*100)
+        for pf, pol in PLATFORM_POLICIES.items():
+            srcs  = " > ".join(pol["preferred_sources"])
+            types = " > ".join(pol["preferred_types"])
+            print(f"{pf:<12} {srcs:<46} {types}")
+        print()
+        return 0
+
+    if args.cmd == "report-use":
+        pm.report_use(args.uid, args.platform, args.outcome)
+        print(f"Recorded: {args.uid}  platform={args.platform}  outcome={args.outcome}")
         return 0
 
     if args.cmd == "inject-resi-pool":
