@@ -542,6 +542,28 @@ module.exports = {
       "autorestart": true,
       "kill_signal": "SIGTERM",
       "kill_timeout": 15000
-    }
+    },
+    {
+    "name": "kiro-chain",
+    "script": "/root/Toolkit/scripts/kiro_chain.py",
+    "interpreter": "python3",
+    "cwd": "/root/Toolkit/scripts",
+    "env": {
+        "DATABASE_URL": "postgresql://postgres:postgres@localhost/toolkit",
+        "KIRO_CONCURRENCY": "1",
+        "KIRO_INTERVAL": "90",
+        "KIRO_PROXY_PORTS": "10854,10857,10859,10851",
+        "KIRO_MAX_PER_RUN": "0",
+        "PYTHONUNBUFFERED": "1"
+    },
+    "out_file": "/tmp/kiro_chain_out.log",
+    "error_file": "/tmp/kiro_chain_err.log",
+    "restart_delay": 30000,
+    "max_restarts": 999,
+    "watch": false,
+    "autorestart": true,
+    "kill_signal": "SIGTERM",
+    "kill_timeout": 15000
+}
   ]
 };
