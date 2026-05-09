@@ -142,28 +142,53 @@ def ocr_png(png_bytes, save_path=None):
     return results
 
 def blob_to_png(page, blob_url):
+    # Method 1: Canvas from img element (blob fetch returns 0b due to browser security)
     try:
-        result = page.evaluate("""
-        async (blobUrl) => {
-            try {
-                const resp = await fetch(blobUrl);
-                const ab = await resp.arrayBuffer();
-                const bytes = new Uint8Array(ab);
-                if (bytes.length === 0) return null;
-                let b64 = '';
-                const chunk = 8192;
-                for (let i = 0; i < bytes.length; i += chunk) {
-                    b64 += btoa(String.fromCharCode(...bytes.subarray(i, i+chunk)));
-                }
-                return b64;
-            } catch(e) { return null; }
-        }
-        """, blob_url)
+        CANVAS_JS = (
+            "() => {"
+            "  try {"
+            "    var ds=Array.from(document.querySelectorAll('[role=\"dialog\"]'))"
+            "      .filter(function(x){return x.offsetParent!==null;});"
+            "    var d=ds.length?ds[0]:document;"
+            "    var img=d.querySelector('img.captcha-img')||d.querySelector('img');"
+            "    if(!img||!img.complete||!img.naturalWidth) return null;"
+            "    var cv=document.createElement('canvas');"
+            "    cv.width=img.naturalWidth; cv.height=img.naturalHeight;"
+            "    cv.getContext('2d').drawImage(img,0,0);"
+            "    return cv.toDataURL('image/png').split(',')[1];"
+            "  } catch(e){return null;}"
+            "}"
+        )
+        result = page.evaluate(CANVAS_JS)
+        if result:
+            raw = base64.b64decode(result)
+            if len(raw) > 50:
+                return raw
+    except Exception as e:
+        log(f"    canvas err: {e}")
+    # Method 2: blob fetch fallback
+    try:
+        FETCH_JS = (
+            "async (blobUrl) => {"
+            "  try {"
+            "    const r=await fetch(blobUrl);"
+            "    const ab=await r.arrayBuffer();"
+            "    const b=new Uint8Array(ab);"
+            "    if(!b.length) return null;"
+            "    let s='';"
+            "    for(let i=0;i<b.length;i+=8192){"
+            "      s+=btoa(String.fromCharCode(...b.subarray(i,i+8192)));"
+            "    }"
+            "    return s;"
+            "  } catch(e){return null;}"
+            "}"
+        )
+        result = page.evaluate(FETCH_JS, blob_url)
         if result:
             raw = base64.b64decode(result)
             return raw if len(raw) > 50 else None
     except Exception as e:
-        log(f"    blob_to_png err: {e}")
+        log(f"    fetch err: {e}")
     return None
 
 # --- Pure JS snippets (no Python format braces) ---
