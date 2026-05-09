@@ -355,6 +355,12 @@ def solve_one(email, pw, port):
         ctx.add_init_script(_INTERCEPT_JS)
 
         def on_response(resp):
+            if _broad_log[0] and "api.ip2free.com" not in resp.url:
+                try:
+                    if resp.request.resource_type in ("image", "fetch", "xhr"):
+                        log(f"    <- BROAD {resp.request.resource_type} {resp.status} {resp.url[:100]}")
+                except:
+                    pass
             if "api.ip2free.com/api" in resp.url:
                 name = resp.url.split("/api/")[-1].split("?")[0]
                 try:
@@ -415,6 +421,7 @@ def solve_one(email, pw, port):
                 except:
                     pass
 
+        _broad_log = [False]
         def on_request(req):
             if "api.ip2free.com/api" in req.url:
                 rname = req.url.split("/api/")[-1].split("?")[0]
@@ -427,6 +434,17 @@ def solve_one(email, pw, port):
                         log(f"    -> {rname} REQ url={_url_tail} body={pd[:120]}")
                     except:
                         pass
+                if "account/captcha" in req.url:
+                    _broad_log[0] = True
+            elif _broad_log[0]:
+                try:
+                    u = req.url
+                    skip_domains = ("google", "gstatic", "analytics", "facebook",
+                                    "cdn-cgi", "cloudflare", "fonts", "doubleclick")
+                    if not any(x in u for x in skip_domains):
+                        log(f"    -> BROAD {req.resource_type}: {u[:120]}")
+                except:
+                    pass
 
         ctx.on("response", on_response)
         ctx.on("request", on_request)
