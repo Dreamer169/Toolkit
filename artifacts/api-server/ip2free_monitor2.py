@@ -103,7 +103,7 @@ def ocr_png(png_bytes, save_path=None):
     results = []
     # 1. easyocr Chinese (primary — best for Chinese captcha)
     try:
-        import easyocr, io
+        import easyocr, io, numpy as np
         from PIL import Image, ImageEnhance, ImageFilter
         _reader = easyocr.Reader(["ch_sim", "en"], gpu=False, verbose=False)
         img = Image.open(io.BytesIO(png_bytes))
@@ -113,7 +113,9 @@ def ocr_png(png_bytes, save_path=None):
             ("sharpened", img.filter(ImageFilter.SHARPEN)),
         ]:
             try:
-                texts = _reader.readtext(proc_img, detail=0, paragraph=True)
+                # easyocr requires bytes, numpy array, or file path — NOT PIL Image
+                arr = np.array(proc_img)
+                texts = _reader.readtext(arr, detail=0, paragraph=True)
                 for t in texts:
                     t = t.strip()
                     if t and t not in results:
@@ -320,6 +322,16 @@ def solve_one(email, pw, port):
                     # Extract captcha UUID from JSON account/captcha response
                     # Server may return {"data":"UUID","code":0} or {"data":"java.lang.Object@...","code":-202}
                     if name == "account/captcha":
+                        try:
+                            # Log response headers — UUID may be in a custom header
+                            _hdrs = dict(resp.headers) if resp.headers else {}
+                            _hdr_log = {k: v for k, v in _hdrs.items()
+                                        if k.lower() not in ("content-type","content-length","date",
+                                                              "server","vary","access-control-allow-origin")}
+                            if _hdr_log:
+                                log(f"    <- captcha resp extra-headers: {str(_hdr_log)[:200]}")
+                        except:
+                            pass
                         try:
                             import json as _jj
                             _cj = _jj.loads(txt)
