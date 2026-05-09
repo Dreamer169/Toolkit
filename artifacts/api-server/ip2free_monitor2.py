@@ -142,33 +142,29 @@ def ocr_png(png_bytes, save_path=None):
     return results
 
 def blob_to_png(page, blob_url):
-    # Read captcha blob via in-browser async fetch (blob: URLs are same-origin accessible)
+    # Read captcha PNG from window.__captchaPNG injected by URL.createObjectURL interceptor
     import time as _t2, base64 as _b64
-    for _w in range(6):
+    for _w in range(12):
         try:
-            _bu = blob_url.replace('\\', '\\\\').replace("'", "\\'")
-            _js = (
-                "(async () => { try {"
-                "var resp = await fetch('" + _bu + "');"
-                "var blob = await resp.blob();"
-                "var buf = await blob.arrayBuffer();"
-                "var bytes = new Uint8Array(buf);"
-                "var bin = '';"
-                "for (var i=0;i<bytes.length;i++){bin+=String.fromCharCode(bytes[i]);}"
-                "return {ok:true,b64:btoa(bin),size:bytes.length};"
-                "} catch(e){return {ok:false,err:String(e),size:0};}"
+            result = page.evaluate(
+                "(function() {"
+                "return {b64: window.__captchaPNG || '',"
+                "size: window.__captchaPNGSize || 0,"
+                "url: window.__captchaPNGUrl || ''};"
                 "})()"
             )
-            result = page.evaluate(_js)
-            if result and result.get('ok') and result.get('size', 0) > 100:
-                png_bytes = _b64.b64decode(result['b64'])
-                log(f"    blob fetch OK: {result['size']}b")
+            b64 = result.get('b64', '')
+            size = result.get('size', 0)
+            cap_url = result.get('url', '')
+            if b64 and size > 100:
+                png_bytes = _b64.b64decode(b64 + '==')
+                log(f"    intercepted PNG: {size}b url={cap_url[-30:] if cap_url else '?'}")
                 return png_bytes
             else:
-                log(f"    blob fetch: {result}")
+                log(f"    waiting for __captchaPNG (size={size}, w={_w})...")
         except Exception as _e:
-            log(f"    blob fetch err {_w}: {_e}")
-        _t2.sleep(0.5)
+            log(f"    __captchaPNG err {_w}: {_e}")
+        _t2.sleep(0.4)
     return None
 
 
@@ -302,6 +298,29 @@ def solve_one(email, pw, port):
         )
         ctx = br.new_context(locale="zh-CN", timezone_id="Asia/Shanghai",
                               user_agent=UA, java_script_enabled=True)
+        # Inject interceptor BEFORE page loads: capture captcha blob via createObjectURL
+        _INTERCEPT_JS = """
+(function() {
+  var _orig = URL.createObjectURL;
+  URL.createObjectURL = function(blob) {
+    var url = _orig.call(URL, blob);
+    if (blob && (blob.type === "image/png" || blob.type === "image/jpeg"
+        || blob.type === "" || blob.size > 100)) {
+      var reader = new FileReader();
+      reader.onloadend = function() {
+        if (reader.result) {
+          window.__captchaPNG = reader.result.split(",")[1] || "";
+          window.__captchaPNGUrl = url;
+          window.__captchaPNGSize = blob.size;
+        }
+      };
+      reader.readAsDataURL(blob);
+    }
+    return url;
+  };
+})();
+"""
+        ctx.add_init_script(_INTERCEPT_JS)
 
         def on_response(resp):
             if "api.ip2free.com/api" in resp.url:
