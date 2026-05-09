@@ -142,27 +142,37 @@ def ocr_png(png_bytes, save_path=None):
     return results
 
 def blob_to_png(page, blob_url):
-    """Capture captcha by screenshotting the exact img with this blob src."""
+    # Capture captcha via getBoundingClientRect clip screenshot
     import time as _t2
-    # Try finding img by exact blob src (most precise)
-    for _w in range(8):
+    _dlg_sel = '[role="dialog"]'
+    GET_RECT_JS = ("(function(blobUrl) {"
+        "var dialogs=Array.from(document.querySelectorAll('" + _dlg_sel + "')).filter(function(x){return x.offsetParent!==null;});"
+        "var d=dialogs[0];if(!d){return null;}"
+        "var img=d.querySelector('img.captcha-img');"
+        "if(!img){var all=Array.from(d.querySelectorAll('img'));"
+        "img=all.find(function(i){return i.naturalWidth>60;})"
+        "||all.find(function(i){return i.src===blobUrl;})"
+        "||null;}"
+        "if(!img){return null;}"
+        "var r=img.getBoundingClientRect();"
+        "return {x:r.left,y:r.top,width:r.width,height:r.height,"
+        "nw:img.naturalWidth,nh:img.naturalHeight};})(arguments[0])")
+    for _w in range(10):
         try:
-            # Direct src match
-            loc = page.locator(f'img[src="{blob_url}"]').first
-            if loc.count() > 0:
-                try:
-                    png_bytes = loc.screenshot(timeout=4000)
-                    if png_bytes and len(png_bytes) > 300:
-                        log(f"    captcha img screenshot: {len(png_bytes)}b")
-                        return png_bytes
-                except Exception as _le:
-                    log(f"    captcha img err: {_le}")
+            rect = page.evaluate(GET_RECT_JS, blob_url)
+            if rect and rect.get('width', 0) > 30 and rect.get('height', 0) > 15:
+                clip = {k: rect[k] for k in ('x', 'y', 'width', 'height')}
+                png_bytes = page.screenshot(clip=clip)
+                if png_bytes and len(png_bytes) > 300:
+                    log(f"    captcha rect: {rect['nw']}x{rect['nh']} {len(png_bytes)}b")
+                    return png_bytes
+            else:
+                log(f"    rect not ready ({rect}), retrying...")
         except Exception as _e:
-            log(f"    locate err {_w}: {_e}")
+            log(f"    rect err {_w}: {_e}")
         _t2.sleep(0.4)
     return None
 
-# --- Pure JS snippets (no Python format braces) ---
 CLICK_CLAIM_BTN_JS = """
 (function() {
     var bs = Array.from(document.querySelectorAll('button')).filter(function(b) {
@@ -185,7 +195,13 @@ GET_BLOB_URL_JS = """
     });
     if (!dialogs.length) return null;
     var d = dialogs[0];
-    var img = d.querySelector('img.captcha-img') || d.querySelector('img');
+    var img = d.querySelector('img.captcha-img');
+    if (!img) {
+        var allImgs = Array.from(d.querySelectorAll('img'));
+        img = allImgs.find(function(i) { return i.naturalWidth > 60; })
+             || allImgs.find(function(i) { return i.src && i.src.startsWith('blob:'); })
+             || allImgs[0];
+    }
     return img ? img.src : null;
 })()
 """
