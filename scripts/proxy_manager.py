@@ -1234,8 +1234,10 @@ class ProxyManager:
                     fmt = f"socks5h://{e.host}:{e.port}"
 
                 # Map alive status → postgres status
+                # 'active' = alive (usable), 'idle' = unprobed, 'banned' = dead
                 status = ("active" if e.alive is True
                           else ("banned" if e.alive is False
+                                else "active" if e.alive is None and e.source in ("local_xray", "webshare")
                                 else "idle"))
                 if e.is_blacklisted():
                     status = "banned"
