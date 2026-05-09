@@ -984,8 +984,12 @@ class KiroRegister:
                     self.log(f"  ⚠️ step11: no state found in query or fragment!")
                 # ★ 关键: sso-token 的 authCode 是 step 11 的 workflowResultHandle
                 wrh11 = (qs11.get("workflowResultHandle", [None]) or fqs11.get("workflowResultHandle", [None]))[0]
+                # FIX: always update (even None) to clear stale step10 value
+                self._workflow_result_handle = wrh11
                 if wrh11:
-                    self._workflow_result_handle = wrh11
+                    self.log(f"  ★ step11 workflowResultHandle={wrh11[:60]}... (覆盖 step10 的値)")
+                else:
+                    self.log(f"  ⚠️ step11: redirect 无 workflowResultHandle, 已清除 step10 旧値")
                 code11 = (qs11.get("code", [None]) or fqs11.get("code", [None]))[0]
                 if code11 and not self._auth_code:
                     self._auth_code = code11
@@ -1341,10 +1345,12 @@ class KiroRegister:
                 "codewhisperer:conversations",
             ],
             "grantTypes": [
+                "authorization_code",
                 "urn:ietf:params:oauth:grant-type:device_code",
                 "refresh_token",
             ],
-            "issuerUrl": "https://identitycenter.amazonaws.com/ssoins-722374e5d5e7e3e0",
+            "redirectUris": [f"{KIRO}/signin/oauth"],
+            "issuerUrl": "https://view.awsapps.com/start/",
         }
         r = self.s.post(f"{OIDC}/client/register", headers=reg_h,
                         json=reg_body)
@@ -1359,6 +1365,38 @@ class KiroRegister:
             self.log(f"  ❌ 无 clientId/clientSecret")
             return None
         self.log(f"  ✅ clientId={client_id[:40]}...")
+
+        # ── PKCE 快速路径: 用 CODE11 + code_verifier 直接换 refreshToken ──
+        if getattr(self, "_auth_code", None) and getattr(self, "cv", None):
+            self.log("  ★ PKCE 快速路径: oidc/token (authorization_code + code_verifier)...")
+            pkce_h = {**reg_h, "amz-sdk-invocation-id": _uuid()}
+            pkce_body = {
+                "clientId": client_id,
+                "clientSecret": client_secret,
+                "code": self._auth_code,
+                "codeVerifier": self.cv,
+                "grantType": "authorization_code",
+                "redirectUri": f"{KIRO}/signin/oauth",
+            }
+            r_pkce = self.s.post(f"{OIDC}/token", headers=pkce_h, json=pkce_body)
+            self.log(f"  PKCE token status: {r_pkce.status_code}")
+            if r_pkce.status_code == 200:
+                pkce_tok = r_pkce.json()
+                pkce_rt = pkce_tok.get("refreshToken", "")
+                pkce_at = pkce_tok.get("accessToken", "")
+                if pkce_rt:
+                    self.log(f"  ✅ PKCE refreshToken={pkce_rt[:60]}...")
+                    return {
+                        "clientId": client_id,
+                        "clientSecret": client_secret,
+                        "accessToken": pkce_at,
+                        "refreshToken": pkce_rt,
+                    }
+                self.log(f"  PKCE resp 无 refreshToken: {pkce_tok}")
+            else:
+                try: self.log(f"  PKCE 失败 body: {r_pkce.text[:300]}")
+                except: pass
+            self.log("  PKCE 快速路径失败, 回退到 device auth 流程")
 
         # ── 12g: POST oidc/device_authorization ──
         self.log("  12g: POST oidc/device_authorization...")

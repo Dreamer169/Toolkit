@@ -22,6 +22,29 @@ DB_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@localhos
 def _db():
     return psycopg2.connect(DB_URL)
 
+_GRAPH_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+
+def validate_refresh_token(refresh_token: str) -> bool:
+    """Quick HTTP check: True=valid, False=expired(400)."""
+    import urllib.request, urllib.parse
+    data = urllib.parse.urlencode({
+        "client_id": _GRAPH_CLIENT_ID,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "scope": "offline_access https://graph.microsoft.com/Mail.Read",
+    }).encode()
+    try:
+        resp = urllib.request.urlopen(
+            urllib.request.Request(
+                "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
+                data=data, headers={"Content-Type": "application/x-www-form-urlencoded"},
+            ), timeout=15)
+        return "access_token" in json.loads(resp.read())
+    except Exception as e:
+        if "400" in str(e): return False
+        print(f"[validate_rt] network err: {e}", flush=True); return True
+
+
 def pick_outlook_account():
     """从 DB 中取一个未使用 Kiro 注册的 Outlook 账号"""
     conn = _db()
@@ -138,7 +161,8 @@ def wait_for_aws_otp(refresh_token: str, timeout: int = 120, tag: str = "") -> s
         print(f"{prefix}❌ refresh token 失败: {e}", flush=True)
         # 400 = refresh_token 过期，向上抛以触发永久失败标记
         if "400" in str(e) or "400" in str(type(e)):
-            raise RuntimeError(f"refresh_token_expired:{e}")
+            # FIX: sentinel instead of raise, caller handles permanent mark
+            return "TOKEN_EXPIRED"
         return None
 
     def graph_get(path):
@@ -210,7 +234,10 @@ def run_kiro_register(email: str, refresh_token: str, proxy: str | None,
 
     # 替换 OTP 函数 (core.py 通过模块级 wait_for_otp 调用)
     def _our_otp(account_id=None, timeout=120, tag=tag):
-        return wait_for_aws_otp(refresh_token, timeout=timeout, tag=tag)
+        result = wait_for_aws_otp(refresh_token, timeout=timeout, tag=tag)
+        if result == "TOKEN_EXPIRED":
+            raise RuntimeError(f"refresh_token_expired:graph_400")
+        return result
     kiro_core.wait_for_otp = _our_otp
 
     password = _gen_password()
@@ -259,6 +286,13 @@ def main():
         proxy = f"socks5://127.0.0.1:{args.port}"
     if not proxy and account.get("proxy_port"):
         proxy = f"socks5://127.0.0.1:{account['proxy_port']}"
+
+    # FIX: 注册前快速验证 refresh_token
+    print(f"[MAIN] 验证 refresh_token...", flush=True)
+    if not validate_refresh_token(account["refresh_token"]):
+        print(f"[MAIN] ❌ refresh_token 已过期 (400), 永久标记账号 {account['id']}", flush=True)
+        mark_outlook_kiro_done(account["id"], success=False, permanent=True)
+        sys.exit(2)
 
     print(f"[MAIN] 开始注册: {account['email']} proxy={proxy}", flush=True)
     start_t = time.time()

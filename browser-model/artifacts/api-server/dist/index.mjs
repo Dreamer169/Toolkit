@@ -58687,7 +58687,7 @@ var STEALTH_INIT = `
       brands: _brands,
       mobile: false,
       platform: "Linux",
-      platformVersion: "6.8.0",
+      platformVersion: "5.15.0",
       architecture: "x86",
       bitness: "64",
       model: "",
