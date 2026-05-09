@@ -3839,7 +3839,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
           if (_isAbuse) {
             await addAccountTags(accountId, ["abuse_mode"], "suspended");
           } else if (_errCode === "invalid_grant") {
-            await addAccountTags(accountId, ["token_invalid"], "suspended");
+            await addAccountTags(accountId, ["token_invalid"], "needs_oauth");
           }
         } catch (_te) { /* tag 失败不中断主流程 */ }
         accessToken = acc.token ?? "";
@@ -5896,7 +5896,7 @@ router.post("/tools/outlook/auto-check", async (req, res) => {
 
           if (graphBanned) {
             // token 能换但 Graph 拒绝 → API 封禁（addAccountTags 自动加 abuse_mode）
-            await addAccountTags(acc.id, [], "suspended");
+            await addAccountTags(acc.id, ["abuse_mode"], "suspended");
             banned++;
             results.push({ id: acc.id, email: acc.email, result: "banned" });
           } else {
@@ -5918,7 +5918,7 @@ router.post("/tools/outlook/auto-check", async (req, res) => {
           const errDesc = td.error_description ?? "";
           if (errDesc.includes("AADSTS70000") || errDesc.includes("service abuse") || errDesc.includes("blocked") || errDesc.includes("AADSTS530032")) {
             // token 换取层面被拒 → 封禁（addAccountTags 自动加 abuse_mode）
-            await addAccountTags(acc.id, [], "suspended");
+            await addAccountTags(acc.id, ["abuse_mode"], "suspended");
             banned++;
             results.push({ id: acc.id, email: acc.email, result: "banned" });
           } else if (errCode === "invalid_grant" || errDesc.includes("AADSTS70008") || errDesc.includes("AADSTS50078") || errDesc.includes("AADSTS700082") || errDesc.includes("AADSTS135010")) {

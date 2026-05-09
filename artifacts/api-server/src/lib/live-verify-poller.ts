@@ -167,7 +167,7 @@ async function runOnce() {
             }
             if (code === "invalid_grant" || desc.includes("AADSTS70008") || desc.includes("AADSTS700082")) {
               logger.warn({ email: acc.email }, "[live-verify] refresh_token 已失效，自动打 token_invalid");
-              await tagAccount(acc.id, "token_invalid", "suspended");
+              await tagAccount(acc.id, "token_invalid", "needs_oauth");
               stats.skipped++;
               return;
             }

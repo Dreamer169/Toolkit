@@ -463,6 +463,9 @@ export default function MailCenter() {
       connection_error: { label: "连接失败", cls: "text-red-400" },
       error:            { label: "错误",    cls: "text-gray-500" },
       no_password:      { label: "无密码",  cls: "text-gray-500" },
+      not_exist:        { label: "账号不存在", cls: "text-red-400" },
+      need_mfa:         { label: "需MFA",   cls: "text-orange-400" },
+      blocked_ca:       { label: "CA封禁",  cls: "text-red-500" },
     };
     return map[st] ?? { label: st, cls: "text-gray-500" };
   };
