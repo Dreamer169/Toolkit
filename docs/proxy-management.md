@@ -301,3 +301,55 @@ python3 proxy_manager.py daemon --interval 1800                  # 守护进程
 - 支持 ip2free / local_xray / proxyscrape / manual 五大来源
 - 平台排除规则（ip2free 不能用于 ip2free 注册）
 - 持久化 JSON 数据库、存活探测、黑名单机制、守护进程模式
+
+---
+
+## 6. ip2free 每日任务自动领取
+
+### 工作原理
+
+ip2free 提供活动奖励代理（时限住宅 IP），通过完成任务获取：
+
+| task_id | task_code | 奖励 | 周期 | 方式 |
+|---------|-----------|------|------|------|
+| 6 | client_click | 1天 US/SG 住宅代理 | 每天 | ★ 自动领取 |
+| 8 | register_one_three | 3天 UK 住宅代理 | 每周 | 邀请1人自动触发 |
+| 2 | register_three | 30天住宅代理 | 每月 | 邀请3人自动触发 |
+| 11/9 | manual_review | 流量包/长期代理 | 限时 | 需人工审核 |
+
+### 脚本用法
+
+```bash
+# 日常运行（每天 08:05 UTC 由 cron 自动执行）
+python3 /data/Toolkit/scripts/ip2free_daily_tasks.py
+
+# 查看状态（已领账号 / 活动代理到期时间）
+python3 /data/Toolkit/scripts/ip2free_daily_tasks.py --status
+
+# 强制重领（忽略今日已领缓存）
+python3 /data/Toolkit/scripts/ip2free_daily_tasks.py --all
+```
+
+### 已验证的 API 端点（逆向 Next.js JS bundle 得到）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | /api/website/link | 获取合作链接列表（含 link_id） |
+| GET | /api/website/linkClick?id=N | 记录链接点击，触发任务条件 |
+| POST | /api/account/taskList | 获取任务列表 + is_finished 状态 |
+| POST | /api/account/finishTask | body: {"id": record_id} — 领取奖励 |
+| POST | /api/ip/taskIpList | body: {"size":100} — 获取活动代理 IP 列表 |
+
+### 已知限制
+
+- **3 个老账号**（sophiagray574 / e.lewis904 / rylan_rivera98）直接支持纯 API 领取，每天各得 4 个活动代理 = **12 代理/天**
+- **6 个新账号**（reg2026a* / ip2r_*）需先通过 patchright 浏览器登录一次激活 finishTask，之后纯 API 即可
+- 活动代理有效期约 24 小时，存储在 DB 中带 expire_ts 字段，proxy_manager pick 自动过滤已过期条目
+
+### Cron 配置
+
+```
+5 8 * * * python3 /data/Toolkit/scripts/ip2free_daily_tasks.py >> /tmp/ip2free_daily_tasks.log 2>&1
+```
+
+每天 UTC 08:05（北京时间 16:05）在 ip2free 每日任务重置后自动领取。
