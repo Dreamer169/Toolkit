@@ -54,8 +54,8 @@ process.once("SIGINT",  () => { killChromiumProc(); process.exit(0); });
 export const STEALTH_INIT = `
 // === Anti-fingerprint init script (runs before any page JS) ===
 (() => {
-  // navigator.webdriver
-  try { Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => undefined, configurable: true }); } catch (_) {}
+  // navigator.webdriver REMOVED: binary natively returns false with [native code] getter.
+  // Patching to undefined triggers CSS check + webdriver===undefined -> webDriverIsOn=true -> 33% headless.
   // delete CDP-injected globals
   try { delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array; } catch(_) {}
   try { delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise; } catch(_) {}
@@ -201,23 +201,8 @@ export const STEALTH_INIT = `
     }
   } catch (_) {}
 
-  // WebGL vendor / renderer (Linux ANGLE/Mesa — v8.00 fixed Mac-string regression)
-  try {
-    const getParam = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function (p) {
-      if (p === 37445) return 'Google Inc. (Intel)';            // UNMASKED_VENDOR_WEBGL
-      if (p === 37446) return 'ANGLE (Intel, Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2), OpenGL 4.6)'; // UNMASKED_RENDERER_WEBGL
-      return getParam.apply(this, arguments);
-    };
-    if (typeof WebGL2RenderingContext !== 'undefined') {
-      const getParam2 = WebGL2RenderingContext.prototype.getParameter;
-      WebGL2RenderingContext.prototype.getParameter = function (p) {
-        if (p === 37445) return 'Google Inc. (Intel)';
-        if (p === 37446) return 'ANGLE (Intel, Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2), OpenGL 4.6)';
-        return getParam2.apply(this, arguments);
-      };
-    }
-  } catch (_) {}
+  // WebGL getParameter: not patched — binary handles GPU spoofing consistently
+  // in both main page and Worker contexts via fingerprint-chromium --fingerprint seed.
 
   // window.outerWidth/Height = innerWidth/Height when 0 (headless leak)
   try {
@@ -257,18 +242,12 @@ export const STEALTH_INIT = `
   // Notification permission default
   try { if (window.Notification && Notification.permission === 'denied') Object.defineProperty(Notification, 'permission', { get: () => 'default' }); } catch (_) {}
 
-  // toString-leak: hide our patches by overriding fn.toString to native pattern
-  const nativeToString = Function.prototype.toString;
+  // Function.prototype.toString override REMOVED — CreepJS fingerprints
+  // the fakeFns WeakSet + toString override as a known stealth tool signature → 40% stealth.
+  // wrap() is kept as a no-op so existing wrap(fn) call sites compile without error.
+  // fakeFns WeakSet is kept for Kasada/CF console detection protection below.
   const fakeFns = new WeakSet();
-  const wrap = (fn) => { fakeFns.add(fn); return fn; };
-  Function.prototype.toString = function () {
-    if (fakeFns.has(this)) return 'function ' + (this.name || '') + '() { [native code] }';
-    return nativeToString.call(this);
-  };
-  // mark our overrides
-  try { wrap(WebGLRenderingContext.prototype.getParameter); } catch (_) {}
-  try { wrap(window.navigator.permissions.query); } catch (_) {}
-  try { wrap(Function.prototype.toString); } catch (_) {}
+  const wrap = (fn) => fn; // no-op: does NOT modify toString
 
   // === WebRTC IP leak protection ===
   // Sites probe local/public IP via RTCPeerConnection ICE candidates. Strip
@@ -362,59 +341,10 @@ export const STEALTH_INIT = `
     try { wrap(Date.prototype.getTimezoneOffset); } catch (_) {}
   } catch (_) {}
 
-  // === navigator.userAgentData (NavigatorUAData high-entropy) ===
-  // v7.79 — CF managed challenge JS 层会调 navigator.userAgentData.getHighEntropyValues
-  // (['platformVersion','architecture','bitness','model','uaFullVersion',
-  //   'fullVersionList','wow64']) 然后跟 Sec-CH-UA-* 协议头 byte-by-byte 比对。
-  // playwright stock 默认 navigator.userAgentData 在 Linux 上要么 undefined 要么
-  // 返 Headless 标记 → CF 一眼判定 bot. 这里强制全套自洽返回值.
-  try {
-    var _brands = [
-      { brand: "Chromium", version: "144" },
-      { brand: "Not:A-Brand", version: "99" },
-      { brand: "Google Chrome", version: "144" },
-    ];
-    var _fullVerList = [
-      { brand: "Chromium", version: "144.0.7559.132" },
-      { brand: "Not:A-Brand", version: "99.0.0.0" },
-      { brand: "Google Chrome", version: "144.0.7559.132" },
-    ];
-    var _highEntropy = {
-      brands: _brands,
-      mobile: false,
-      platform: "Linux",
-      platformVersion: "6.8.0",
-      architecture: "x86",
-      bitness: "64",
-      model: "",
-      uaFullVersion: "144.0.7559.132",
-      fullVersionList: _fullVerList,
-      wow64: false,
-      formFactors: ["Desktop"],
-    };
-    var _uaData = {
-      brands: _brands,
-      mobile: false,
-      platform: "Linux",
-      getHighEntropyValues: function (hints) {
-        var out = { brands: _brands, mobile: false, platform: "Linux" };
-        try {
-          (hints || []).forEach(function (h) {
-            if (h in _highEntropy) out[h] = _highEntropy[h];
-          });
-        } catch (_) {}
-        return Promise.resolve(out);
-      },
-      toJSON: function () {
-        return { brands: _brands, mobile: false, platform: "Linux" };
-      },
-    };
-    try { wrap(_uaData.getHighEntropyValues); } catch (_) {}
-    try { wrap(_uaData.toJSON); } catch (_) {}
-    Object.defineProperty(Navigator.prototype, 'userAgentData', {
-      get: function () { return _uaData; }, configurable: true,
-    });
-  } catch (_) {}
+  // userAgentData JS patch REMOVED.
+  // fingerprint-chromium (ungoogled) provides null userAgentData in BOTH main page
+  // and DedicatedWorker → consistent → 0% headless.
+  // CF uses HTTP sec-ch-ua-* headers (set in newFreshContext/getStickyContext), not JS API.
 
   // === Canvas / Audio / WebGL fingerprint noise ===
   // v7.79 — CF/CreepJS canvas hash 黑名单已收录 stock playwright + Mesa-SwiftShader
@@ -598,38 +528,7 @@ export const STEALTH_INIT = `
 // WORKER_STEALTH_PATCH: injected into DedicatedWorkers via page.on('worker').
 // addInitScript() does NOT reach Workers. getHighEntropyValues() is Promise-
 // based, so this patch wins the race against the worker's early async calls.
-const WORKER_STEALTH_PATCH = `
-(function() {
-  try {
-    if (typeof navigator !== 'undefined' && !navigator.userAgentData) {
-      var _b = [
-        {brand:'Chromium',version:'144'},
-        {brand:'Google Chrome',version:'144'},
-        {brand:'Not:A-Brand',version:'99'}
-      ];
-      Object.defineProperty(navigator, 'userAgentData', {
-        value: {
-          brands: _b, mobile: false, platform: 'Linux',
-          getHighEntropyValues: function(hints) {
-            return Promise.resolve({
-              brands: _b, mobile: false, platform: 'Linux',
-              platformVersion: '6.8.0', architecture: 'x86', bitness: '64',
-              model: '', uaFullVersion: '144.0.7559.132',
-              fullVersionList: [
-                {brand:'Chromium',version:'144.0.7559.132'},
-                {brand:'Google Chrome',version:'144.0.7559.132'},
-                {brand:'Not:A-Brand',version:'99.0.0.0'}
-              ], wow64: false,
-            });
-          },
-          toJSON: function() { return {brands:_b,mobile:false,platform:'Linux'}; },
-        },
-        configurable: true,
-      });
-    }
-  } catch(_) {}
-})();
-`;
+const WORKER_STEALTH_PATCH = ``; // cleared: main page userAgentData=null, Worker=null (binary consistent), no patch needed
 
 async function getBrowser(): Promise<Browser> {
   // If browser exists but is no longer connected (process died), reset.
