@@ -48,6 +48,9 @@ _SIGNUP_NA_DEFAULT = "602b5c42ffedec9865ca902b033d188b22c575dfd5"
 _LOGIN_NA_DEFAULT  = "60e02e33f743e14f5dab1dc42181ba1e746fd4d925"
 # Turnstile sitekey（shadow DOM，不在 HTML body 中，在 JS bundle 里）
 SITEKEY = "0x4AAAAAAC-pdVMpBJQaHL0Q"
+# JS fingerprint injection: hide automation signals on every new document
+_FINGERPRINT_JS = "(function() {\n  try { Object.defineProperty(navigator,'webdriver',{get:()=>undefined,configurable:true}); } catch(e){}\n  try { Object.defineProperty(navigator,'deviceMemory',{get:()=>8,configurable:true}); } catch(e){}\n  try { Object.defineProperty(navigator,'hardwareConcurrency',{get:()=>8,configurable:true}); } catch(e){}\n  try { Object.defineProperty(navigator,'languages',{get:()=>['en-US','en'],configurable:true}); } catch(e){}\n  try {\n    var pp={name:'Chrome PDF Plugin',filename:'internal-pdf-viewer',description:'Portable Document Format'};\n    var pl=Object.create(PluginArray.prototype);\n    Object.defineProperty(pl,'length',{get:()=>1});\n    Object.defineProperty(pl,'0',{get:()=>pp});\n    pl.item=()=>pp; pl.namedItem=()=>pp; pl.refresh=()=>{};\n    Object.defineProperty(navigator,'plugins',{get:()=>pl,configurable:true});\n  } catch(e){}\n  try {\n    if(!window.chrome){\n      Object.defineProperty(window,'chrome',{\n        value:{runtime:{},loadTimes:function(){},csi:function(){},app:{}},\n        configurable:true,writable:true});\n    }\n  } catch(e){}\n  try {\n    var oq=Permissions.prototype.query;\n    Permissions.prototype.query=function(p){\n      if(p&&p.name==='notifications') return Promise.resolve({state:'prompt',onchange:null});\n      return oq.apply(this,arguments);\n    };\n  } catch(e){}\n})();"
+
 
 # ── pydoll 依赖（Chromium 路径） ──────────────────────────────────────────────
 CHROME = None
@@ -499,6 +502,14 @@ async def _pydoll_register(
     try:
         async with Chrome(options=opt, connection_port=_free_port()) as browser:
             tab = await browser.start()
+            # Fingerprint injection: hide automation signals before first navigation
+            try:
+                from pydoll.commands.page_commands import PageCommands as _PC
+                await tab._execute_command(
+                    _PC.add_script_to_evaluate_on_new_document(_FINGERPRINT_JS))
+                log('[fp] fingerprint injection OK')
+            except Exception as _fp_e:
+                log('[fp] inject warn (non-fatal): ' + str(_fp_e)[:80])
             await tab.enable_network_events()
 
             # ref_code: 先访问 /ref/<code> 写入 cookie
@@ -844,6 +855,14 @@ async def http_login_hybrid(
     try:
         async with Chrome(options=opt, connection_port=_free_port()) as browser:
             tab = await browser.start()
+            # Fingerprint injection: hide automation signals before first navigation
+            try:
+                from pydoll.commands.page_commands import PageCommands as _PC
+                await tab._execute_command(
+                    _PC.add_script_to_evaluate_on_new_document(_FINGERPRINT_JS))
+                log('[fp] fingerprint injection OK')
+            except Exception as _fp_e:
+                log('[fp] inject warn (non-fatal): ' + str(_fp_e)[:80])
             await tab.enable_network_events()
 
             await tab.go_to(f"{UNITOOL_BASE}/en/entry")
