@@ -466,7 +466,24 @@ def main():
     log(f"[graph] prior_vr={_prior_vr} max_polls={_max_polls} ({_max_polls*20}s)")
 
     verify_url = ""
-    if access_token:
+    # -- Method 0 v8: 读取 live-verify-poller/chain_v3 写入的共享缓存 --
+    _safe_email = re.sub(r"[^a-z0-9._@+-]", "_", email.lower())
+    _cache_path = f"/tmp/replit_verify_cache/{_safe_email}.json"
+    try:
+        if os.path.exists(_cache_path):
+            import json as _jcache
+            _cd = _jcache.loads(open(_cache_path).read())
+            _cu = (_cd.get("verify_url") or "").strip()
+            _ct = int(_cd.get("ts") or 0)
+            if _cu and (time.time() * 1000 - _ct) < 600_000:
+                log("[cache] v8 HIT src=" + _cd.get("source", "?") + ": " + _cu[:80])
+                verify_url = _cu
+            elif _cu:
+                log("[cache] v8 EXPIRED ts=" + str(_ct))
+    except Exception as _ce:
+        log("[cache] v8 err(non-fatal): " + str(_ce)[:80])
+
+    if not verify_url and access_token:
         log(f"[graph] polling JunkEmail+Inbox+$search (max {_max_polls*20}s)...")
         for attempt in range(_max_polls):
             import time as _t; _t.sleep(20)
@@ -474,7 +491,7 @@ def main():
             if verify_url:
                 log(f"[graph] found at {(attempt+1)*20}s: {verify_url[:80]}"); break
             log(f"[graph] [{(attempt+1)*20}s] not found")
-    else:
+    elif not verify_url:
         log("[graph] no token")
 
     ssid = ""
