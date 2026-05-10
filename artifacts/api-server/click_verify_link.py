@@ -401,7 +401,10 @@ try:
         "email verified", "email has been verified", "successfully verified",
         "verification successful", "email confirmed", "\u5df2\u9a8c\u8bc1\u90ae\u7bb1", "\u90ae\u7bb1\u5df2\u9a8c\u8bc1",
         "your email is now verified", "you have verified",
-        "verifying email success", "this window will close automatically",
+        # v7.78r fix: Replit page = "Verifying email... Success!" / "You can now close this window"
+        "you can now close",           # "You can now close this window" (Replit post-verify)
+        "you can close this",          # alt phrasing
+        "this window will close",      # broad match (auto-close variant)
         "return to replit here",
     )
     FAILURE_KWS = (

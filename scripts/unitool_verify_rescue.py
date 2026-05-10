@@ -207,7 +207,7 @@ def find_verify_link(access_token, max_msgs=30):
     headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
     # v8b: also match replit.com/action-code (verify@replit.com sends this format)
     pattern = re.compile(
-        r"https://(?:(?:[a-z0-9-]+\.)?unitool\.ai|replit\.com/action-code)\S*",
+        r"https://(?:(?:[a-z0-9-]+\.)?unitool\.ai|replit\.com/action-code)[^\s\"\'<>]+",
         re.IGNORECASE)
     # also match html-unescaped body
     import html as _html_mod
@@ -231,8 +231,24 @@ def find_verify_link(access_token, max_msgs=30):
             body  = _html_mod.unescape(m.get("body", {}).get("content", ""))
             links = pattern.findall(body)
             if links:
-                log(f"[graph] v8b ✓ {folder}: subj={subj!r} from={from_addr} url={links[0][:80]}")
-                return links[0]
+                # v10: for replit action-code links, reject emails older than 55 min
+                _link = links[0]
+                if "replit.com/action-code" in _link:
+                    _recv_full = m.get("receivedDateTime", "")
+                    _age_ok = False
+                    try:
+                        import datetime as _dt
+                        _recv = _dt.datetime.fromisoformat(_recv_full.replace("Z", "+00:00"))
+                        _now  = _dt.datetime.now(_dt.timezone.utc)
+                        _age_min = (_now - _recv).total_seconds() / 60
+                        _age_ok = _age_min <= 55
+                        if not _age_ok:
+                            log(f"[graph] skip expired replit link age={_age_min:.0f}min (>55min) subj={subj!r}")
+                            continue
+                    except Exception as _te:
+                        log(f"[graph] time parse err: {_te}"); _age_ok = True
+                log(f"[graph] v8b ✓ {folder}: subj={subj!r} from={from_addr} url={_link[:80]}")
+                return _link
     # $search 跨全部文件夹（Focused/Other/ClutteredLow 等 folder 扫描可能遗漏）
     try:
         _search_url = (
@@ -254,8 +270,77 @@ def find_verify_link(access_token, max_msgs=30):
         log(f"[graph] $search err: {e}")
     return ""
 
+
+def _click_replit_verify_firebase(verify_url):
+    """用真实 Chrome (pydoll) 打开 replit action-code 页面执行 JS 验证。
+    等待页面出现 'Success' / 'can now close' 文字才算成功。"""
+    import asyncio as _asyncio
+
+    async def _do_verify():
+        from pydoll.browser import Chrome
+        from pydoll.browser.options import ChromiumOptions
+        _opt = ChromiumOptions()
+        _opt.headless = False   # xvfb DISPLAY=:99 提供虚拟屏幕
+        _chrome = None
+        for _p in ["/data/cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
+                   "/root/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
+                   "/usr/local/bin/google-chrome", "/usr/bin/google-chrome"]:
+            if os.path.exists(_p):
+                _chrome = _p; break
+        if _chrome:
+            _opt.binary_location = _chrome
+        for _a in ["--no-sandbox", "--disable-dev-shm-usage",
+                   "--disable-gpu", "--window-size=1280,800",
+                   "--lang=en-US", "--disable-blink-features=AutomationControlled"]:
+            _opt.add_argument(_a)
+
+        _found = False
+        try:
+            async with Chrome(options=_opt) as _browser:
+                _tab = await _browser.start()
+                log(f"[pydoll] goto {verify_url[:80]}")
+                await _tab.go_to(verify_url)
+                # 等待最多 30s，每 2s 检查一次页面文字
+                for _i in range(15):
+                    await _asyncio.sleep(2)
+                    _txt = ""
+                    try:
+                        _r = await _tab.execute_script(
+                            "document.body ? document.body.innerText.slice(0,500) : ''",
+                            return_by_value=True)
+                        if isinstance(_r, dict):
+                            _inner = _r.get("result", _r)
+                            if isinstance(_inner, dict):
+                                _inner = _inner.get("result", _inner)
+                            _txt = str(_inner.get("value", "")) if isinstance(_inner, dict) else str(_inner)
+                        else:
+                            _txt = str(_r or "")
+                    except Exception as _e2:
+                        log(f"[pydoll] js err: {_e2}")
+                    _low = _txt.lower()
+                    log(f"[pydoll] [{(_i+1)*2}s] body={_txt[:100].replace(chr(10),' | ')}")
+                    if any(_kw in _low for _kw in ("success", "can now close", "return to replit", "email verified")):
+                        log("[pydoll] ✓ SUCCESS text found")
+                        _found = True
+                        break
+                    if any(_kw in _low for _kw in ("invalid", "expired", "error", "something went wrong")):
+                        log("[pydoll] ✗ error text found"); break
+        except Exception as _e:
+            log(f"[pydoll] fatal: {type(_e).__name__}: {_e}")
+        return _found
+
+    try:
+        return _asyncio.run(_do_verify())
+    except Exception as _ex:
+        log(f"[pydoll] asyncio.run err: {_ex}"); return False
+
 def click_verify_link(verify_url):
     """curl点击验证链接，完成邮箱验证。返回(ssid, to_entry)"""
+    # v9: replit.com/action-code -> Firebase REST API direct verify
+    if 'replit.com/action-code' in verify_url:
+        ok = _click_replit_verify_firebase(verify_url)
+        log('[firebase] replit verify ' + ('OK' if ok else 'FAIL'))
+        return '', ok
     ck  = "/tmp/unitool_rescue_ck.txt"
     hdr = "/tmp/unitool_rescue_hdr.txt"
     for f in [ck, hdr]:

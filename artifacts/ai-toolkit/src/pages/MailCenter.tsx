@@ -1607,9 +1607,7 @@ export default function MailCenter() {
           <div className="bg-[#161b22] border border-[#30363d] rounded-xl w-full max-w-2xl flex flex-col max-h-[80vh]">
             <div className="px-5 py-3 border-b border-[#30363d] flex items-center justify-between">
               <h3 className="text-sm font-semibold text-white">🤖 自动完成授权 — 实时日志</h3>
-              {autoCompleteDone && (
-                <button onClick={() => { setAutoCompleteOpen(false); if (autoCompleteLogRef.current) { clearInterval(autoCompleteLogRef.current); autoCompleteLogRef.current = null; } }} className="text-gray-500 hover:text-gray-300 text-xs">关闭</button>
-              )}
+              <button onClick={() => { setAutoCompleteOpen(false); if (autoCompleteLogRef.current) { clearInterval(autoCompleteLogRef.current); autoCompleteLogRef.current = null; } }} className="text-gray-400 hover:text-white text-lg leading-none px-1" title="关闭">✕</button>
             </div>
             <div className="flex-1 overflow-y-auto p-4 font-mono text-xs space-y-0.5">
               {autoCompleteLog.length === 0
@@ -1641,9 +1639,7 @@ export default function MailCenter() {
           <div className="bg-[#161b22] border border-[#30363d] rounded-xl w-full max-w-2xl flex flex-col max-h-[80vh]">
             <div className="px-5 py-3 border-b border-[#30363d] flex items-center justify-between">
               <h3 className="text-sm font-semibold text-white">🔄 重授权 needs_oauth_manual — 实时日志</h3>
-              {reauthManualDone && (
-                <button onClick={() => { setReauthManualOpen(false); if (reauthManualLogRef.current) { clearInterval(reauthManualLogRef.current); reauthManualLogRef.current = null; } }} className="text-gray-500 hover:text-gray-300 text-xs">关闭</button>
-              )}
+              <button onClick={() => { setReauthManualOpen(false); if (reauthManualLogRef.current) { clearInterval(reauthManualLogRef.current); reauthManualLogRef.current = null; } }} className="text-gray-400 hover:text-white text-lg leading-none px-1" title="关闭">✕</button>
             </div>
             <div className="flex-1 overflow-y-auto p-4 font-mono text-xs space-y-0.5">
               {reauthManualLog.length === 0

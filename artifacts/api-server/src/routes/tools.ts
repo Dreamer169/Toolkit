@@ -1609,6 +1609,7 @@ router.post("/tools/outlook/register", async (req, res) => {
   });
 
   child.on("close", async (code) => {
+    try {
     // 解析 JSON 结果块
     // v8.20: 扩展为 identityMap, 同时收集 token + cookies + fingerprint + UA + IP + port
     const identityMap = new Map<string, {
@@ -1917,8 +1918,10 @@ router.post("/tools/outlook/register", async (req, res) => {
       type: "done",
       message: `注册任务完成 · 成功 ${okCount} 个 / 共 ${n} 个` + (okCount > 0 ? ` ✅` : ``),
     });
-    decRegBusy();
     await jobQueue.finish(jobId, code ?? -1, "done");
+    } finally {
+      decRegBusy();
+    }
   });
 });
 
