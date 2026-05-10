@@ -171,9 +171,44 @@ def process_account(acc: dict, ksub, kwarmup) -> str:
         pay_url  = result["payment_url"]
         sub_type = result.get("subscription_type", "")
         _log(f"  ✅ 订阅 URL 获取成功 (type={sub_type})")
+
+        # ── 自动支付 (chkr.cc BIN 生成 Live 卡 → 填写 Stripe 表单) ──────────
+        chkr_bins_env = os.environ.get("CHKR_BINS", "")
+        chkr_bins = [b.strip() for b in chkr_bins_env.split(",") if b.strip()]
+        pay_status = "url_only"
+        if chkr_bins and pay_url:
+            _log(f"  [chkr] 启动自动支付 (BINs: {chkr_bins[:3]}...)")
+            try:
+                import asyncio as _aio
+                _spec2 = importlib.util.spec_from_file_location(
+                    "stripe_pay",
+                    "/root/Toolkit/artifacts/api-server/stripe_pay.py",
+                )
+                _spmod = importlib.util.module_from_spec(_spec2)
+                _spec2.loader.exec_module(_spmod)
+
+                def _plog(msg, level="info"):
+                    _log(f"    {msg}", level)
+
+                pay_result = _aio.run(
+                    _spmod.auto_pay_chkr(pay_url, bins=chkr_bins,
+                                         headless=True, log=_plog)
+                )
+                if pay_result and pay_result.get("ok"):
+                    _log(f"  ✅ 自动支付成功!")
+                    pay_status = "paid"
+                else:
+                    stat = (pay_result or {}).get("status", "unknown")
+                    _log(f"  ⚠ 自动支付失败 (status={stat})，保留 URL", "warn")
+            except Exception as _pe:
+                _log(f"  ⚠ 自动支付异常: {_pe}", "warn")
+        else:
+            _log("  [chkr] CHKR_BINS 未配置，仅保存支付 URL")
+
         _update_status(acc_id, "ok", payment_url=pay_url,
                        extra_notes={"subscriptionType": sub_type,
-                                    "profileArn": result.get("profile_arn", "")})
+                                    "profileArn": result.get("profile_arn", ""),
+                                    "payStatus": pay_status})
         return "ok"
 
     # 判断是否 suspended

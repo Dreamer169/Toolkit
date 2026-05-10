@@ -471,6 +471,56 @@ async def auto_pay(payment_url, cdk_code, headless=True, log=print):
     return result
 
 
+
+# ── chkr.cc 自动支付入口 ────────────────────────────────────────────────
+async def auto_pay_chkr(payment_url: str, bins=None,
+                        headless: bool = True, log=print):
+    """
+    用 chkr.cc BIN 生成 Live 信用卡，自动完成 Stripe 支付。
+
+    Args:
+        payment_url: Stripe Checkout 一次性支付 URL
+        bins: BIN 前缀列表，None 时读 CHKR_BINS 环境变量
+        headless: Playwright 无头模式
+        log: 日志回调 fn(msg, level)
+
+    Returns:
+        {"ok": bool, "status": str, ...}
+    """
+    import importlib.util as _ilu
+    import os as _os
+
+    def _L(msg, level='info'):
+        try:
+            log(msg, level)
+        except TypeError:
+            log(msg)
+
+    _dir = _os.path.dirname(_os.path.abspath(__file__))
+    _spec = _ilu.spec_from_file_location(
+        'chkr_cards',
+        _os.path.join(_dir, 'chkr_cards.py'),
+    )
+    _mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    find_live_card = _mod.find_live_card
+
+    _L('[chkr] 搜索 Live 信用卡 (via chkr.cc BIN 检测)...')
+    cards = find_live_card(bins=bins, needed=1, max_tries=80,
+                           log=lambda m: _L(m))
+
+    if not cards:
+        _L('[chkr] 未找到 Live 卡，支付失败', 'error')
+        return {'ok': False, 'status': 'no_live_card',
+                'message': 'chkr未找到Live卡'}
+
+    card_info = cards[0]
+    _L(f"[chkr] 使用卡 *{card_info['lastFour']} ({card_info['bank']}) → Stripe表单", 'ok')
+
+    return await fill_stripe_checkout(
+        payment_url, card_info, cdk_code=None, log=log, headless=headless
+    )
+
 if __name__ == "__main__":
     import sys
 
