@@ -359,6 +359,16 @@ export const STEALTH_INIT = `
         _connProto._dlMaxPatched = true;
       }
     }
+    // Also expose window.NetworkInformation globally (CreepJS checks window.NetworkInformation?.prototype)
+    // If ungoogled-chromium strips the global constructor, the fallback {} makes noDownlinkMax=true.
+    try {
+      if (typeof window.NetworkInformation === 'undefined' && _conn && _conn.constructor && _conn.constructor !== Object) {
+        Object.defineProperty(window, 'NetworkInformation', {
+          value: _conn.constructor,
+          configurable: true, writable: true, enumerable: false,
+        });
+      }
+    } catch(_n) {}
   } catch (_) {}
 
   // Notification permission default
@@ -833,6 +843,55 @@ const WORKER_STEALTH_PATCH = `(function() {
         });
         _wStorProto._wEstPatched = true;
       }
+    }
+  } catch(_) {}
+
+  // === Worker WebGL renderer (hasSwiftShader fix) ==============================
+  // CreepJS probes workerScope.webglRenderer via OffscreenCanvas in a DedicatedWorker.
+  // fingerprint-chromium spoofs main-page GPU via --fingerprint but NOT OffscreenCanvas
+  // in workers -> SwiftShader leaks -> hasSwiftShader = TRUE (extra like-headless flag).
+  // GeekezBrowser-style: hook getParameter on prototype, not instance (PixelScan-safe).
+  try {
+    var _W_RENDERER = "ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6 (Core Profile) Mesa 23.2.1)";
+    var _W_VENDOR   = "Google Inc. (Intel)";
+    var _W_GL_KEY   = "__wGlSpoofed__";
+    var _W_DBG_EXT  = { UNMASKED_VENDOR_WEBGL: 37445, UNMASKED_RENDERER_WEBGL: 37446 };
+
+    function _wHookGlProto(proto) {
+      if (!proto || proto[_W_GL_KEY]) return;
+      try {
+        var _oGP = proto.getParameter;
+        var _oGE = proto.getExtension;
+        proto.getParameter = function getParameter(param) {
+          if (param === 37445) return _W_VENDOR;
+          if (param === 37446) return _W_RENDERER;
+          if (param === 7936)  return _W_VENDOR;
+          if (param === 7937)  return _W_RENDERER;
+          return _oGP.apply(this, arguments);
+        };
+        proto.getExtension = function getExtension(name) {
+          if (name === "WEBGL_debug_renderer_info") return _W_DBG_EXT;
+          return _oGE.apply(this, arguments);
+        };
+        proto[_W_GL_KEY] = true;
+      } catch(_) {}
+    }
+
+    _wHookGlProto(self.WebGLRenderingContext  && self.WebGLRenderingContext.prototype);
+    _wHookGlProto(self.WebGL2RenderingContext && self.WebGL2RenderingContext.prototype);
+
+    if (self.OffscreenCanvas && self.OffscreenCanvas.prototype && self.OffscreenCanvas.prototype.getContext) {
+      var _oOCGC = self.OffscreenCanvas.prototype.getContext;
+      self.OffscreenCanvas.prototype.getContext = function getContext(type) {
+        var ctx = _oOCGC.apply(this, arguments);
+        if (ctx) {
+          var t = String(type || "").toLowerCase();
+          if (t === "webgl" || t === "experimental-webgl" || t === "webgl2") {
+            try { _wHookGlProto(Object.getPrototypeOf(ctx)); } catch(_) {}
+          }
+        }
+        return ctx;
+      };
     }
   } catch(_) {}
 })();`;
