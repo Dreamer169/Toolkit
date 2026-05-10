@@ -201,23 +201,11 @@ export const STEALTH_INIT = `
     }
   } catch (_) {}
 
-  // WebGL vendor / renderer (Linux ANGLE/Mesa — v8.00 fixed Mac-string regression)
-  try {
-    const getParam = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function (p) {
-      if (p === 37445) return 'Google Inc. (Intel)';            // UNMASKED_VENDOR_WEBGL
-      if (p === 37446) return 'ANGLE (Intel, Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2), OpenGL 4.6)'; // UNMASKED_RENDERER_WEBGL
-      return getParam.apply(this, arguments);
-    };
-    if (typeof WebGL2RenderingContext !== 'undefined') {
-      const getParam2 = WebGL2RenderingContext.prototype.getParameter;
-      WebGL2RenderingContext.prototype.getParameter = function (p) {
-        if (p === 37445) return 'Google Inc. (Intel)';
-        if (p === 37446) return 'ANGLE (Intel, Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2), OpenGL 4.6)';
-        return getParam2.apply(this, arguments);
-      };
-    }
-  } catch (_) {}
+  // WebGL getParameter: NOT patched on main page.
+  // Patching GPU strings on main page (Intel Iris) while Worker keeps SwiftShader
+  // creates a GPU inconsistency that CreepJS flags as 33% headless.
+  // Binary-only (SwiftShader in both contexts) gives 0% headless / 0% stealth.
+  // The SwiftShader GPU is a 'like headless' marker but NOT a 'headless' conviction.
 
   // window.outerWidth/Height = innerWidth/Height when 0 (headless leak)
   try {
@@ -257,18 +245,12 @@ export const STEALTH_INIT = `
   // Notification permission default
   try { if (window.Notification && Notification.permission === 'denied') Object.defineProperty(Notification, 'permission', { get: () => 'default' }); } catch (_) {}
 
-  // toString-leak: hide our patches by overriding fn.toString to native pattern
-  const nativeToString = Function.prototype.toString;
-  const fakeFns = new WeakSet();
-  const wrap = (fn) => { fakeFns.add(fn); return fn; };
-  Function.prototype.toString = function () {
-    if (fakeFns.has(this)) return 'function ' + (this.name || '') + '() { [native code] }';
-    return nativeToString.call(this);
-  };
-  // mark our overrides
-  try { wrap(WebGLRenderingContext.prototype.getParameter); } catch (_) {}
-  try { wrap(window.navigator.permissions.query); } catch (_) {}
-  try { wrap(Function.prototype.toString); } catch (_) {}
+  // NOTE: Function.prototype.toString patching removed.
+  // CreepJS fingerprints this exact pattern (fakeFns WeakSet + toString override)
+  // as a known stealth tool signature — causes 40% stealth score.
+  // WebGL getParameter wrapped via Proxy below: V8 spec guarantees
+  // Proxy(nativeFn).toString() == 'function getParameter() { [native code] }'
+  const fakeFns = new WeakSet(); // kept as no-op for safe console protection code
 
   // === WebRTC IP leak protection ===
   // Sites probe local/public IP via RTCPeerConnection ICE candidates. Strip
@@ -383,7 +365,7 @@ export const STEALTH_INIT = `
       brands: _brands,
       mobile: false,
       platform: "Linux",
-      platformVersion: "5.15.0",
+      platformVersion: "6.8.0",
       architecture: "x86",
       bitness: "64",
       model: "",
@@ -609,39 +591,11 @@ export const STEALTH_INIT = `
     });
   } catch(_) {}
 
-  // === Worker constructor interception ===
-  // Playwright addInitScript does NOT inject into DedicatedWorker contexts.
-  // Intercept Worker() in main-page scope to prepend patch via importScripts.
-  try {
-    var _OW = window.Worker;
-    if (_OW) {
-      var _WI = (
-        "try{Object.defineProperty(self.navigator,'userAgentData',{get:function(){"
-        +"var b=[{brand:'Chromium',version:'144'},{brand:'Not:A-Brand',version:'99'},{brand:'Google Chrome',version:'144'}];"
-        +"var h={brands:b,mobile:false,platform:'Linux',platformVersion:'5.15.0',architecture:'x86',bitness:'64',model:'',"
-        +"uaFullVersion:'144.0.7559.132',fullVersionList:[{brand:'Chromium',version:'144.0.7559.132'},{brand:'Not:A-Brand',version:'99.0.0.0'},{brand:'Google Chrome',version:'144.0.7559.132'}],wow64:false,formFactors:['Desktop']};"
-        +"return{brands:b,mobile:false,platform:'Linux',"
-        +"getHighEntropyValues:function(hs){var o={brands:b,mobile:false,platform:'Linux'};(hs||[]).forEach(function(k){if(k in h)o[k]=h[k];});return Promise.resolve(o);},"
-        +"toJSON:function(){return{brands:b,mobile:false,platform:'Linux'};}}; },configurable:true});}catch(_){}"
-        +"try{Object.defineProperty(self.navigator,'languages',{get:function(){return['en-US','en'];},configurable:true});}catch(_){}"
-        +"try{Object.defineProperty(self.navigator,'platform',{get:function(){return 'Linux x86_64';},configurable:true});}catch(_){}"
-        +"try{Object.defineProperty(self.navigator,'hardwareConcurrency',{get:function(){return 8;},configurable:true});}catch(_){}"
-        +"try{Object.defineProperty(self.navigator,'deviceMemory',{get:function(){return 8;},configurable:true});}catch(_){}"
-      );
-      var _pBlob = new Blob([_WI], {type:"application/javascript"});
-      var _pUrl  = URL.createObjectURL(_pBlob);
-      function _PW(url, opts) {
-        if (opts && opts.type === "module") return new _OW(url, opts);
-        try {
-          var body = "try{importScripts("+JSON.stringify(_pUrl)+");}catch(_){}";
-          if (typeof url === "string") body += "\nimportScripts("+JSON.stringify(url)+");";
-          return new _OW(URL.createObjectURL(new Blob([body],{type:"application/javascript"})), opts);
-        } catch(_) { return new _OW(url, opts); }
-      }
-      _PW.prototype = _OW.prototype;
-      try { Object.defineProperty(window,"Worker",{value:_PW,writable:true,configurable:true}); } catch(_) {}
-    }
-  } catch(_) {}
+  // === Worker context note ===
+  // Playwright addInitScript does NOT inject into DedicatedWorker/SharedWorker.
+  // Wrapping window.Worker IS detectable: Function.prototype.toString native-code check
+  // will expose the custom wrapper. Do NOT patch Worker constructor here.
+  // The binary (fingerprint-chromium) provides consistent values in workers.
 })();
 `;
 
@@ -777,7 +731,7 @@ async function newFreshContext(): Promise<BrowserContext> {
       "sec-ch-ua-bitness": "\"64\"",
       "sec-ch-ua-arch": "\"x86\"",
       "sec-ch-ua-full-version": "\"144.0.7559.132\"",
-      "sec-ch-ua-platform-version": "\"5.15.0\"",
+      "sec-ch-ua-platform-version": "\"6.8.0\"",
       "sec-ch-ua-full-version-list": "\"Chromium\";v=\"144.0.7559.132\", \"Not:A-Brand\";v=\"99.0.0.0\", \"Google Chrome\";v=\"144.0.7559.132\"",
       "sec-ch-ua-model": "\"\"",
       "sec-ch-ua-wow64": "?0",
@@ -852,7 +806,7 @@ async function getStickyContext(hostname: string): Promise<BrowserContext> {
       "sec-ch-ua-bitness": "\"64\"",
       "sec-ch-ua-arch": "\"x86\"",
       "sec-ch-ua-full-version": "\"144.0.7559.132\"",
-      "sec-ch-ua-platform-version": "\"5.15.0\"",
+      "sec-ch-ua-platform-version": "\"6.8.0\"",
       "sec-ch-ua-full-version-list": "\"Chromium\";v=\"144.0.7559.132\", \"Not:A-Brand\";v=\"99.0.0.0\", \"Google Chrome\";v=\"144.0.7559.132\"",
       "sec-ch-ua-model": "\"\"",
       "sec-ch-ua-wow64": "?0",
