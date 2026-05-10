@@ -341,6 +341,26 @@ export const STEALTH_INIT = `
   // Returning a plain object breaks instanceof checks; PixelScan detects it.
   // No override needed: Chrome on Linux already returns a proper NetworkInformation with effectiveType '4g'.
 
+
+  // === NetworkInformation.downlinkMax (fixes noDownlinkMax like-headless flag) ============
+  // Chrome deprecated/removed downlinkMax ~M110 for privacy, but it existed on ALL prior
+  // desktop Chrome returning Infinity for wired connections. fingerprint-chromium strips it.
+  // Override on prototype (not instance) so navigator.connection.hasOwnProperty('downlinkMax')
+  // stays false — PixelScan-safe. CreepJS probes 'downlinkMax' in navigator.connection.
+  try {
+    var _conn = navigator.connection;
+    if (_conn && !('downlinkMax' in _conn)) {
+      var _connProto = Object.getPrototypeOf(_conn);
+      if (_connProto && !_connProto._dlMaxPatched) {
+        Object.defineProperty(_connProto, 'downlinkMax', {
+          get: function() { return Infinity; },
+          configurable: true, enumerable: true,
+        });
+        _connProto._dlMaxPatched = true;
+      }
+    }
+  } catch (_) {}
+
   // Notification permission default
   try { if (window.Notification && Notification.permission === 'denied') Object.defineProperty(Notification, 'permission', { get: () => 'default' }); } catch (_) {}
 
