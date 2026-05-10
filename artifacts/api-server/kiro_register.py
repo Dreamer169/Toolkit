@@ -113,6 +113,49 @@ def save_kiro_account(outlook_id: int, email: str, password: str,
     cur.close(); conn.close()
     return new_id
 
+def update_kiro_notes(account_id: int, extra: dict):
+    """Merge extra keys into the notes JSON of a kiro account."""
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute("SELECT notes FROM accounts WHERE id=%s", (account_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        return
+    try:
+        notes = json.loads(row[0] or "{}")
+    except Exception:
+        notes = {}
+    notes.update(extra)
+    cur.execute("UPDATE accounts SET notes=%s, updated_at=NOW() WHERE id=%s",
+                (json.dumps(notes), account_id))
+    conn.commit()
+    cur.close(); conn.close()
+
+
+def update_sub_status(account_id: int, status: str, retry_hours: int = 0):
+    """更新 kiro 账号的订阅状态列。"""
+    conn = _db()
+    cur  = conn.cursor()
+    if retry_hours > 0:
+        cur.execute("""
+            UPDATE accounts
+            SET    sub_status = %s,
+                   sub_retry_after = NOW() + (%s || ' hours')::INTERVAL,
+                   updated_at = NOW()
+            WHERE  id = %s
+        """, (status, str(retry_hours), account_id))
+    else:
+        cur.execute("""
+            UPDATE accounts
+            SET    sub_status = %s,
+                   sub_retry_after = NULL,
+                   updated_at = NOW()
+            WHERE  id = %s
+        """, (status, account_id))
+    conn.commit(); cur.close(); conn.close()
+
+
 def mark_outlook_kiro_done(account_id: int, success: bool, permanent: bool = False):
     conn = _db()
     cur = conn.cursor()
@@ -321,6 +364,37 @@ def main():
         mark_outlook_kiro_done(account["id"], success=True)
         print(f"✅ 注册成功! Kiro ID={kiro_id} email={result['email']} ({elapsed}s)", flush=True)
         print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        # ── 预热 + 入队（24h 后由 kiro_sub_retry.py 发起订阅）────────────
+        try:
+            import importlib.util as _ilu
+            _wspec = _ilu.spec_from_file_location(
+                "kiro_warmup",
+                "/root/Toolkit/artifacts/api-server/kiro_warmup.py",
+            )
+            _kwup = _ilu.module_from_spec(_wspec)
+            _wspec.loader.exec_module(_kwup)
+
+            def _sub_log(msg, level="info"):
+                print(f"[SUB] [{level.upper():5s}] {msg}", flush=True)
+
+            access_token_val = result.get("accessToken", "")
+            if access_token_val:
+                # A. 预热：模拟 Kiro IDE 首次启动，让账号在 AWS 侧建立使用记录
+                print("[MAIN] 账号预热中 (模拟 IDE 首次启动)...", flush=True)
+                try:
+                    _kwup.warmup(access_token_val, log=_sub_log)
+                except Exception as _wup_exc:
+                    print(f"[MAIN] 预热异常(继续): {_wup_exc}", flush=True)
+
+                # B. 预热完成后不立即订阅，入队等待 24h
+                update_sub_status(kiro_id, "pending", retry_hours=24)
+                print("[MAIN] ✅ 预热完成，已入队 → 24h 后由 kiro_sub_retry 自动发起订阅", flush=True)
+            else:
+                print("[MAIN] 无 accessToken，跳过预热/入队", flush=True)
+        except Exception as _sub_exc:
+            print(f"[MAIN] 预热/入队异常: {_sub_exc}", flush=True)
+
         sys.exit(0)
     else:
         permanent = result.get("permanent", False)

@@ -30,10 +30,11 @@ if (exe === FP_BIN) {
   args.push(
     `--fingerprint=${Math.floor(Math.random()*0x7fffffff)}`,
     "--fingerprint-platform=linux",
-    "--fingerprint-platform-version=6.8.0",
+    
     "--fingerprint-brand=Chrome",
     "--fingerprint-brand-version=144",
     "--fingerprint-hardware-concurrency=8",
+    "--disable-spoofing=gpu",
     "--timezone=America/Los_Angeles",
     "--disable-non-proxied-udp",
   );

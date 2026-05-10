@@ -1052,12 +1052,15 @@ class KiroRegister:
                     at = rd.get("accessToken", "")
                     ct = rd.get("csrfToken", "")
                     ei = rd.get("expiresIn", 0)
+                    rt = rd.get("refreshToken", "")  # Kiro Social refresh token
+                    self.log(f"  ExchangeToken keys: {list(rd.keys())}")
+                    if rt: self.log(f"  refreshToken={rt[:60]}...")
                     if at:
                         self.log(f"  ✅ accessToken={at[:60]}...")
                         self.log(f"  ✅ csrfToken={ct[:30] if ct else ''}")
                         pb = self._fetch_portal_bearer()
                         if pb: self._portal_bearer = pb
-                        return {"accessToken": at, "sessionToken": self._portal_bearer or "", "csrfToken": ct, "expiresIn": ei}
+                        return {"accessToken": at, "refreshToken": rt, "sessionToken": self._portal_bearer or "", "csrfToken": ct, "expiresIn": ei}
                     self.log(f"  no accessToken: {rd}")
                 except Exception as ex2:
                     self.log(f"  CBOR fail: {ex2}")
@@ -1641,6 +1644,7 @@ class KiroRegister:
             return False, {"error": "step12 失败: 无法获取 tokens"}
 
         access_token = tokens.get("accessToken", "")
+        exchange_rt = tokens.get("refreshToken", "")  # from ExchangeToken CBOR
         session_token = tokens.get("sessionToken", "")
 
         # Step 12f: Device Auth → refreshToken + clientId + clientSecret
@@ -1655,6 +1659,7 @@ class KiroRegister:
             client_secret = device_result.get("clientSecret", "")
         else:
             self.log("  ⚠️ step12f 失败, 无 refreshToken (非致命)")
+            if not refresh_token and exchange_rt: refresh_token = exchange_rt; self.log("  ℹ️ fallback: refreshToken from ExchangeToken")
 
         self.log(f"=== register() 完成: email={email} ===")
         return True, {
