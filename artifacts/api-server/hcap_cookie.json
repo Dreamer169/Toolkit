@@ -1,0 +1,28 @@
+{
+  "registered_at": "2026-05-10T00:10:38.479691Z",
+  "email": "fcjjtwhc@guerrillamailblock.com",
+  "cookies": [
+    {
+      "name": "hmt_id",
+      "value": "879fefe7-a121-411c-8a8f-c1815b24804c",
+      "domain": "api.hcaptcha.com",
+      "path": "/",
+      "expires": 1780963743.408401,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None",
+      "partitionKey": "https://hcaptcha.com",
+      "_crHasCrossSiteAncestor": false
+    },
+    {
+      "name": "hmt_id",
+      "value": "3a0f26c1-29ea-4370-a975-0d716f1b2e32",
+      "domain": "accounts.hcaptcha.com",
+      "path": "/",
+      "expires": 1809907743.685467,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Lax"
+    }
+  ]
+}
