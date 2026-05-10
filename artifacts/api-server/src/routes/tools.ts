@@ -3674,8 +3674,19 @@ router.post("/tools/outlook/purge-invalid", async (req, res) => {
 
         const err  = (td.error ?? "unknown").toLowerCase();
         const desc = td.error_description ?? "";
+
+        // AADSTS70000 = service abuse mode: 账号本身被微软封禁，重授权无效，直接标 abuse_mode
+        const isServiceAbuse = desc.includes("AADSTS70000") || desc.includes("service abuse");
+        if (isServiceAbuse) {
+          if (!dry_run) await dbE(
+            "UPDATE accounts SET status='suspended', tags=(SELECT NULLIF(array_to_string(ARRAY(SELECT DISTINCT trim(t) FROM unnest(string_to_array(COALESCE(tags,'')||',abuse_mode',',')) AS t WHERE trim(t)<>''),','),'')), updated_at=NOW() WHERE id=$1",
+            [acc.id]
+          );
+          purged.push({ id: acc.id, email: acc.email, reason: "AADSTS70000:service_abuse_mode" });
+          continue;
+        }
+
         const tokenRevoked = err === "invalid_grant"
-          || desc.includes("AADSTS70000")
           || desc.includes("AADSTS70008")
           || desc.includes("AADSTS700082")
           || desc.includes("AADSTS50173");
@@ -5087,7 +5098,8 @@ router.post("/tools/outlook/auto-check", async (req, res) => {
           const errCode = td.error ?? "";
           const errDesc = td.error_description ?? "";
           const isAbuse = errCode === "invalid_grant" &&
-            (errDesc.includes("AADSTS70008") || errDesc.includes("disabled") || errDesc.includes("abuse"));
+            (errDesc.includes("AADSTS70000") || errDesc.includes("AADSTS70008") ||
+             errDesc.includes("service abuse") || errDesc.includes("disabled") || errDesc.includes("abuse"));
           if (isAbuse) {
             banned++; await addTag(acc.id, "abuse_mode", "suspended");
             details.push({ email: acc.email, result: "banned", error: errCode });
