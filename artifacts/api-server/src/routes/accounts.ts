@@ -61,7 +61,7 @@ function portToProxy(port: number): string {
 
 // Outlook OAuth (Thunderbird client_id)
 const OUTLOOK_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
-const OUTLOOK_SCOPE     = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access";
+const OUTLOOK_SCOPE     = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access https://outlook.office.com/IMAP.AccessAsUser.All";
 // CF-banned port cooldown: port → timestamp when cooldown expires (5 min)
 const cfBannedUntil = new Map<number, number>();
 // Dead ports: ERR_CONNECTION_CLOSED → skip for 10 min
