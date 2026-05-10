@@ -314,14 +314,26 @@ export const STEALTH_INIT = `
     if (!window.outerHeight) Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight });
   } catch (_) {}
 
-  // Realistic screen properties
+  // Screen properties via Proxy on window.screen (ODP on screen instance fails — non-configurable native).
+  // Debug-proven: ODP(window,'screen',{get:Proxy}) works correctly with Playwright screen:{} emulation.
   try {
-    Object.defineProperty(screen, 'availWidth',  { get: () => 1920, configurable: true });
-    Object.defineProperty(screen, 'availHeight', { get: () => 1040, configurable: true });
-    Object.defineProperty(screen, 'width',  { get: () => 1920, configurable: true });
-    Object.defineProperty(screen, 'height', { get: () => 1080, configurable: true });
-    Object.defineProperty(screen, 'colorDepth', { get: () => 24, configurable: true });
-    Object.defineProperty(screen, 'pixelDepth', { get: () => 24, configurable: true });
+    var _rs = window.screen;
+    Object.defineProperty(window, 'screen', {
+      get: function() {
+        return new Proxy(_rs, {
+          get: function(t, p) {
+            if (p === 'availWidth')  return 1920;
+            if (p === 'availHeight') return 1040;
+            if (p === 'width')  return 1920;
+            if (p === 'height') return 1080;
+            if (p === 'colorDepth') return 24;
+            if (p === 'pixelDepth') return 24;
+            var v = t[p]; return typeof v === 'function' ? v.bind(t) : v;
+          },
+        });
+      },
+      configurable: true,
+    });
   } catch (_) {}
 
   // Battery — override on prototype so it is NOT an own property of navigator.
@@ -388,8 +400,20 @@ export const STEALTH_INIT = `
     } catch(_n) {}
   } catch (_) {}
 
-  // Notification permission default
-  try { if (window.Notification && Notification.permission === 'denied') Object.defineProperty(Notification, 'permission', { get: () => 'default' }); } catch (_) {}
+  // Notification.permission always 'default': direct window.Notification replacement (debug-proven).
+  // Bug: (1) condition 'denied' false at initScript time; (2) ODP non-configurable. Fix: direct Proxy.
+  try {
+    if (window.Notification) {
+      var _RealNotif = window.Notification;
+      window.Notification = new Proxy(_RealNotif, {
+        get: function(t, p) {
+          if (p === 'permission') return 'default';
+          var v = t[p]; return typeof v === 'function' ? v.bind(t) : v;
+        },
+        construct: function(t, args) { return new t(...args); },
+      });
+    }
+  } catch (_) {}
 
   // wrap() is a no-op — existing call sites compile without error, no toString spoofing.
   // fakeFns WeakSet REMOVED — it is a known puppeteer-extra-plugin-stealth v2 signature
@@ -717,22 +741,15 @@ export const STEALTH_INIT = `
     Object.defineProperty(Navigator.prototype, 'pdfViewerEnabled', { get: () => true, configurable: true });
   } catch (_) {}
   // === Web Share API stub (fixes noWebShare like-headless flag) ============
-  // Linux Chrome does not expose navigator.share/canShare; CreepJS flags absence as like-headless.
-  // Stub returns a rejected promise (native share UI unavailable) — same pattern as a real
-  // desktop that has the API but no native share target.
+  // ODP(Navigator.prototype,"share") silently fails. Debug-proven: navigator.share = fn WORKS.
   try {
     if (!("share" in navigator)) {
-      Object.defineProperty(Navigator.prototype, "share", {
-        value: function share() { return Promise.reject(new DOMException("Share canceled","AbortError")); },
-        writable: true, configurable: true, enumerable: true,
-      });
+      navigator.share = function share() {
+        return Promise.reject(new DOMException("Share canceled", "AbortError"));
+      };
     }
     if (!("canShare" in navigator)) {
-      Object.defineProperty(Navigator.prototype, "canShare", {
-        // Linux Chrome desktop: canShare() returns false (no native share target)
-        value: function canShare() { return false; },
-        writable: true, configurable: true, enumerable: true,
-      });
+      navigator.canShare = function canShare() { return false; };
     }
   } catch (_) {}
 
@@ -773,9 +790,8 @@ export const STEALTH_INIT = `
   // Real desktop Chrome on Linux follows GTK theme and rarely returns pure red.
   // Patch: intercept getComputedStyle only when el has explicit inline ActiveText bg-color.
   try {
-    var _gCS = window.getComputedStyle.bind(window);
-    Object.defineProperty(window, "getComputedStyle", {
-      value: function getComputedStyle(el, pseudo) {
+    var _gCS = window.getComputedStyle;
+    window.getComputedStyle = function getComputedStyle(el, pseudo) {
         var result = _gCS(el, pseudo);
         try {
           if (el && el.getAttribute) {
@@ -793,9 +809,25 @@ export const STEALTH_INIT = `
         } catch(_2) {}
         return result;
       },
-      configurable: true, writable: true,
-    });
+    };
   } catch (_) {}
+
+
+  // === ContentIndex stub (noContentIndex fix): getPlatformEstimate checks 'ContentIndex' in window ===
+  try {
+    if (typeof window.ContentIndex === 'undefined') {
+      window.ContentIndex = function ContentIndex() { throw new TypeError('Illegal constructor'); };
+    }
+  } catch(_) {}
+
+  // === userAgentData.platform fix (uaDataIsBlank fix) ===
+  // fingerprint-chromium may leave navigator.userAgentData.platform='' → uaDataIsBlank=true.
+  try {
+    var _uad = navigator.userAgentData;
+    if (_uad && !_uad.platform) {
+      try { Object.defineProperty(_uad, 'platform', { get: function() { return 'Linux'; }, configurable: true }); } catch(_up) {}
+    }
+  } catch(_) {}
 
 })();
 `;
