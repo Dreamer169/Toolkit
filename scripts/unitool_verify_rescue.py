@@ -6,6 +6,7 @@ unitool_verify_rescue.py — 专门处理 unitool_verify_pending 账号
 """
 import atexit, glob, json, os, re, signal, subprocess, sys, time
 import urllib.parse, urllib.request
+import imaplib, email as _email_lib
 import psycopg2
 
 LOG      = "/tmp/unitool_verify_rescue.log"
@@ -269,6 +270,81 @@ def find_verify_link(access_token, max_msgs=30):
     except Exception as e:
         log(f"[graph] $search err: {e}")
     return ""
+
+
+
+def refresh_ms_token_imap(refresh_token):
+    data = urllib.parse.urlencode({
+        'grant_type': 'refresh_token', 'client_id': CLIENT_ID,
+        'refresh_token': refresh_token,
+        'scope': 'https://outlook.office.com/IMAP.AccessAsUser.All offline_access',
+    }).encode()
+    r = urllib.request.urlopen(urllib.request.Request(
+        'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+        data=data, method='POST'), timeout=20)
+    return json.loads(r.read())
+
+
+def find_verify_link_imap(email_addr, imap_access_token, max_msgs=30):
+    import datetime as _dt
+    SOH = chr(1)
+    auth_str = ('user=' + email_addr + SOH + 'auth=Bearer ' + imap_access_token + SOH + SOH).encode()
+    pattern  = re.compile(
+        r'https://(?:(?:[a-z0-9-]+[.])?unitool[.]ai|replit[.]com/action-code)[^\s"<>]+',
+        re.IGNORECASE)
+    try:
+        conn = imaplib.IMAP4_SSL('outlook.office365.com', 993, timeout=20)
+    except Exception as e:
+        log('[imap] connect err: ' + str(e)); return ''
+    try:
+        conn.authenticate('XOAUTH2', lambda _: auth_str)
+        log('[imap] auth OK')
+        for folder in ('INBOX', 'Junk'):
+            try:
+                st, _ = conn.select(folder, readonly=True)
+                if st != 'OK':
+                    log('[imap] ' + folder + ' select fail'); continue
+                _, data = conn.search(None, 'ALL')
+                ids = data[0].split()
+                log('[imap] ' + folder + ': ' + str(len(ids)) + ' msgs')
+                for mid in reversed(ids[-max_msgs:]):
+                    _, raw = conn.fetch(mid, '(RFC822)')
+                    if not raw or not raw[0]: continue
+                    msg      = _email_lib.message_from_bytes(raw[0][1])
+                    subj     = str(msg.get('Subject', ''))
+                    frm      = str(msg.get('From',    ''))
+                    date_str = str(msg.get('Date',    ''))
+                    body = ''
+                    if msg.is_multipart():
+                        for part in msg.walk():
+                            if part.get_content_type() in ('text/plain', 'text/html'):
+                                try: body += part.get_payload(decode=True).decode('utf-8', 'replace')
+                                except: pass
+                    else:
+                        try: body = msg.get_payload(decode=True).decode('utf-8', 'replace')
+                        except: body = str(msg.get_payload())
+                    links = pattern.findall(body)
+                    if links:
+                        _link = links[0]
+                        if 'replit.com/action-code' in _link:
+                            try:
+                                from email.utils import parsedate_to_datetime as _p2d
+                                recv    = _p2d(date_str)
+                                age_min = (_dt.datetime.now(_dt.timezone.utc) - recv).total_seconds() / 60
+                                if age_min > 55:
+                                    log('[imap] skip expired age=' + str(int(age_min)) + 'min'); continue
+                            except Exception: pass
+                        log('[imap] FOUND ' + folder + ' from=' + frm[:40] + ' url=' + _link[:80])
+                        return _link
+            except Exception as e:
+                log('[imap] ' + folder + ' err: ' + str(e))
+    except Exception as e:
+        log('[imap] auth err: ' + str(e))
+    finally:
+        try: conn.logout()
+        except: pass
+    return ''
+
 
 
 def _click_replit_verify_firebase(verify_url):
@@ -586,6 +662,21 @@ def main():
             log(f"[graph] [{(attempt+1)*20}s] not found")
     elif not verify_url:
         log("[graph] no token")
+
+    # IMAP fallback (new accounts with IMAP.AccessAsUser.All consent)
+    if not verify_url and refresh_token:
+        try:
+            _ir = refresh_ms_token_imap(refresh_token)
+            _it = _ir.get("access_token", "")
+            if _it:
+                log("[imap] fallback token len=" + str(len(_it)))
+                verify_url = find_verify_link_imap(email, _it)
+                if verify_url: log("[imap] fallback FOUND: " + verify_url[:80])
+                else: log("[imap] fallback: no link found")
+            else:
+                log("[imap] fallback no token: " + _ir.get("error_description","")[:60])
+        except Exception as _ie:
+            log("[imap] fallback err (non-fatal): " + str(_ie)[:80])
 
     ssid = ""
     if verify_url:
