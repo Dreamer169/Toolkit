@@ -347,6 +347,100 @@ def find_verify_link_imap(email_addr, imap_access_token, max_msgs=30):
 
 
 
+
+def find_verify_link_imap_idle(email_addr, imap_access_token, max_wait=300):
+    import datetime as _dt
+    from imapclient import IMAPClient
+    pattern = re.compile(
+        r'https://(?:(?:[a-z0-9-]+[.])?unitool[.]ai|replit[.]com/action-code)[^\s"<>]+',
+        re.IGNORECASE)
+
+    def _scan(server):
+        for folder in ("INBOX", "Junk"):
+            try:
+                server.select_folder(folder, readonly=True)
+                ids = server.search(["ALL"])
+                if not ids:
+                    continue
+                latest = ids[-30:]
+                msgs = server.fetch(latest, ["RFC822"])
+                for uid, data in reversed(list(msgs.items())):
+                    raw = data.get(b"RFC822", b"")
+                    if not raw:
+                        continue
+                    msg  = _email_lib.message_from_bytes(raw)
+                    body = ""
+                    if msg.is_multipart():
+                        for part in msg.walk():
+                            if part.get_content_type() in ("text/plain", "text/html"):
+                                try: body += part.get_payload(decode=True).decode("utf-8", "replace")
+                                except: pass
+                    else:
+                        try: body = msg.get_payload(decode=True).decode("utf-8", "replace")
+                        except: body = str(msg.get_payload())
+                    links = pattern.findall(body)
+                    if links:
+                        _link = links[0]
+                        if "replit.com/action-code" in _link:
+                            try:
+                                from email.utils import parsedate_to_datetime as _p2d
+                                recv    = _p2d(str(msg.get("Date", "")))
+                                age_min = (_dt.datetime.now(_dt.timezone.utc) - recv).total_seconds() / 60
+                                if age_min > 55:
+                                    log("[idle] skip expired age=%dmin" % int(age_min)); continue
+                            except Exception: pass
+                        log("[idle] FOUND %s: %s" % (folder, _link[:80]))
+                        return _link
+            except Exception as e:
+                log("[idle] scan %s err: %s" % (folder, e))
+        return ""
+
+    try:
+        server = IMAPClient("outlook.office365.com", ssl=True)
+        SOH = chr(1)
+        auth_str = ("user=" + email_addr + SOH + "auth=Bearer " + imap_access_token + SOH + SOH).encode()
+        server.authenticate("XOAUTH2", lambda _: auth_str)
+        log("[idle] auth OK")
+    except Exception as e:
+        log("[idle] connect/auth err: %s" % e); return ""
+
+    try:
+        url = _scan(server)
+        if url:
+            return url
+
+        deadline = time.time() + max_wait
+        cycle    = 0
+        server.select_folder("INBOX", readonly=True)
+        while time.time() < deadline:
+            remaining    = deadline - time.time()
+            idle_timeout = min(240, remaining)
+            if idle_timeout <= 5:
+                break
+            cycle += 1
+            log("[idle] cycle %d: IDLE %.0fs" % (cycle, idle_timeout))
+            server.idle()
+            responses = server.idle_check(timeout=idle_timeout)
+            server.idle_done()
+            if responses:
+                log("[idle] push received (%d events), scanning..." % len(responses))
+                url = _scan(server)
+                if url:
+                    return url
+            else:
+                log("[idle] cycle %d timeout, rescanning..." % cycle)
+                url = _scan(server)
+                if url:
+                    return url
+        log("[idle] exhausted %ds — not found" % max_wait)
+        return ""
+    except Exception as e:
+        log("[idle] outer err: %s" % e); return ""
+    finally:
+        try: server.logout()
+        except: pass
+
+
 def _click_replit_verify_firebase(verify_url):
     """用真实 Chrome (pydoll) 打开 replit action-code 页面执行 JS 验证。
     等待页面出现 'Success' / 'can now close' 文字才算成功。"""
@@ -652,31 +746,38 @@ def main():
     except Exception as _ce:
         log("[cache] v8 err(non-fatal): " + str(_ce)[:80])
 
-    if not verify_url and access_token:
-        log(f"[graph] polling JunkEmail+Inbox+$search (max {_max_polls*20}s)...")
-        for attempt in range(_max_polls):
-            import time as _t; _t.sleep(20)
-            verify_url = find_verify_link(access_token)
-            if verify_url:
-                log(f"[graph] found at {(attempt+1)*20}s: {verify_url[:80]}"); break
-            log(f"[graph] [{(attempt+1)*20}s] not found")
-    elif not verify_url:
-        log("[graph] no token")
-
-    # IMAP fallback (new accounts with IMAP.AccessAsUser.All consent)
+    # IMAP IDLE first (low-latency push); degrade to Graph polling only if IMAP unavailable
+    _imap_wait  = _max_polls * 20  # match original Graph poll window (360s / 100s)
+    _imap_tried = False
     if not verify_url and refresh_token:
         try:
             _ir = refresh_ms_token_imap(refresh_token)
             _it = _ir.get("access_token", "")
             if _it:
-                log("[imap] fallback token len=" + str(len(_it)))
-                verify_url = find_verify_link_imap(email, _it)
-                if verify_url: log("[imap] fallback FOUND: " + verify_url[:80])
-                else: log("[imap] fallback: no link found")
+                log("[idle] token OK len=%d max_wait=%ds" % (len(_it), _imap_wait))
+                _imap_tried = True
+                verify_url  = find_verify_link_imap_idle(email, _it, max_wait=_imap_wait)
+                if verify_url:
+                    log("[idle] FOUND: " + verify_url[:80])
+                else:
+                    log("[idle] not found within wait window")
             else:
-                log("[imap] fallback no token: " + _ir.get("error_description","")[:60])
+                log("[idle] imap token fail: " + _ir.get("error_description", "")[:80])
         except Exception as _ie:
-            log("[imap] fallback err (non-fatal): " + str(_ie)[:80])
+            log("[idle] err (non-fatal): " + str(_ie)[:80])
+
+    # Graph API polling fallback — only when IMAP token unavailable
+    if not verify_url and not _imap_tried:
+        if access_token:
+            log("[graph] IMAP unavailable — Graph polling max %ds..." % (_max_polls * 20))
+            for attempt in range(_max_polls):
+                import time as _t; _t.sleep(20)
+                verify_url = find_verify_link(access_token)
+                if verify_url:
+                    log("[graph] found at %ds: %s" % ((attempt+1)*20, verify_url[:80])); break
+                log("[graph] [%ds] not found" % ((attempt+1)*20))
+        else:
+            log("[graph] no Graph token and IMAP unavailable")
 
     ssid = ""
     if verify_url:
