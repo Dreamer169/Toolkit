@@ -567,6 +567,28 @@ module.exports = {
     "autorestart": true,
     "kill_signal": "SIGTERM",
     "kill_timeout": 15000
-}
+},
+    {
+      "name": "kiro-sub-retry",
+      "script": "/root/Toolkit/artifacts/api-server/kiro_sub_retry.py",
+      "interpreter": "python3",
+      "cwd": "/root/Toolkit",
+      "args": "--daemon",
+      "env": {
+        "DATABASE_URL": "postgresql://postgres:postgres@localhost/toolkit",
+        "CHKR_BINS": "455673,455674,401288,426684,431940,545301,511880,556105,400026,406820",
+        "DISPLAY": ":99",
+        "PLAYWRIGHT_BROWSERS_PATH": "/data/cache/ms-playwright",
+        "PYTHONUNBUFFERED": "1"
+      },
+      "out_file": "/tmp/kiro_sub_retry_out.log",
+      "error_file": "/tmp/kiro_sub_retry_err.log",
+      "restart_delay": 60000,
+      "max_restarts": 999,
+      "watch": false,
+      "autorestart": true,
+      "kill_signal": "SIGTERM",
+      "kill_timeout": 15000
+    }
   ]
 };
