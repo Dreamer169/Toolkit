@@ -760,7 +760,7 @@ router.post("/tools/outlook/messages", async (req, res) => {
             grant_type: "refresh_token",
             client_id: OAUTH_CLIENT_ID,
             refresh_token: account.refresh_token,
-            scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
+            scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access https://outlook.office.com/IMAP.AccessAsUser.All",
           }).toString(),
         }, acctProxy);
         const td = await tr.json() as { access_token?: string; refresh_token?: string; error?: string; error_description?: string };
@@ -899,7 +899,7 @@ router.post("/tools/outlook/device-code", async (req, res) => {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         client_id: cid,
-        scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
+        scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access https://outlook.office.com/IMAP.AccessAsUser.All",
       }).toString(),
     });
     const data = await r.json() as {
@@ -1001,7 +1001,7 @@ function cleanOldBatchSessions() {
 async function createBatchOAuthSessions(rows: { id: number; email: string }[]) {
   cleanOldBatchSessions();
   const CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
-  const SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access";
+  const SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access https://outlook.office.com/IMAP.AccessAsUser.All";
   const sessionList: BatchOAuthSession[] = [];
   await Promise.allSettled(rows.map(async (acc) => {
     try {
@@ -1498,6 +1498,13 @@ router.post("/tools/outlook/register", async (req, res) => {
   const child = spawn("python3", args, { env: _spawnEnv });
   jobQueue.setChild(jobId, child);
 
+  // identityMap hoisted here so stdout AND close handlers share it
+  const identityMap = new Map<string, {
+    access_token: string; refresh_token: string;
+    cookies_json: string; fingerprint_json: string;
+    user_agent: string; exit_ip: string; proxy_port: number; proxy_formatted: string;
+  }>();
+
   let jsonBuf = "";
   let inJson  = false;
 
@@ -1611,12 +1618,7 @@ router.post("/tools/outlook/register", async (req, res) => {
   child.on("close", async (code) => {
     try {
     // 解析 JSON 结果块
-    // v8.20: 扩展为 identityMap, 同时收集 token + cookies + fingerprint + UA + IP + port
-    const identityMap = new Map<string, {
-      access_token: string; refresh_token: string;
-      cookies_json: string; fingerprint_json: string;
-      user_agent: string; exit_ip: string; proxy_port: number; proxy_formatted: string;
-    }>();
+    // v8.20: identityMap declared above (before stdout handler) for cross-handler access
     try {
       const jsonStart = jsonBuf.indexOf("[");
       if (jsonStart >= 0) {
@@ -3407,7 +3409,7 @@ router.post("/tools/outlook/auto-auth", async (req, res) => {
           grant_type: "refresh_token",
           client_id: OAUTH_CLIENT_ID,
           refresh_token: acc.refresh_token,
-          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
+          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access https://outlook.office.com/IMAP.AccessAsUser.All",
         }).toString(),
       }, acctProxy);
       const td = await r.json() as { access_token?: string; refresh_token?: string; error_description?: string };
@@ -3459,7 +3461,7 @@ router.post("/tools/outlook/auto-auth-all", async (req, res) => {
               grant_type: "refresh_token",
               client_id: OAUTH_CLIENT_ID,
               refresh_token: acc.refresh_token,
-              scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
+              scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access https://outlook.office.com/IMAP.AccessAsUser.All",
             }).toString(),
           }, acctProxy);
           const td = await r.json() as { access_token?: string; refresh_token?: string; error_description?: string };
@@ -3832,7 +3834,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
           grant_type: "refresh_token",
           client_id: OAUTH_CLIENT_ID,
           refresh_token: acc.refresh_token,
-          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
+          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access https://outlook.office.com/IMAP.AccessAsUser.All",
         }).toString(),
       }, acctProxy);
       const td = await r.json() as { access_token?: string; refresh_token?: string; error_description?: string; error?: string };
@@ -5061,7 +5063,7 @@ router.post("/tools/waf/scrape", async (req, res) => {
 // 立即检测: status=active 账号 + Graph API 二次验证 + 自动打标签 (v9.14)
 router.post("/tools/outlook/auto-check", async (req, res) => {
   const BATCH = 30;
-  const SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access";
+  const SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access https://outlook.office.com/IMAP.AccessAsUser.All";
   const addTag = async (id: number, tag: string, newStatus?: string) => {
     const statusPart = newStatus ? `, status='${newStatus}'` : "";
     await execute(
