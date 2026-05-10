@@ -590,5 +590,21 @@ module.exports = {
       "kill_signal": "SIGTERM",
       "kill_timeout": 15000
     }
+    ,{
+      "name": "text-captcha-yolo",
+      "script": "/root/Text_select_captcha/app/main.py",
+      "interpreter": "python3",
+      "interpreter_args": "-m uvicorn app.main:app --host 0.0.0.0 --port 8767",
+      "cwd": "/root/Text_select_captcha",
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      },
+      "out_file": "/tmp/text_captcha_out.log",
+      "error_file": "/tmp/text_captcha_err.log",
+      "restart_delay": 5000,
+      "max_restarts": 20,
+      "watch": false,
+      "autorestart": true
+    }
   ]
 };
