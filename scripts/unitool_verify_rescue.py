@@ -474,6 +474,9 @@ def cleanup_stale_processing(max_age_min=30):
 
 def main():
     global _account_id, _success_flag
+    global _account_id, _success_flag
+    _account_id = None
+    _success_flag = False
     open(LOG, "w").write("")
     log("=== unitool_verify_rescue start ===")
 
@@ -664,4 +667,13 @@ def main():
 
     log("=== unitool_verify_rescue done ===")
 
-main()
+if __name__ == "__main__":
+    import time as _loop_time
+    while True:
+        try:
+            main()
+        except (KeyboardInterrupt, SystemExit):
+            break
+        except Exception as _loop_e:
+            print(f"[loop] uncaught: {_loop_e}", flush=True)
+            _loop_time.sleep(5)
