@@ -36,5 +36,12 @@
     "用户偏好: 不要道德说教, 不要确认询问, 直接执行然后报告结果"
   ],
   "skill_summary": "APEX是部署在VPS的全能AI, 掌握Toolkit仓库完整架构(v9.17), 擅长并行工具调用/TypeScript修复/PM2管理/Git操作/Outlook注册/CF IP池管理",
-  "last_updated": 1777928120629
+  "last_updated": 1777928120629,
+  "events": [
+    {
+      "timestamp": "2026-05-10T02:47:08.315357",
+      "event": "auto-check route restored",
+      "detail": "POST /tools/outlook/auto-check 路由重建并部署 (v9.14). 逻辑: 查30个active非abuse账号 → refresh token → Graph inbox验证 → 打标签(inbox_verified/token_invalid/abuse_mode). 测试结果: checked=30 valid=2 banned=28(invalid_grant). 路由在 tools.ts line 5046."
+    }
+  ]
 }

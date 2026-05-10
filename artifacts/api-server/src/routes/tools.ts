@@ -5043,4 +5043,102 @@ router.post("/tools/waf/scrape", async (req, res) => {
 });
 
 
+// ── POST /tools/outlook/auto-check ──────────────────────────────────────────
+// 立即检测: status=active 账号 + Graph API 二次验证 + 自动打标签 (v9.14)
+router.post("/tools/outlook/auto-check", async (req, res) => {
+  const BATCH = 30;
+  const SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access";
+  const addTag = async (id: number, tag: string, newStatus?: string) => {
+    const statusPart = newStatus ? `, status='${newStatus}'` : "";
+    await execute(
+      `UPDATE accounts SET tags=(SELECT NULLIF(array_to_string(ARRAY(SELECT DISTINCT trim(t) FROM unnest(string_to_array(COALESCE(tags,'')||','||$2,',')) AS t WHERE trim(t)<>''),','),'')), updated_at=NOW()${statusPart} WHERE id=$1`,
+      [id, tag]
+    );
+  };
+  try {
+    const accounts = await query<{
+      id: number; email: string;
+      token: string | null; refresh_token: string | null; tags: string | null;
+    }>(
+      "SELECT id,email,token,refresh_token,tags FROM accounts WHERE platform='outlook' AND status='active' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' ORDER BY updated_at ASC LIMIT " + BATCH
+    );
+    let checked = 0, valid = 0, needsAuth = 0, banned = 0, skipped = 0;
+    const details: { email: string; result: string; error?: string }[] = [];
+    for (const acc of accounts) {
+      checked++;
+      if (!acc.refresh_token || acc.refresh_token.length < 20) {
+        needsAuth++;
+        await addTag(acc.id, "needs_oauth_manual");
+        details.push({ email: acc.email, result: "needsAuth" });
+        continue;
+      }
+      let accessToken = "";
+      try {
+        const acctProxy = await resolveAccountProxy(acc.id);
+        const tr = await microsoftFetch(
+          "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+          { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({ grant_type: "refresh_token", client_id: OAUTH_CLIENT_ID,
+              refresh_token: acc.refresh_token!, scope: SCOPE }).toString() },
+          acctProxy
+        );
+        const td = await tr.json() as { access_token?: string; refresh_token?: string; error?: string; error_description?: string };
+        if (!tr.ok || !td.access_token) {
+          const errCode = td.error ?? "";
+          const errDesc = td.error_description ?? "";
+          const isAbuse = errCode === "invalid_grant" &&
+            (errDesc.includes("AADSTS70008") || errDesc.includes("disabled") || errDesc.includes("abuse"));
+          if (isAbuse) {
+            banned++; await addTag(acc.id, "abuse_mode", "suspended");
+            details.push({ email: acc.email, result: "banned", error: errCode });
+          } else {
+            needsAuth++; await addTag(acc.id, "token_invalid");
+            details.push({ email: acc.email, result: "needsAuth", error: errCode });
+          }
+          continue;
+        }
+        accessToken = td.access_token;
+        await execute(
+          "UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
+          [accessToken, td.refresh_token ?? acc.refresh_token, acc.id]
+        );
+      } catch (e: unknown) {
+        skipped++;
+        details.push({ email: acc.email, result: "error", error: String(e).slice(0, 80) });
+        continue;
+      }
+      try {
+        const acctProxy2 = await resolveAccountProxy(acc.id);
+        const gr = await microsoftFetch(
+          "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=1&$select=id",
+          { headers: { Authorization: `Bearer ${accessToken}` } },
+          acctProxy2
+        );
+        const gd = await gr.json() as { error?: { code?: string } };
+        if (gr.ok) {
+          valid++; await addTag(acc.id, "inbox_verified");
+          details.push({ email: acc.email, result: "valid" });
+        } else {
+          const code = gd.error?.code ?? "";
+          if (gr.status === 403 || code === "AccessDenied") {
+            banned++; await addTag(acc.id, "abuse_mode", "suspended");
+            details.push({ email: acc.email, result: "banned", error: code });
+          } else {
+            needsAuth++; await addTag(acc.id, "token_invalid");
+            details.push({ email: acc.email, result: "needsAuth", error: code });
+          }
+        }
+      } catch (e: unknown) {
+        skipped++;
+        details.push({ email: acc.email, result: "error", error: String(e).slice(0, 80) });
+      }
+      await new Promise(r => setTimeout(r, 200));
+    }
+    res.json({ success: true, checked, valid, needsAuth, banned, skipped, details });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+
 export default router;
