@@ -571,6 +571,36 @@ export const STEALTH_INIT = `
     });
   } catch (_) {}
 
+  // === getComputedStyle: spoof ActiveText system color (fixes hasKnownBgColor) ============
+  // Xvfb default X11 theme returns rgb(255,0,0) for CSS system color ActiveText.
+  // CreepJS: if background-color:ActiveText resolves to red → hasKnownBgColor=true → like-headless.
+  // Real desktop Chrome on Linux follows GTK theme and rarely returns pure red.
+  // Patch: intercept getComputedStyle only when el has explicit inline ActiveText bg-color.
+  try {
+    var _gCS = window.getComputedStyle.bind(window);
+    Object.defineProperty(window, "getComputedStyle", {
+      value: function getComputedStyle(el, pseudo) {
+        var result = _gCS(el, pseudo);
+        try {
+          if (el && el.getAttribute) {
+            var inl = el.getAttribute("style") || "";
+            if (/background-color\s*:\s*ActiveText/i.test(inl)) {
+              return new Proxy(result, {
+                get: function(t, p) {
+                  if (p === "backgroundColor") return "rgb(0, 120, 212)";
+                  var v = t[p];
+                  return typeof v === "function" ? v.bind(t) : v;
+                }
+              });
+            }
+          }
+        } catch(_2) {}
+        return result;
+      },
+      configurable: true, writable: true,
+    });
+  } catch (_) {}
+
 })();
 `;
 
