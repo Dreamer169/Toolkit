@@ -201,11 +201,23 @@ export const STEALTH_INIT = `
     }
   } catch (_) {}
 
-  // WebGL getParameter: NOT patched on main page.
-  // Patching GPU strings on main page (Intel Iris) while Worker keeps SwiftShader
-  // creates a GPU inconsistency that CreepJS flags as 33% headless.
-  // Binary-only (SwiftShader in both contexts) gives 0% headless / 0% stealth.
-  // The SwiftShader GPU is a 'like headless' marker but NOT a 'headless' conviction.
+  // WebGL vendor / renderer (Linux ANGLE/Mesa — v8.00 fixed Mac-string regression)
+  try {
+    const getParam = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function (p) {
+      if (p === 37445) return 'Google Inc. (Intel)';            // UNMASKED_VENDOR_WEBGL
+      if (p === 37446) return 'ANGLE (Intel, Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2), OpenGL 4.6)'; // UNMASKED_RENDERER_WEBGL
+      return getParam.apply(this, arguments);
+    };
+    if (typeof WebGL2RenderingContext !== 'undefined') {
+      const getParam2 = WebGL2RenderingContext.prototype.getParameter;
+      WebGL2RenderingContext.prototype.getParameter = function (p) {
+        if (p === 37445) return 'Google Inc. (Intel)';
+        if (p === 37446) return 'ANGLE (Intel, Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2), OpenGL 4.6)';
+        return getParam2.apply(this, arguments);
+      };
+    }
+  } catch (_) {}
 
   // window.outerWidth/Height = innerWidth/Height when 0 (headless leak)
   try {
@@ -245,12 +257,18 @@ export const STEALTH_INIT = `
   // Notification permission default
   try { if (window.Notification && Notification.permission === 'denied') Object.defineProperty(Notification, 'permission', { get: () => 'default' }); } catch (_) {}
 
-  // NOTE: Function.prototype.toString patching removed.
-  // CreepJS fingerprints this exact pattern (fakeFns WeakSet + toString override)
-  // as a known stealth tool signature — causes 40% stealth score.
-  // WebGL getParameter wrapped via Proxy below: V8 spec guarantees
-  // Proxy(nativeFn).toString() == 'function getParameter() { [native code] }'
-  const fakeFns = new WeakSet(); // kept as no-op for safe console protection code
+  // toString-leak: hide our patches by overriding fn.toString to native pattern
+  const nativeToString = Function.prototype.toString;
+  const fakeFns = new WeakSet();
+  const wrap = (fn) => { fakeFns.add(fn); return fn; };
+  Function.prototype.toString = function () {
+    if (fakeFns.has(this)) return 'function ' + (this.name || '') + '() { [native code] }';
+    return nativeToString.call(this);
+  };
+  // mark our overrides
+  try { wrap(WebGLRenderingContext.prototype.getParameter); } catch (_) {}
+  try { wrap(window.navigator.permissions.query); } catch (_) {}
+  try { wrap(Function.prototype.toString); } catch (_) {}
 
   // === WebRTC IP leak protection ===
   // Sites probe local/public IP via RTCPeerConnection ICE candidates. Strip
@@ -507,95 +525,109 @@ export const STEALTH_INIT = `
     } catch (_) {}
   } catch (_) {}
 
-  // === pdfViewerEnabled (Chrome ≥ 105) ===
-  try {
-    Object.defineProperty(Navigator.prototype, 'pdfViewerEnabled', { get: () => true, configurable: true });
-  } catch (_) {}
 
-  // === Speech Synthesis — headless has 0 voices; inject realistic Google voices ===
+  // === Speech Synthesis voices (headless = 0 voices) =======================
   try {
-    const _fakeVoices = [
-      { voiceURI:'Google US English',               name:'Google US English',               lang:'en-US', localService:false, default:true  },
-      { voiceURI:'Google UK English Female',         name:'Google UK English Female',         lang:'en-GB', localService:false, default:false },
-      { voiceURI:'Google UK English Male',           name:'Google UK English Male',           lang:'en-GB', localService:false, default:false },
-      { voiceURI:'Google Deutsch',                   name:'Google Deutsch',                   lang:'de-DE', localService:false, default:false },
-      { voiceURI:'Google español',                   name:'Google español',                   lang:'es-ES', localService:false, default:false },
-      { voiceURI:'Google español de Estados Unidos', name:'Google español de Estados Unidos', lang:'es-US', localService:false, default:false },
-      { voiceURI:'Google français',                  name:'Google français',                  lang:'fr-FR', localService:false, default:false },
-      { voiceURI:'Google हिन्दी',                   name:'Google हिन्दी',                   lang:'hi-IN', localService:false, default:false },
-      { voiceURI:'Google Indonesia',                 name:'Google Indonesia',                 lang:'id-ID', localService:false, default:false },
-      { voiceURI:'Google italiano',                  name:'Google italiano',                  lang:'it-IT', localService:false, default:false },
-      { voiceURI:'Google 日本語',                    name:'Google 日本語',                    lang:'ja-JP', localService:false, default:false },
-      { voiceURI:'Google 한국의',                    name:'Google 한국의',                    lang:'ko-KR', localService:false, default:false },
-      { voiceURI:'Google Nederlands',                name:'Google Nederlands',                lang:'nl-NL', localService:false, default:false },
-      { voiceURI:'Google polski',                    name:'Google polski',                    lang:'pl-PL', localService:false, default:false },
-      { voiceURI:'Google português do Brasil',       name:'Google português do Brasil',       lang:'pt-BR', localService:false, default:false },
-      { voiceURI:'Google русский',                   name:'Google русский',                   lang:'ru-RU', localService:false, default:false },
-      { voiceURI:'Google 普通话（中国大陆）',          name:'Google 普通话（中国大陆）',          lang:'zh-CN', localService:false, default:false },
-      { voiceURI:'Google 粤語（香港）',               name:'Google 粤語（香港）',               lang:'zh-HK', localService:false, default:false },
-      { voiceURI:'Google 國語（臺灣）',               name:'Google 國語（臺灣）',               lang:'zh-TW', localService:false, default:false },
+    var _fv = [
+      { voiceURI:'Google US English',        name:'Google US English',        lang:'en-US', localService:false, default:true  },
+      { voiceURI:'Google UK English Female', name:'Google UK English Female', lang:'en-GB', localService:false, default:false },
+      { voiceURI:'Google UK English Male',   name:'Google UK English Male',   lang:'en-GB', localService:false, default:false },
+      { voiceURI:'Google Deutsch',           name:'Google Deutsch',           lang:'de-DE', localService:false, default:false },
+      { voiceURI:'Google espanol',           name:'Google espanol',           lang:'es-ES', localService:false, default:false },
+      { voiceURI:'Google francais',          name:'Google francais',          lang:'fr-FR', localService:false, default:false },
+      { voiceURI:'Google italiano',          name:'Google italiano',          lang:'it-IT', localService:false, default:false },
+      { voiceURI:'Google nihongo',           name:'Google nihongo',           lang:'ja-JP', localService:false, default:false },
+      { voiceURI:'Google hangugeo',          name:'Google hangugeo',          lang:'ko-KR', localService:false, default:false },
+      { voiceURI:'Google portugues',         name:'Google portugues',         lang:'pt-BR', localService:false, default:false },
+      { voiceURI:'Google russkiy',           name:'Google russkiy',           lang:'ru-RU', localService:false, default:false },
+      { voiceURI:'Google putonghua',         name:'Google putonghua',         lang:'zh-CN', localService:false, default:false },
     ];
-    // Make each voice look like a real SpeechSynthesisVoice
-    _fakeVoices.forEach(v => { Object.setPrototypeOf(v, SpeechSynthesisVoice?.prototype || Object.prototype); });
+    _fv.forEach(function(v) { try { Object.setPrototypeOf(v, SpeechSynthesisVoice.prototype); } catch(_){} });
     if (typeof speechSynthesis !== 'undefined') {
-      Object.defineProperty(speechSynthesis, 'getVoices', {
-        value: function() { return _fakeVoices; },
-        writable: true, configurable: true,
-      });
-      // Dispatch voiceschanged so scripts waiting on it resolve immediately
-      try { speechSynthesis.dispatchEvent(new Event('voiceschanged')); } catch (_) {}
+      Object.defineProperty(speechSynthesis, 'getVoices', { value: function(){ return _fv; }, writable:true, configurable:true });
+      try { speechSynthesis.dispatchEvent(new Event('voiceschanged')); } catch(_) {}
     }
     if (typeof SpeechSynthesis !== 'undefined') {
-      Object.defineProperty(SpeechSynthesis.prototype, 'getVoices', {
-        value: function() { return _fakeVoices; },
-        writable: true, configurable: true,
-      });
+      Object.defineProperty(SpeechSynthesis.prototype, 'getVoices', { value: function(){ return _fv; }, writable:true, configurable:true });
     }
   } catch (_) {}
 
-  // === Keyboard / input device presence (headless leak: no keyboard events) ===
-  // navigator.keyboard exists on real Chrome; headless may suppress it
+  // === Kasada/CF console detection (b field) — mark via existing fakeFns ===
   try {
-    if (navigator.keyboard && typeof navigator.keyboard.getLayoutMap === 'function') {
-      // Already present — no-op
-    } else if (!navigator.keyboard) {
+    ["log","warn","error","info","debug","trace","dir","table","count","countReset",
+     "group","groupCollapsed","groupEnd","time","timeEnd","timeLog","assert","clear"
+    ].forEach(function(m) {
+      try { if (typeof console[m] === "function") fakeFns.add(console[m]); } catch(_) {}
+    });
+  } catch(_) {}
+
+  // === Keyboard API presence (headless leak) ================================
+  try {
+    if (typeof navigator.keyboard === 'undefined') {
       Object.defineProperty(Navigator.prototype, 'keyboard', {
-        get: () => ({ getLayoutMap: () => Promise.resolve(new Map()) }),
+        get: function() { return { getLayoutMap: function() { return Promise.resolve(new Map()); } }; },
         configurable: true,
       });
     }
   } catch (_) {}
 
-  // === Permissions API — override headless "denied" defaults ===
+  // === Permissions API — override headless "denied" defaults ================
   try {
-    const _origPQ = navigator.permissions?.query?.bind(navigator.permissions);
-    if (_origPQ) {
+    var _oPQ = navigator.permissions && navigator.permissions.query && navigator.permissions.query.bind(navigator.permissions);
+    if (_oPQ) {
       Object.defineProperty(navigator.permissions, 'query', {
         value: function query(desc) {
-          const name = desc?.name;
-          // headless returns "denied" for these; real Chrome returns "default"/"granted"
-          if (name === 'notifications') return Promise.resolve({ state: 'default', onchange: null });
-          if (name === 'clipboard-read' || name === 'clipboard-write') return Promise.resolve({ state: 'prompt', onchange: null });
-          return _origPQ(desc);
+          var n = desc && desc.name;
+          if (n === 'notifications') return Promise.resolve({ state: 'default', onchange: null });
+          if (n === 'clipboard-read' || n === 'clipboard-write') return Promise.resolve({ state: 'prompt', onchange: null });
+          return _oPQ(desc);
         },
         writable: true, configurable: true,
       });
     }
   } catch (_) {}
 
-  // === console detection protection (Kasada/CF 'b' field) ===
+  // === pdfViewerEnabled (Chrome ≥ 105) ===
   try {
-    var _cm = ["log","warn","error","info","debug","trace","dir","table","count","countReset","group","groupCollapsed","groupEnd","time","timeEnd","timeLog","assert","clear"];
-    _cm.forEach(function(m) {
-      try { if (typeof console[m] === "function") fakeFns.add(console[m]); } catch(_) {}
-    });
-  } catch(_) {}
+    Object.defineProperty(Navigator.prototype, 'pdfViewerEnabled', { get: () => true, configurable: true });
+  } catch (_) {}
+})();
+`;
 
-  // === Worker context note ===
-  // Playwright addInitScript does NOT inject into DedicatedWorker/SharedWorker.
-  // Wrapping window.Worker IS detectable: Function.prototype.toString native-code check
-  // will expose the custom wrapper. Do NOT patch Worker constructor here.
-  // The binary (fingerprint-chromium) provides consistent values in workers.
+
+// WORKER_STEALTH_PATCH: injected into DedicatedWorkers via page.on('worker').
+// addInitScript() does NOT reach Workers. getHighEntropyValues() is Promise-
+// based, so this patch wins the race against the worker's early async calls.
+const WORKER_STEALTH_PATCH = `
+(function() {
+  try {
+    if (typeof navigator !== 'undefined' && !navigator.userAgentData) {
+      var _b = [
+        {brand:'Chromium',version:'144'},
+        {brand:'Google Chrome',version:'144'},
+        {brand:'Not:A-Brand',version:'99'}
+      ];
+      Object.defineProperty(navigator, 'userAgentData', {
+        value: {
+          brands: _b, mobile: false, platform: 'Linux',
+          getHighEntropyValues: function(hints) {
+            return Promise.resolve({
+              brands: _b, mobile: false, platform: 'Linux',
+              platformVersion: '6.8.0', architecture: 'x86', bitness: '64',
+              model: '', uaFullVersion: '144.0.7559.132',
+              fullVersionList: [
+                {brand:'Chromium',version:'144.0.7559.132'},
+                {brand:'Google Chrome',version:'144.0.7559.132'},
+                {brand:'Not:A-Brand',version:'99.0.0.0'}
+              ], wow64: false,
+            });
+          },
+          toJSON: function() { return {brands:_b,mobile:false,platform:'Linux'}; },
+        },
+        configurable: true,
+      });
+    }
+  } catch(_) {}
 })();
 `;
 
@@ -739,6 +771,8 @@ async function newFreshContext(): Promise<BrowserContext> {
   });
   ctx.on("close", () => { closedContexts.add(ctx); });
   await ctx.addInitScript(STEALTH_INIT);
+  // Inject userAgentData patch into DedicatedWorkers (addInitScript doesn't reach them)
+  ctx.on("page", (p) => { p.on("worker", (w) => { w.evaluate(WORKER_STEALTH_PATCH).catch(() => {}); }); });
   return ctx;
 }
 
@@ -814,6 +848,7 @@ async function getStickyContext(hostname: string): Promise<BrowserContext> {
   }).then(async (c) => {
     c.on("close", () => { closedContexts.add(c); });
     await c.addInitScript(STEALTH_INIT);
+    c.on("page", (p) => { p.on("worker", (w) => { w.evaluate(WORKER_STEALTH_PATCH).catch(() => {}); }); });
     try { await attachGoogleProxyRouting(c); } catch (e) { console.error("[google-route] attach failed:", (e as Error).message); }
     return c;
   });
