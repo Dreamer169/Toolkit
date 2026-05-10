@@ -293,16 +293,47 @@ def solve_turnstile_token(dx: str, p: str) -> Optional[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _free_port(lo=12000, hi=29999):
+    """
+    File-lock based port reservation — safe for parallel processes.
+    Each caller atomically creates /tmp/port_<p>.lock before returning p,
+    so concurrent callers never get the same port.
+    Stale locks (processes that crashed) are cleaned up automatically.
+    """
+    import fcntl, errno as _errno
     tried: set = set()
     while len(tried) < (hi - lo):
         p = random.randint(lo, hi)
         if p in tried:
             continue
         tried.add(p)
+        # Quick TCP check first (fast path: port actually in use)
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            if s.connect_ex(("127.0.0.1", p)) != 0:
-                return p
+            if s.connect_ex(("127.0.0.1", p)) == 0:
+                continue  # port is listening, skip
+        # Atomic file-lock reservation (prevents race between parallel processes)
+        lock_path = f"/tmp/port_{p}.lock"
+        try:
+            fd = open(lock_path, "w")
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fd.write(str(os.getpid()))
+            fd.flush()
+            # Double-check TCP after locking
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
+                s2.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                if s2.connect_ex(("127.0.0.1", p)) != 0:
+                    # Port is free AND we hold the lock — reserve it
+                    # Lock file is kept open; GC closes it when Chrome context exits
+                    _free_port._locks = getattr(_free_port, "_locks", [])
+                    _free_port._locks.append(fd)  # keep fd alive
+                    return p
+                else:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    fd.close()
+        except OSError:
+            # Another process locked this port — skip
+            try: fd.close()
+            except: pass
     raise RuntimeError("no free port")
 
 
@@ -441,9 +472,9 @@ async def _pydoll_register(
                 break
         return "".join(parts)
 
-    async def _bypass_wait(tab, label="", rounds=2, per_round=10) -> bool:
+    async def _bypass_wait(tab, label="", rounds=3, per_round=20) -> bool:
         """等 Turnstile iframe → 多轮 bypass → reload 兜底"""
-        for i in range(12):
+        for i in range(18):
             await asyncio.sleep(1)
             n_iframe = int(_s(await tab.execute_script(
                 "document.querySelectorAll('iframe[src*=\"challenges.cloudflare\"]').length",
@@ -458,7 +489,7 @@ async def _pydoll_register(
             try:
                 _bp_t0 = time.time()
                 log(f"  [{label}] bypass start round={rnd+1}")
-                await tab._bypass_cloudflare({}, time_to_wait_captcha=20)
+                await tab._bypass_cloudflare({}, time_to_wait_captcha=35)
                 log(f"  [{label}] bypass done round={rnd+1} bp={time.time()-_bp_t0:.1f}s")
             except Exception as e:
                 log(f"  [{label}] bypass err round={rnd+1}: {e}")
@@ -471,7 +502,7 @@ async def _pydoll_register(
                 if i % 5 == 4:
                     log(f"  [{label}] [{i+1}s] token len={n} ...")
             log(f"  [{label}] round {rnd+1} token=0, retry bypass...")
-            await asyncio.sleep(2)
+            await asyncio.sleep(3 + rnd * 2)  # progressive backoff: 3s, 5s, 7s
 
         # 最终兜底: reload
         log(f"  [{label}] all rounds failed, reloading...")
@@ -487,7 +518,7 @@ async def _pydoll_register(
         try:
             _bp_t0 = time.time()
             log(f"  [{label}] bypass start reload")
-            await tab._bypass_cloudflare({}, time_to_wait_captcha=25)
+            await tab._bypass_cloudflare({}, time_to_wait_captcha=35)
             log(f"  [{label}] bypass done reload bp={time.time()-_bp_t0:.1f}s")
         except Exception as e:
             log(f"  [{label}] reload bypass err: {e}")
