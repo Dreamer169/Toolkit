@@ -489,7 +489,7 @@ async def _pydoll_register(
             try:
                 _bp_t0 = time.time()
                 log(f"  [{label}] bypass start round={rnd+1}")
-                await tab._bypass_cloudflare({}, time_to_wait_captcha=35)
+                await tab._bypass_cloudflare({}, time_to_wait_captcha=10)
                 log(f"  [{label}] bypass done round={rnd+1} bp={time.time()-_bp_t0:.1f}s")
             except Exception as e:
                 log(f"  [{label}] bypass err round={rnd+1}: {e}")
@@ -518,7 +518,7 @@ async def _pydoll_register(
         try:
             _bp_t0 = time.time()
             log(f"  [{label}] bypass start reload")
-            await tab._bypass_cloudflare({}, time_to_wait_captcha=35)
+            await tab._bypass_cloudflare({}, time_to_wait_captcha=10)
             log(f"  [{label}] bypass done reload bp={time.time()-_bp_t0:.1f}s")
         except Exception as e:
             log(f"  [{label}] reload bypass err: {e}")
