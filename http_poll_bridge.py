@@ -5,7 +5,7 @@ Connects to sub-node /api/stream/open|read|write (HTTP polling, not WS).
 No Replit WS proxy blocking. Looks like normal HTTP data streaming.
 
 Env:
-  GATEWAY_API   - local gateway API base URL (default http://localhost:8080/api)
+  GATEWAY_API   - local gateway API base URL (default http://localhost:8081/api)
   STREAM_TOKEN  - auth token matching sub-node TUNNEL_TOKEN
   SUBNODE_URLS  - manual seed URLs (comma-separated), used when gateway unavailable
   SOCKS_PORT    - local SOCKS5 port (default 1092)

@@ -190,6 +190,7 @@ module.exports = {
       "cwd": "/root/Toolkit",
       "env": {
         "BRIDGE_PORT": "1089",
+        "GATEWAY_API": "http://localhost:8081/api",
         "WS_URL": "wss://gh-cli-install--jessicaphilli10.replit.app/api/stream/ws",
         "WS_TOKEN": "1NnCcQJcNgwlTDPEnDIkWEKzWIdmZ/4+BmsOp1/jLP6ojCWsv8+xTwcLj34Mu2viWy0q5SEoDP0q2qE5xHaRRg=="
       },
@@ -230,7 +231,7 @@ module.exports = {
       "env": {
         "SOCKS_PORT": "1092",
         "STREAM_TOKEN": "123456",
-        "GATEWAY_API": "http://localhost:8080/api",
+        "GATEWAY_API": "http://localhost:8081/api",
         "SUBNODE_URLS": "https://gh-cli-direct--elizabetha96.replit.app",
         "REFRESH_SECS": "30",
         "PYTHONUNBUFFERED": "1"
@@ -248,7 +249,7 @@ module.exports = {
       "env": {
         "SOCKS_PORT": "1093",
         "STREAM_TOKEN": "123456",
-        "GATEWAY_API": "http://localhost:8080/api",
+        "GATEWAY_API": "http://localhost:8081/api",
         "SUBNODE_URLS": "https://gh-cli-direct--elizabetha96.replit.app",
         "REFRESH_SECS": "30",
         "PYTHONUNBUFFERED": "1"
@@ -266,7 +267,7 @@ module.exports = {
       "env": {
         "SOCKS_PORT": "1094",
         "STREAM_TOKEN": "123456",
-        "GATEWAY_API": "http://localhost:8080/api",
+        "GATEWAY_API": "http://localhost:8081/api",
         "SUBNODE_URLS": "https://gh-cli-direct--elizabetha96.replit.app",
         "REFRESH_SECS": "30",
         "PYTHONUNBUFFERED": "1"
@@ -284,7 +285,7 @@ module.exports = {
       "env": {
         "SOCKS_PORT": "1095",
         "STREAM_TOKEN": "123456",
-        "GATEWAY_API": "http://localhost:8080/api",
+        "GATEWAY_API": "http://localhost:8081/api",
         "SUBNODE_URLS": "https://gh-cli-direct--elizabetha96.replit.app",
         "REFRESH_SECS": "30",
         "PYTHONUNBUFFERED": "1"

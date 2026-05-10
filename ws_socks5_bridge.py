@@ -4,7 +4,7 @@ WS-SOCKS5 Bridge — 动态多节点版 (Protocol-A compatible)
 后台线程每 REFRESH_SECS 秒从本地网关同步 friend-openai 节点列表。
 
 Env:
-  GATEWAY_API   - 本地网关 (default http://localhost:8080/api)
+  GATEWAY_API   - 本地网关 (default http://localhost:8081/api)
   WS_TOKEN      - 隧道认证 token
   BRIDGE_HOST   - 监听地址 (default 127.0.0.1)
   BRIDGE_PORT   - 监听端口 (default 1089)

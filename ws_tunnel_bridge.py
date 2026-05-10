@@ -3,7 +3,7 @@
 动态从网关发现 friend-openai 节点，每 REFRESH_SECS 秒同步一次。
 
 Env:
-  GATEWAY_API   - 本地网关 (default http://localhost:8080/api)
+  GATEWAY_API   - 本地网关 (default http://localhost:8081/api)
   WS_TOKEN      - 隧道认证 token
   SOCKS_PORT    - 本地 SOCKS5 端口 (default 1091)
   REFRESH_SECS  - 节点刷新间隔 (default 60)
