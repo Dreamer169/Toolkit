@@ -592,9 +592,8 @@ module.exports = {
     }
     ,{
       "name": "text-captcha-yolo",
-      "script": "/root/Text_select_captcha/app/main.py",
-      "interpreter": "python3",
-      "interpreter_args": "-m uvicorn app.main:app --host 0.0.0.0 --port 8767",
+      "script": "/root/Text_select_captcha/start.sh",
+      "interpreter": "bash",
       "cwd": "/root/Text_select_captcha",
       "env": {
         "PYTHONUNBUFFERED": "1"
