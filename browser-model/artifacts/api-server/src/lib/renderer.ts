@@ -500,40 +500,22 @@ export const STEALTH_INIT = `
       return _rngState / 4294967296;
     };
 
-    // -- Canvas 2D toDataURL / toBlob: 渲染前最低位扰动 --
-    var _origToDataURL = HTMLCanvasElement.prototype.toDataURL;
-    HTMLCanvasElement.prototype.toDataURL = function () {
-      try {
-        var ctx = this.getContext && this.getContext('2d');
-        if (ctx && this.width > 0 && this.height > 0) {
-          var w = Math.min(this.width, 16), h = Math.min(this.height, 16);
-          var img = ctx.getImageData(0, 0, w, h);
-          var d = img.data;
-          for (var i = 0; i < d.length; i += 4) {
-            if (d[i + 3] === 0) continue; // skip fully transparent pixels
-            d[i]     = (d[i]     ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
-            d[i + 1] = (d[i + 1] ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
-            d[i + 2] = (d[i + 2] ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
-          }
-          ctx.putImageData(img, 0, 0);
-        }
-      } catch (_) {}
-      return _origToDataURL.apply(this, arguments);
-    };
-    try { wrap(HTMLCanvasElement.prototype.toDataURL); } catch (_) {}
-
-    // -- CanvasRenderingContext2D.getImageData: 末位扰动 (前 1024 byte 够) --
+    // -- CanvasRenderingContext2D.getImageData: GeekezBrowser alpha-only sparse noise --
+    // v8.90: REPLACED RGB-LSB XOR (creates detectable 'rgba noise' on all 3 channels)
+    // with alpha-only perturbation at every 53rd pixel (prime stride avoids grid patterns).
+    // CreepJS rgba-noise check compares R/G/B channel statistics — alpha-only is invisible
+    // to that check while still breaking cross-session canvas hashing. No putImageData
+    // permanently mutating the canvas (which caused double-noise via toDataURL path).
     var _origGID = CanvasRenderingContext2D.prototype.getImageData;
     CanvasRenderingContext2D.prototype.getImageData = function () {
       var img = _origGID.apply(this, arguments);
       try {
         var d = img.data;
-        var n = Math.min(d.length, 1024);
-        for (var i = 0; i < n; i += 4) {
-          if (d[i + 3] === 0) continue; // skip fully transparent pixels
-          d[i]     = (d[i]     ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
-          d[i + 1] = (d[i + 1] ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
-          d[i + 2] = (d[i + 2] ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
+        var noiseVal = ((_noiseSeed & 1) === 0) ? 1 : -1;
+        for (var i = 0; i < d.length; i += 4) {
+          if ((i / 4 + _noiseSeed) % 53 === 0 && d[i + 3] > 0 && d[i + 3] < 255) {
+            d[i + 3] = Math.max(1, Math.min(254, d[i + 3] + noiseVal));
+          }
         }
       } catch (_) {}
       return img;
@@ -557,39 +539,9 @@ export const STEALTH_INIT = `
       }
     } catch (_) {}
 
-    // -- WebGL readPixels: ArrayBufferView 尾扰 --
-    try {
-      if (typeof WebGLRenderingContext !== 'undefined' && WebGLRenderingContext.prototype.readPixels) {
-        var _origRP = WebGLRenderingContext.prototype.readPixels;
-        WebGLRenderingContext.prototype.readPixels = function () {
-          var ret = _origRP.apply(this, arguments);
-          try {
-            var buf = arguments[6];
-            if (buf && buf.length) {
-              var n = Math.min(buf.length, 256);
-              for (var i = 0; i < n; i++) buf[i] = (buf[i] ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
-            }
-          } catch (_) {}
-          return ret;
-        };
-        try { wrap(WebGLRenderingContext.prototype.readPixels); } catch (_) {}
-      }
-      if (typeof WebGL2RenderingContext !== 'undefined' && WebGL2RenderingContext.prototype.readPixels) {
-        var _origRP2 = WebGL2RenderingContext.prototype.readPixels;
-        WebGL2RenderingContext.prototype.readPixels = function () {
-          var ret = _origRP2.apply(this, arguments);
-          try {
-            var buf = arguments[6];
-            if (buf && buf.length) {
-              var n = Math.min(buf.length, 256);
-              for (var i = 0; i < n; i++) buf[i] = (buf[i] ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
-            }
-          } catch (_) {}
-          return ret;
-        };
-        try { wrap(WebGL2RenderingContext.prototype.readPixels); } catch (_) {}
-      }
-    } catch (_) {}
+    // -- WebGL readPixels: noise REMOVED (v8.90) --
+    // RGB-XOR on readPixels created detectable 'rgba noise' pattern.
+    // fingerprint-chromium --fingerprint seed handles WebGL natively.
   } catch (_) {}
 
 
@@ -627,6 +579,109 @@ export const STEALTH_INIT = `
       try { if (typeof console[m] === "function") _cslRefs.push(console[m]); } catch(_) {}
     });
   } catch(_) {}
+
+  // === Missing Chrome 144 API stubs — fix "load: Like undefined" (v8.90) ====
+  // Real Chrome 144 on Linux desktop exposes these APIs; absence is flagged by
+  // CreepJS as 'Like undefined' which inflates the like-headless percentage.
+
+  // File System Access API
+  try {
+    if (typeof window.showOpenFilePicker === 'undefined') {
+      window.showOpenFilePicker = function showOpenFilePicker() {
+        return Promise.reject(new DOMException('The user aborted a request.', 'AbortError'));
+      };
+    }
+    if (typeof window.showSaveFilePicker === 'undefined') {
+      window.showSaveFilePicker = function showSaveFilePicker() {
+        return Promise.reject(new DOMException('The user aborted a request.', 'AbortError'));
+      };
+    }
+    if (typeof window.showDirectoryPicker === 'undefined') {
+      window.showDirectoryPicker = function showDirectoryPicker() {
+        return Promise.reject(new DOMException('The user aborted a request.', 'AbortError'));
+      };
+    }
+  } catch (_) {}
+
+  // File Handling API — launchQueue
+  try {
+    if (typeof window.launchQueue === 'undefined') {
+      var _lq = { _handlers: [], setConsumer: function(cb) { this._handlers.push(cb); } };
+      Object.defineProperty(window, 'launchQueue', { value: _lq, configurable: true, writable: true });
+    }
+  } catch (_) {}
+
+  // Document Picture-in-Picture API
+  try {
+    if (typeof window.documentPictureInPicture === 'undefined') {
+      Object.defineProperty(window, 'documentPictureInPicture', {
+        value: { requestWindow: function() { return Promise.reject(new DOMException('Not supported', 'NotSupportedError')); } },
+        configurable: true, writable: true,
+      });
+    }
+  } catch (_) {}
+
+  // navigator.userActivation
+  try {
+    if (typeof navigator.userActivation === 'undefined') {
+      Object.defineProperty(Navigator.prototype, 'userActivation', {
+        get: _mkN(function userActivation() { return { hasBeenActive: true, isActive: false }; }, 'get userActivation'),
+        configurable: true,
+      });
+    }
+  } catch (_) {}
+
+  // navigator.scheduling (Scheduler API — Chrome 94+)
+  try {
+    if (typeof navigator.scheduling === 'undefined') {
+      Object.defineProperty(Navigator.prototype, 'scheduling', {
+        get: function() { return { isInputPending: function() { return false; } }; },
+        configurable: true,
+      });
+    }
+  } catch (_) {}
+
+  // navigator.virtualKeyboard (Virtual Keyboard API — Chrome 94+)
+  try {
+    if (typeof navigator.virtualKeyboard === 'undefined') {
+      Object.defineProperty(Navigator.prototype, 'virtualKeyboard', {
+        get: function() {
+          return { show: function(){}, hide: function(){}, overlaysContent: false,
+                   boundingRect: { x:0, y:0, width:0, height:0, top:0, right:0, bottom:0, left:0 },
+                   addEventListener: function(){}, removeEventListener: function(){} };
+        },
+        configurable: true,
+      });
+    }
+  } catch (_) {}
+
+  // navigator.windowControlsOverlay (Window Controls Overlay — Chrome 92+)
+  try {
+    if (typeof navigator.windowControlsOverlay === 'undefined') {
+      Object.defineProperty(Navigator.prototype, 'windowControlsOverlay', {
+        get: function() {
+          return { visible: false,
+                   getTitlebarAreaRect: function() { return { x:0,y:0,width:0,height:0 }; },
+                   addEventListener: function(){}, removeEventListener: function(){} };
+        },
+        configurable: true,
+      });
+    }
+  } catch (_) {}
+
+  // navigator.ink (Ink API — Chrome 94+)
+  try {
+    if (typeof navigator.ink === 'undefined') {
+      Object.defineProperty(Navigator.prototype, 'ink', {
+        get: function() {
+          return { requestPresenter: function() {
+            return Promise.reject(new DOMException('Not supported', 'NotSupportedError'));
+          }};
+        },
+        configurable: true,
+      });
+    }
+  } catch (_) {}
 
   // === Keyboard API presence (headless leak) ================================
   try {
@@ -880,8 +935,8 @@ const WORKER_STEALTH_PATCH = `(function() {
   // in workers -> SwiftShader leaks -> hasSwiftShader = TRUE (extra like-headless flag).
   // GeekezBrowser-style: hook getParameter on prototype, not instance (PixelScan-safe).
   try {
-    var _W_RENDERER = "ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6 (Core Profile) Mesa 23.2.1)";
-    var _W_VENDOR   = "Google Inc. (Intel)";
+    var _W_RENDERER = "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 4080/PCIe/SSE2, OpenGL 4.5.0)";
+    var _W_VENDOR   = "Google Inc. (NVIDIA Corporation)";
     var _W_GL_KEY   = "__wGlSpoofed__";
     var _W_DBG_EXT  = { UNMASKED_VENDOR_WEBGL: 37445, UNMASKED_RENDERER_WEBGL: 37446 };
 

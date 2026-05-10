@@ -453,8 +453,10 @@ async def _pydoll_register(
 
         for rnd in range(rounds):
             try:
+                _bp_t0 = time.time()
+                log(f"  [{label}] bypass start round={rnd+1}")
                 await tab._bypass_cloudflare({}, time_to_wait_captcha=20)
-                log(f"  [{label}] bypass OK round={rnd+1}")
+                log(f"  [{label}] bypass done round={rnd+1} bp={time.time()-_bp_t0:.1f}s")
             except Exception as e:
                 log(f"  [{label}] bypass err round={rnd+1}: {e}")
             for i in range(per_round):
@@ -480,7 +482,10 @@ async def _pydoll_register(
             if n_iframe > 0:
                 break
         try:
+            _bp_t0 = time.time()
+            log(f"  [{label}] bypass start reload")
             await tab._bypass_cloudflare({}, time_to_wait_captcha=25)
+            log(f"  [{label}] bypass done reload bp={time.time()-_bp_t0:.1f}s")
         except Exception as e:
             log(f"  [{label}] reload bypass err: {e}")
         for i in range(20):
@@ -855,7 +860,10 @@ async def http_login_hybrid(
             # bypass 登录 Turnstile
             for rnd in range(3):
                 try:
+                    _bp_t0 = time.time()
+                    log(f"  [login_bypass] bypass start round={rnd+1}")
                     await tab._bypass_cloudflare({}, time_to_wait_captcha=15)
+                    log(f"  [login_bypass] bypass done round={rnd+1} bp={time.time()-_bp_t0:.1f}s")
                 except Exception as e:
                     log(f"  [login_bypass] round {rnd+1} err: {e}")
                 for i in range(15):
