@@ -58365,36 +58365,71 @@ var STEALTH_INIT = `
 
   // languages
   // languages \u2014 patch prototype first, then instance (handles ungoogled-chromium non-configurable)
-  try { Object.defineProperty(Navigator.prototype, 'languages', { get: () => ['en-US', 'en'], configurable: true, enumerable: true }); } catch (_) {}
-  try { Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'], configurable: true, enumerable: true }); } catch (_) {}
+  // Cache the frozen array so identity checks pass: navigator.languages === navigator.languages \u2192 true
+  try {
+    const _cachedLangs = Object.freeze(['en-US', 'en']);
+    Object.defineProperty(Navigator.prototype, 'languages', { get: () => _cachedLangs, configurable: true, enumerable: true });
+  } catch (_) {}
+  // navigator instance-level languages REMOVED: makes hasOwnProperty('languages')=true. Prototype override above is sufficient.
 
   // platform / hardwareConcurrency / deviceMemory
   try { Object.defineProperty(Navigator.prototype, 'platform', { get: () => 'Linux x86_64', configurable: true }); } catch (_) {}
-  try { Object.defineProperty(Navigator.prototype, 'hardwareConcurrency', { get: () => 8, configurable: true }); } catch (_) {}
-  try { Object.defineProperty(Navigator.prototype, 'deviceMemory', { get: () => 8, configurable: true }); } catch (_) {}
-  try { Object.defineProperty(Navigator.prototype, 'maxTouchPoints', { get: () => 0, configurable: true }); } catch (_) {}
+  try { Object.defineProperty(Navigator.prototype, 'hardwareConcurrency', { get: () => 4, configurable: true }); } catch (_) {}
+  try { Object.defineProperty(Navigator.prototype, 'deviceMemory', { get: () => 4, configurable: true }); } catch (_) {}
+  // maxTouchPoints REMOVED: native Chrome/Linux returns 0. Overriding changes configurable flag, PixelScan detects it.
 
-  // plugins / mimeTypes \u2014 PluginArray with realistic entries
+  // plugins / mimeTypes \u2014 PluginArray + MimeTypeArray with full bidirectional cross-references.
+  // PixelScan checks: plugin.item(0) \u2194 mimeTypes["application/pdf"].enabledPlugin consistency.
   try {
-    const makePlugin = (name, filename, desc) => {
+    // Create MimeType objects with proper properties
+    const makeMimeType = (type, desc, suffixes) => {
+      const mt = Object.create(MimeType.prototype);
+      Object.defineProperties(mt, {
+        type:        { value: type,     enumerable: true, configurable: true },
+        description: { value: desc,     enumerable: true, configurable: true },
+        suffixes:    { value: suffixes, enumerable: true, configurable: true },
+        enabledPlugin: { value: null, writable: true, enumerable: true, configurable: true },
+      });
+      return mt;
+    };
+
+    // Two MimeTypes for PDF
+    const mtPdf  = makeMimeType('application/pdf', 'Portable Document Format', 'pdf');
+    const mtTxt  = makeMimeType('text/pdf',        'Portable Document Format', 'pdf');
+
+    // Create Plugin objects with item()/namedItem() + MimeType back-reference
+    const makePlugin = (name, filename, desc, mimeTypes) => {
       const p = Object.create(Plugin.prototype);
+      const mts = mimeTypes || [];
+      mts.forEach((mt, i) => { p[i] = mt; p[mt.type] = mt; });
       Object.defineProperties(p, {
-        name: { value: name }, filename: { value: filename },
-        description: { value: desc }, length: { value: 1 },
+        name:        { value: name,       enumerable: true, configurable: true },
+        filename:    { value: filename,   enumerable: true, configurable: true },
+        description: { value: desc,       enumerable: true, configurable: true },
+        length:      { value: mts.length, enumerable: true, configurable: true },
       });
       return p;
     };
+
     const plugins = [
-      makePlugin('PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
-      makePlugin('Chrome PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
-      makePlugin('Chromium PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
-      makePlugin('Microsoft Edge PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
-      makePlugin('WebKit built-in PDF', 'internal-pdf-viewer', 'Portable Document Format'),
+      makePlugin('PDF Viewer',                'internal-pdf-viewer', 'Portable Document Format', [mtPdf, mtTxt]),
+      makePlugin('Chrome PDF Viewer',         'internal-pdf-viewer', 'Portable Document Format', [mtPdf, mtTxt]),
+      makePlugin('Chromium PDF Viewer',       'internal-pdf-viewer', 'Portable Document Format', [mtPdf, mtTxt]),
+      makePlugin('Microsoft Edge PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format', [mtPdf, mtTxt]),
+      makePlugin('WebKit built-in PDF',       'internal-pdf-viewer', 'Portable Document Format', [mtPdf, mtTxt]),
     ];
-    const arr = Object.create(PluginArray.prototype);
-    plugins.forEach((p, i) => { arr[i] = p; arr[p.name] = p; });
-    Object.defineProperty(arr, 'length', { value: plugins.length });
-    Object.defineProperty(Navigator.prototype, 'plugins', { get: () => arr, configurable: true });
+
+    // Set enabledPlugin back-reference on each MimeType
+    mtPdf.enabledPlugin = plugins[0];
+    mtTxt.enabledPlugin = plugins[0];
+
+    // Build PluginArray
+    const plugArr = Object.create(PluginArray.prototype);
+    plugins.forEach((p, i) => { plugArr[i] = p; plugArr[p.name] = p; });
+    Object.defineProperty(plugArr, 'length', { value: plugins.length, enumerable: true, configurable: true });
+
+    Object.defineProperty(Navigator.prototype, 'plugins', { get: () => plugArr, configurable: true });
+    // mimeTypes NOT overridden: native ungoogled-chromium values passed PixelScan (Clear).
   } catch (_) {}
 
   // \u2500\u2500 chrome.* stubs (comprehensive \u2014 direct assignment to bypass configurable:false) \u2500\u2500
@@ -58492,16 +58527,8 @@ var STEALTH_INIT = `
 
   } catch (_e) { /* silent */ }
 
-  // permissions: notifications quirk
-  try {
-    const origQuery = window.navigator.permissions && window.navigator.permissions.query;
-    if (origQuery) {
-      window.navigator.permissions.query = (params) =>
-        params && params.name === 'notifications'
-          ? Promise.resolve({ state: Notification.permission, name: 'notifications', onchange: null })
-          : origQuery.call(window.navigator.permissions, params);
-    }
-  } catch (_) {}
+  // permissions.query: patched on Permissions.prototype below \u2014 see "Permissions API" block.
+  // Instance-level assignment REMOVED: navigator.permissions.hasOwnProperty('query')=true triggers PixelScan.
 
   // WebGL getParameter: not patched \u2014 binary handles GPU spoofing consistently
   // in both main page and Worker contexts via fingerprint-chromium --fingerprint seed.
@@ -58545,19 +58572,24 @@ var STEALTH_INIT = `
   // === StorageEstimate quota spoof (YSbrowser --quota-seed) ====================
   // Headless chromium reports quota=0 or minimal; real Chrome shows ~120GB+
   try {
+    // Use prototype so navigator.storage.hasOwnProperty('estimate') stays false (PixelScan detects instance override)
     if (navigator.storage && navigator.storage.estimate) {
+      var _storProto = Object.getPrototypeOf(navigator.storage);
       var _origEst = navigator.storage.estimate.bind(navigator.storage);
-      Object.defineProperty(navigator.storage, 'estimate', {
-        value: function estimate() {
-          return _origEst().then(function(r) {
-            if (!r || !r.quota || r.quota < 1e9) {
-              return { quota: 128849018880, usage: Math.floor(Math.random() * 5e7 + 1e7) };
-            }
-            return r;
-          });
-        },
-        configurable: true, writable: true,
-      });
+      if (_storProto && !_storProto._estPatched) {
+        Object.defineProperty(_storProto, 'estimate', {
+          value: function estimate() {
+            return _origEst().then(function(r) {
+              if (!r || !r.quota || r.quota < 1e9) {
+                return { quota: 128849018880, usage: Math.floor(Math.random() * 5e7 + 1e7) };
+              }
+              return r;
+            });
+          },
+          configurable: true, writable: true,
+        });
+        _storProto._estPatched = true;
+      }
     }
   } catch(_) {}
 
@@ -58584,7 +58616,20 @@ var STEALTH_INIT = `
     if (_gbOrig) {
       Object.defineProperty(Navigator.prototype, 'getBattery', {
         value: function getBattery() {
-          return _gbOrig.call(this).catch(() => ({
+          return _gbOrig.call(this).then(function(bat) {
+            // BatteryManager.dischargingTime is non-configurable \u2014 use Proxy to intercept reads
+            if (!bat) return bat;
+            if (bat.dischargingTime !== null && bat.dischargingTime !== undefined) return bat;
+            // dischargingTime is null (server has no battery): wrap in Proxy returning Infinity
+            return new Proxy(bat, {
+              get: function(target, prop) {
+                if (prop === 'dischargingTime') return Infinity;
+                if (prop === 'chargingTime') return 0;
+                var v = target[prop];
+                return typeof v === 'function' ? v.bind(target) : v;
+              },
+            });
+          }).catch(() => ({
             charging: true, chargingTime: 0, dischargingTime: Infinity, level: 0.99,
             addEventListener(){}, removeEventListener(){}, dispatchEvent(){return true;},
           }));
@@ -58636,32 +58681,19 @@ var STEALTH_INIT = `
     }
   } catch (_) {}
 
-  // === Mock mediaDevices.enumerateDevices / getUserMedia ===
+  // === mediaDevices: remove fake enumerateDevices/getUserMedia mocks ===
+  // Fake device IDs ("cam1xy" etc.) are obviously synthetic and detected by PixelScan.
+  // Let Chrome enumerate real/native devices \u2014 on this server that returns [] or PulseAudio virtual
+  // devices, both of which are natural. WebRTC IP leak is handled by RTCPeerConnection SDP above.
+  // Only keep getDisplayMedia rejection (not suspicious \u2014 real desktop Chrome needs screen-share perm).
   try {
     if (navigator.mediaDevices) {
-      const fakeDevices = [
-        { deviceId: "default", kind: "audioinput",  label: "", groupId: "g1", toJSON(){return this;} },
-        { deviceId: "8a1bcf",  kind: "audioinput",  label: "", groupId: "g1", toJSON(){return this;} },
-        { deviceId: "default", kind: "audiooutput", label: "", groupId: "g1", toJSON(){return this;} },
-        { deviceId: "cam1xy",  kind: "videoinput",  label: "", groupId: "g2", toJSON(){return this;} },
-      ];
-      const fakeEnum = function enumerateDevices() { return Promise.resolve(fakeDevices); };
-      const fakeGUM  = function getUserMedia() { return Promise.reject(new DOMException("Permission denied", "NotAllowedError")); };
-      const fakeGDM  = function getDisplayMedia() { return Promise.reject(new DOMException("Permission denied", "NotAllowedError")); };
-      try { wrap(fakeEnum); wrap(fakeGUM); wrap(fakeGDM); } catch (_) {}
-      // Try prototype first
+      const fakeGDM = function getDisplayMedia() { return Promise.reject(new DOMException("Permission denied", "NotAllowedError")); };
+      try { wrap(fakeGDM); } catch (_) {}
       try {
         const proto = Object.getPrototypeOf(navigator.mediaDevices);
-        Object.defineProperty(proto, "enumerateDevices", { value: fakeEnum, configurable: true, writable: true });
-        Object.defineProperty(proto, "getUserMedia",     { value: fakeGUM,  configurable: true, writable: true });
-        Object.defineProperty(proto, "getDisplayMedia",  { value: fakeGDM,  configurable: true, writable: true });
-        } catch (_) {}
-      // Always also define on instance (proto may be locked)
-      try {
-        Object.defineProperty(navigator.mediaDevices, "enumerateDevices", { value: fakeEnum, configurable: true, writable: true });
-        Object.defineProperty(navigator.mediaDevices, "getUserMedia",     { value: fakeGUM,  configurable: true, writable: true });
-        Object.defineProperty(navigator.mediaDevices, "getDisplayMedia",  { value: fakeGDM,  configurable: true, writable: true });
-        } catch (_) {}
+        Object.defineProperty(proto, "getDisplayMedia", { value: fakeGDM, configurable: true, writable: true });
+      } catch (_) {}
     }
   } catch (_) {}
 
@@ -58863,9 +58895,11 @@ var STEALTH_INIT = `
 
   // === Permissions API \u2014 override headless "denied" defaults ================
   try {
+    // Use prototype so navigator.permissions.hasOwnProperty('query') stays false (PixelScan detects instance override)
+    var _permProto = navigator.permissions && Object.getPrototypeOf(navigator.permissions);
     var _oPQ = navigator.permissions && navigator.permissions.query && navigator.permissions.query.bind(navigator.permissions);
-    if (_oPQ) {
-      Object.defineProperty(navigator.permissions, 'query', {
+    if (_permProto && _oPQ && !_permProto._pqPatched) {
+      Object.defineProperty(_permProto, 'query', {
         value: function query(desc) {
           var n = desc && desc.name;
           if (n === 'notifications') return Promise.resolve({ state: 'default', onchange: null });
@@ -58874,6 +58908,7 @@ var STEALTH_INIT = `
         },
         writable: true, configurable: true,
       });
+      _permProto._pqPatched = true;
     }
   } catch (_) {}
 
@@ -58894,7 +58929,8 @@ var STEALTH_INIT = `
     }
     if (!("canShare" in navigator)) {
       Object.defineProperty(Navigator.prototype, "canShare", {
-        value: function canShare(data) { return !!(data && (data.url || data.text || data.title)); },
+        // Linux Chrome desktop: canShare() returns false (no native share target)
+        value: function canShare() { return false; },
         writable: true, configurable: true, enumerable: true,
       });
     }
@@ -58979,9 +59015,39 @@ var WORKER_STEALTH_PATCH = `(function() {
     }
     if (_nav && !("canShare" in _nav)) {
       Object.defineProperty(_nav.constructor.prototype, "canShare", {
-        value: function canShare(d) { return !!(d && (d.url || d.text || d.title)); },
+        value: function canShare() { return false; },
         writable: true, configurable: true, enumerable: true,
       });
+    }
+  } catch (_) {}
+
+  // === hardwareConcurrency + deviceMemory consistency with main page ===
+  // PixelScan checks Worker.hardwareConcurrency vs navigator.hardwareConcurrency.
+  // If we override main page to 8 but Worker returns native (e.g. 2), mismatch = Detected.
+  try {
+    var _wNav = self.navigator;
+    var _wNavProto = _wNav && _wNav.constructor && _wNav.constructor.prototype;
+    if (_wNavProto) {
+      if (!('_hcPatched' in _wNavProto)) {
+        Object.defineProperty(_wNavProto, 'hardwareConcurrency', { get: function() { return 4; }, configurable: true });
+        Object.defineProperty(_wNavProto, 'deviceMemory', { get: function() { return 4; }, configurable: true });
+        Object.defineProperty(_wNavProto, 'platform', { get: function() { return 'Linux x86_64'; }, configurable: true });
+        _wNavProto._hcPatched = true;
+      }
+    }
+  } catch (_) {}
+
+  // === language/languages consistency with main page ===
+  // Navigator.prototype overrides don't reach WorkerNavigator.prototype.
+  // Add explicit language overrides so PixelScan cross-frame check passes.
+  try {
+    var _wNav2 = self.navigator;
+    var _wNavProto2 = _wNav2 && _wNav2.constructor && _wNav2.constructor.prototype;
+    if (_wNavProto2 && !('_langPatched' in _wNavProto2)) {
+      var _wCachedLangs = Object.freeze(['en-US', 'en']);
+      Object.defineProperty(_wNavProto2, 'language', { get: function() { return 'en-US'; }, configurable: true });
+      Object.defineProperty(_wNavProto2, 'languages', { get: function() { return _wCachedLangs; }, configurable: true });
+      _wNavProto2._langPatched = true;
     }
   } catch (_) {}
 
@@ -59025,20 +59091,25 @@ var WORKER_STEALTH_PATCH = `(function() {
   } catch (_) {}
 
   // === StorageEstimate in Worker ===============================================
+  // Use prototype so hasOwnProperty('estimate') stays false (PixelScan detects instance override)
   try {
     if (self.navigator && self.navigator.storage && self.navigator.storage.estimate) {
+      var _wStorProto = Object.getPrototypeOf(self.navigator.storage);
       var _wOrigEst = self.navigator.storage.estimate.bind(self.navigator.storage);
-      Object.defineProperty(self.navigator.storage, 'estimate', {
-        value: function estimate() {
-          return _wOrigEst().then(function(r) {
-            if (!r || !r.quota || r.quota < 1e9) {
-              return { quota: 128849018880, usage: 15728640 };
-            }
-            return r;
-          });
-        },
-        configurable: true, writable: true,
-      });
+      if (_wStorProto && !_wStorProto._wEstPatched) {
+        Object.defineProperty(_wStorProto, 'estimate', {
+          value: function estimate() {
+            return _wOrigEst().then(function(r) {
+              if (!r || !r.quota || r.quota < 1e9) {
+                return { quota: 128849018880, usage: 15728640 };
+              }
+              return r;
+            });
+          },
+          configurable: true, writable: true,
+        });
+        _wStorProto._wEstPatched = true;
+      }
     }
   } catch(_) {}
 })();`;
@@ -59122,7 +59193,7 @@ async function getBrowser() {
         "--fingerprint-platform=linux",
         "--fingerprint-brand=Chrome",
         "--fingerprint-brand-version=144",
-        "--fingerprint-hardware-concurrency=8",
+        "--fingerprint-hardware-concurrency=4",
         "--lang=en-US",
         "--accept-lang=en-US,en",
         "--timezone=America/Los_Angeles",
