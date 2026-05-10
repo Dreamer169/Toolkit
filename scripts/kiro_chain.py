@@ -118,6 +118,14 @@ def main():
             consecutive_fail = 0
             print(f"[{ts()}] ✅ 成功 (累计={done})", flush=True)
             wait = INTERVAL
+            # 每 10 次成功同步一次 kiro-rs credentials.json
+            if done % 10 == 0:
+                try:
+                    subprocess.run(["bash", "/data/Toolkit/scripts/sync_kiro_creds.sh"],
+                                   timeout=60, capture_output=True)
+                    print(f"[{ts()}] 🔄 kiro-rs credentials 已同步", flush=True)
+                except Exception as e:
+                    print(f"[{ts()}] ⚠️ sync 失败: {e}", flush=True)
         else:
             consecutive_fail += 1
             # 指数退避: 连续失败时等待更久
