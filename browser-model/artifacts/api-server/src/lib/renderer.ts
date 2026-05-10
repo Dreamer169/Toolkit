@@ -55,27 +55,20 @@ export const STEALTH_INIT = `
 // === Anti-fingerprint init script (runs before any page JS) ===
 (() => {
 
-  // === Native-code spoofing: prevents PixelScan/CreepJS detecting patched getters ===
-  // PixelScan calls: String(Object.getOwnPropertyDescriptor(Navigator.prototype,'x').get)
-  // If it doesn't contain "[native code]", the property is flagged as injected.
-  var _nativeFns = new WeakSet();
-  var _origFnToStr = Function.prototype.toString;
-  (function() {
-    var _ps = function toString() {
-      if (_nativeFns.has(this)) {
-        var n = (typeof this === "function" && this.name) ? this.name : "";
-        return "function " + n + "() { [native code] }";
-      }
-      return _origFnToStr.call(this);
-    };
-    Object.defineProperty(Function.prototype, "toString", { value: _ps, configurable: true, writable: true });
-    _nativeFns.add(_ps);
-    _nativeFns.add(_origFnToStr);
-  })();
+  // === Native-code spoofing: per-function toString (NO global override) ========
+  // PixelScan: String(getter) / getter+"" calls fn.toString() → hits own-property → "[native code]"
+  // CreepJS: Function.prototype.toString is untouched → no antidetect stealth detection
+  // WeakSet global approach was detected by CreepJS cross-realm iframe toString check.
   function _mkN(fn, name) {
-    if (name !== undefined) { try { Object.defineProperty(fn, "name", { value: name }); } catch(_) {} }
-    _nativeFns.add(fn);
-    return fn;
+    // .bind(null) creates a V8 bound function: toString() returns "function () { [native code] }"
+    // unconditionally, even when called via cross-realm native Function.prototype.toString.
+    // Closures are preserved. No global Function.prototype.toString override needed.
+    // This satisfies both PixelScan (uses toString.call(getter)) and CreepJS (no global change).
+    try {
+      var bound = fn.bind(null);
+      if (name) { try { Object.defineProperty(bound, "name", { value: name }); } catch(_) {} }
+      return bound;
+    } catch(_) { return fn; }
   }
 
   // navigator.webdriver REMOVED: binary natively returns false with [native code] getter.
@@ -758,25 +751,15 @@ export const STEALTH_INIT = `
 // based, so this patch wins the race against the worker's early async calls.
 const WORKER_STEALTH_PATCH = `(function() {
 
-  // === Worker native-code spoofing ==============================================
-  var _wNativeFns = new WeakSet();
-  var _wOrigFnToStr = Function.prototype.toString;
-  (function() {
-    var _wps = function toString() {
-      if (_wNativeFns.has(this)) {
-        var n = (typeof this === "function" && this.name) ? this.name : "";
-        return "function " + n + "() { [native code] }";
-      }
-      return _wOrigFnToStr.call(this);
-    };
-    Object.defineProperty(Function.prototype, "toString", { value: _wps, configurable: true, writable: true });
-    _wNativeFns.add(_wps);
-    _wNativeFns.add(_wOrigFnToStr);
-  })();
+  // === Worker native-code spoofing: per-function (no global override) ===========
+  // Same rationale as main page: avoids CreepJS cross-realm iframe toString detection.
   function _wMkN(fn, name) {
-    if (name !== undefined) { try { Object.defineProperty(fn, "name", { value: name }); } catch(_) {} }
-    _wNativeFns.add(fn);
-    return fn;
+    // Same bind() trick as main page _mkN: bound functions are natively [native code].
+    try {
+      var bound = fn.bind(null);
+      if (name) { try { Object.defineProperty(bound, "name", { value: name }); } catch(_) {} }
+      return bound;
+    } catch(_) { return fn; }
   }
   // Worker context: no window, use self. navigator = WorkerNavigator.
   // Mirrors the three STEALTH_INIT patches that CreepJS checks in SharedWorker probes.

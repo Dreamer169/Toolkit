@@ -58356,6 +58356,23 @@ process.once("SIGINT", () => {
 var STEALTH_INIT = `
 // === Anti-fingerprint init script (runs before any page JS) ===
 (() => {
+
+  // === Native-code spoofing: per-function toString (NO global override) ========
+  // PixelScan: String(getter) / getter+"" calls fn.toString() \u2192 hits own-property \u2192 "[native code]"
+  // CreepJS: Function.prototype.toString is untouched \u2192 no antidetect stealth detection
+  // WeakSet global approach was detected by CreepJS cross-realm iframe toString check.
+  function _mkN(fn, name) {
+    // .bind(null) creates a V8 bound function: toString() returns "function () { [native code] }"
+    // unconditionally, even when called via cross-realm native Function.prototype.toString.
+    // Closures are preserved. No global Function.prototype.toString override needed.
+    // This satisfies both PixelScan (uses toString.call(getter)) and CreepJS (no global change).
+    try {
+      var bound = fn.bind(null);
+      if (name) { try { Object.defineProperty(bound, "name", { value: name }); } catch(_) {} }
+      return bound;
+    } catch(_) { return fn; }
+  }
+
   // navigator.webdriver REMOVED: binary natively returns false with [native code] getter.
   // Patching to undefined triggers CSS check + webdriver===undefined -> webDriverIsOn=true -> 33% headless.
   // delete CDP-injected globals
@@ -58368,14 +58385,14 @@ var STEALTH_INIT = `
   // Cache the frozen array so identity checks pass: navigator.languages === navigator.languages \u2192 true
   try {
     const _cachedLangs = Object.freeze(['en-US', 'en']);
-    Object.defineProperty(Navigator.prototype, 'languages', { get: () => _cachedLangs, configurable: true, enumerable: true });
+    Object.defineProperty(Navigator.prototype, 'languages', { get: _mkN(function languages() { return _cachedLangs; }, 'get languages'), configurable: true, enumerable: true });
   } catch (_) {}
   // navigator instance-level languages REMOVED: makes hasOwnProperty('languages')=true. Prototype override above is sufficient.
 
   // platform / hardwareConcurrency / deviceMemory
-  try { Object.defineProperty(Navigator.prototype, 'platform', { get: () => 'Linux x86_64', configurable: true }); } catch (_) {}
-  try { Object.defineProperty(Navigator.prototype, 'hardwareConcurrency', { get: () => 4, configurable: true }); } catch (_) {}
-  try { Object.defineProperty(Navigator.prototype, 'deviceMemory', { get: () => 4, configurable: true }); } catch (_) {}
+  try { Object.defineProperty(Navigator.prototype, 'platform', { get: _mkN(function platform() { return 'Linux x86_64'; }, 'get platform'), configurable: true }); } catch (_) {}
+  try { Object.defineProperty(Navigator.prototype, 'hardwareConcurrency', { get: _mkN(function hardwareConcurrency() { return 4; }, 'get hardwareConcurrency'), configurable: true }); } catch (_) {}
+  try { Object.defineProperty(Navigator.prototype, 'deviceMemory', { get: _mkN(function deviceMemory() { return 4; }, 'get deviceMemory'), configurable: true }); } catch (_) {}
   // maxTouchPoints REMOVED: native Chrome/Linux returns 0. Overriding changes configurable flag, PixelScan detects it.
 
   // plugins / mimeTypes \u2014 PluginArray + MimeTypeArray with full bidirectional cross-references.
@@ -58428,7 +58445,7 @@ var STEALTH_INIT = `
     plugins.forEach((p, i) => { plugArr[i] = p; plugArr[p.name] = p; });
     Object.defineProperty(plugArr, 'length', { value: plugins.length, enumerable: true, configurable: true });
 
-    Object.defineProperty(Navigator.prototype, 'plugins', { get: () => plugArr, configurable: true });
+    Object.defineProperty(Navigator.prototype, 'plugins', { get: _mkN(function plugins() { return plugArr; }, 'get plugins'), configurable: true });
     // mimeTypes NOT overridden: native ungoogled-chromium values passed PixelScan (Clear).
   } catch (_) {}
 
@@ -58728,7 +58745,7 @@ var STEALTH_INIT = `
   } catch (_) {}
 
   // === navigator.language matches languages[0] ===
-  try { Object.defineProperty(Navigator.prototype, 'language', { get: () => 'en-US', configurable: true }); } catch (_) {}
+  try { Object.defineProperty(Navigator.prototype, 'language', { get: _mkN(function language() { return 'en-US'; }, 'get language'), configurable: true }); } catch (_) {}
 
   // === Intl/timezone consistency check ===
   // Context already pins timezoneId, but some libs read DateTimeFormat directly.
@@ -59030,6 +59047,17 @@ var STEALTH_INIT = `
 })();
 `;
 var WORKER_STEALTH_PATCH = `(function() {
+
+  // === Worker native-code spoofing: per-function (no global override) ===========
+  // Same rationale as main page: avoids CreepJS cross-realm iframe toString detection.
+  function _wMkN(fn, name) {
+    // Same bind() trick as main page _mkN: bound functions are natively [native code].
+    try {
+      var bound = fn.bind(null);
+      if (name) { try { Object.defineProperty(bound, "name", { value: name }); } catch(_) {} }
+      return bound;
+    } catch(_) { return fn; }
+  }
   // Worker context: no window, use self. navigator = WorkerNavigator.
   // Mirrors the three STEALTH_INIT patches that CreepJS checks in SharedWorker probes.
 
@@ -59059,7 +59087,7 @@ var WORKER_STEALTH_PATCH = `(function() {
     var _wNavProto = _wNav && _wNav.constructor && _wNav.constructor.prototype;
     if (_wNavProto) {
       if (!('_hcPatched' in _wNavProto)) {
-        Object.defineProperty(_wNavProto, 'hardwareConcurrency', { get: function() { return 4; }, configurable: true });
+        Object.defineProperty(_wNavProto, 'hardwareConcurrency', { get: _wMkN(function hardwareConcurrency() { return 4; }, 'get hardwareConcurrency'), configurable: true });
         Object.defineProperty(_wNavProto, 'deviceMemory', { get: function() { return 4; }, configurable: true });
         Object.defineProperty(_wNavProto, 'platform', { get: function() { return 'Linux x86_64'; }, configurable: true });
         _wNavProto._hcPatched = true;
@@ -59075,8 +59103,8 @@ var WORKER_STEALTH_PATCH = `(function() {
     var _wNavProto2 = _wNav2 && _wNav2.constructor && _wNav2.constructor.prototype;
     if (_wNavProto2 && !('_langPatched' in _wNavProto2)) {
       var _wCachedLangs = Object.freeze(['en-US', 'en']);
-      Object.defineProperty(_wNavProto2, 'language', { get: function() { return 'en-US'; }, configurable: true });
-      Object.defineProperty(_wNavProto2, 'languages', { get: function() { return _wCachedLangs; }, configurable: true });
+      Object.defineProperty(_wNavProto2, 'language', { get: _wMkN(function language() { return 'en-US'; }, 'get language'), configurable: true });
+      Object.defineProperty(_wNavProto2, 'languages', { get: _wMkN(function languages() { return _wCachedLangs; }, 'get languages'), configurable: true });
       _wNavProto2._langPatched = true;
     }
   } catch (_) {}
