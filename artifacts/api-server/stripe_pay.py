@@ -361,6 +361,9 @@ async def _wait_for_payment_result(page, cdk_code, log, timeout=120):
 
 
 async def _handle_3ds(page, cdk_code, log):
+    if not cdk_code:
+        log("3DS 触发但无 CDK Code，跳过 (chkr模式无3DS支持)", "warn")
+        return
     for _ in range(10):
         await asyncio.sleep(5)
         verification = efun_3ds_verify(cdk_code, minutes=5, log=log)
