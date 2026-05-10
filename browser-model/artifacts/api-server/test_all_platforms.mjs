@@ -1,160 +1,95 @@
-import { chromium } from "playwright";
-import { readFileSync } from "fs";
+import { chromium } from 'playwright';
+import { readFileSync } from 'fs';
+const BINARY = '/opt/fingerprint-chromium/squashfs-root/opt/ungoogled-chromium/chrome';
+const PROXY  = 'socks5://127.0.0.1:10857';
+const tsSrc = readFileSync('/root/Toolkit/browser-model/artifacts/api-server/src/lib/renderer.ts', 'utf8');
+const STEALTH_INIT = (tsSrc.match(/export const STEALTH_INIT = `([\s\S]*?)`;/) || [])[1] || '';
+const WORKER_STEALTH = (tsSrc.match(/const WORKER_STEALTH_PATCH = `([\s\S]*?)`;/) || [])[1] || '';
+console.log('STEALTH_INIT len:', STEALTH_INIT.length, ' WORKER len:', WORKER_STEALTH.length);
 
-const BINARY = "/opt/fingerprint-chromium/squashfs-root/opt/ungoogled-chromium/chrome";
-const PROXY  = "socks5://127.0.0.1:10854";
-// Read from TS source (most accurate, avoids dist regex issues)
-const tsSrc = readFileSync("/root/Toolkit/browser-model/artifacts/api-server/src/lib/renderer.ts", "utf8");
-const m1 = tsSrc.match(/export const STEALTH_INIT = `([\s\S]*?)`;/);
-const STEALTH_INIT = m1 ? m1[1] : "";
-const m2 = tsSrc.match(/const WORKER_STEALTH_PATCH = `([\s\S]*?)`;/);
-const WORKER_STEALTH_PATCH = m2 ? m2[1] : "";
-console.log("STEALTH_INIT:" + STEALTH_INIT.length + " WORKER:" + WORKER_STEALTH_PATCH.length);
-if (!STEALTH_INIT) { console.error("STEALTH_INIT empty!"); process.exit(1); }
-
-const browser = await chromium.launch({
-  executablePath: BINARY, headless: false,
-  proxy: { server: PROXY },
-  args: [
-    "--no-sandbox","--disable-setuid-sandbox","--disable-dev-shm-usage",
-    "--disable-blink-features=AutomationControlled",
-    "--fingerprint=" + (Math.random()*0x7fffffff|0),
-    "--fingerprint-platform=linux","--fingerprint-brand=Chrome",
-    "--fingerprint-brand-version=144","--fingerprint-hardware-concurrency=8",
-
-    "--lang=en-US","--accept-lang=en-US,en",
-    "--timezone=America/Los_Angeles","--window-size=1920,1080",
-    "--disable-non-proxied-udp","--proxy-resolves-dns-locally",
-    "--use-gl=angle","--use-angle=swiftshader","--enable-webgl",
-  ],
-  ignoreDefaultArgs: ["--enable-automation"],
-  env: Object.assign({}, process.env, { DISPLAY: ":99" }),
-});
-
-async function makeCtx() {
-  const ctx = await browser.newContext({
-    userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
-    viewport: { width: 1920, height: 1040 }, locale: "en-US",
-    timezoneId: "America/Los_Angeles", screen: { width: 1920, height: 1080 },
+async function launch() {
+  return chromium.launch({
+    headless: false, executablePath: BINARY,
+    args: ['--no-sandbox','--disable-dev-shm-usage','--disable-blink-features=AutomationControlled',
+      '--no-first-run','--no-default-browser-check','--mute-audio','--lang=en-US',
+      '--use-gl=angle','--use-angle=swiftshader','--enable-webgl','--window-size=1920,1080',
+      '--fingerprint='+Math.floor(Math.random()*0x7fffffff),
+      '--fingerprint-platform=linux','--fingerprint-brand=Chrome','--fingerprint-brand-version=144',
+      '--fingerprint-hardware-concurrency=8','--timezone=America/Los_Angeles',
+      '--proxy-server='+PROXY,'--disable-quic','--proxy-resolves-dns-locally','--disable-non-proxied-udp'],
+    ignoreDefaultArgs: ['--enable-automation'],
+    env: { ...process.env, DISPLAY: ':99' },
   });
-  // Worker constructor bootstrap (GeekezBrowser approach):
-  // Embed WORKER_STEALTH_PATCH as Blob URL FIRST so it runs before worker script.
-  const workerBootSuffix = `;(function(){
-  try {
-    var _OW = self.Worker;
-    var _OSW = self.SharedWorker;
-    var _wp = ` + JSON.stringify(WORKER_STEALTH_PATCH) + `;
-    function _hookW(Ctor, name) {
-      if (typeof Ctor !== "function") return;
-      function _H(url, opts) {
-        try {
-          var absUrl;
-          try { absUrl = new URL(String(url), self.location.href).href; } catch(_e) { absUrl = String(url); }
-          var code = _wp + ";importScripts(" + JSON.stringify(absUrl) + ");";
-          var blob = new Blob([code], {type:"application/javascript"});
-          var bu = URL.createObjectURL(blob);
-          var w = new Ctor(bu, opts);
-          setTimeout(function(){try{URL.revokeObjectURL(bu);}catch(_e){}}, 15000);
-          return w;
-        } catch(_e) { return new Ctor(url, opts); }
-      }
-      _H.prototype = Ctor.prototype;
-      try { Object.defineProperty(self, name, {value:_H, configurable:true, writable:true}); }
-      catch(_e) { try { self[name] = _H; } catch(_e2) {} }
-    }
-    _hookW(_OW, "Worker");
-    _hookW(_OSW, "SharedWorker");
-  } catch(_e) {}
-})();`;
-  const STEALTH_INIT_FULL = STEALTH_INIT + workerBootSuffix;
-  await ctx.addInitScript(STEALTH_INIT_FULL);
-  // Keep fallback page.on("worker") for any workers not caught by constructor hook
-  ctx.on("page", function(p) { p.on("worker", function(w) { w.evaluate(WORKER_STEALTH_PATCH).catch(function(){}); }); });
+}
+async function makeCtx(browser) {
+  const ctx = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
+    viewport:{width:1920,height:1040}, locale:'en-US', timezoneId:'America/Los_Angeles', screen:{width:1920,height:1080},
+  });
+  await ctx.addInitScript(STEALTH_INIT);
+  ctx.on('page', p => p.on('worker', w => w.evaluate(WORKER_STEALTH).catch(()=>{})));
   return ctx;
 }
-
-async function testSite(label, url, extractFn, waitMs) {
-  waitMs = waitMs || 12000;
-  console.log("\n" + "=".repeat(60));
-  console.log("TEST: " + label + "  ->  " + url);
-  const ctx = await makeCtx();
-  const apiData = [];
+async function testSite(name, url, waitMs, extractFn) {
+  console.log('\n=== '+name+' ===');
+  const browser = await launch();
+  const ctx = await makeCtx(browser);
   const page = await ctx.newPage();
-  page.on("response", async function(r) {
+  const apiData = [];
+  page.on('response', async r => {
     try {
-      const ct = r.headers()["content-type"] || "";
-      if (ct.includes("json") && !r.url().match(/\.(js|css|png|woff|ico)/)) {
-        const j = await r.json().catch(function(){ return null; });
-        if (j) apiData.push({ url: r.url().slice(0,120), data: j });
-      }
+      const ct = r.headers()['content-type']||'';
+      if (ct.includes('json')) { const j = await r.json().catch(()=>null); if (j) apiData.push({url:r.url().slice(0,120),d:j}); }
     } catch(e) {}
   });
   try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.goto(url, {timeout:60000, waitUntil:'domcontentloaded'});
     await page.waitForTimeout(waitMs);
-    const result = await page.evaluate(extractFn);
-    console.log(JSON.stringify(result, null, 2));
-    if (apiData.length) {
-      console.log("--- API JSON ---");
-      apiData.slice(0,5).forEach(function(d) { console.log(d.url + "\n" + JSON.stringify(d.data).slice(0,800)); });
-    }
-  } catch(e) { console.log("ERROR: " + e.message.slice(0,200)); }
-  await ctx.close();
+    const result = await page.evaluate(extractFn).catch(e=>({err:e.message}));
+    if (result.err) console.log('eval error:', result.err);
+    else { (result.lines||[]).forEach(l=>console.log(' '+l)); if (result.extra) console.log(' extra:', result.extra); }
+    const rel = apiData.filter(x=>{const s=JSON.stringify(x.d); return s.includes('bot')||s.includes('like')||s.includes('headless')||s.includes('stealth')||s.includes('trust')||s.includes('score')||s.includes('visitor');});
+    rel.slice(0,3).forEach(x=>console.log(' API:',x.url,JSON.stringify(x.d).slice(0,500)));
+  } catch(e) { console.log('Error:', e.message.slice(0,200)); }
+  await browser.close();
 }
 
-// 1. BrowserScan
-await testSite("BrowserScan", "https://www.browserscan.net/bot-detection", function() {
-  var t = document.body ? document.body.innerText : "";
-  var lines = t.split("\n").filter(function(l) { return l.trim() && /score|bot|human|pass|fail|result|detect|webdriver|headless|automation/i.test(l); }).slice(0,25);
-  return { title: document.title, lines: lines, raw: t.slice(0,3000) };
-}, 18000);
+await testSite('CreepJS', 'https://creepjs.com/', 30000, () => {
+  const t = document.body?.innerText||'';
+  const lines = t.split('\n').filter(l=>l.trim()&&/%|like.headless|headless|stealth|bot/i.test(l)).slice(0,30);
+  const flags = ['noContentIndex','noContactsManager','noDownlinkMax','hasKnownBgColor','noWebShare','prefersLightColor','matchMedia']
+    .filter(f=>new RegExp(f,'i').test(t));
+  return {lines, extra:'remaining flags: '+JSON.stringify(flags)};
+});
 
-// 2. CreepJS
-await testSite("CreepJS", "https://abrahamjuliot.github.io/creepjs/", function() {
-  var t = document.body ? document.body.innerText : "";
-  var gradeEl = document.querySelector && document.querySelector(".grade");
-  var grade = gradeEl ? gradeEl.textContent.trim() : "";
-  if (!grade) { var gm = t.match(/Grade[:\s]+([A-F][+-]?)/i); grade = gm ? gm[1] : ""; }
-  var trust = t.match(/trust[^%]*?(\d+\.?\d*)%/i);
-  var lines = t.split("\n").filter(function(l) { return l.trim() && /headless|stealth|like headless|Grade|Worker|SharedWorker|Chromium|bot|0%|lied|lie count/i.test(l); }).slice(0,35);
-  return { title: document.title, grade: grade, trust: trust ? trust[0] : "", lines: lines };
-}, 30000);
+await testSite('PixelScan', 'https://pixelscan.net/fingerprint-check', 22000, () => {
+  const t = document.body?.innerText||'';
+  return {lines: t.split('\n').filter(l=>l.trim()&&/consistent|inconsistent|normal|suspicious|bot|score|pass|fail|detect|clear|risk/i.test(l)).slice(0,25)};
+});
 
-// 3. IPHey
-await testSite("IPHey", "https://iphey.com/", function() {
-  var t = document.body ? document.body.innerText : "";
-  var lines = t.split("\n").filter(function(l) { return l.trim() && /trustworthy|bot|human|ip|score|detect|vpn|proxy|result|status|genuine|clean/i.test(l); }).slice(0,25);
-  return { title: document.title, lines: lines, raw: t.slice(0,2500) };
-}, 18000);
+await testSite('IPHey', 'https://iphey.com/', 22000, () => {
+  const t = document.body?.innerText||'';
+  return {lines: t.split('\n').filter(l=>l.trim()&&/trustworthy|genuine|human|bot|suspicious|score|good|bad|clean|risk|result|status|trust/i.test(l)).slice(0,20)};
+});
 
-// 4. PixelScan
-await testSite("PixelScan", "https://pixelscan.net/", function() {
-  var t = document.body ? document.body.innerText : "";
-  var lines = t.split("\n").filter(function(l) { return l.trim() && /consistent|inconsistent|normal|suspicious|bot|human|score|result|pass|fail|detect/i.test(l); }).slice(0,30);
-  return { title: document.title, lines: lines, raw: t.slice(0,2500) };
-}, 18000);
+await testSite('BrowserScan', 'https://www.browserscan.net/bot-detection', 20000, () => {
+  const t = document.body?.innerText||'';
+  return {lines: t.split('\n').filter(l=>l.trim()&&/bot|human|score|risk|pass|fail|detect|normal|suspicious|headless|webdriver/i.test(l)).slice(0,25)};
+});
 
-// 5. SannySoft
-await testSite("SannySoft", "https://bot.sannysoft.com/", function() {
-  var rows = [];
-  var trs = document.querySelectorAll ? Array.from(document.querySelectorAll("table tr")) : [];
-  trs.forEach(function(row) { var t = row.innerText ? row.innerText.replace(/\t/g," ").trim() : ""; if(t) rows.push(t); });
-  return { title: document.title, rows: rows.slice(0,50) };
-}, 12000);
+await testSite('Sannysoft', 'https://bot.sannysoft.com/', 12000, () => {
+  const t = document.body?.innerText||'';
+  return {lines: t.split('\n').filter(l=>l.trim()&&/(PASS|FAIL|true|false)/i.test(l)).slice(0,30)};
+});
 
-// 6. Brotector
-await testSite("Brotector/Selenium-Detector", "https://hmaker.github.io/selenium-detector/", function() {
-  var t = document.body ? document.body.innerText : "";
-  var lines = t.split("\n").filter(function(l) { return l.trim() && /bot|human|detect|pass|fail|score|result|automation|webdriver|headless|true|false|status/i.test(l); }).slice(0,45);
-  return { title: document.title, lines: lines, raw: t.slice(0,3500) };
-}, 15000);
+await testSite('Fingerprint', 'https://fingerprint.com/demo/', 32000, () => {
+  const t = document.body?.innerText||'';
+  return {lines: t.split('\n').filter(l=>l.trim()&&/bot|automation|score|confidence|visitor|suspect|human/i.test(l)).slice(0,20)};
+});
 
-// 7. Fingerprint.com
-await testSite("Fingerprint.com", "https://fingerprint.com/demo/", function() {
-  var t = document.body ? document.body.innerText : "";
-  var lines = t.split("\n").filter(function(l) { return l.trim() && /bot|human|visitor|confidence|score|detect|incognito|vpn|headless|automation|result|probability|request/i.test(l); }).slice(0,35);
-  return { title: document.title, lines: lines, raw: t.slice(0,3000) };
-}, 22000);
+await testSite('Datadome', 'https://antoinevastel.com/bots/datadome', 15000, () => {
+  const t = document.body?.innerText||'';
+  return {lines: t.split('\n').filter(l=>l.trim()).slice(0,20)};
+});
 
-await browser.close();
-console.log("\n=== ALL TESTS DONE ===");
+console.log('\n=== ALL TESTS DONE ===');
