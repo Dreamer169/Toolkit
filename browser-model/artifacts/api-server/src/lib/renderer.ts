@@ -521,6 +521,56 @@ export const STEALTH_INIT = `
   try {
     Object.defineProperty(Navigator.prototype, 'pdfViewerEnabled', { get: () => true, configurable: true });
   } catch (_) {}
+  // === Web Share API stub (fixes noWebShare like-headless flag) ============
+  // Linux Chrome does not expose navigator.share/canShare; CreepJS flags absence as like-headless.
+  // Stub returns a rejected promise (native share UI unavailable) — same pattern as a real
+  // desktop that has the API but no native share target.
+  try {
+    if (!("share" in navigator)) {
+      Object.defineProperty(Navigator.prototype, "share", {
+        value: function share() { return Promise.reject(new DOMException("Share canceled","AbortError")); },
+        writable: true, configurable: true, enumerable: true,
+      });
+    }
+    if (!("canShare" in navigator)) {
+      Object.defineProperty(Navigator.prototype, "canShare", {
+        value: function canShare(data) { return !!(data && (data.url || data.text || data.title)); },
+        writable: true, configurable: true, enumerable: true,
+      });
+    }
+  } catch (_) {}
+
+  // === prefers-color-scheme: dark (fixes prefersLightColor like-headless flag) =========
+  // Xvfb returns "light" by default; real desktop Chrome on Linux typically follows system
+  // dark/light setting. Override matchMedia so (prefers-color-scheme: light).matches = false.
+  try {
+    var _origMQL = window.matchMedia.bind(window);
+    Object.defineProperty(window, "matchMedia", {
+      value: function matchMedia(query) {
+        var mql = _origMQL(query);
+        if (typeof query === "string" && query.indexOf("prefers-color-scheme") !== -1) {
+          var isLight = query.indexOf("light") !== -1;
+          var isDark = query.indexOf("dark") !== -1;
+          if (isLight || isDark) {
+            // Return a MediaQueryList-like object that reports dark mode preference
+            return Object.defineProperties(Object.create(mql), {
+              matches: { get: function() { return isDark; }, configurable: true },
+              media:   { get: function() { return mql.media;  }, configurable: true },
+              onchange:{ value: null, writable: true, configurable: true },
+              addListener:    { value: mql.addListener.bind(mql), configurable: true },
+              removeListener: { value: mql.removeListener.bind(mql), configurable: true },
+              addEventListener:    { value: mql.addEventListener.bind(mql), configurable: true },
+              removeEventListener: { value: mql.removeEventListener.bind(mql), configurable: true },
+              dispatchEvent: { value: mql.dispatchEvent.bind(mql), configurable: true },
+            });
+          }
+        }
+        return mql;
+      },
+      writable: true, configurable: true,
+    });
+  } catch (_) {}
+
 })();
 `;
 
