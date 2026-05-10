@@ -609,13 +609,37 @@ export const STEALTH_INIT = `
     });
   } catch(_) {}
 
-  // === Worker userAgentData patch ===
+  // === Worker constructor interception ===
+  // Playwright addInitScript does NOT inject into DedicatedWorker contexts.
+  // Intercept Worker() in main-page scope to prepend patch via importScripts.
   try {
-    if (typeof window === "undefined" && typeof self !== "undefined") {
-      var _wB = [{brand:"Chromium",version:"144"},{brand:"Not:A-Brand",version:"99"},{brand:"Google Chrome",version:"144"}];
-      var _wH = {brands:_wB,mobile:false,platform:"Linux",platformVersion:"5.15.0",architecture:"x86",bitness:"64",model:"",uaFullVersion:"144.0.7559.132",fullVersionList:[{brand:"Chromium",version:"144.0.7559.132"},{brand:"Not:A-Brand",version:"99.0.0.0"},{brand:"Google Chrome",version:"144.0.7559.132"}],wow64:false,formFactors:["Desktop"]};
-      try { Object.defineProperty(self.navigator,"userAgentData",{get:function(){return {brands:_wB,mobile:false,platform:"Linux",getHighEntropyValues:function(h){var o={brands:_wB,mobile:false,platform:"Linux"};(h||[]).forEach(function(k){if(k in _wH)o[k]=_wH[k];});return Promise.resolve(o);},toJSON:function(){return {brands:_wB,mobile:false,platform:"Linux"};}};},configurable:true}); } catch(_) {}
-      try { Object.defineProperty(self.navigator,"entryPoints",{get:function(){return [];},configurable:true}); } catch(_) {}
+    var _OW = window.Worker;
+    if (_OW) {
+      var _WI = (
+        "try{Object.defineProperty(self.navigator,'userAgentData',{get:function(){"
+        +"var b=[{brand:'Chromium',version:'144'},{brand:'Not:A-Brand',version:'99'},{brand:'Google Chrome',version:'144'}];"
+        +"var h={brands:b,mobile:false,platform:'Linux',platformVersion:'5.15.0',architecture:'x86',bitness:'64',model:'',"
+        +"uaFullVersion:'144.0.7559.132',fullVersionList:[{brand:'Chromium',version:'144.0.7559.132'},{brand:'Not:A-Brand',version:'99.0.0.0'},{brand:'Google Chrome',version:'144.0.7559.132'}],wow64:false,formFactors:['Desktop']};"
+        +"return{brands:b,mobile:false,platform:'Linux',"
+        +"getHighEntropyValues:function(hs){var o={brands:b,mobile:false,platform:'Linux'};(hs||[]).forEach(function(k){if(k in h)o[k]=h[k];});return Promise.resolve(o);},"
+        +"toJSON:function(){return{brands:b,mobile:false,platform:'Linux'};}}; },configurable:true});}catch(_){}"
+        +"try{Object.defineProperty(self.navigator,'languages',{get:function(){return['en-US','en'];},configurable:true});}catch(_){}"
+        +"try{Object.defineProperty(self.navigator,'platform',{get:function(){return 'Linux x86_64';},configurable:true});}catch(_){}"
+        +"try{Object.defineProperty(self.navigator,'hardwareConcurrency',{get:function(){return 8;},configurable:true});}catch(_){}"
+        +"try{Object.defineProperty(self.navigator,'deviceMemory',{get:function(){return 8;},configurable:true});}catch(_){}"
+      );
+      var _pBlob = new Blob([_WI], {type:"application/javascript"});
+      var _pUrl  = URL.createObjectURL(_pBlob);
+      function _PW(url, opts) {
+        if (opts && opts.type === "module") return new _OW(url, opts);
+        try {
+          var body = "try{importScripts("+JSON.stringify(_pUrl)+");}catch(_){}";
+          if (typeof url === "string") body += "\nimportScripts("+JSON.stringify(url)+");";
+          return new _OW(URL.createObjectURL(new Blob([body],{type:"application/javascript"})), opts);
+        } catch(_) { return new _OW(url, opts); }
+      }
+      _PW.prototype = _OW.prototype;
+      try { Object.defineProperty(window,"Worker",{value:_PW,writable:true,configurable:true}); } catch(_) {}
     }
   } catch(_) {}
 })();
@@ -753,7 +777,7 @@ async function newFreshContext(): Promise<BrowserContext> {
       "sec-ch-ua-bitness": "\"64\"",
       "sec-ch-ua-arch": "\"x86\"",
       "sec-ch-ua-full-version": "\"144.0.7559.132\"",
-      "sec-ch-ua-platform-version": "\"6.5.0\"",
+      "sec-ch-ua-platform-version": "\"5.15.0\"",
       "sec-ch-ua-full-version-list": "\"Chromium\";v=\"144.0.7559.132\", \"Not:A-Brand\";v=\"99.0.0.0\", \"Google Chrome\";v=\"144.0.7559.132\"",
       "sec-ch-ua-model": "\"\"",
       "sec-ch-ua-wow64": "?0",
@@ -828,7 +852,7 @@ async function getStickyContext(hostname: string): Promise<BrowserContext> {
       "sec-ch-ua-bitness": "\"64\"",
       "sec-ch-ua-arch": "\"x86\"",
       "sec-ch-ua-full-version": "\"144.0.7559.132\"",
-      "sec-ch-ua-platform-version": "\"6.5.0\"",
+      "sec-ch-ua-platform-version": "\"5.15.0\"",
       "sec-ch-ua-full-version-list": "\"Chromium\";v=\"144.0.7559.132\", \"Not:A-Brand\";v=\"99.0.0.0\", \"Google Chrome\";v=\"144.0.7559.132\"",
       "sec-ch-ua-model": "\"\"",
       "sec-ch-ua-wow64": "?0",
