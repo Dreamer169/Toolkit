@@ -58503,8 +58503,141 @@ var STEALTH_INIT = `
     }
   } catch (_) {}
 
-  // WebGL getParameter: not patched \u2014 binary handles GPU spoofing consistently
-  // in both main page and Worker contexts via fingerprint-chromium --fingerprint seed.
+  // === WebGL vendor/renderer/caps spoof =======================================
+  // GeekezBrowser-style: hook getParameter + getExtension + getSupportedExtensions
+  // on WebGL1, WebGL2, and OffscreenCanvas for main thread.
+  // YSbrowser validates Intel UHD 630 preset achieves creepjs 62.5%+.
+  // Needed because fingerprint-chromium is not installed; stock chromium exposes
+  // SwiftShader which is a dead giveaway for headless bots.
+  try {
+    var _GL_VENDOR   = 'Intel Inc.';
+    var _GL_RENDERER = 'Intel(R) UHD Graphics 630';
+    var _GL_VENDOR_RAW   = 'Intel Open Source Technology Center';
+    var _GL_RENDERER_RAW = 'Mesa Intel(R) UHD Graphics 630 (CFL GT2)';
+    var _GL_VERSION      = 'OpenGL ES 3.0 (ANGLE 2.1.19.0 git hash: unknown)';
+    var _GL_GLSL_VERSION = 'WebGL GLSL ES 3.00 (OpenGL ES GLSL ES 3.0 Chromium)';
+    var _debugExtObj = { UNMASKED_VENDOR_WEBGL: 37445, UNMASKED_RENDERER_WEBGL: 37446 };
+    // Intel UHD 630 realistic capability values (from GeekezBrowser deriveWebglCaps)
+    var _intelCaps = {
+      3379:  16384,  // MAX_TEXTURE_SIZE
+      34076: 16384,  // MAX_CUBE_MAP_TEXTURE_SIZE
+      34024: 16384,  // MAX_RENDERBUFFER_SIZE
+      34921: 16,     // MAX_VERTEX_ATTRIBS
+      34930: 16,     // MAX_TEXTURE_IMAGE_UNITS
+      35660: 16,     // MAX_VERTEX_TEXTURE_IMAGE_UNITS
+      35661: 32,     // MAX_COMBINED_TEXTURE_IMAGE_UNITS
+      36347: 4096,   // MAX_VERTEX_UNIFORM_VECTORS
+      36348: 30,     // MAX_VARYING_VECTORS
+      36349: 1024,   // MAX_FRAGMENT_UNIFORM_VECTORS
+      34852: 8,      // MAX_DRAW_BUFFERS (WebGL2)
+      36063: 8,      // MAX_COLOR_ATTACHMENTS (WebGL2)
+    };
+    var _capKeys = Object.keys(_intelCaps).map(Number);
+    var _WEBGL_PATCH_KEY = '__iuhd630_patched__';
+
+    function _hookWebGLProto(proto) {
+      if (!proto || proto[_WEBGL_PATCH_KEY]) return;
+      try { proto[_WEBGL_PATCH_KEY] = true; } catch(_) {}
+      try {
+        var _origGP  = proto.getParameter;
+        var _origGE  = proto.getExtension;
+        var _origGSE = proto.getSupportedExtensions;
+        proto.getParameter = function getParameter(p) {
+          if (p === 37445) return _GL_VENDOR;           // UNMASKED_VENDOR_WEBGL
+          if (p === 37446) return _GL_RENDERER;         // UNMASKED_RENDERER_WEBGL
+          if (p === 7936)  return _GL_VENDOR_RAW;       // VENDOR
+          if (p === 7937)  return _GL_RENDERER_RAW;     // RENDERER
+          if (p === 7938)  return _GL_VERSION;           // VERSION
+          if (p === 35724) return _GL_GLSL_VERSION;     // SHADING_LANGUAGE_VERSION
+          if (_intelCaps.hasOwnProperty(p)) return _intelCaps[p];
+          return _origGP.apply(this, arguments);
+        };
+        proto.getExtension = function getExtension(name) {
+          if (name === 'WEBGL_debug_renderer_info') return _debugExtObj;
+          return _origGE.apply(this, arguments);
+        };
+        if (_origGSE) {
+          proto.getSupportedExtensions = function getSupportedExtensions() {
+            var list = _origGSE.apply(this, arguments) || [];
+            if (Array.isArray(list) && list.indexOf('WEBGL_debug_renderer_info') === -1) {
+              list = list.concat(['WEBGL_debug_renderer_info']);
+            }
+            return list;
+          };
+        }
+      } catch(_e) {}
+    }
+
+    if (typeof WebGLRenderingContext  !== 'undefined') _hookWebGLProto(WebGLRenderingContext.prototype);
+    if (typeof WebGL2RenderingContext !== 'undefined') _hookWebGLProto(WebGL2RenderingContext.prototype);
+
+    // OffscreenCanvas: hook on first getContext call (proto not accessible before)
+    if (typeof OffscreenCanvas !== 'undefined' && OffscreenCanvas.prototype && OffscreenCanvas.prototype.getContext) {
+      var _origOCGC = OffscreenCanvas.prototype.getContext;
+      OffscreenCanvas.prototype.getContext = function getContext(type) {
+        var ctx = _origOCGC.apply(this, arguments);
+        if (ctx && /webgl/i.test(String(type || ''))) {
+          try { _hookWebGLProto(Object.getPrototypeOf(ctx)); } catch(_) {}
+        }
+        return ctx;
+      };
+    }
+  } catch (_) {}
+
+  // === DOMRect / getBoundingClientRect noise (fixes fontFaceLoadPolicy / rect fingerprint) =
+  // GeekezBrowser --rect-seed concept: add deterministic sub-pixel jitter so
+  // rect-based font fingerprints differ across sessions but are stable within one session.
+  try {
+    var _rectSeed = (function() {
+      try {
+        var k = '__rect_ns__';
+        var v = sessionStorage.getItem(k);
+        if (!v) { v = String((Math.random() * 1e9) >>> 0); sessionStorage.setItem(k, v); }
+        return (parseInt(v, 10) || 1) >>> 0;
+      } catch(_) { return (Math.random() * 1e9) >>> 0; }
+    })();
+    var _rrs = _rectSeed || 1;
+    var _rrng = function() { _rrs = (Math.imul(_rrs, 1664525) + 1013904223) >>> 0; return _rrs / 4294967296; };
+    var _rectJitter = function(v) { return typeof v === 'number' ? v + (_rrng() - 0.5) * 0.02 : v; };
+
+    var _origGBCR = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = function getBoundingClientRect() {
+      var r = _origGBCR.apply(this, arguments);
+      try {
+        // Only jitter for text-rendering elements to avoid layout breakage
+        var tag = (this.tagName || '').toUpperCase();
+        if (tag === 'SPAN' || tag === 'DIV' || tag === 'P' || tag === 'CANVAS') {
+          return {
+            x: _rectJitter(r.x), y: _rectJitter(r.y),
+            width: r.width, height: r.height,
+            top: _rectJitter(r.top), right: _rectJitter(r.right),
+            bottom: _rectJitter(r.bottom), left: _rectJitter(r.left),
+            toJSON: function() { return this; }
+          };
+        }
+      } catch(_) {}
+      return r;
+    };
+  } catch(_) {}
+
+  // === StorageEstimate quota spoof (YSbrowser --quota-seed) ====================
+  // Headless chromium reports quota=0 or minimal; real Chrome shows ~120GB+
+  try {
+    if (navigator.storage && navigator.storage.estimate) {
+      var _origEst = navigator.storage.estimate.bind(navigator.storage);
+      Object.defineProperty(navigator.storage, 'estimate', {
+        value: function estimate() {
+          return _origEst().then(function(r) {
+            if (!r || !r.quota || r.quota < 1e9) {
+              return { quota: 128849018880, usage: Math.floor(Math.random() * 5e7 + 1e7) };
+            }
+            return r;
+          });
+        },
+        configurable: true, writable: true,
+      });
+    }
+  } catch(_) {}
 
   // window.outerWidth/Height = innerWidth/Height when 0 (headless leak)
   try {
@@ -58544,12 +58677,11 @@ var STEALTH_INIT = `
   // Notification permission default
   try { if (window.Notification && Notification.permission === 'denied') Object.defineProperty(Notification, 'permission', { get: () => 'default' }); } catch (_) {}
 
-  // Function.prototype.toString override REMOVED \u2014 CreepJS fingerprints
-  // the fakeFns WeakSet + toString override as a known stealth tool signature \u2192 40% stealth.
-  // wrap() is kept as a no-op so existing wrap(fn) call sites compile without error.
-  // fakeFns WeakSet is kept for Kasada/CF console detection protection below.
-  const fakeFns = new WeakSet();
-  const wrap = (fn) => fn; // no-op: does NOT modify toString
+  // wrap() is a no-op \u2014 existing call sites compile without error, no toString spoofing.
+  // fakeFns WeakSet REMOVED \u2014 it is a known puppeteer-extra-plugin-stealth v2 signature
+  // detected by Fingerprint.com as bot_type:"puppeteer_stealth". Use plain array instead.
+  var _cslRefs = []; // replaces fakeFns WeakSet for Kasada console protection
+  var wrap = function(fn) { return fn; }; // no-op: does NOT modify toString
 
   // === WebRTC IP leak protection ===
   // Sites probe local/public IP via RTCPeerConnection ICE candidates. Strip
@@ -58563,9 +58695,7 @@ var STEALTH_INIT = `
       // Filter out candidate lines exposing private IPs in SDP
       function sanitizeSdp(sdp) {
         if (!sdp || typeof sdp !== 'string') return sdp;
-        return sdp.split('\r
-').filter((l) => !/^a=candidate:/i.test(l)).join('\r
-');
+        return sdp.split('\\r\\n').filter((l) => !/^a=candidate:/i.test(l)).join('\\r\\n');
       }
       PC.prototype.setLocalDescription = function setLocalDescription(desc) {
         if (desc && desc.sdp) desc.sdp = sanitizeSdp(desc.sdp);
@@ -58679,6 +58809,7 @@ var STEALTH_INIT = `
           var img = ctx.getImageData(0, 0, w, h);
           var d = img.data;
           for (var i = 0; i < d.length; i += 4) {
+            if (d[i + 3] === 0) continue; // skip fully transparent pixels
             d[i]     = (d[i]     ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
             d[i + 1] = (d[i + 1] ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
             d[i + 2] = (d[i + 2] ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
@@ -58698,6 +58829,7 @@ var STEALTH_INIT = `
         var d = img.data;
         var n = Math.min(d.length, 1024);
         for (var i = 0; i < n; i += 4) {
+          if (d[i + 3] === 0) continue; // skip fully transparent pixels
           d[i]     = (d[i]     ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
           d[i + 1] = (d[i + 1] ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
           d[i + 2] = (d[i + 2] ^ ((_rand() < 0.5) ? 0 : 1)) & 0xFF;
@@ -58791,7 +58923,7 @@ var STEALTH_INIT = `
     ["log","warn","error","info","debug","trace","dir","table","count","countReset",
      "group","groupCollapsed","groupEnd","time","timeEnd","timeLog","assert","clear"
     ].forEach(function(m) {
-      try { if (typeof console[m] === "function") fakeFns.add(console[m]); } catch(_) {}
+      try { if (typeof console[m] === "function") _cslRefs.push(console[m]); } catch(_) {}
     });
   } catch(_) {}
 
@@ -58967,7 +59099,114 @@ var WORKER_STEALTH_PATCH = `(function() {
       };
     }
   } catch (_) {}
+
+  // === WebGL hook in Worker (OffscreenCanvas / SharedWorker) ===================
+  // CreepJS probes WebGL vendor/renderer in SharedWorker context.
+  // GeekezBrowser injects same hookProto into Worker blob bootstrap.
+  try {
+    var _wGL_VENDOR   = 'Intel Inc.';
+    var _wGL_RENDERER = 'Intel(R) UHD Graphics 630';
+    var _wGL_VENDOR_RAW   = 'Intel Open Source Technology Center';
+    var _wGL_RENDERER_RAW = 'Mesa Intel(R) UHD Graphics 630 (CFL GT2)';
+    var _wGL_VERSION      = 'OpenGL ES 3.0 (ANGLE 2.1.19.0 git hash: unknown)';
+    var _wGL_GLSL         = 'WebGL GLSL ES 3.00 (OpenGL ES GLSL ES 3.0 Chromium)';
+    var _wDebugExt = { UNMASKED_VENDOR_WEBGL: 37445, UNMASKED_RENDERER_WEBGL: 37446 };
+    var _wIntelCaps = {
+      3379: 16384, 34076: 16384, 34024: 16384,
+      34921: 16, 34930: 16, 35660: 16, 35661: 32,
+      36347: 4096, 36348: 30, 36349: 1024, 34852: 8, 36063: 8,
+    };
+    var _WPATCH_KEY = '__wiuhd630__';
+    function _wHookProto(proto) {
+      if (!proto || proto[_WPATCH_KEY]) return;
+      try { proto[_WPATCH_KEY] = true; } catch(_) {}
+      try {
+        var _oGP  = proto.getParameter;
+        var _oGE  = proto.getExtension;
+        var _oGSE = proto.getSupportedExtensions;
+        proto.getParameter = function(p) {
+          if (p === 37445) return _wGL_VENDOR;
+          if (p === 37446) return _wGL_RENDERER;
+          if (p === 7936)  return _wGL_VENDOR_RAW;
+          if (p === 7937)  return _wGL_RENDERER_RAW;
+          if (p === 7938)  return _wGL_VERSION;
+          if (p === 35724) return _wGL_GLSL;
+          if (_wIntelCaps.hasOwnProperty(p)) return _wIntelCaps[p];
+          return _oGP.apply(this, arguments);
+        };
+        proto.getExtension = function(name) {
+          if (name === 'WEBGL_debug_renderer_info') return _wDebugExt;
+          return _oGE.apply(this, arguments);
+        };
+        if (_oGSE) {
+          proto.getSupportedExtensions = function() {
+            var list = _oGSE.apply(this, arguments) || [];
+            if (Array.isArray(list) && list.indexOf('WEBGL_debug_renderer_info') === -1) list = list.concat(['WEBGL_debug_renderer_info']);
+            return list;
+          };
+        }
+      } catch(_) {}
+    }
+    if (typeof self.WebGLRenderingContext  !== 'undefined') _wHookProto(self.WebGLRenderingContext.prototype);
+    if (typeof self.WebGL2RenderingContext !== 'undefined') _wHookProto(self.WebGL2RenderingContext.prototype);
+    // OffscreenCanvas in workers
+    if (typeof self.OffscreenCanvas !== 'undefined' && self.OffscreenCanvas.prototype && self.OffscreenCanvas.prototype.getContext) {
+      var _oOCGC = self.OffscreenCanvas.prototype.getContext;
+      self.OffscreenCanvas.prototype.getContext = function(type) {
+        var ctx = _oOCGC.apply(this, arguments);
+        if (ctx && /webgl/i.test(String(type || ''))) try { _wHookProto(Object.getPrototypeOf(ctx)); } catch(_) {}
+        return ctx;
+      };
+    }
+  } catch(_) {}
+
+  // === StorageEstimate in Worker ===============================================
+  try {
+    if (self.navigator && self.navigator.storage && self.navigator.storage.estimate) {
+      var _wOrigEst = self.navigator.storage.estimate.bind(self.navigator.storage);
+      Object.defineProperty(self.navigator.storage, 'estimate', {
+        value: function estimate() {
+          return _wOrigEst().then(function(r) {
+            if (!r || !r.quota || r.quota < 1e9) {
+              return { quota: 128849018880, usage: 15728640 };
+            }
+            return r;
+          });
+        },
+        configurable: true, writable: true,
+      });
+    }
+  } catch(_) {}
 })();`;
+var _WORKER_BOOT_SUFFIX = `;(function(){
+  try {
+    var _OW = self.Worker;
+    var _OSW = self.SharedWorker;
+    var _wp = ` + JSON.stringify(WORKER_STEALTH_PATCH) + `;
+    function _hookW(Ctor, name) {
+      if (typeof Ctor !== "function") return;
+      function _Hooked(url, opts) {
+        try {
+          var absUrl;
+          try { absUrl = new URL(String(url), self.location.href).href; } catch(_e) { absUrl = String(url); }
+          var code = _wp + "
+;importScripts(" + JSON.stringify(absUrl) + ");";
+          var blob = new Blob([code], {type:"application/javascript"});
+          var bu = URL.createObjectURL(blob);
+          var w = new Ctor(bu, opts);
+          setTimeout(function(){try{URL.revokeObjectURL(bu);}catch(_e){}}, 15000);
+          return w;
+        } catch(_e) { return new Ctor(url, opts); }
+      }
+      _Hooked.prototype = Ctor.prototype;
+      try { Object.defineProperty(self, name, {value:_Hooked, configurable:true, writable:true}); }
+      catch(_e) { try { self[name] = _Hooked; } catch(_e2) {} }
+    }
+    _hookW(_OW, "Worker");
+    _hookW(_OSW, "SharedWorker");
+  } catch(_e) {}
+})();`;
+var STEALTH_INIT_FULL = STEALTH_INIT + _WORKER_BOOT_SUFFIX;
 async function getBrowser() {
   if (browserPromise) {
     try {
@@ -59090,7 +59329,7 @@ async function newFreshContext() {
   ctx.on("close", () => {
     closedContexts.add(ctx);
   });
-  await ctx.addInitScript(STEALTH_INIT);
+  await ctx.addInitScript(STEALTH_INIT_FULL);
   ctx.on("page", (p) => {
     p.on("worker", (w) => {
       w.evaluate(WORKER_STEALTH_PATCH).catch(() => {
@@ -59164,7 +59403,7 @@ async function getStickyContext(hostname) {
     c.on("close", () => {
       closedContexts.add(c);
     });
-    await c.addInitScript(STEALTH_INIT);
+    await c.addInitScript(STEALTH_INIT_FULL);
     c.on("page", (p2) => {
       p2.on("worker", (w) => {
         w.evaluate(WORKER_STEALTH_PATCH).catch(() => {
@@ -59461,7 +59700,7 @@ async function harvestGoogleCookiesFresh() {
     proxy: { server: GOOGLE_HARVEST_PROXY }
   });
   try {
-    await ctx.addInitScript(STEALTH_INIT);
+    await ctx.addInitScript(STEALTH_INIT_FULL);
     try {
       await attachGoogleProxyRouting(ctx);
     } catch {
@@ -59604,7 +59843,7 @@ async function _bootstrapGoogleTrust(browser) {
       }
     });
     try {
-      await ctx.addInitScript(STEALTH_INIT);
+      await ctx.addInitScript(STEALTH_INIT_FULL);
     } catch (_) {
     }
     const page = await ctx.newPage();
@@ -60854,14 +61093,9 @@ var STEALTH_INIT2 = `
 
   try { if (window.Notification && Notification.permission === 'denied') Object.defineProperty(Notification, 'permission', { get: () => 'default' }); } catch (_) {}
 
-  // toString \u6CC4\u6F0F\uFF1A\u88AB\u6539\u5199\u8FC7\u7684\u51FD\u6570 toString \u5FC5\u987B\u4ECD\u8FD4\u56DE '[native code]'
-  const nativeToString = Function.prototype.toString;
-  const fakeFns = new WeakSet();
-  const wrap = (fn) => { fakeFns.add(fn); return fn; };
-  Function.prototype.toString = function () {
-    if (fakeFns.has(this)) return 'function ' + (this.name || '') + '() { [native code] }';
-    return nativeToString.call(this);
-  };
+  // Function.prototype.toString override REMOVED \u2014 known puppeteer-extra-plugin-stealth
+  // v2 signature: Fingerprint.com detects it as bot_type:"puppeteer_stealth". Use no-op.
+  const wrap = (fn) => fn; // no-op: toString NOT modified
   try { wrap(WebGLRenderingContext.prototype.getParameter); } catch (_) {}
   try { wrap(window.navigator.permissions.query); } catch (_) {}
   try { wrap(Function.prototype.toString); } catch (_) {}

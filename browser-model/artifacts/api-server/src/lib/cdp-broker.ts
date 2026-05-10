@@ -144,14 +144,9 @@ const STEALTH_INIT = `
 
   try { if (window.Notification && Notification.permission === 'denied') Object.defineProperty(Notification, 'permission', { get: () => 'default' }); } catch (_) {}
 
-  // toString 泄漏：被改写过的函数 toString 必须仍返回 '[native code]'
-  const nativeToString = Function.prototype.toString;
-  const fakeFns = new WeakSet();
-  const wrap = (fn) => { fakeFns.add(fn); return fn; };
-  Function.prototype.toString = function () {
-    if (fakeFns.has(this)) return 'function ' + (this.name || '') + '() { [native code] }';
-    return nativeToString.call(this);
-  };
+  // Function.prototype.toString override REMOVED — known puppeteer-extra-plugin-stealth
+  // v2 signature: Fingerprint.com detects it as bot_type:"puppeteer_stealth". Use no-op.
+  const wrap = (fn) => fn; // no-op: toString NOT modified
   try { wrap(WebGLRenderingContext.prototype.getParameter); } catch (_) {}
   try { wrap(window.navigator.permissions.query); } catch (_) {}
   try { wrap(Function.prototype.toString); } catch (_) {}
