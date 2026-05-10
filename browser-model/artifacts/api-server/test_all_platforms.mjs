@@ -13,7 +13,7 @@ console.log("STEALTH_INIT:" + STEALTH_INIT.length + " WORKER:" + WORKER_STEALTH_
 if (!STEALTH_INIT) { console.error("STEALTH_INIT empty!"); process.exit(1); }
 
 const browser = await chromium.launch({
-  executablePath: BINARY, headless: true,
+  executablePath: BINARY, headless: false,
   proxy: { server: PROXY },
   args: [
     "--no-sandbox","--disable-setuid-sandbox","--disable-dev-shm-usage",
@@ -21,10 +21,11 @@ const browser = await chromium.launch({
     "--fingerprint=" + (Math.random()*0x7fffffff|0),
     "--fingerprint-platform=linux","--fingerprint-brand=Chrome",
     "--fingerprint-brand-version=144","--fingerprint-hardware-concurrency=8",
-    "--disable-spoofing=gpu",
+
     "--lang=en-US","--accept-lang=en-US,en",
     "--timezone=America/Los_Angeles","--window-size=1920,1080",
     "--disable-non-proxied-udp","--proxy-resolves-dns-locally",
+    "--use-gl=angle","--use-angle=swiftshader","--enable-webgl",
   ],
   ignoreDefaultArgs: ["--enable-automation"],
   env: Object.assign({}, process.env, { DISPLAY: ":99" }),
@@ -142,7 +143,7 @@ await testSite("SannySoft", "https://bot.sannysoft.com/", function() {
 }, 12000);
 
 // 6. Brotector
-await testSite("Brotector", "https://kaliiiiiiiiii.github.io/brotector/", function() {
+await testSite("Brotector/Selenium-Detector", "https://hmaker.github.io/selenium-detector/", function() {
   var t = document.body ? document.body.innerText : "";
   var lines = t.split("\n").filter(function(l) { return l.trim() && /bot|human|detect|pass|fail|score|result|automation|webdriver|headless|true|false|status/i.test(l); }).slice(0,45);
   return { title: document.title, lines: lines, raw: t.slice(0,3500) };

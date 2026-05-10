@@ -58577,24 +58577,26 @@ var STEALTH_INIT = `
     Object.defineProperty(screen, 'pixelDepth', { get: () => 24, configurable: true });
   } catch (_) {}
 
-  // Battery (some sites probe it)
+  // Battery \u2014 override on prototype so it is NOT an own property of navigator.
+  // PixelScan checks navigator.hasOwnProperty('getBattery') \u2192 direct assignment = detected.
   try {
-    if (navigator.getBattery) {
-      const _gb = navigator.getBattery.bind(navigator);
-      navigator.getBattery = () => _gb().then((b) => b).catch(() => ({
-        charging: true, chargingTime: 0, dischargingTime: Infinity, level: 0.99,
-        addEventListener(){}, removeEventListener(){}, dispatchEvent(){return true;},
-      }));
+    const _gbOrig = Navigator.prototype.getBattery;
+    if (_gbOrig) {
+      Object.defineProperty(Navigator.prototype, 'getBattery', {
+        value: function getBattery() {
+          return _gbOrig.call(this).catch(() => ({
+            charging: true, chargingTime: 0, dischargingTime: Infinity, level: 0.99,
+            addEventListener(){}, removeEventListener(){}, dispatchEvent(){return true;},
+          }));
+        },
+        writable: true, configurable: true,
+      });
     }
   } catch (_) {}
 
-  // Connection
-  try {
-    Object.defineProperty(Navigator.prototype, 'connection', {
-      get: () => ({ effectiveType: '4g', rtt: 50, downlink: 10, saveData: false, addEventListener(){}, removeEventListener(){} }),
-      configurable: true,
-    });
-  } catch (_) {}
+  // Connection \u2014 let real Chrome expose the native NetworkInformation.
+  // Returning a plain object breaks instanceof checks; PixelScan detects it.
+  // No override needed: Chrome on Linux already returns a proper NetworkInformation with effectiveType '4g'.
 
   // Notification permission default
   try { if (window.Notification && Notification.permission === 'denied') Object.defineProperty(Notification, 'permission', { get: () => 'default' }); } catch (_) {}
