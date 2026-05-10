@@ -201,86 +201,8 @@ export const STEALTH_INIT = `
     }
   } catch (_) {}
 
-  // === WebGL vendor/renderer/caps spoof =======================================
-  // GeekezBrowser-style: hook getParameter + getExtension + getSupportedExtensions
-  // on WebGL1, WebGL2, and OffscreenCanvas for main thread.
-  // YSbrowser validates Intel UHD 630 preset achieves creepjs 62.5%+.
-  // Needed because fingerprint-chromium is not installed; stock chromium exposes
-  // SwiftShader which is a dead giveaway for headless bots.
-  try {
-    var _GL_VENDOR   = 'Intel Inc.';
-    var _GL_RENDERER = 'Intel(R) UHD Graphics 630';
-    var _GL_VENDOR_RAW   = 'Intel Open Source Technology Center';
-    var _GL_RENDERER_RAW = 'Mesa Intel(R) UHD Graphics 630 (CFL GT2)';
-    var _GL_VERSION      = 'OpenGL ES 3.0 (ANGLE 2.1.19.0 git hash: unknown)';
-    var _GL_GLSL_VERSION = 'WebGL GLSL ES 3.00 (OpenGL ES GLSL ES 3.0 Chromium)';
-    var _debugExtObj = { UNMASKED_VENDOR_WEBGL: 37445, UNMASKED_RENDERER_WEBGL: 37446 };
-    // Intel UHD 630 realistic capability values (from GeekezBrowser deriveWebglCaps)
-    var _intelCaps = {
-      3379:  16384,  // MAX_TEXTURE_SIZE
-      34076: 16384,  // MAX_CUBE_MAP_TEXTURE_SIZE
-      34024: 16384,  // MAX_RENDERBUFFER_SIZE
-      34921: 16,     // MAX_VERTEX_ATTRIBS
-      34930: 16,     // MAX_TEXTURE_IMAGE_UNITS
-      35660: 16,     // MAX_VERTEX_TEXTURE_IMAGE_UNITS
-      35661: 32,     // MAX_COMBINED_TEXTURE_IMAGE_UNITS
-      36347: 4096,   // MAX_VERTEX_UNIFORM_VECTORS
-      36348: 30,     // MAX_VARYING_VECTORS
-      36349: 1024,   // MAX_FRAGMENT_UNIFORM_VECTORS
-      34852: 8,      // MAX_DRAW_BUFFERS (WebGL2)
-      36063: 8,      // MAX_COLOR_ATTACHMENTS (WebGL2)
-    };
-    var _capKeys = Object.keys(_intelCaps).map(Number);
-    var _WEBGL_PATCH_KEY = '__iuhd630_patched__';
-
-    function _hookWebGLProto(proto) {
-      if (!proto || proto[_WEBGL_PATCH_KEY]) return;
-      try { proto[_WEBGL_PATCH_KEY] = true; } catch(_) {}
-      try {
-        var _origGP  = proto.getParameter;
-        var _origGE  = proto.getExtension;
-        var _origGSE = proto.getSupportedExtensions;
-        proto.getParameter = function getParameter(p) {
-          if (p === 37445) return _GL_VENDOR;           // UNMASKED_VENDOR_WEBGL
-          if (p === 37446) return _GL_RENDERER;         // UNMASKED_RENDERER_WEBGL
-          if (p === 7936)  return _GL_VENDOR_RAW;       // VENDOR
-          if (p === 7937)  return _GL_RENDERER_RAW;     // RENDERER
-          if (p === 7938)  return _GL_VERSION;           // VERSION
-          if (p === 35724) return _GL_GLSL_VERSION;     // SHADING_LANGUAGE_VERSION
-          if (_intelCaps.hasOwnProperty(p)) return _intelCaps[p];
-          return _origGP.apply(this, arguments);
-        };
-        proto.getExtension = function getExtension(name) {
-          if (name === 'WEBGL_debug_renderer_info') return _debugExtObj;
-          return _origGE.apply(this, arguments);
-        };
-        if (_origGSE) {
-          proto.getSupportedExtensions = function getSupportedExtensions() {
-            var list = _origGSE.apply(this, arguments) || [];
-            if (Array.isArray(list) && list.indexOf('WEBGL_debug_renderer_info') === -1) {
-              list = list.concat(['WEBGL_debug_renderer_info']);
-            }
-            return list;
-          };
-        }
-      } catch(_e) {}
-    }
-
-    if (typeof WebGLRenderingContext  !== 'undefined') _hookWebGLProto(WebGLRenderingContext.prototype);
-    if (typeof WebGL2RenderingContext !== 'undefined') _hookWebGLProto(WebGL2RenderingContext.prototype);
-
-    // OffscreenCanvas: hook on first getContext call (proto not accessible before)
-    if (typeof OffscreenCanvas !== 'undefined' && OffscreenCanvas.prototype && OffscreenCanvas.prototype.getContext) {
-      var _origOCGC = OffscreenCanvas.prototype.getContext;
-      OffscreenCanvas.prototype.getContext = function getContext(type) {
-        var ctx = _origOCGC.apply(this, arguments);
-        if (ctx && /webgl/i.test(String(type || ''))) {
-          try { _hookWebGLProto(Object.getPrototypeOf(ctx)); } catch(_) {}
-        }
-        return ctx;
-      };
-    }
-  } catch (_) {}
+  // WebGL getParameter: not patched — binary handles GPU spoofing consistently
+  // in both main page and Worker contexts via fingerprint-chromium --fingerprint seed.
 
   // === DOMRect / getBoundingClientRect noise (fixes fontFaceLoadPolicy / rect fingerprint) =
   // GeekezBrowser --rect-seed concept: add deterministic sub-pixel jitter so
@@ -802,66 +724,6 @@ const WORKER_STEALTH_PATCH = `(function() {
       };
     }
   } catch (_) {}
-
-  // === WebGL hook in Worker (OffscreenCanvas / SharedWorker) ===================
-  // CreepJS probes WebGL vendor/renderer in SharedWorker context.
-  // GeekezBrowser injects same hookProto into Worker blob bootstrap.
-  try {
-    var _wGL_VENDOR   = 'Intel Inc.';
-    var _wGL_RENDERER = 'Intel(R) UHD Graphics 630';
-    var _wGL_VENDOR_RAW   = 'Intel Open Source Technology Center';
-    var _wGL_RENDERER_RAW = 'Mesa Intel(R) UHD Graphics 630 (CFL GT2)';
-    var _wGL_VERSION      = 'OpenGL ES 3.0 (ANGLE 2.1.19.0 git hash: unknown)';
-    var _wGL_GLSL         = 'WebGL GLSL ES 3.00 (OpenGL ES GLSL ES 3.0 Chromium)';
-    var _wDebugExt = { UNMASKED_VENDOR_WEBGL: 37445, UNMASKED_RENDERER_WEBGL: 37446 };
-    var _wIntelCaps = {
-      3379: 16384, 34076: 16384, 34024: 16384,
-      34921: 16, 34930: 16, 35660: 16, 35661: 32,
-      36347: 4096, 36348: 30, 36349: 1024, 34852: 8, 36063: 8,
-    };
-    var _WPATCH_KEY = '__wiuhd630__';
-    function _wHookProto(proto) {
-      if (!proto || proto[_WPATCH_KEY]) return;
-      try { proto[_WPATCH_KEY] = true; } catch(_) {}
-      try {
-        var _oGP  = proto.getParameter;
-        var _oGE  = proto.getExtension;
-        var _oGSE = proto.getSupportedExtensions;
-        proto.getParameter = function(p) {
-          if (p === 37445) return _wGL_VENDOR;
-          if (p === 37446) return _wGL_RENDERER;
-          if (p === 7936)  return _wGL_VENDOR_RAW;
-          if (p === 7937)  return _wGL_RENDERER_RAW;
-          if (p === 7938)  return _wGL_VERSION;
-          if (p === 35724) return _wGL_GLSL;
-          if (_wIntelCaps.hasOwnProperty(p)) return _wIntelCaps[p];
-          return _oGP.apply(this, arguments);
-        };
-        proto.getExtension = function(name) {
-          if (name === 'WEBGL_debug_renderer_info') return _wDebugExt;
-          return _oGE.apply(this, arguments);
-        };
-        if (_oGSE) {
-          proto.getSupportedExtensions = function() {
-            var list = _oGSE.apply(this, arguments) || [];
-            if (Array.isArray(list) && list.indexOf('WEBGL_debug_renderer_info') === -1) list = list.concat(['WEBGL_debug_renderer_info']);
-            return list;
-          };
-        }
-      } catch(_) {}
-    }
-    if (typeof self.WebGLRenderingContext  !== 'undefined') _wHookProto(self.WebGLRenderingContext.prototype);
-    if (typeof self.WebGL2RenderingContext !== 'undefined') _wHookProto(self.WebGL2RenderingContext.prototype);
-    // OffscreenCanvas in workers
-    if (typeof self.OffscreenCanvas !== 'undefined' && self.OffscreenCanvas.prototype && self.OffscreenCanvas.prototype.getContext) {
-      var _oOCGC = self.OffscreenCanvas.prototype.getContext;
-      self.OffscreenCanvas.prototype.getContext = function(type) {
-        var ctx = _oOCGC.apply(this, arguments);
-        if (ctx && /webgl/i.test(String(type || ''))) try { _wHookProto(Object.getPrototypeOf(ctx)); } catch(_) {}
-        return ctx;
-      };
-    }
-  } catch(_) {}
 
   // === StorageEstimate in Worker ===============================================
   try {
