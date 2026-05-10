@@ -798,6 +798,76 @@
         "auth": "noauth",
         "udp": false
       }
+    },
+    {
+      "tag": "tp-in-0",
+      "port": 10910,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "tp-in-1",
+      "port": 10911,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "tp-in-2",
+      "port": 10912,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "tp-in-3",
+      "port": 10913,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "tp-in-4",
+      "port": 10914,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "tp-in-5",
+      "port": 10915,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "tp-in-6",
+      "port": 10916,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
     }
   ],
   "outbounds": [
@@ -2174,11 +2244,207 @@
           }
         ]
       }
+    },
+    {
+      "tag": "tp-out-0",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "154.44.73.141",
+            "port": 7129,
+            "users": [
+              {
+                "user": "AO13W7HuIzqC",
+                "pass": "8UDFTpgLmRvw"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "tp-out-1",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "38.96.191.150",
+            "port": 21719,
+            "users": [
+              {
+                "user": "44fa737d",
+                "pass": "1bab4a4504ca"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "tp-out-2",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "38.111.30.111",
+            "port": 26433,
+            "users": [
+              {
+                "user": "4b2c7676",
+                "pass": "6f0f4cbba5bb"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "tp-out-3",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "131.143.161.47",
+            "port": 1337,
+            "users": [
+              {
+                "user": "2b4i0hk14vj5",
+                "pass": "qjj5rvzk7jcy"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "tp-out-4",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "82.110.34.3",
+            "port": 7651,
+            "users": [
+              {
+                "user": "vuv3Uacy1lut",
+                "pass": "uleBx40W3Dof"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "tp-out-5",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "200.36.9.33",
+            "port": 1337,
+            "users": [
+              {
+                "user": "uwwt01yosouc",
+                "pass": "72041xv3y1z5"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "tp-out-6",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "205.179.217.31",
+            "port": 7139,
+            "users": [
+              {
+                "user": "bjj0Afk5N8DE",
+                "pass": "wZdVTxx4YcLX"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
     }
   ],
   "routing": {
     "domainStrategy": "AsIs",
     "rules": [
+      {
+        "type": "field",
+        "inboundTag": [
+          "tp-in-6"
+        ],
+        "outboundTag": "tp-out-6"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "tp-in-5"
+        ],
+        "outboundTag": "tp-out-5"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "tp-in-4"
+        ],
+        "outboundTag": "tp-out-4"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "tp-in-3"
+        ],
+        "outboundTag": "tp-out-3"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "tp-in-2"
+        ],
+        "outboundTag": "tp-out-2"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "tp-in-1"
+        ],
+        "outboundTag": "tp-out-1"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "tp-in-0"
+        ],
+        "outboundTag": "tp-out-0"
+      },
       {
         "type": "field",
         "inboundTag": [

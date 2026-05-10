@@ -47,7 +47,7 @@ const WARP_PORT   = 40000;  // 仅 google_proxy_route 用, 不进 attempt-pool
 // same pool at runtime, so the two layers stay in lockstep. CRITICAL: outer broker
 // proxy + google_proxy_route + v8.27 sign-up forward MUST share the same exit IP
 // to avoid CF edge IP-mismatch 403 + reCAPTCHA datacenter score.
-const XRAY_PORTS  = [10851, 10878, 10900, 10901, 10902, 10903, 10904, 10905, 10906, 10907, 10908, 10909, 10857, 10855, 10853, 10854, 10859];  // v8.30 2026-05-03: IT ISP(10851) 首位
+const XRAY_PORTS  = [10910, 10911, 10912, 10914, 10915, 10916, 10851, 10878, 10900, 10901, 10902, 10903, 10904, 10905, 10906, 10907, 10908, 10909, 10857, 10855, 10853, 10854, 10859];  // tp-proxies prepended  // v8.30 2026-05-03: IT ISP(10851) 首位
 const XRAY_PORTS_LEGACY_CF = [10822, 10824, 10826, 10828, 10830, 10832, 10834, 10836, 10838, 10840, 10842, 10845];  // ALL CF AS13335 — DO NOT USE
 const DEAD_PORTS  = XRAY_PORTS_DEAD;
 const TOR_SOCKS_PORT = 9050;  // Tor SOCKS5 (already running on VPS), exit = non-CF/non-GCP
