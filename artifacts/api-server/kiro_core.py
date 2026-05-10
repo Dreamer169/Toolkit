@@ -1649,17 +1649,27 @@ class KiroRegister:
 
         # Step 12f: Device Auth → refreshToken + clientId + clientSecret
         bearer_for_device = self._portal_bearer or session_token or ""
-        device_result = self.step12f_device_auth(bearer_for_device)
+        device_result = None
         refresh_token = ""
         client_id = ""
         client_secret = ""
+        try:
+            device_result = self.step12f_device_auth(bearer_for_device)
+        except Exception as _12f_exc:
+            self.log(f"  step12f exc(non-fatal): {type(_12f_exc).__name__}: {_12f_exc}")
         if device_result:
             refresh_token = device_result.get("refreshToken", "")
             client_id = device_result.get("clientId", "")
             client_secret = device_result.get("clientSecret", "")
+            if refresh_token:
+                self.log(f"  step12f OK refreshToken={refresh_token[:40]}...")
+            else:
+                self.log("  step12f: no refreshToken in result")
         else:
-            self.log("  ⚠️ step12f 失败, 无 refreshToken (非致命)")
-            if not refresh_token and exchange_rt: refresh_token = exchange_rt; self.log("  ℹ️ fallback: refreshToken from ExchangeToken")
+            self.log("  step12f failed/exception, no refreshToken (non-fatal)")
+        if not refresh_token and exchange_rt:
+            refresh_token = exchange_rt
+            self.log("  fallback: refreshToken from ExchangeToken")
 
         self.log(f"=== register() 完成: email={email} ===")
         return True, {

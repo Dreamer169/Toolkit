@@ -13,10 +13,19 @@ CREDS_PATH = "/opt/kiro.rs/credentials.json"
 
 # 代理出口 IP geo 信息 (已检测)
 PROXY_GEO = {
+    # US exits (tp-out, priority=0)
+    "socks5://127.0.0.1:10910": {"ip": "154.44.73.141",  "cc": "US", "country": "United States", "city": "Los Angeles"},
+    "socks5://127.0.0.1:10911": {"ip": "38.96.191.150",  "cc": "US", "country": "United States", "city": "New York"},
+    "socks5://127.0.0.1:10912": {"ip": "38.111.30.111",  "cc": "US", "country": "United States", "city": "New York"},
+    "socks5://127.0.0.1:10916": {"ip": "205.179.217.31", "cc": "US", "country": "United States", "city": "Los Angeles"},
+    # Asia/EU exits (ss-out, priority=1)
     "socks5://127.0.0.1:10851": {"ip": "185.49.57.133",  "cc": "IT", "country": "Italy"},
+    "socks5://127.0.0.1:10853": {"ip": "5.180.32.18",    "cc": "TR", "country": "Turkey"},
     "socks5://127.0.0.1:10854": {"ip": "112.120.48.16",  "cc": "HK", "country": "Hong Kong"},
-    "socks5://127.0.0.1:10857": {"ip": "203.186.234.178","cc": "HK", "country": "Hong Kong"},
-    "socks5://127.0.0.1:10859": {"ip": "218.190.242.49", "cc": "HK", "country": "Hong Kong"},
+    "socks5://127.0.0.1:10855": {"ip": "213.109.202.195","cc": "RU", "country": "Russia"},
+    "socks5://127.0.0.1:10857": {"ip": "203.186.234.178", "cc": "HK", "country": "Hong Kong"},
+    "socks5://127.0.0.1:10859": {"ip": "218.190.242.49",  "cc": "HK", "country": "Hong Kong"},
+    "socks5://127.0.0.1:10872": {"ip": "185.45.95.70",    "cc": "HK", "country": "Hong Kong"},
 }
 # 优先国家 (美/日/韩 = 0, 其余 = 1)
 PREFERRED_CC = {"US", "JP", "KR"}

@@ -555,7 +555,7 @@ module.exports = {
         "DATABASE_URL": "postgresql://postgres:postgres@localhost/toolkit",
         "KIRO_CONCURRENCY": "1",
         "KIRO_INTERVAL": "90",
-        "KIRO_PROXY_PORTS": "10854,10857,10859,10851",
+        "KIRO_PROXY_PORTS": "10910,10911,10912,10916,10854,10857,10859,10851",
         "KIRO_MAX_PER_RUN": "0",
         "PYTHONUNBUFFERED": "1"
     },
