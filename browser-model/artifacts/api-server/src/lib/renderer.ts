@@ -689,7 +689,6 @@ async function getBrowser(): Promise<Browser> {
         "--fingerprint-brand=Chrome",
         "--fingerprint-brand-version=144",
         "--fingerprint-hardware-concurrency=8",
-        "--disable-spoofing=gpu",
         "--lang=en-US",
         "--accept-lang=en-US,en",
         "--timezone=America/Los_Angeles",
