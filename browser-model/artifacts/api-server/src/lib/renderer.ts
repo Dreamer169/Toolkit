@@ -608,7 +608,67 @@ export const STEALTH_INIT = `
 // WORKER_STEALTH_PATCH: injected into DedicatedWorkers via page.on('worker').
 // addInitScript() does NOT reach Workers. getHighEntropyValues() is Promise-
 // based, so this patch wins the race against the worker's early async calls.
-const WORKER_STEALTH_PATCH = ``; // cleared: main page userAgentData=null, Worker=null (binary consistent), no patch needed
+const WORKER_STEALTH_PATCH = `(function() {
+  // Worker context: no window, use self. navigator = WorkerNavigator.
+  // Mirrors the three STEALTH_INIT patches that CreepJS checks in SharedWorker probes.
+
+  // === Web Share API stub (noWebShare) ===
+  // WorkerNavigator lacks share/canShare on Linux Chrome — same absence as main page pre-patch.
+  try {
+    var _nav = self.navigator;
+    if (_nav && !("share" in _nav)) {
+      Object.defineProperty(_nav.constructor.prototype, "share", {
+        value: function share() { return Promise.reject(new DOMException("Share canceled", "AbortError")); },
+        writable: true, configurable: true, enumerable: true,
+      });
+    }
+    if (_nav && !("canShare" in _nav)) {
+      Object.defineProperty(_nav.constructor.prototype, "canShare", {
+        value: function canShare(d) { return !!(d && (d.url || d.text || d.title)); },
+        writable: true, configurable: true, enumerable: true,
+      });
+    }
+  } catch (_) {}
+
+  // === matchMedia stub (prefersLightColor) ===
+  // matchMedia is not natively available in Worker scope.
+  // Stub it to report dark-mode preference, consistent with main page patch.
+  try {
+    if (typeof self.matchMedia !== "function") {
+      self.matchMedia = function matchMedia(query) {
+        var q = String(query || "");
+        var isDark = q.indexOf("prefers-color-scheme") !== -1 && q.indexOf("dark") !== -1;
+        return {
+          matches: isDark,
+          media: q,
+          onchange: null,
+          addListener: function() {},
+          removeListener: function() {},
+          addEventListener: function() {},
+          removeEventListener: function() {},
+          dispatchEvent: function() { return false; },
+        };
+      };
+    }
+  } catch (_) {}
+
+  // === getComputedStyle stub (hasKnownBgColor / ActiveText) ===
+  // getComputedStyle is not natively available in Worker scope.
+  // Stub returns a proxy that reports the same spoofed ActiveText value as main page.
+  try {
+    if (typeof self.getComputedStyle !== "function") {
+      self.getComputedStyle = function getComputedStyle() {
+        return new Proxy({}, {
+          get: function(t, p) {
+            if (p === "backgroundColor") return "rgb(0, 120, 212)";
+            if (p === "getPropertyValue") return function() { return ""; };
+            return "";
+          },
+        });
+      };
+    }
+  } catch (_) {}
+})();`;
 
 async function getBrowser(): Promise<Browser> {
   // If browser exists but is no longer connected (process died), reset.

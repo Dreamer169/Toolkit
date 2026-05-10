@@ -58356,8 +58356,8 @@ process.once("SIGINT", () => {
 var STEALTH_INIT = `
 // === Anti-fingerprint init script (runs before any page JS) ===
 (() => {
-  // navigator.webdriver
-  try { Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => undefined, configurable: true }); } catch (_) {}
+  // navigator.webdriver REMOVED: binary natively returns false with [native code] getter.
+  // Patching to undefined triggers CSS check + webdriver===undefined -> webDriverIsOn=true -> 33% headless.
   // delete CDP-injected globals
   try { delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array; } catch(_) {}
   try { delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise; } catch(_) {}
@@ -58503,23 +58503,8 @@ var STEALTH_INIT = `
     }
   } catch (_) {}
 
-  // WebGL vendor / renderer (Linux ANGLE/Mesa \u2014 v8.00 fixed Mac-string regression)
-  try {
-    const getParam = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function (p) {
-      if (p === 37445) return 'Google Inc. (Intel)';            // UNMASKED_VENDOR_WEBGL
-      if (p === 37446) return 'ANGLE (Intel, Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2), OpenGL 4.6)'; // UNMASKED_RENDERER_WEBGL
-      return getParam.apply(this, arguments);
-    };
-    if (typeof WebGL2RenderingContext !== 'undefined') {
-      const getParam2 = WebGL2RenderingContext.prototype.getParameter;
-      WebGL2RenderingContext.prototype.getParameter = function (p) {
-        if (p === 37445) return 'Google Inc. (Intel)';
-        if (p === 37446) return 'ANGLE (Intel, Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2), OpenGL 4.6)';
-        return getParam2.apply(this, arguments);
-      };
-    }
-  } catch (_) {}
+  // WebGL getParameter: not patched \u2014 binary handles GPU spoofing consistently
+  // in both main page and Worker contexts via fingerprint-chromium --fingerprint seed.
 
   // window.outerWidth/Height = innerWidth/Height when 0 (headless leak)
   try {
@@ -58559,18 +58544,12 @@ var STEALTH_INIT = `
   // Notification permission default
   try { if (window.Notification && Notification.permission === 'denied') Object.defineProperty(Notification, 'permission', { get: () => 'default' }); } catch (_) {}
 
-  // toString-leak: hide our patches by overriding fn.toString to native pattern
-  const nativeToString = Function.prototype.toString;
+  // Function.prototype.toString override REMOVED \u2014 CreepJS fingerprints
+  // the fakeFns WeakSet + toString override as a known stealth tool signature \u2192 40% stealth.
+  // wrap() is kept as a no-op so existing wrap(fn) call sites compile without error.
+  // fakeFns WeakSet is kept for Kasada/CF console detection protection below.
   const fakeFns = new WeakSet();
-  const wrap = (fn) => { fakeFns.add(fn); return fn; };
-  Function.prototype.toString = function () {
-    if (fakeFns.has(this)) return 'function ' + (this.name || '') + '() { [native code] }';
-    return nativeToString.call(this);
-  };
-  // mark our overrides
-  try { wrap(WebGLRenderingContext.prototype.getParameter); } catch (_) {}
-  try { wrap(window.navigator.permissions.query); } catch (_) {}
-  try { wrap(Function.prototype.toString); } catch (_) {}
+  const wrap = (fn) => fn; // no-op: does NOT modify toString
 
   // === WebRTC IP leak protection ===
   // Sites probe local/public IP via RTCPeerConnection ICE candidates. Strip
@@ -58666,59 +58645,10 @@ var STEALTH_INIT = `
     try { wrap(Date.prototype.getTimezoneOffset); } catch (_) {}
   } catch (_) {}
 
-  // === navigator.userAgentData (NavigatorUAData high-entropy) ===
-  // v7.79 \u2014 CF managed challenge JS \u5C42\u4F1A\u8C03 navigator.userAgentData.getHighEntropyValues
-  // (['platformVersion','architecture','bitness','model','uaFullVersion',
-  //   'fullVersionList','wow64']) \u7136\u540E\u8DDF Sec-CH-UA-* \u534F\u8BAE\u5934 byte-by-byte \u6BD4\u5BF9\u3002
-  // playwright stock \u9ED8\u8BA4 navigator.userAgentData \u5728 Linux \u4E0A\u8981\u4E48 undefined \u8981\u4E48
-  // \u8FD4 Headless \u6807\u8BB0 \u2192 CF \u4E00\u773C\u5224\u5B9A bot. \u8FD9\u91CC\u5F3A\u5236\u5168\u5957\u81EA\u6D3D\u8FD4\u56DE\u503C.
-  try {
-    var _brands = [
-      { brand: "Chromium", version: "144" },
-      { brand: "Not:A-Brand", version: "99" },
-      { brand: "Google Chrome", version: "144" },
-    ];
-    var _fullVerList = [
-      { brand: "Chromium", version: "144.0.7559.132" },
-      { brand: "Not:A-Brand", version: "99.0.0.0" },
-      { brand: "Google Chrome", version: "144.0.7559.132" },
-    ];
-    var _highEntropy = {
-      brands: _brands,
-      mobile: false,
-      platform: "Linux",
-      platformVersion: "5.15.0",
-      architecture: "x86",
-      bitness: "64",
-      model: "",
-      uaFullVersion: "144.0.7559.132",
-      fullVersionList: _fullVerList,
-      wow64: false,
-      formFactors: ["Desktop"],
-    };
-    var _uaData = {
-      brands: _brands,
-      mobile: false,
-      platform: "Linux",
-      getHighEntropyValues: function (hints) {
-        var out = { brands: _brands, mobile: false, platform: "Linux" };
-        try {
-          (hints || []).forEach(function (h) {
-            if (h in _highEntropy) out[h] = _highEntropy[h];
-          });
-        } catch (_) {}
-        return Promise.resolve(out);
-      },
-      toJSON: function () {
-        return { brands: _brands, mobile: false, platform: "Linux" };
-      },
-    };
-    try { wrap(_uaData.getHighEntropyValues); } catch (_) {}
-    try { wrap(_uaData.toJSON); } catch (_) {}
-    Object.defineProperty(Navigator.prototype, 'userAgentData', {
-      get: function () { return _uaData; }, configurable: true,
-    });
-  } catch (_) {}
+  // userAgentData JS patch REMOVED.
+  // fingerprint-chromium (ungoogled) provides null userAgentData in BOTH main page
+  // and DedicatedWorker \u2192 consistent \u2192 0% headless.
+  // CF uses HTTP sec-ch-ua-* headers (set in newFreshContext/getStickyContext), not JS API.
 
   // === Canvas / Audio / WebGL fingerprint noise ===
   // v7.79 \u2014 CF/CreepJS canvas hash \u9ED1\u540D\u5355\u5DF2\u6536\u5F55 stock playwright + Mesa-SwiftShader
@@ -58829,101 +58759,215 @@ var STEALTH_INIT = `
     } catch (_) {}
   } catch (_) {}
 
-  // === pdfViewerEnabled (Chrome \u2265 105) ===
-  try {
-    Object.defineProperty(Navigator.prototype, 'pdfViewerEnabled', { get: () => true, configurable: true });
-  } catch (_) {}
 
-  // === Speech Synthesis \u2014 headless has 0 voices; inject realistic Google voices ===
+  // === Speech Synthesis voices (headless = 0 voices) =======================
   try {
-    const _fakeVoices = [
-      { voiceURI:'Google US English',               name:'Google US English',               lang:'en-US', localService:false, default:true  },
-      { voiceURI:'Google UK English Female',         name:'Google UK English Female',         lang:'en-GB', localService:false, default:false },
-      { voiceURI:'Google UK English Male',           name:'Google UK English Male',           lang:'en-GB', localService:false, default:false },
-      { voiceURI:'Google Deutsch',                   name:'Google Deutsch',                   lang:'de-DE', localService:false, default:false },
-      { voiceURI:'Google espa\xF1ol',                   name:'Google espa\xF1ol',                   lang:'es-ES', localService:false, default:false },
-      { voiceURI:'Google espa\xF1ol de Estados Unidos', name:'Google espa\xF1ol de Estados Unidos', lang:'es-US', localService:false, default:false },
-      { voiceURI:'Google fran\xE7ais',                  name:'Google fran\xE7ais',                  lang:'fr-FR', localService:false, default:false },
-      { voiceURI:'Google \u0939\u093F\u0928\u094D\u0926\u0940',                   name:'Google \u0939\u093F\u0928\u094D\u0926\u0940',                   lang:'hi-IN', localService:false, default:false },
-      { voiceURI:'Google Indonesia',                 name:'Google Indonesia',                 lang:'id-ID', localService:false, default:false },
-      { voiceURI:'Google italiano',                  name:'Google italiano',                  lang:'it-IT', localService:false, default:false },
-      { voiceURI:'Google \u65E5\u672C\u8A9E',                    name:'Google \u65E5\u672C\u8A9E',                    lang:'ja-JP', localService:false, default:false },
-      { voiceURI:'Google \uD55C\uAD6D\uC758',                    name:'Google \uD55C\uAD6D\uC758',                    lang:'ko-KR', localService:false, default:false },
-      { voiceURI:'Google Nederlands',                name:'Google Nederlands',                lang:'nl-NL', localService:false, default:false },
-      { voiceURI:'Google polski',                    name:'Google polski',                    lang:'pl-PL', localService:false, default:false },
-      { voiceURI:'Google portugu\xEAs do Brasil',       name:'Google portugu\xEAs do Brasil',       lang:'pt-BR', localService:false, default:false },
-      { voiceURI:'Google \u0440\u0443\u0441\u0441\u043A\u0438\u0439',                   name:'Google \u0440\u0443\u0441\u0441\u043A\u0438\u0439',                   lang:'ru-RU', localService:false, default:false },
-      { voiceURI:'Google \u666E\u901A\u8BDD\uFF08\u4E2D\u56FD\u5927\u9646\uFF09',          name:'Google \u666E\u901A\u8BDD\uFF08\u4E2D\u56FD\u5927\u9646\uFF09',          lang:'zh-CN', localService:false, default:false },
-      { voiceURI:'Google \u7CA4\u8A9E\uFF08\u9999\u6E2F\uFF09',               name:'Google \u7CA4\u8A9E\uFF08\u9999\u6E2F\uFF09',               lang:'zh-HK', localService:false, default:false },
-      { voiceURI:'Google \u570B\u8A9E\uFF08\u81FA\u7063\uFF09',               name:'Google \u570B\u8A9E\uFF08\u81FA\u7063\uFF09',               lang:'zh-TW', localService:false, default:false },
+    var _fv = [
+      { voiceURI:'Google US English',        name:'Google US English',        lang:'en-US', localService:false, default:true  },
+      { voiceURI:'Google UK English Female', name:'Google UK English Female', lang:'en-GB', localService:false, default:false },
+      { voiceURI:'Google UK English Male',   name:'Google UK English Male',   lang:'en-GB', localService:false, default:false },
+      { voiceURI:'Google Deutsch',           name:'Google Deutsch',           lang:'de-DE', localService:false, default:false },
+      { voiceURI:'Google espanol',           name:'Google espanol',           lang:'es-ES', localService:false, default:false },
+      { voiceURI:'Google francais',          name:'Google francais',          lang:'fr-FR', localService:false, default:false },
+      { voiceURI:'Google italiano',          name:'Google italiano',          lang:'it-IT', localService:false, default:false },
+      { voiceURI:'Google nihongo',           name:'Google nihongo',           lang:'ja-JP', localService:false, default:false },
+      { voiceURI:'Google hangugeo',          name:'Google hangugeo',          lang:'ko-KR', localService:false, default:false },
+      { voiceURI:'Google portugues',         name:'Google portugues',         lang:'pt-BR', localService:false, default:false },
+      { voiceURI:'Google russkiy',           name:'Google russkiy',           lang:'ru-RU', localService:false, default:false },
+      { voiceURI:'Google putonghua',         name:'Google putonghua',         lang:'zh-CN', localService:false, default:false },
     ];
-    // Make each voice look like a real SpeechSynthesisVoice
-    _fakeVoices.forEach(v => { Object.setPrototypeOf(v, SpeechSynthesisVoice?.prototype || Object.prototype); });
+    _fv.forEach(function(v) { try { Object.setPrototypeOf(v, SpeechSynthesisVoice.prototype); } catch(_){} });
     if (typeof speechSynthesis !== 'undefined') {
-      Object.defineProperty(speechSynthesis, 'getVoices', {
-        value: function() { return _fakeVoices; },
-        writable: true, configurable: true,
-      });
-      // Dispatch voiceschanged so scripts waiting on it resolve immediately
-      try { speechSynthesis.dispatchEvent(new Event('voiceschanged')); } catch (_) {}
+      Object.defineProperty(speechSynthesis, 'getVoices', { value: function(){ return _fv; }, writable:true, configurable:true });
+      try { speechSynthesis.dispatchEvent(new Event('voiceschanged')); } catch(_) {}
     }
     if (typeof SpeechSynthesis !== 'undefined') {
-      Object.defineProperty(SpeechSynthesis.prototype, 'getVoices', {
-        value: function() { return _fakeVoices; },
-        writable: true, configurable: true,
-      });
+      Object.defineProperty(SpeechSynthesis.prototype, 'getVoices', { value: function(){ return _fv; }, writable:true, configurable:true });
     }
   } catch (_) {}
 
-  // === Keyboard / input device presence (headless leak: no keyboard events) ===
-  // navigator.keyboard exists on real Chrome; headless may suppress it
+  // === Kasada/CF console detection (b field) \u2014 mark via existing fakeFns ===
   try {
-    if (navigator.keyboard && typeof navigator.keyboard.getLayoutMap === 'function') {
-      // Already present \u2014 no-op
-    } else if (!navigator.keyboard) {
+    ["log","warn","error","info","debug","trace","dir","table","count","countReset",
+     "group","groupCollapsed","groupEnd","time","timeEnd","timeLog","assert","clear"
+    ].forEach(function(m) {
+      try { if (typeof console[m] === "function") fakeFns.add(console[m]); } catch(_) {}
+    });
+  } catch(_) {}
+
+  // === Keyboard API presence (headless leak) ================================
+  try {
+    if (typeof navigator.keyboard === 'undefined') {
       Object.defineProperty(Navigator.prototype, 'keyboard', {
-        get: () => ({ getLayoutMap: () => Promise.resolve(new Map()) }),
+        get: function() { return { getLayoutMap: function() { return Promise.resolve(new Map()); } }; },
         configurable: true,
       });
     }
   } catch (_) {}
 
-  // === Permissions API \u2014 override headless "denied" defaults ===
+  // === Permissions API \u2014 override headless "denied" defaults ================
   try {
-    const _origPQ = navigator.permissions?.query?.bind(navigator.permissions);
-    if (_origPQ) {
+    var _oPQ = navigator.permissions && navigator.permissions.query && navigator.permissions.query.bind(navigator.permissions);
+    if (_oPQ) {
       Object.defineProperty(navigator.permissions, 'query', {
         value: function query(desc) {
-          const name = desc?.name;
-          // headless returns "denied" for these; real Chrome returns "default"/"granted"
-          if (name === 'notifications') return Promise.resolve({ state: 'default', onchange: null });
-          if (name === 'clipboard-read' || name === 'clipboard-write') return Promise.resolve({ state: 'prompt', onchange: null });
-          return _origPQ(desc);
+          var n = desc && desc.name;
+          if (n === 'notifications') return Promise.resolve({ state: 'default', onchange: null });
+          if (n === 'clipboard-read' || n === 'clipboard-write') return Promise.resolve({ state: 'prompt', onchange: null });
+          return _oPQ(desc);
         },
         writable: true, configurable: true,
       });
     }
   } catch (_) {}
 
-  // === console detection protection (Kasada/CF 'b' field) ===
+  // === pdfViewerEnabled (Chrome \u2265 105) ===
   try {
-    var _cm = ["log","warn","error","info","debug","trace","dir","table","count","countReset","group","groupCollapsed","groupEnd","time","timeEnd","timeLog","assert","clear"];
-    _cm.forEach(function(m) {
-      try { if (typeof console[m] === "function") fakeFns.add(console[m]); } catch(_) {}
-    });
-  } catch(_) {}
-
-  // === Worker userAgentData patch ===
+    Object.defineProperty(Navigator.prototype, 'pdfViewerEnabled', { get: () => true, configurable: true });
+  } catch (_) {}
+  // === Web Share API stub (fixes noWebShare like-headless flag) ============
+  // Linux Chrome does not expose navigator.share/canShare; CreepJS flags absence as like-headless.
+  // Stub returns a rejected promise (native share UI unavailable) \u2014 same pattern as a real
+  // desktop that has the API but no native share target.
   try {
-    if (typeof window === "undefined" && typeof self !== "undefined") {
-      var _wB = [{brand:"Chromium",version:"144"},{brand:"Not:A-Brand",version:"99"},{brand:"Google Chrome",version:"144"}];
-      var _wH = {brands:_wB,mobile:false,platform:"Linux",platformVersion:"5.15.0",architecture:"x86",bitness:"64",model:"",uaFullVersion:"144.0.7559.132",fullVersionList:[{brand:"Chromium",version:"144.0.7559.132"},{brand:"Not:A-Brand",version:"99.0.0.0"},{brand:"Google Chrome",version:"144.0.7559.132"}],wow64:false,formFactors:["Desktop"]};
-      try { Object.defineProperty(self.navigator,"userAgentData",{get:function(){return {brands:_wB,mobile:false,platform:"Linux",getHighEntropyValues:function(h){var o={brands:_wB,mobile:false,platform:"Linux"};(h||[]).forEach(function(k){if(k in _wH)o[k]=_wH[k];});return Promise.resolve(o);},toJSON:function(){return {brands:_wB,mobile:false,platform:"Linux"};}};},configurable:true}); } catch(_) {}
-      try { Object.defineProperty(self.navigator,"entryPoints",{get:function(){return [];},configurable:true}); } catch(_) {}
+    if (!("share" in navigator)) {
+      Object.defineProperty(Navigator.prototype, "share", {
+        value: function share() { return Promise.reject(new DOMException("Share canceled","AbortError")); },
+        writable: true, configurable: true, enumerable: true,
+      });
     }
-  } catch(_) {}
+    if (!("canShare" in navigator)) {
+      Object.defineProperty(Navigator.prototype, "canShare", {
+        value: function canShare(data) { return !!(data && (data.url || data.text || data.title)); },
+        writable: true, configurable: true, enumerable: true,
+      });
+    }
+  } catch (_) {}
+
+  // === prefers-color-scheme: dark (fixes prefersLightColor like-headless flag) =========
+  // Xvfb returns "light" by default; real desktop Chrome on Linux typically follows system
+  // dark/light setting. Override matchMedia so (prefers-color-scheme: light).matches = false.
+  try {
+    var _origMQL = window.matchMedia.bind(window);
+    Object.defineProperty(window, "matchMedia", {
+      value: function matchMedia(query) {
+        var mql = _origMQL(query);
+        if (typeof query === "string" && query.indexOf("prefers-color-scheme") !== -1) {
+          var isLight = query.indexOf("light") !== -1;
+          var isDark = query.indexOf("dark") !== -1;
+          if (isLight || isDark) {
+            // Return a MediaQueryList-like object that reports dark mode preference
+            return Object.defineProperties(Object.create(mql), {
+              matches: { get: function() { return isDark; }, configurable: true },
+              media:   { get: function() { return mql.media;  }, configurable: true },
+              onchange:{ value: null, writable: true, configurable: true },
+              addListener:    { value: mql.addListener.bind(mql), configurable: true },
+              removeListener: { value: mql.removeListener.bind(mql), configurable: true },
+              addEventListener:    { value: mql.addEventListener.bind(mql), configurable: true },
+              removeEventListener: { value: mql.removeEventListener.bind(mql), configurable: true },
+              dispatchEvent: { value: mql.dispatchEvent.bind(mql), configurable: true },
+            });
+          }
+        }
+        return mql;
+      },
+      writable: true, configurable: true,
+    });
+  } catch (_) {}
+
+  // === getComputedStyle: spoof ActiveText system color (fixes hasKnownBgColor) ============
+  // Xvfb default X11 theme returns rgb(255,0,0) for CSS system color ActiveText.
+  // CreepJS: if background-color:ActiveText resolves to red \u2192 hasKnownBgColor=true \u2192 like-headless.
+  // Real desktop Chrome on Linux follows GTK theme and rarely returns pure red.
+  // Patch: intercept getComputedStyle only when el has explicit inline ActiveText bg-color.
+  try {
+    var _gCS = window.getComputedStyle.bind(window);
+    Object.defineProperty(window, "getComputedStyle", {
+      value: function getComputedStyle(el, pseudo) {
+        var result = _gCS(el, pseudo);
+        try {
+          if (el && el.getAttribute) {
+            var inl = el.getAttribute("style") || "";
+            if (/background-colors*:s*ActiveText/i.test(inl)) {
+              return new Proxy(result, {
+                get: function(t, p) {
+                  if (p === "backgroundColor") return "rgb(0, 120, 212)";
+                  var v = t[p];
+                  return typeof v === "function" ? v.bind(t) : v;
+                }
+              });
+            }
+          }
+        } catch(_2) {}
+        return result;
+      },
+      configurable: true, writable: true,
+    });
+  } catch (_) {}
+
 })();
 `;
+var WORKER_STEALTH_PATCH = `(function() {
+  // Worker context: no window, use self. navigator = WorkerNavigator.
+  // Mirrors the three STEALTH_INIT patches that CreepJS checks in SharedWorker probes.
+
+  // === Web Share API stub (noWebShare) ===
+  // WorkerNavigator lacks share/canShare on Linux Chrome \u2014 same absence as main page pre-patch.
+  try {
+    var _nav = self.navigator;
+    if (_nav && !("share" in _nav)) {
+      Object.defineProperty(_nav.constructor.prototype, "share", {
+        value: function share() { return Promise.reject(new DOMException("Share canceled", "AbortError")); },
+        writable: true, configurable: true, enumerable: true,
+      });
+    }
+    if (_nav && !("canShare" in _nav)) {
+      Object.defineProperty(_nav.constructor.prototype, "canShare", {
+        value: function canShare(d) { return !!(d && (d.url || d.text || d.title)); },
+        writable: true, configurable: true, enumerable: true,
+      });
+    }
+  } catch (_) {}
+
+  // === matchMedia stub (prefersLightColor) ===
+  // matchMedia is not natively available in Worker scope.
+  // Stub it to report dark-mode preference, consistent with main page patch.
+  try {
+    if (typeof self.matchMedia !== "function") {
+      self.matchMedia = function matchMedia(query) {
+        var q = String(query || "");
+        var isDark = q.indexOf("prefers-color-scheme") !== -1 && q.indexOf("dark") !== -1;
+        return {
+          matches: isDark,
+          media: q,
+          onchange: null,
+          addListener: function() {},
+          removeListener: function() {},
+          addEventListener: function() {},
+          removeEventListener: function() {},
+          dispatchEvent: function() { return false; },
+        };
+      };
+    }
+  } catch (_) {}
+
+  // === getComputedStyle stub (hasKnownBgColor / ActiveText) ===
+  // getComputedStyle is not natively available in Worker scope.
+  // Stub returns a proxy that reports the same spoofed ActiveText value as main page.
+  try {
+    if (typeof self.getComputedStyle !== "function") {
+      self.getComputedStyle = function getComputedStyle() {
+        return new Proxy({}, {
+          get: function(t, p) {
+            if (p === "backgroundColor") return "rgb(0, 120, 212)";
+            if (p === "getPropertyValue") return function() { return ""; };
+            return "";
+          },
+        });
+      };
+    }
+  } catch (_) {}
+})();`;
 async function getBrowser() {
   if (browserPromise) {
     try {
@@ -58976,7 +59020,6 @@ async function getBrowser() {
         "--fingerprint-brand=Chrome",
         "--fingerprint-brand-version=144",
         "--fingerprint-hardware-concurrency=8",
-        "--disable-spoofing=gpu",
         "--lang=en-US",
         "--accept-lang=en-US,en",
         "--timezone=America/Los_Angeles",
@@ -59038,7 +59081,7 @@ async function newFreshContext() {
       "sec-ch-ua-bitness": '"64"',
       "sec-ch-ua-arch": '"x86"',
       "sec-ch-ua-full-version": '"144.0.7559.132"',
-      "sec-ch-ua-platform-version": '"6.5.0"',
+      "sec-ch-ua-platform-version": '"6.8.0"',
       "sec-ch-ua-full-version-list": '"Chromium";v="144.0.7559.132", "Not:A-Brand";v="99.0.0.0", "Google Chrome";v="144.0.7559.132"',
       "sec-ch-ua-model": '""',
       "sec-ch-ua-wow64": "?0"
@@ -59048,6 +59091,12 @@ async function newFreshContext() {
     closedContexts.add(ctx);
   });
   await ctx.addInitScript(STEALTH_INIT);
+  ctx.on("page", (p) => {
+    p.on("worker", (w) => {
+      w.evaluate(WORKER_STEALTH_PATCH).catch(() => {
+      });
+    });
+  });
   return ctx;
 }
 function siteKey(hostname) {
@@ -59106,7 +59155,7 @@ async function getStickyContext(hostname) {
       "sec-ch-ua-bitness": '"64"',
       "sec-ch-ua-arch": '"x86"',
       "sec-ch-ua-full-version": '"144.0.7559.132"',
-      "sec-ch-ua-platform-version": '"6.5.0"',
+      "sec-ch-ua-platform-version": '"6.8.0"',
       "sec-ch-ua-full-version-list": '"Chromium";v="144.0.7559.132", "Not:A-Brand";v="99.0.0.0", "Google Chrome";v="144.0.7559.132"',
       "sec-ch-ua-model": '""',
       "sec-ch-ua-wow64": "?0"
@@ -59116,6 +59165,12 @@ async function getStickyContext(hostname) {
       closedContexts.add(c);
     });
     await c.addInitScript(STEALTH_INIT);
+    c.on("page", (p2) => {
+      p2.on("worker", (w) => {
+        w.evaluate(WORKER_STEALTH_PATCH).catch(() => {
+        });
+      });
+    });
     try {
       await attachGoogleProxyRouting(c);
     } catch (e) {
