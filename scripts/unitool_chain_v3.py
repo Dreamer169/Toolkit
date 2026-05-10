@@ -994,6 +994,126 @@ def run_login(email, password):
     log(f"[login] 未拿到 ssid rc={rc}")
     return ""
 
+def run_inline_verify(email: str, password: str, refresh_token: str, max_wait: int = 90) -> str:
+    # 注册成功后立即内联等待验证邮件（max_wait 秒，每 30s 轮询一次），
+    # 找到后 curl 点击 -> 必要时 run_login() 拿 ssid。
+    # 比 verify_rescue 更快: 无需等下一个 PM2 周期; 同一进程内完成全链路。
+    # 返回: ssid 字符串（成功则非空，失败或超时返回空字符串）
+    if not refresh_token:
+        log("[inline_verify] 无 refresh_token -> 跳过"); return ""
+
+    access_token = ""
+    try:
+        _body = urllib.parse.urlencode({
+            "grant_type":    "refresh_token",
+            "client_id":     CLIENT_ID,
+            "refresh_token": refresh_token,
+            "scope":         "https://graph.microsoft.com/Mail.Read offline_access",
+        }).encode()
+        _req = urllib.request.Request(
+            "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+            data=_body,
+        )
+        import json as _jj
+        _resp = _jj.loads(urllib.request.urlopen(_req, timeout=20).read())
+        access_token = _resp.get("access_token", "")
+        log(f"[inline_verify] Graph token len={len(access_token)}")
+    except Exception as e:
+        log(f"[inline_verify] token fail: {e}"); return ""
+
+    if not access_token:
+        return ""
+
+    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+    verify_url = ""
+    polls = max(1, max_wait // 30)
+    for i in range(polls):
+        time.sleep(30)
+        for folder in ("JunkEmail", "Inbox", "Clutter", "DeletedItems"):
+            try:
+                _filter = "from/emailAddress/address%20eq%20%27no-reply%40unitool.ai%27"
+                _url = (f"https://graph.microsoft.com/v1.0/me/mailFolders/"
+                        f"{folder}/messages?={_filter}"
+                        f"&=10&=subject,body,receivedDateTime")
+                _rq = urllib.request.Request(_url, headers=headers)
+                import json as _jj2
+                msgs = _jj2.loads(urllib.request.urlopen(_rq, timeout=15).read()).get("value", [])
+                log(f"[inline_verify] {folder}: {len(msgs)} messages")
+                for m in msgs:
+                    body = m.get("body", {}).get("content", "")
+                    links = re.findall(
+                        r"https://[^\s\"'<>]*unitool\.ai/api/auth/email[^\s\"'<>]*",
+                        body,
+                    )
+                    if not links:
+                        links = re.findall(
+                            r"https://unitool\.ai[^\s\"'<>]*token=[^\s\"'<>]*",
+                            body,
+                        )
+                    if links:
+                        verify_url = links[0]
+                        log(f"[inline_verify] found at {(i+1)*30}s in {folder}: {verify_url[:80]}")
+                        break
+                if verify_url:
+                    break
+            except Exception as e:
+                log(f"[inline_verify] {folder} err: {e}")
+        if verify_url:
+            break
+        log(f"[inline_verify] [{(i+1)*30}s] not found")
+
+    if not verify_url:
+        log(f"[inline_verify] {max_wait}s 内未收到验证邮件 -> 交 verify_rescue 处理")
+        return ""
+
+    ck  = "/tmp/unitool_chain_ck.txt"
+    hdr = "/tmp/unitool_chain_hdr.txt"
+    for f in [ck, hdr]:
+        try: os.remove(f)
+        except: pass
+    _curl = [
+        "curl", "-sS", "-L", "--max-redirs", "8",
+        "-c", ck, "-b", ck, "-D", hdr,
+        "-H", "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0.0.0",
+        "-H", "Accept: text/html,application/xhtml+xml,*/*;q=0.9",
+        "--max-time", "30",
+        verify_url,
+    ]
+    ssid = ""; to_entry = False
+    try:
+        _proc = subprocess.Popen(_curl, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            _proc.communicate(timeout=35)
+        except subprocess.TimeoutExpired:
+            _proc.kill(); _proc.communicate()
+        raw_hdrs = open(hdr, encoding="utf-8", errors="ignore").read() if os.path.exists(hdr) else ""
+        for line in raw_hdrs.splitlines():
+            if "unitool-ssid" in line.lower() and "set-cookie" in line.lower():
+                m2 = re.search(r"unitool-ssid=([^;\s]+)", line, re.I)
+                if m2: ssid = m2.group(1)
+            if "/entry" in line and "location" in line.lower():
+                to_entry = True
+        if not ssid and os.path.exists(ck):
+            for line in open(ck, encoding="utf-8", errors="ignore"):
+                if "unitool-ssid" in line.lower():
+                    parts = line.strip().split("\t")
+                    ssid  = parts[-1] if parts else ""; break
+        log(f"[inline_verify] curl ssid={len(ssid) if ssid else 0} to_entry={to_entry}")
+    except KeyboardInterrupt:
+        raise
+    except Exception as e:
+        log(f"[inline_verify] curl err: {e}")
+
+    if ssid:
+        log(f"[inline_verify] ssid from curl Set-Cookie len={len(ssid)}")
+        return ssid
+
+    log("[inline_verify] email verified, ssid httpOnly -> run_login()")
+    if check_resources():
+        return run_login(email, password)
+    log("[inline_verify] 资源不足，跳过 run_login"); return ""
+
+
 def run_reflink(email, _retries=3, _wait=30):
     """
     unitool_reflink.py --email EMAIL
@@ -1102,9 +1222,14 @@ def main():
     if not ssid:
         log("[ssid] 注册返回无 ssid，尝试从 DB 读...")
         ssid = db_get_ssid_from_notes(account_id)
-    # Fix G6: email_sent registration -> skip login, mark verify_pending
+    # Step 5b: 注册成功无 ssid -> 内联等待验证邮件（90s），避免立即入 verify_rescue 队列
     if not ssid and reg_result.get("ok"):
-        log("[ssid] email_sent: account unverified, skip login -> verify_rescue")
+        log("[ssid] 注册成功无 ssid -> 内联等待验证邮件（90s）...")
+        ssid = run_inline_verify(email, password, refresh_token, max_wait=90)
+        if ssid:
+            log(f"[ssid] inline_verify ssid len={len(ssid)}")
+        else:
+            log("[ssid] inline_verify 超时 -> 交 verify_rescue 处理")
     elif not ssid:
         log("[ssid] DB \u4e5f\u65e0 ssid\uff0c\u5c1d\u8bd5 unitool_login.py \u5c3c\u5e95\u767b\u5f55...")
         if check_resources():
