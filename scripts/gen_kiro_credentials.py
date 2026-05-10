@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""
+gen_kiro_credentials.py — 从 Toolkit DB 生成 kiro-rs credentials.json
+- 读取所有 platform=kiro 的活跃账号 (token 列 = Kiro accessToken)
+- 按 proxy_formatted 分配 proxyUrl (IP 一致性)
+- 美/日/韩 IP 优先 priority=0，其余 priority=1
+- 保留已有手动 credentials (id<=100) 不覆盖
+"""
+import json, secrets, psycopg2, sys, urllib.request, urllib.parse
+
+DB_URL = "postgresql://postgres:postgres@localhost/toolkit"
+CREDS_PATH = "/opt/kiro.rs/credentials.json"
+
+# 代理出口 IP geo 信息 (已检测)
+PROXY_GEO = {
+    "socks5://127.0.0.1:10851": {"ip": "185.49.57.133",  "cc": "IT", "country": "Italy"},
+    "socks5://127.0.0.1:10854": {"ip": "112.120.48.16",  "cc": "HK", "country": "Hong Kong"},
+    "socks5://127.0.0.1:10857": {"ip": "203.186.234.178","cc": "HK", "country": "Hong Kong"},
+    "socks5://127.0.0.1:10859": {"ip": "218.190.242.49", "cc": "HK", "country": "Hong Kong"},
+}
+# 优先国家 (美/日/韩 = 0, 其余 = 1)
+PREFERRED_CC = {"US", "JP", "KR"}
+
+def geo_priority(proxy_fmt):
+    geo = PROXY_GEO.get(proxy_fmt, {})
+    cc  = geo.get("cc", "??")
+    return 0 if cc in PREFERRED_CC else 1
+
+def gen_machine_id():
+    return secrets.token_hex(32)  # 64-char hex
+
+def load_existing():
+    try:
+        data = json.load(open(CREDS_PATH))
+        arr  = data if isinstance(data, list) else [data]
+        # keep manually-added entries (id <= 100 or no db_account_id in email)
+        manual = [c for c in arr if c.get("id", 999) <= 100]
+        return manual, max((c.get("id",0) for c in arr), default=0)
+    except Exception as e:
+        print(f"[gen] no existing creds or parse err: {e}")
+        return [], 0
+
+def fetch_kiro_accounts():
+    conn = psycopg2.connect(DB_URL)
+    cur  = conn.cursor()
+    cur.execute("""
+        SELECT id, email, token, proxy_formatted
+        FROM   accounts
+        WHERE  platform = 'kiro'
+          AND  status   = 'active'
+          AND  token    IS NOT NULL
+          AND  length(token) > 100
+        ORDER  BY id
+    """)
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+    return rows
+
+def main():
+    manual_creds, max_existing_id = load_existing()
+    print(f"[gen] existing manual credentials: {len(manual_creds)}, max_id={max_existing_id}")
+
+    rows = fetch_kiro_accounts()
+    print(f"[gen] kiro accounts in DB: {len(rows)}")
+
+    # Build set of emails already in manual_creds
+    manual_emails = {c.get("email","") for c in manual_creds}
+
+    new_creds = []
+    next_id   = max_existing_id + 1
+
+    for acc_id, email, token, proxy_fmt in rows:
+        if email in manual_emails:
+            print(f"[gen] skip (already in manual): {email}")
+            continue
+
+        geo      = PROXY_GEO.get(proxy_fmt or "", {})
+        country  = geo.get("country", "unknown")
+        priority = geo_priority(proxy_fmt or "")
+
+        cred = {
+            "id":           next_id,
+            "email":        email,
+            "accessToken":  token,
+            "refreshToken": token,      # Social: same token used for refresh via desktop endpoint
+            "expiresAt":    "2030-01-01T00:00:00Z",
+            "authMethod":   "social",
+            "machineId":    gen_machine_id(),
+            "priority":     priority,
+            "disabled":     False,
+        }
+        # Assign per-credential proxy for IP consistency
+        if proxy_fmt:
+            cred["proxyUrl"] = proxy_fmt.replace("127.0.0.1", "127.0.0.1")
+            cred["_proxyCountry"] = country
+        
+        new_creds.append(cred)
+        next_id += 1
+
+    all_creds = manual_creds + new_creds
+    print(f"[gen] total credentials: {len(all_creds)} ({len(manual_creds)} manual + {len(new_creds)} from DB)")
+
+    # Priority distribution
+    from collections import Counter
+    cc_dist = Counter(PROXY_GEO.get(c.get("proxyUrl",""),{}).get("country","manual") for c in all_creds)
+    print(f"[gen] geo distribution: {dict(cc_dist)}")
+    prio_dist = Counter(c.get("priority", 0) for c in all_creds)
+    print(f"[gen] priority distribution: {dict(prio_dist)}")
+
+    # Write
+    with open(CREDS_PATH, "w") as f:
+        json.dump(all_creds, f, indent=2, ensure_ascii=False)
+    print(f"[gen] written → {CREDS_PATH}")
+    print(f"[gen] DONE. kiro-rs needs reload to pick up new credentials.")
+
+if __name__ == "__main__":
+    main()
