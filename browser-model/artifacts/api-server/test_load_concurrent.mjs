@@ -29,11 +29,15 @@ const PORT_TZ = {
 
 function getSysStats() {
   try {
-    const mem      = execSync("free -m | awk NR==2{print "/"" MB"}", {encoding:"utf8"}).trim();
-    const chromN   = execSync("ps aux | grep -i chrom | grep -v grep | wc -l", {encoding:"utf8"}).trim();
-    const chromMB  = execSync("ps aux | grep -i chrom | grep -v grep | awk {s+=}END{printf "%.0f",s/1024}", {encoding:"utf8"}).trim();
-    const loadAvg  = execSync("cat /proc/loadavg | awk {print "/""/"}", {encoding:"utf8"}).trim();
-    return { mem, chromN, chromMB: chromMB+"MB", loadAvg };
+    const memRaw  = execSync("free -m", {encoding:"utf8"}).trim().split("\n")[1].trim().split(/\s+/);
+    const mem     = memRaw[2]+"/"+memRaw[1]+" MB";
+    const chromN  = execSync("ps aux | grep -i chrom | grep -v grep | wc -l", {encoding:"utf8"}).trim();
+    const chromKB = execSync(
+      "ps aux | grep -i chrom | grep -v grep | awk '{s+=$6}END{printf \"%.0f\",s/1024}'",
+      {encoding:"utf8"}
+    ).trim();
+    const loadAvg = execSync("cat /proc/loadavg", {encoding:"utf8"}).trim().split(" ").slice(0,3).join("/");
+    return { mem, chromN, chromMB: (chromKB||"0")+"MB", loadAvg };
   } catch(e) { return { mem:"?", chromN:"?", chromMB:"?", loadAvg:"?" }; }
 }
 
@@ -79,7 +83,7 @@ async function runWorker(id, port) {
     const res = [];
     for (const t of tasks) {
       const page = await ctx.newPage();
-      await page.goto(t.url, { timeout:60000, waitUntil:"domcontentloaded" });
+      await page.goto(t.url, { timeout:120000, waitUntil:"domcontentloaded" });
       let txt = "";
       for (let i=0; i<6; i++) {
         await page.waitForTimeout(5000);

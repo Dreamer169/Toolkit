@@ -68,18 +68,37 @@ console.log(`\n[${new Date().toISOString().slice(11,19)}] === 1/3 incolumitas.co
   const { b, ctx } = await mkBrowser();
   const page = await ctx.newPage();
   await page.goto("https://bot.incolumitas.com/", { timeout: 90000, waitUntil: "domcontentloaded" });
-  const text = await pollText(page, t => /score|result|passed|failed|human|bot/i.test(t), 4000, 40000);
+  // behavioralScore needs 1.5s+ of human-like behavior to compute
+  await page.waitForTimeout(1500);
+  // simulate natural mouse movement + scrolling to trigger behavioral classifiers
+  for (let i = 0; i < 8; i++) {
+    const x = 300 + Math.floor(Math.random() * 900);
+    const y = 200 + Math.floor(Math.random() * 500);
+    await page.mouse.move(x, y, { steps: 5 });
+    await page.waitForTimeout(300 + Math.floor(Math.random() * 400));
+  }
+  await page.evaluate(() => window.scrollBy(0, 150));
+  await page.waitForTimeout(500);
+  await page.evaluate(() => window.scrollBy(0, 100));
+  await page.waitForTimeout(500);
+  // poll for behavioralScore up to 60s
+  let score = null;
+  for (let i = 0; i < 20; i++) {
+    await page.waitForTimeout(3000);
+    // keep moving mouse to maintain behavioral signal
+    await page.mouse.move(400 + i*20, 300 + Math.floor(Math.random()*100), { steps: 3 }).catch(()=>{});
+    const raw = await page.evaluate(() => {
+      const el = document.getElementById("behavioralScore");
+      return el ? el.innerText.trim() : "";
+    }).catch(() => "");
+    if (raw && raw !== "..." && /^[0-9]/.test(raw)) { score = parseFloat(raw); break; }
+  }
   await page.screenshot({ path: "/tmp/extra_incolumitas.png" });
   await b.close();
-  // 找 bot score (0=human, 1=bot)
-  const scoreMatch = text.match(/(?:bot|overall)[^\d]*(\d+\.?\d*)/i);
-  const score = scoreMatch ? parseFloat(scoreMatch[1]) : null;
-  const passText = /you are (not a bot|human)|passed|not detected/i.test(text);
-  const failText = /you are (a )?bot|bot detected|automated/i.test(text);
   let pass, verdict;
-  if (failText)              { pass = false; verdict = `FAIL bot_detected score=${score??"-"}`; }
-  else if (passText || (score !== null && score < 0.5)) { pass = true; verdict = `PASS human score=${score??"-"}`; }
-  else                       { pass = true; verdict = `PASS(assumed) score=${score??"-"} no_bot_flag`; }
+  if (score === null)     { pass = false; verdict = "FAIL score_not_loaded"; }
+  else if (score >= 0.5)  { pass = true;  verdict = "PASS human score=" + score.toFixed(2); }
+  else                    { pass = false; verdict = "FAIL bot score=" + score.toFixed(2); }
   console.log(`  ${pass?"✅":"❌"} ${verdict}`);
   results.push({ name: "incolumitas", pass, verdict });
 }

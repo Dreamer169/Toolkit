@@ -289,4 +289,18 @@ if [ ! -S /var/run/dbus/system_bus_socket ] || ! pgrep -f "dbus-daemon --system 
   /usr/bin/dbus-daemon --system --fork 2>/dev/null || true
 fi
 
+# v8.64 — pre-bind: release port 8092 held by previous instance before exec.
+# Without this, PM2 rapid-restart leaves the old node process still bound,
+# causing EADDRINUSE → crash loop (78+ restarts witnessed 2026-05-11).
+_stale=$(ss -lntp 2>/dev/null | grep -oP "127\\.0\\.0\\.1:8092[^,]*pid=\\K[0-9]+" | head -1)
+if [[ -z "$_stale" ]]; then
+  _stale=$(ss -lntp 2>/dev/null | grep -oP "\\*:8092[^,]*pid=\\K[0-9]+" | head -1)
+fi
+if [[ -n "$_stale" ]]; then
+  kill -9 "$_stale" 2>/dev/null && echo "[start-browser-model] v8.64 killed stale pid=$_stale on :8092"
+else
+  fuser -k 8092/tcp 2>/dev/null && echo "[start-browser-model] v8.64 fuser cleared :8092" || true
+fi
+sleep 0.3
+
 exec node --enable-source-maps /root/browser-model/artifacts/api-server/dist/index.mjs
