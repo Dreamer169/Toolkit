@@ -58639,26 +58639,26 @@ var STEALTH_INIT = `
     if (!window.outerHeight) Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight });
   } catch (_) {}
 
-  // Screen properties via Proxy on window.screen (ODP on screen instance fails \u2014 non-configurable native).
-  // Debug-proven: ODP(window,'screen',{get:Proxy}) works correctly with Playwright screen:{} emulation.
+  // Screen properties via Proxy \u2014 ODP may fail on non-configurable window.screen.
+  // Fallback: direct assignment window.screen = proxy (works when ODP throws).
   try {
     var _rs = window.screen;
-    Object.defineProperty(window, 'screen', {
-      get: function() {
-        return new Proxy(_rs, {
-          get: function(t, p) {
-            if (p === 'availWidth')  return 1920;
-            if (p === 'availHeight') return 1040;
-            if (p === 'width')  return 1920;
-            if (p === 'height') return 1080;
-            if (p === 'colorDepth') return 24;
-            if (p === 'pixelDepth') return 24;
-            var v = t[p]; return typeof v === 'function' ? v.bind(t) : v;
-          },
-        });
+    var _screenProxy = new Proxy(_rs, {
+      get: function(t, p) {
+        if (p === 'availWidth')  return 1920;
+        if (p === 'availHeight') return 1040;
+        if (p === 'width')  return 1920;
+        if (p === 'height') return 1080;
+        if (p === 'colorDepth') return 24;
+        if (p === 'pixelDepth') return 24;
+        var v = t[p]; return typeof v === 'function' ? v.bind(t) : v;
       },
-      configurable: true,
     });
+    try {
+      Object.defineProperty(window, 'screen', { get: function() { return _screenProxy; }, configurable: true });
+    } catch (_odp) {
+      try { Object.getPrototypeOf(window).screen; window['screen'] = _screenProxy; } catch(_wa) {}
+    }
   } catch (_) {}
 
   // Battery \u2014 override on prototype so it is NOT an own property of navigator.
@@ -58725,18 +58725,27 @@ var STEALTH_INIT = `
     } catch(_n) {}
   } catch (_) {}
 
-  // Notification.permission always 'default': direct window.Notification replacement (debug-proven).
-  // Bug: (1) condition 'denied' false at initScript time; (2) ODP non-configurable. Fix: direct Proxy.
+  // Notification.permission always 'default'.
+  // window.Notification is a getter \u2014 direct assignment silently fails.
+  // ODP with get: () => proxy ensures the Proxy is always returned.
   try {
     if (window.Notification) {
       var _RealNotif = window.Notification;
-      window.Notification = new Proxy(_RealNotif, {
+      var _notifProxy = new Proxy(_RealNotif, {
         get: function(t, p) {
           if (p === 'permission') return 'default';
           var v = t[p]; return typeof v === 'function' ? v.bind(t) : v;
         },
         construct: function(t, args) { return new t(...args); },
       });
+      try {
+        Object.defineProperty(window, 'Notification', {
+          get: function() { return _notifProxy; },
+          configurable: true, enumerable: true,
+        });
+      } catch (_odp) {
+        try { window.Notification = _notifProxy; } catch (_) {}
+      }
     }
   } catch (_) {}
 
@@ -59065,16 +59074,39 @@ var STEALTH_INIT = `
   try {
     Object.defineProperty(Navigator.prototype, 'pdfViewerEnabled', { get: () => true, configurable: true });
   } catch (_) {}
-  // === Web Share API stub (fixes noWebShare like-headless flag) ============
-  // ODP(Navigator.prototype,"share") silently fails. Debug-proven: navigator.share = fn WORKS.
+  // === Web Share API stub (noWebShare fix) ===
+  // ODP(Navigator.prototype) and direct assignment both silently fail on Linux Chrome builds.
+  // Robust fix: try ODP on prototype first, then Proxy window.navigator as fallback.
   try {
-    if (!("share" in navigator)) {
-      navigator.share = function share() {
-        return Promise.reject(new DOMException("Share canceled", "AbortError"));
-      };
-    }
-    if (!("canShare" in navigator)) {
-      navigator.canShare = function canShare() { return false; };
+    var _shareStub = function share() { return Promise.reject(new DOMException('Share canceled','AbortError')); };
+    var _canShareStub = function canShare() { return true; };
+    try {
+      if (!('share' in Navigator.prototype)) {
+        Object.defineProperty(Navigator.prototype, 'share', { value: _shareStub, writable: true, configurable: true, enumerable: false });
+      }
+    } catch(_p1) {}
+    try {
+      if (!('canShare' in Navigator.prototype)) {
+        Object.defineProperty(Navigator.prototype, 'canShare', { value: _canShareStub, writable: true, configurable: true, enumerable: false });
+      }
+    } catch(_p2) {}
+    // Fallback: if still absent, wrap window.navigator in a Proxy
+    if (!('share' in navigator)) {
+      var _realNav = window.navigator;
+      var _navProxy = new Proxy(_realNav, {
+        get: function(t, p) {
+          if (p === 'share') return _shareStub;
+          if (p === 'canShare') return _canShareStub;
+          var v = t[p]; return typeof v === 'function' ? v.bind(t) : v;
+        },
+        has: function(t, p) {
+          if (p === 'share' || p === 'canShare') return true;
+          return p in t;
+        },
+      });
+      try {
+        Object.defineProperty(window, 'navigator', { get: function() { return _navProxy; }, configurable: true });
+      } catch(_no) {}
     }
   } catch (_) {}
 
@@ -59156,135 +59188,6 @@ var STEALTH_INIT = `
 
 })();
 
-// \u2500\u2500 Like-headless mitigation patches \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-// Reduces CreepJS likeHeadlessRating by faking absent APIs
-
-// 1. hasKnownBgColor: document.documentElement background
-(function(){
-  try {
-    const orig = window.getComputedStyle;
-    window.getComputedStyle = function(el, pseudo) {
-      const s = orig.call(this, el, pseudo);
-      if (el === document.documentElement || el === document.body) {
-        const origGetProp = s.getPropertyValue.bind(s);
-        return new Proxy(s, {
-          get(t, p) {
-            if (p === 'backgroundColor' || p === 'background-color') return 'rgb(248, 249, 250)';
-            const v = t[p];
-            return typeof v === 'function' ? v.bind(t) : v;
-          }
-        });
-      }
-      return s;
-    };
-  } catch(e) {}
-})();
-
-// 2. prefersLightColor \u2014 CreepJS checks matchMedia('prefers-color-scheme: light')
-(function(){
-  try {
-    const origMQL = window.matchMedia;
-    window.matchMedia = function(query) {
-      const mql = origMQL.call(this, query);
-      if (/prefers-color-scheme/.test(query)) {
-        const isDark = /dark/.test(query);
-        return Object.defineProperties(Object.create(mql), {
-          matches: { get: () => isDark ? false : true },
-          media: { get: () => query },
-          onchange: { value: null, writable: true },
-          addEventListener: { value: mql.addEventListener.bind(mql) },
-          removeEventListener: { value: mql.removeEventListener.bind(mql) },
-        });
-      }
-      return mql;
-    };
-  } catch(e) {}
-})();
-
-// 3. noTaskbar \u2014 fake screen.availHeight to show taskbar presence (40px)
-(function(){
-  try {
-    const screenHeight = window.screen.height || 1080;
-    const taskbarH = 40;
-    Object.defineProperty(window.screen, 'availHeight', {
-      get: () => screenHeight - taskbarH,
-      configurable: true
-    });
-    // Also override on screen object
-    Object.defineProperty(Screen.prototype, 'availHeight', {
-      get: function() { return this.height - taskbarH; },
-      configurable: true
-    });
-  } catch(e) {}
-})();
-
-// 4. noWebShare \u2014 fake navigator.share (Web Share API)
-(function(){
-  try {
-    if (!navigator.share) {
-      Object.defineProperty(navigator, 'share', {
-        value: async function(data) { return Promise.resolve(); },
-        configurable: true, writable: true
-      });
-      Object.defineProperty(navigator, 'canShare', {
-        value: function(data) { return true; },
-        configurable: true, writable: true
-      });
-    }
-  } catch(e) {}
-})();
-
-// 5. noContentIndex \u2014 fake ContentIndex API
-(function(){
-  try {
-    if (navigator.serviceWorker && !('ContentIndex' in window)) {
-      window.ContentIndex = function(){};
-      // Fake on ServiceWorkerRegistration
-      const origGetter = Object.getOwnPropertyDescriptor(ServiceWorkerRegistration.prototype, 'index');
-      if (!origGetter) {
-        Object.defineProperty(ServiceWorkerRegistration.prototype, 'index', {
-          get: function() { return { add: async()=>{}, delete: async()=>{}, getAll: async()=>[] }; },
-          configurable: true
-        });
-      }
-    }
-  } catch(e) {}
-})();
-
-// 6. noContactsManager \u2014 fake Contacts Manager API
-(function(){
-  try {
-    if (!navigator.contacts) {
-      Object.defineProperty(navigator, 'contacts', {
-        value: {
-          select: async function(props, opts) { return []; },
-          getProperties: async function() { return ['name', 'email', 'tel']; }
-        },
-        configurable: true, writable: true
-      });
-    }
-  } catch(e) {}
-})();
-
-// 7. noDownlinkMax \u2014 fake navigator.connection.downlinkMax
-(function(){
-  try {
-    if (navigator.connection && navigator.connection.downlinkMax === undefined) {
-      Object.defineProperty(navigator.connection, 'downlinkMax', {
-        get: () => 10,
-        configurable: true
-      });
-    } else if (!navigator.connection) {
-      Object.defineProperty(navigator, 'connection', {
-        value: { downlink: 10, downlinkMax: 10, effectiveType: '4g',
-                 rtt: 100, saveData: false, type: 'wifi',
-                 onchange: null },
-        configurable: true, writable: true
-      });
-    }
-  } catch(e) {}
-})();
-// \u2500\u2500 End like-headless patches \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 `;
 var WORKER_STEALTH_PATCH = `(function() {
