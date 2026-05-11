@@ -8,6 +8,7 @@ API 流程:
   2. POST /CreateSubscriptionToken   → 获取一次性 Stripe 支付 URL
 
 无需 Playwright，纯 HTTP 调用。
+proxy 参数格式: "socks5://127.0.0.1:10910" — 必须与注册时使用的代理一致（IP 一致性）
 """
 import json
 import uuid
@@ -24,39 +25,60 @@ FIXED_PROFILE_ARNS = {
 }
 
 
-def _post(url, payload, access_token, timeout=30):
-    """POST JSON, return (status_code, dict)."""
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        url, data=data,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {access_token}",
-            "x-amz-target": "com.amazonaws.codewhisperer",
-        },
-        method="POST",
-    )
+def _post(url, payload, access_token, timeout=30, proxy: str | None = None):
+    """POST JSON via curl_cffi (支持 SOCKS5 代理), return (status_code, dict).
+
+    proxy 格式: "socks5://127.0.0.1:10910"
+    保持与注册时相同的出口 IP，避免 Kiro 安全锁定。
+    """
+    data = json.dumps(payload)
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {access_token}",
+        "x-amz-target": "com.amazonaws.codewhisperer",
+        "User-Agent": "aws-sdk-java/2.x Linux/5.15.0",
+    }
     try:
-        resp = urllib.request.urlopen(req, timeout=timeout)
-        return resp.status, json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        body = b""
-        try:
-            body = e.read()
-        except Exception:
-            pass
-        return e.code, {"_error_body": body.decode(errors="replace")[:500]}
+        from curl_cffi import requests as _cr
+        kwargs = dict(
+            headers=headers,
+            data=data,
+            timeout=timeout,
+            verify=False,
+        )
+        if proxy:
+            kwargs["proxies"] = {"https": proxy, "http": proxy}
+        resp = _cr.post(url, **kwargs)
+        if resp.status_code == 200:
+            return 200, resp.json()
+        else:
+            return resp.status_code, {"_error_body": resp.text[:500]}
     except Exception as exc:
-        return 0, {"_exception": str(exc)}
+        # fallback: urllib without proxy
+        try:
+            req_data = data.encode()
+            req = urllib.request.Request(url, data=req_data, headers=headers, method="POST")
+            resp2 = urllib.request.urlopen(req, timeout=timeout)
+            return resp2.status, json.loads(resp2.read())
+        except urllib.error.HTTPError as e:
+            body = b""
+            try:
+                body = e.read()
+            except Exception:
+                pass
+            return e.code, {"_error_body": body.decode(errors="replace")[:500]}
+        except Exception as exc2:
+            return 0, {"_exception": str(exc2)}
 
 
-def list_available_subscriptions(access_token, profile_arn, log=print):
+def list_available_subscriptions(access_token, profile_arn, log=print,
+                                 proxy: str | None = None):
     """
     返回 {"ok": True, "plans": [...], "data": {...}}
          {"ok": False, "error": ...}
     """
     url = f"{CODEWHISPERER_ENDPOINT}/listAvailableSubscriptions"
-    status, data = _post(url, {"profileArn": profile_arn}, access_token)
+    status, data = _post(url, {"profileArn": profile_arn}, access_token, proxy=proxy)
 
     if status == 200:
         plans = data.get("subscriptionPlans", [])
@@ -76,7 +98,8 @@ def list_available_subscriptions(access_token, profile_arn, log=print):
 
 
 def create_subscription_token(access_token, profile_arn, subscription_type,
-                              success_url=None, cancel_url=None, log=print):
+                              success_url=None, cancel_url=None, log=print,
+                              proxy: str | None = None):
     """
     返回 {"ok": True, "url": "...", "token": "...", "status": "..."}
          {"ok": False, "error": ...}
@@ -94,7 +117,7 @@ def create_subscription_token(access_token, profile_arn, subscription_type,
         payload["cancelUrl"] = cancel_url
 
     log(f"创建订阅 Token (type={subscription_type})...", "info")
-    status, data = _post(url, payload, access_token)
+    status, data = _post(url, payload, access_token, proxy=proxy)
 
     if status == 200:
         encoded_url = data.get("encodedVerificationUrl", "")
@@ -113,9 +136,13 @@ def create_subscription_token(access_token, profile_arn, subscription_type,
 
 
 def subscribe_pro(access_token, profile_arn=None, provider="BuilderId",
-                  subscription_type=None, log=print):
+                  subscription_type=None, proxy: str | None = None, log=print):
     """
     完整 Pro 订阅流程: 查询套餐 → 选择 Pro → 获取支付 URL。
+
+    Args:
+        proxy: 账号注册时使用的 SOCKS5 代理 (如 "socks5://127.0.0.1:10910")
+               必须与注册 IP 一致，否则 Kiro 会触发安全锁定。
 
     Returns:
         dict with ok, payment_url, subscription_type, timestamp  — 或 None
@@ -126,10 +153,13 @@ def subscribe_pro(access_token, profile_arn=None, provider="BuilderId",
     log("=" * 50, "ok")
     log("开始 Pro 订阅流程", "info")
     log(f"  Provider: {provider}  ProfileArn: {profile_arn}", "info")
+    if proxy:
+        log(f"  Proxy: {proxy}", "info")
     log("=" * 50, "ok")
 
     # Step 1: 查询可用套餐
-    plans_result = list_available_subscriptions(access_token, profile_arn, log)
+    plans_result = list_available_subscriptions(access_token, profile_arn, log,
+                                                proxy=proxy)
     if not plans_result["ok"]:
         log("无法获取套餐列表，流程中止", "error")
         return None
@@ -158,7 +188,7 @@ def subscribe_pro(access_token, profile_arn=None, provider="BuilderId",
 
     # Step 3: 获取一次性 Stripe 支付 URL
     token_result = create_subscription_token(
-        access_token, profile_arn, subscription_type, log=log
+        access_token, profile_arn, subscription_type, log=log, proxy=proxy
     )
     if not token_result["ok"]:
         log("获取支付 URL 失败", "error")
@@ -194,13 +224,14 @@ if __name__ == "__main__":
         print(f"[{ts}] [{level.upper():5s}] {msg}")
 
     if len(sys.argv) < 2:
-        print("用法: python3 kiro_subscribe.py <access_token> [profile_arn]")
+        print("用法: python3 kiro_subscribe.py <access_token> [profile_arn] [proxy]")
         sys.exit(1)
 
     token_arg = sys.argv[1]
     pa_arg    = sys.argv[2] if len(sys.argv) > 2 else None
+    proxy_arg = sys.argv[3] if len(sys.argv) > 3 else None
 
-    result = subscribe_pro(token_arg, profile_arn=pa_arg, log=_log)
+    result = subscribe_pro(token_arg, profile_arn=pa_arg, proxy=proxy_arg, log=_log)
     if result and result.get("ok"):
         print("\n" + "=" * 60)
         print(f"支付 URL: {result['payment_url']}")

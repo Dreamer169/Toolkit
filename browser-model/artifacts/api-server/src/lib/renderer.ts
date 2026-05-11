@@ -1521,6 +1521,7 @@ export async function renderWithBrowser(
       }
     });
 
+    const _navStart = Date.now();
     try {
       await page.goto(url, { waitUntil: "load", timeout: timeoutMs });
     } catch (err) {
@@ -1563,7 +1564,7 @@ export async function renderWithBrowser(
     // Behavioral warm-up for Datadome / ML-based detectors.
     // Runs after page load to seed genuine mouse/scroll/keyboard signals.
     if (_needsBehaviorSim(targetHost)) {
-      const _behaviorBudget = Math.max(0, timeoutMs - (Date.now() - (page as any)._t0 ?? 0) - 3000);
+      const _behaviorBudget = Math.max(0, timeoutMs - (Date.now() - _navStart) - 3000);
       await _behaviorSim(page, Math.min(_behaviorBudget, 7000)).catch(() => {});
     }
 

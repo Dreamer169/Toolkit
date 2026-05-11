@@ -53,7 +53,9 @@ def fetch_kiro_accounts():
     conn = psycopg2.connect(DB_URL)
     cur  = conn.cursor()
     cur.execute("""
-        SELECT id, email, token, proxy_formatted
+        SELECT id, email, token, proxy_formatted,
+               refresh_token,
+               notes
         FROM   accounts
         WHERE  platform = 'kiro'
           AND  status   = 'active'
@@ -78,7 +80,15 @@ def main():
     new_creds = []
     next_id   = max_existing_id + 1
 
-    for acc_id, email, token, proxy_fmt in rows:
+    for row in rows:
+        acc_id, email, token, proxy_fmt, db_refresh_token, notes_raw = row
+        # Safely parse notes JSON
+        try:
+            notes_json = json.loads(notes_raw or '{}') if notes_raw and notes_raw.strip().startswith('{') else {}
+        except Exception:
+            notes_json = {}
+        client_id     = notes_json.get('clientId', '')
+        client_secret = notes_json.get('clientSecret', '')
         if email in manual_emails:
             print(f"[gen] skip (already in manual): {email}")
             continue
@@ -87,12 +97,16 @@ def main():
         country  = geo.get("country", "unknown")
         priority = geo_priority(proxy_fmt or "")
 
+        from datetime import datetime, timezone, timedelta
+        expires_in_8h = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Use real refreshToken from DB if available; else fall back to accessToken (social mode)
+        real_refresh = db_refresh_token if db_refresh_token and len(db_refresh_token) > 50 else token
         cred = {
             "id":           next_id,
             "email":        email,
             "accessToken":  token,
-            "refreshToken": token,      # Social: same token used for refresh via desktop endpoint
-            "expiresAt":    "2030-01-01T00:00:00Z",
+            "refreshToken": real_refresh,
+            "expiresAt":    expires_in_8h,
             "authMethod":   "social",
             "machineId":    gen_machine_id(),
             "priority":     priority,

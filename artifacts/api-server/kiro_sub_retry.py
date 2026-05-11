@@ -3,9 +3,12 @@
 kiro_sub_retry.py — Pro 订阅延迟重试守护进程
 
 扫描 accounts 表中满足以下条件的 kiro 账号，调用 subscribe_pro() 并更新结果：
-  - sub_status = 'pending'   (注册后预热完成，等待 24h 首次订阅)
-  - sub_status = 'suspended' (上次订阅返回 403 suspended，按退避周期重试)
+  - sub_status = 'pending'   (注册后等待首次订阅)
+  - sub_status = 'suspended' (上次订阅失败，按退避周期重试)
   - sub_retry_after <= NOW()
+
+关键修复: 订阅时传入账号注册时使用的 proxy_formatted (IP 一致性)
+          避免 Kiro 检测到 IP 变化触发安全锁定。
 
 运行方式:
   python3 kiro_sub_retry.py            # 单次扫描后退出
@@ -24,6 +27,9 @@ import psycopg2
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@localhost/toolkit")
 LOG_PREFIX = "[RETRY]"
 
+# 脚本目录（/data/Toolkit/artifacts/api-server）
+_API_DIR = "/data/Toolkit/artifacts/api-server"
+
 
 def _db():
     return psycopg2.connect(DB_URL)
@@ -36,8 +42,7 @@ def _log(msg: str, level: str = "info"):
 
 def _load_subscribe():
     spec = importlib.util.spec_from_file_location(
-        "kiro_subscribe",
-        "/root/Toolkit/artifacts/api-server/kiro_subscribe.py",
+        "kiro_subscribe", f"{_API_DIR}/kiro_subscribe.py",
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -46,8 +51,7 @@ def _load_subscribe():
 
 def _load_warmup():
     spec = importlib.util.spec_from_file_location(
-        "kiro_warmup",
-        "/root/Toolkit/artifacts/api-server/kiro_warmup.py",
+        "kiro_warmup", f"{_API_DIR}/kiro_warmup.py",
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -59,7 +63,7 @@ def pending_accounts() -> list[dict]:
     conn = _db()
     cur  = conn.cursor()
     cur.execute("""
-        SELECT id, email, token, notes, sub_status
+        SELECT id, email, token, notes, sub_status, proxy_formatted
         FROM   accounts
         WHERE  platform = 'kiro'
           AND  sub_status IN ('pending', 'suspended')
@@ -71,7 +75,7 @@ def pending_accounts() -> list[dict]:
     cur.close(); conn.close()
     result = []
     for row in rows:
-        acc_id, email, access_token, notes_raw, sub_status = row
+        acc_id, email, access_token, notes_raw, sub_status, proxy_fmt = row
         try:
             notes = json.loads(notes_raw or "{}")
         except Exception:
@@ -82,6 +86,7 @@ def pending_accounts() -> list[dict]:
             "access_token": access_token or "",
             "profile_arn":  notes.get("profileArn", ""),
             "sub_status":   sub_status,
+            "proxy":        proxy_fmt or "",   # 账号注册时使用的代理，用于 IP 一致性
         })
     return result
 
@@ -130,16 +135,16 @@ def process_account(acc: dict, ksub, kwarmup) -> str:
     access_token = acc["access_token"]
     profile_arn  = acc["profile_arn"]
     prev_status  = acc["sub_status"]
+    proxy        = acc["proxy"]  # 注册时的代理，维持 IP 一致性
 
-    _log(f"处理账号 [{acc_id}] {email}  (前状态: {prev_status})")
+    _log(f"处理账号 [{acc_id}] {email}  (前状态: {prev_status}, proxy={proxy or 'NONE'})")
 
     if not access_token:
         _log(f"  ❌ 无 access_token，标记 failed", "warn")
         _update_status(acc_id, "failed")
         return "failed"
 
-    # pending = 首次订阅，不再预热（注册时已预热过）
-    # suspended = 重试，再次预热降低触发概率
+    # pending = 首次订阅；suspended = 重试，先预热
     if prev_status == "suspended":
         _log(f"  预热中 (重试前再次模拟 IDE 行为)...")
         try:
@@ -149,13 +154,16 @@ def process_account(acc: dict, ksub, kwarmup) -> str:
     else:
         _log(f"  pending 首次订阅，跳过预热")
 
-    # 发起订阅
+    # 发起订阅 — 传入 proxy 保持 IP 一致性
     def _sub_log(msg, level="info"):
         _log(f"  {msg}", level)
 
     try:
         result = ksub.subscribe_pro(
-            access_token, profile_arn=profile_arn or None, log=_sub_log
+            access_token,
+            profile_arn=profile_arn or None,
+            proxy=proxy or None,
+            log=_sub_log,
         )
     except Exception as e:
         _log(f"  ❌ subscribe_pro 异常: {e}", "error")
@@ -181,8 +189,7 @@ def process_account(acc: dict, ksub, kwarmup) -> str:
             try:
                 import asyncio as _aio
                 _spec2 = importlib.util.spec_from_file_location(
-                    "stripe_pay",
-                    "/root/Toolkit/artifacts/api-server/stripe_pay.py",
+                    "stripe_pay", f"{_API_DIR}/stripe_pay.py",
                 )
                 _spmod = importlib.util.module_from_spec(_spec2)
                 _spec2.loader.exec_module(_spmod)
@@ -211,7 +218,7 @@ def process_account(acc: dict, ksub, kwarmup) -> str:
                                     "payStatus": pay_status})
         return "ok"
 
-    # 判断是否 suspended
+    # 判断错误类型
     err_body = ""
     try:
         err_obj = result.get("error", {})
@@ -222,12 +229,16 @@ def process_account(acc: dict, ksub, kwarmup) -> str:
         pass
 
     if "suspended" in err_body.lower():
-        # 退避策略：首次 24h，第二次及之后 48h
         backoff = 48 if prev_status == "suspended" else 24
-        _log(f"  ⏳ 仍然 suspended，{backoff}h 后重试", "warn")
+        _log(f"  ⏳ Kiro 安全锁定 (IP/行为触发)，{backoff}h 后重试", "warn")
         _update_status(acc_id, "suspended", retry_after_hours=backoff,
                        extra_notes={"subError": "temporarily_suspended"})
         return "suspended"
+    elif "invalid" in err_body.lower() and "token" in err_body.lower():
+        _log(f"  ❌ Token 无效或已过期 (需重新登录)，标记 failed", "error")
+        _update_status(acc_id, "failed",
+                       extra_notes={"subError": "token_invalid"})
+        return "failed"
     else:
         _log(f"  ❌ 其他错误: {err_body[:120]}，标记 failed", "error")
         _update_status(acc_id, "failed")

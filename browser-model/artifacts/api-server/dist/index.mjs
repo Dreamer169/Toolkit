@@ -58353,6 +58353,29 @@ process.once("SIGINT", () => {
   killChromiumProc();
   process.exit(0);
 });
+var _PROXY_PORT_TZ = {
+  "10857": { tz: "Asia/Hong_Kong", std: -480, dst: -480, hasDst: false },
+  "10859": { tz: "Europe/Amsterdam", std: -60, dst: -120, hasDst: true },
+  "10853": { tz: "America/Los_Angeles", std: 480, dst: 420, hasDst: true },
+  "10855": { tz: "Europe/London", std: 0, dst: -60, hasDst: true },
+  "10851": { tz: "America/New_York", std: 300, dst: 240, hasDst: true },
+  "10854": { tz: "Asia/Seoul", std: -540, dst: -540, hasDst: false },
+  "10910": { tz: "America/Los_Angeles", std: 480, dst: 420, hasDst: true },
+  "10911": { tz: "America/Los_Angeles", std: 480, dst: 420, hasDst: true },
+  "10912": { tz: "America/Los_Angeles", std: 480, dst: 420, hasDst: true },
+  "10914": { tz: "Europe/London", std: 0, dst: -60, hasDst: true },
+  "10915": { tz: "America/Mexico_City", std: 360, dst: 300, hasDst: true },
+  "10916": { tz: "America/Los_Angeles", std: 480, dst: 420, hasDst: true }
+};
+function _resolveProxyTz() {
+  const m = (process.env.BROWSER_PROXY || "").match(/:(\d+)$/);
+  return _PROXY_PORT_TZ[m?.[1] ?? ""] ?? { tz: "America/Los_Angeles", std: 480, dst: 420, hasDst: true };
+}
+var _ptz = _resolveProxyTz();
+var BROWSER_TIMEZONE = _ptz.tz;
+var _TZ_STD = _ptz.std;
+var _TZ_DST = _ptz.dst;
+var _TZ_HAS_DST = _ptz.hasDst;
 var STEALTH_INIT = `
 // === Anti-fingerprint init script (runs before any page JS) ===
 (() => {
@@ -58778,7 +58801,7 @@ var STEALTH_INIT = `
     const origRO = Intl.DateTimeFormat.prototype.resolvedOptions;
     Intl.DateTimeFormat.prototype.resolvedOptions = function resolvedOptions() {
       const r = origRO.apply(this, arguments);
-      if (!r.timeZone || r.timeZone === "UTC") r.timeZone = "America/Los_Angeles";
+      if (!r.timeZone || r.timeZone === "UTC") r.timeZone = "${BROWSER_TIMEZONE}";
       if (!r.locale || r.locale === "en-GB") r.locale = "en-US";
       return r;
     };
@@ -58793,9 +58816,9 @@ var STEALTH_INIT = `
     const origGTO = Date.prototype.getTimezoneOffset;
     Date.prototype.getTimezoneOffset = function getTimezoneOffset() {
       const v = origGTO.call(this);
-      if (v === 0) {
+      if (v === 0 && ${_TZ_STD} !== 0) {
         const month = this.getUTCMonth();
-        return (month >= 2 && month <= 10) ? 420 : 480;
+        return ${_TZ_HAS_DST} ? ((month >= 2 && month <= 10) ? ${_TZ_DST} : ${_TZ_STD}) : ${_TZ_STD};
       }
       return v;
     };
@@ -59390,7 +59413,7 @@ async function getBrowser() {
         "--fingerprint-hardware-concurrency=4",
         "--lang=en-US",
         "--accept-lang=en-US,en",
-        "--timezone=America/Los_Angeles",
+        `--timezone=${BROWSER_TIMEZONE}`,
         "--disable-non-proxied-udp"
       ] : [],
       "about:blank"
@@ -59438,7 +59461,7 @@ async function newFreshContext() {
     isMobile: false,
     hasTouch: false,
     locale: "en-US",
-    timezoneId: "America/Los_Angeles",
+    timezoneId: BROWSER_TIMEZONE,
     colorScheme: "light",
     ignoreHTTPSErrors: true,
     extraHTTPHeaders: {
@@ -59512,7 +59535,7 @@ async function getStickyContext(hostname) {
     isMobile: false,
     hasTouch: false,
     locale: "en-US",
-    timezoneId: "America/Los_Angeles",
+    timezoneId: BROWSER_TIMEZONE,
     colorScheme: "light",
     ignoreHTTPSErrors: true,
     extraHTTPHeaders: {
@@ -59621,6 +59644,108 @@ async function _dumpCaptcha(html, finalUrl, status, attempt, tag) {
     return "(dump-failed)";
   }
 }
+var _BEHAVIOR_SIM_HOSTS = [
+  /datadome\.co$/i,
+  /(^|\.)antoinelouis\.co$/i,
+  // add more Datadome-protected e-commerce/news domains here:
+  /(^|\.)foot\.fr$/i,
+  /(^|\.)lemonde\.fr$/i,
+  /(^|\.)leboncoin\.fr$/i,
+  /(^|\.)cdiscount\.com$/i,
+  /(^|\.)fnac\.com$/i
+];
+function _needsBehaviorSim(hostname) {
+  return _BEHAVIOR_SIM_HOSTS.some((re) => re.test(hostname));
+}
+function _bezierPoints(x0, y0, x1, y1, x2, y2, x3, y3, steps) {
+  const pts = [];
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const u = 1 - t;
+    const x = u * u * u * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x3;
+    const y = u * u * u * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y3;
+    pts.push([Math.round(x), Math.round(y)]);
+  }
+  return pts;
+}
+async function _behaviorSim(page, budgetMs = 6e3) {
+  const t0 = Date.now();
+  const elapsed = () => Date.now() - t0;
+  const ri = (a, b) => Math.floor(Math.random() * (b - a + 1)) + a;
+  const sleep = (ms) => page.waitForTimeout(ms).catch(() => {
+  });
+  await page.evaluate(() => {
+    const fire = (type, x, y) => {
+      try {
+        document.dispatchEvent(new MouseEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          clientX: x,
+          clientY: y,
+          screenX: x + 10,
+          screenY: y + 80,
+          movementX: Math.round(Math.random() * 6 - 3),
+          movementY: Math.round(Math.random() * 6 - 3)
+        }));
+      } catch {
+      }
+    };
+    fire("mousemove", 800, 400);
+    fire("mouseover", 800, 400);
+  }).catch(() => {
+  });
+  let cx = ri(300, 1200), cy = ri(200, 700);
+  const moveCount = ri(3, 5);
+  for (let m = 0; m < moveCount && elapsed() < budgetMs - 1200; m++) {
+    const tx = ri(150, 1750), ty = ri(120, 900);
+    const cp1x = cx + ri(-200, 200), cp1y = cy + ri(-150, 150);
+    const cp2x = tx + ri(-150, 150), cp2y = ty + ri(-100, 100);
+    const steps = ri(18, 35);
+    const pts = _bezierPoints(cx, cy, cp1x, cp1y, cp2x, cp2y, tx, ty, steps);
+    for (const [px, py] of pts) {
+      await page.mouse.move(px, py).catch(() => {
+      });
+      await sleep(ri(8, 28));
+    }
+    for (let j = 0; j < ri(2, 4); j++) {
+      await page.mouse.move(tx + ri(-3, 3), ty + ri(-3, 3)).catch(() => {
+      });
+      await sleep(ri(30, 80));
+    }
+    cx = tx;
+    cy = ty;
+    await sleep(ri(180, 500));
+  }
+  if (elapsed() >= budgetMs - 800) return;
+  const scrollSections = ri(2, 4);
+  for (let s = 0; s < scrollSections && elapsed() < budgetMs - 600; s++) {
+    const totalDy = ri(200, 600) * (Math.random() < 0.85 ? 1 : -1);
+    const chunks = ri(6, 14);
+    for (let c = 0; c < chunks; c++) {
+      const factor = Math.sin(Math.PI * c / chunks);
+      const dy = Math.round(totalDy / chunks * (0.5 + factor * 0.8));
+      await page.evaluate((d) => window.scrollBy({ top: d, behavior: "instant" }), dy).catch(() => {
+      });
+      await sleep(ri(35, 90));
+    }
+    await sleep(ri(400, 1100));
+    if (Math.random() < 0.6 && elapsed() < budgetMs - 800) {
+      await page.mouse.move(ri(200, 1600), ri(150, 850), { steps: ri(6, 12) }).catch(() => {
+      });
+      await sleep(ri(200, 600));
+    }
+  }
+  if (elapsed() >= budgetMs - 400) return;
+  const tabPresses = ri(1, 3);
+  for (let t = 0; t < tabPresses && elapsed() < budgetMs - 300; t++) {
+    await page.keyboard.press("Tab").catch(() => {
+    });
+    await sleep(ri(120, 350));
+  }
+  const remainBudget = budgetMs - elapsed();
+  if (remainBudget > 200) await sleep(Math.min(remainBudget, 800));
+}
 async function renderWithBrowser(url, timeoutMs = 3e4, attempt = 0) {
   const targetHost = (() => {
     try {
@@ -59665,6 +59790,11 @@ async function renderWithBrowser(url, timeoutMs = 3e4, attempt = 0) {
         });
       }
     } catch {
+    }
+    if (_needsBehaviorSim(targetHost)) {
+      const _behaviorBudget = Math.max(0, timeoutMs - (Date.now() - page._t0) - 3e3);
+      await _behaviorSim(page, Math.min(_behaviorBudget, 7e3)).catch(() => {
+      });
     }
     const html = await getPageContent(page);
     const finalUrl = page.url();
@@ -59825,7 +59955,7 @@ async function harvestGoogleCookiesFresh() {
     userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
     viewport: { width: 1920, height: 1040 },
     locale: "en-US",
-    timezoneId: "America/Los_Angeles",
+    timezoneId: BROWSER_TIMEZONE,
     proxy: { server: GOOGLE_HARVEST_PROXY }
   });
   try {
@@ -59962,7 +60092,7 @@ async function _bootstrapGoogleTrust(browser) {
       viewport: { width: 1920, height: 1040 },
       screen: { width: 1920, height: 1080 },
       locale: "en-US",
-      timezoneId: "America/Los_Angeles",
+      timezoneId: BROWSER_TIMEZONE,
       ignoreHTTPSErrors: true,
       extraHTTPHeaders: {
         "Accept-Language": "en-US,en;q=0.9",
