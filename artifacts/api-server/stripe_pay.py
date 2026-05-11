@@ -335,8 +335,20 @@ async def _stripe_pay_playwright(payment_url: str, card_str: str,
     log(f"[stripe] 卡: {card_num[:6]}xxxxxxxxxx  到期: {exp_str}", "info")
 
     async with async_playwright() as pw:
-        _launch_args = ["--no-sandbox", "--disable-dev-shm-usage",
-                        "--disable-blink-features=AutomationControlled"]
+        _launch_args = [
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",              # VPS has no GPU; prevents GPU process crash
+            "--no-zygote",                # avoids zygote subprocess (lower mem)
+            "--disable-blink-features=AutomationControlled",
+            "--disable-extensions",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-ipc-flooding-protection",
+            "--memory-pressure-off",
+            "--max-old-space-size=256",
+        ]
         if proxy:
             _launch_args.append(f"--proxy-server={proxy}")
             log(f"[stripe] Playwright 使用代理: {proxy}", "info")
@@ -353,11 +365,19 @@ async def _stripe_pay_playwright(payment_url: str, card_str: str,
             ),
             locale="en-US",
             timezone_id="America/New_York",
+            java_script_enabled=True,
+        )
+        # Hide automation fingerprint from Stripe bot detection
+        await ctx.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+            "window.chrome = {runtime: {}};"
+            "Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});"
+            "Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});"
         )
         page = await ctx.new_page()
         try:
             log("[stripe] 导航到 Checkout URL...", "info")
-            await page.goto(payment_url, wait_until="domcontentloaded", timeout=35000)
+            await page.goto(payment_url, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(4000)
 
             title = await page.title()
