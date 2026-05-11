@@ -604,6 +604,17 @@ module.exports = {
       "max_restarts": 20,
       "watch": false,
       "autorestart": true
+    },{
+      "name": "zombie-reaper",
+      "script": "/root/Toolkit/zombie-reaper.sh",
+      "interpreter": "bash",
+      "cwd": "/root/Toolkit",
+      "out_file": "/tmp/toolkit_logs/zombie-reaper-out.log",
+      "error_file": "/tmp/toolkit_logs/zombie-reaper-err.log",
+      "restart_delay": 5000,
+      "max_restarts": 999,
+      "watch": false,
+      "autorestart": true
     }
   ]
 };
