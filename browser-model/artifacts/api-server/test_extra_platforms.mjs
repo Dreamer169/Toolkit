@@ -17,6 +17,72 @@ const LATE_FIX_PATCHES = (tsSrc.match(/const LATE_FIX_PATCHES = `([\s\S]*?)`;/) 
 const WORKER_STEALTH   = (tsSrc.match(/const WORKER_STEALTH_PATCH = `([\s\S]*?)`;/)||[])[1]||"";
 const STEALTH_FULL     = STEALTH_INIT + (BOOT_SUFFIX||"");
 const TZ = "Asia/Hong_Kong";
+// ── Nesting proxy pool (CF Workers) — route abs.incolumitas.com ──────────────
+// Same pattern as google-route.ts: ctx.route() intercepts blocked domains and
+// re-fetches via CF Workers. abs.incolumitas.com is unreachable via residential
+// SOCKS5 exits; CF Workers traverse a different path and typically succeed.
+const NESTING_WORKERS = [
+  "proxy.jimjio.indevs.in",
+  "proxy.jimjon.eu.cc",
+  "proxy.jonjim.indevs.in",
+  "proxy.hackerjim.indevs.in",
+];
+let _nestIdx = 0;
+
+async function nestingFetch(targetUrl, method = "GET", reqHeaders = {}) {
+  for (let attempt = 0; attempt < NESTING_WORKERS.length; attempt++) {
+    const host = NESTING_WORKERS[(_nestIdx + attempt) % NESTING_WORKERS.length];
+    try {
+      const envelope = { target_url: targetUrl, method };
+      const filtered = {};
+      for (const [k, v] of Object.entries(reqHeaders)) {
+        const lk = k.toLowerCase();
+        if (lk === "host" || lk === "connection" || lk === "accept-encoding") continue;
+        filtered[k] = v;
+      }
+      if (Object.keys(filtered).length) envelope.headers = filtered;
+      const res = await fetch(`https://${host}/proxy`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(envelope),
+        signal: AbortSignal.timeout(12000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        _nestIdx = (_nestIdx + 1) % NESTING_WORKERS.length;
+        return data;
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
+async function attachIncolumitasRouting(ctx) {
+  await ctx.route("**/*", async (route, request) => {
+    let u;
+    try { u = new URL(request.url()); } catch { return route.fallback(); }
+    if (!u.hostname.includes("abs.incolumitas.com")) return route.fallback();
+    try {
+      const hdrs = await request.allHeaders();
+      const data = await nestingFetch(request.url(), request.method(), hdrs);
+      if (data && data.status && data.status < 500) {
+        const bodyBuf = Buffer.from(data.body || "", "utf8");
+        const respHdrs = {};
+        for (const [k, v] of Object.entries(data.headers || {})) {
+          const lk = k.toLowerCase();
+          if (lk === "content-encoding" || lk === "transfer-encoding" || lk === "connection") continue;
+          respHdrs[k] = v;
+        }
+        respHdrs["access-control-allow-origin"] = "*";
+        await route.fulfill({ status: data.status, headers: respHdrs, body: bodyBuf });
+        return;
+      }
+    } catch (_) {}
+    await route.fallback();
+  });
+}
+
+
 
 const ARGS = [
   "--no-sandbox","--disable-dev-shm-usage",
@@ -47,6 +113,7 @@ async function mkBrowser() {
   await ctx.addInitScript(STEALTH_FULL);
   if (LATE_FIX_PATCHES) await ctx.addInitScript(LATE_FIX_PATCHES);
   ctx.on("page", p => p.on("worker", w => w.evaluate(WORKER_STEALTH).catch(()=>{})));
+  await attachIncolumitasRouting(ctx);
   return { b, ctx };
 }
 
