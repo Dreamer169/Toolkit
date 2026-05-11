@@ -77,11 +77,13 @@ _ACTIVE_RELAYS: list = []
 
 # v8.97: 设备码申请也通过同一 CF proxy，确保 申请IP == 授权IP == 兑换IP
 DEVICE_CODE_SCOPE = (
+    "offline_access "
     "https://graph.microsoft.com/Mail.Read "
     "https://graph.microsoft.com/Mail.ReadWrite "
     "https://graph.microsoft.com/Mail.Send "
     "https://graph.microsoft.com/User.Read "
-    "offline_access"
+    "https://graph.microsoft.com/IMAP.AccessAsUser.All "
+    "https://graph.microsoft.com/SMTP.Send"
 )
 DEVICE_CODE_ENDPOINT = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode"
 

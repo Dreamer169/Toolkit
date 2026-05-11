@@ -700,7 +700,7 @@ router.post("/tools/outlook/refresh-token", async (req, res) => {
         grant_type: "refresh_token",
         client_id: clientId,
         refresh_token: refreshToken,
-        scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read offline_access",
+        scope: FULL_GRAPH_SCOPE,
       }).toString(),
     });
     const data = await r.json() as {
@@ -810,7 +810,7 @@ router.post("/tools/outlook/device-code", async (req, res) => {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         client_id: cid,
-        scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
+        scope: FULL_GRAPH_SCOPE,
       }).toString(),
     });
     const data = await r.json() as {
@@ -912,7 +912,7 @@ function cleanOldBatchSessions() {
 async function createBatchOAuthSessions(rows: { id: number; email: string }[]) {
   cleanOldBatchSessions();
   const CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
-  const SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access";
+  const SCOPE = FULL_GRAPH_SCOPE;
   const sessionList: BatchOAuthSession[] = [];
   await Promise.allSettled(rows.map(async (acc) => {
     try {
@@ -3279,8 +3279,11 @@ router.post("/tools/outlook/save-token", async (req, res) => {
 
 // ── 批量验证微软账号有效性（ROPC 错误码诊断）────────────────────────────────
 // 错误码参考: https://learn.microsoft.com/en-us/azure/active-directory/develop/reference-aadsts-error-codes
+// ── 统一 Graph API scope（所有 token refresh 均使用此常量）──────────────────
+// 来源: outlook_retoken.py + imap_idle_daemon.py 对齐（参考 hrhcode/luoianun）
+const FULL_GRAPH_SCOPE = "offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read https://graph.microsoft.com/IMAP.AccessAsUser.All https://graph.microsoft.com/SMTP.Send";
 const ROPC_CID  = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
-const ROPC_SCO  = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read offline_access";
+const ROPC_SCO  = FULL_GRAPH_SCOPE;
 
 function ropcStatus(err?: string, desc?: string): string {
   if (!err) return "valid";
@@ -3344,7 +3347,7 @@ router.post("/tools/outlook/verify-accounts", async (req, res) => {
             grant_type: "refresh_token",
             client_id: OAUTH_CLIENT_ID,
             refresh_token: acc.refresh_token,
-            scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read offline_access",
+            scope: FULL_GRAPH_SCOPE,
           }).toString(),
         }, acctProxy);
         const td = await r.json() as { access_token?: string; refresh_token?: string; error?: string; error_description?: string };
@@ -3452,7 +3455,7 @@ router.post("/tools/outlook/auto-auth", async (req, res) => {
           grant_type: "refresh_token",
           client_id: OAUTH_CLIENT_ID,
           refresh_token: acc.refresh_token,
-          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
+          scope: FULL_GRAPH_SCOPE,
         }).toString(),
       }, acctProxy);
       const td = await r.json() as { access_token?: string; refresh_token?: string; error_description?: string };
@@ -3653,7 +3656,7 @@ router.post("/tools/outlook/purge-invalid", async (req, res) => {
             grant_type: "refresh_token",
             client_id: OAUTH_CLIENT_ID,
             refresh_token: acc.refresh_token,
-            scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read offline_access",
+            scope: FULL_GRAPH_SCOPE,
           }).toString(),
         });
         const td = await r.json() as { access_token?: string; refresh_token?: string; error?: string; error_description?: string };
@@ -3824,7 +3827,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
           grant_type: "refresh_token",
           client_id: OAUTH_CLIENT_ID,
           refresh_token: acc.refresh_token,
-          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
+          scope: FULL_GRAPH_SCOPE,
         }).toString(),
       }, acctProxy);
       const td = await r.json() as { access_token?: string; refresh_token?: string; error_description?: string; error?: string };
@@ -3903,7 +3906,8 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
               grant_type: "refresh_token",
               client_id: OAUTH_CLIENT_ID,
               refresh_token: acc.refresh_token,
-              scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
+              // login.live.com 使用 wl.imap scope（非 graph namespace）— luoianun fix
+              scope: "wl.imap wl.offline_access",
             }).toString(),
           }, acctProxy);
           const liveTd = await liveR.json() as { access_token?: string; refresh_token?: string };
@@ -4082,7 +4086,7 @@ router.patch("/tools/outlook/message/:accountId/:messageId/read", async (req, re
         body: new URLSearchParams({
           grant_type: "refresh_token", client_id: OAUTH_CLIENT_ID,
           refresh_token: rows[0].refresh_token,
-          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite offline_access",
+          scope: FULL_GRAPH_SCOPE,
         }).toString(),
       }, acctProxy);
       const td = await r.json() as { access_token?: string; refresh_token?: string };
@@ -4136,7 +4140,7 @@ router.post("/tools/outlook/message/:accountId/:messageId/move", async (req, res
         body: new URLSearchParams({
           grant_type: "refresh_token", client_id: OAUTH_CLIENT_ID,
           refresh_token: rows[0].refresh_token,
-          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite offline_access",
+          scope: FULL_GRAPH_SCOPE,
         }).toString(),
       }, acctProxy);
       const td = await r.json() as { access_token?: string; refresh_token?: string };
@@ -4189,7 +4193,7 @@ router.delete("/tools/outlook/message/:accountId/:messageId", async (req, res) =
         body: new URLSearchParams({
           grant_type: "refresh_token", client_id: OAUTH_CLIENT_ID,
           refresh_token: rows[0].refresh_token,
-          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite offline_access",
+          scope: FULL_GRAPH_SCOPE,
         }).toString(),
       }, acctProxy);
       const td = await r.json() as { access_token?: string; refresh_token?: string };
@@ -4248,7 +4252,7 @@ router.post("/tools/outlook/send-message", async (req, res) => {
         body: new URLSearchParams({
           grant_type: "refresh_token", client_id: OAUTH_CLIENT_ID,
           refresh_token: rows[0].refresh_token,
-          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access",
+          scope: FULL_GRAPH_SCOPE,
         }).toString(),
       }, acctProxy);
       const td = await r.json() as { access_token?: string; refresh_token?: string };
@@ -4309,7 +4313,7 @@ router.post("/tools/outlook/click-verify-link", async (req, res) => {
           grant_type: "refresh_token",
           client_id: OAUTH_CLIENT_ID,
           refresh_token: acc.refresh_token,
-          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read offline_access",
+          scope: FULL_GRAPH_SCOPE,
         }).toString(),
       }, acctProxy);
       const td = await tr.json() as { access_token?: string; refresh_token?: string };
@@ -4374,7 +4378,7 @@ router.post("/tools/outlook/auto-verify-emails", async (req, res) => {
               grant_type: "refresh_token",
               client_id: OAUTH_CLIENT_ID,
               refresh_token: acc.refresh_token,
-              scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read offline_access",
+              scope: FULL_GRAPH_SCOPE,
             }).toString(),
           }, acctProxy);
           const td = await tr.json() as { access_token?: string; refresh_token?: string };
@@ -4499,7 +4503,7 @@ router.post("/tools/outlook/account/:id/batch-delete-by-subject", async (req, re
         body: new URLSearchParams({
           grant_type: "refresh_token", client_id: OAUTH_CLIENT_ID,
           refresh_token: rows[0].refresh_token,
-          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite offline_access",
+          scope: FULL_GRAPH_SCOPE,
         }).toString(),
       }, acctProxy);
       const td = await r.json() as { access_token?: string; refresh_token?: string };
@@ -5078,7 +5082,7 @@ router.post("/tools/waf/scrape", async (req, res) => {
 // 立即检测: status=active 账号 + Graph API 二次验证 + 自动打标签 (v9.14)
 router.post("/tools/outlook/auto-check", async (req, res) => {
   const BATCH = 30;
-  const SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access";
+  const SCOPE = FULL_GRAPH_SCOPE;
   const addTag = async (id: number, tag: string, newStatus?: string) => {
     const statusPart = newStatus ? `, status='${newStatus}'` : "";
     await execute(

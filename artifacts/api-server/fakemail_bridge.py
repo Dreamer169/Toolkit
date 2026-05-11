@@ -129,42 +129,72 @@ def start_watching(login: str, domain: str):
     entry = _inboxes[key]
 
     def _watch():
-        try:
-            sio = socketio.Client(logger=False, engineio_logger=False)
+        MAX_RETRIES = 3
+        RETRY_DELAY = 5
+        for attempt in range(MAX_RETRIES):
+            try:
+                sio = socketio.Client(logger=False, engineio_logger=False,
+                                      reconnection=False)
 
-            @sio.on("connect")
-            def on_connect():
-                sio.emit("watch_address", {"login": login, "domain": domain})
+                @sio.on("connect")
+                def on_connect():
+                    sio.emit("watch_address", {"login": login, "domain": domain})
 
-            @sio.on("new_message")
-            def on_msg(data):
-                entry["messages"].append({
-                    "id": data.get("id"),
-                    "from": data.get("from", ""),
-                    "subject": data.get("subject", ""),
-                    "date": data.get("date", ""),
-                    "body": data.get("body", data.get("intro", "")),
-                    "received_at": time.time(),
-                })
+                @sio.on("new_message")
+                def on_msg(data):
+                    # 去重：同一 message-id 不重复存
+                    mid = data.get("id")
+                    with _inbox_lock:
+                        if mid and any(m.get("id") == mid for m in entry["messages"]):
+                            return
+                        entry["messages"].append({
+                            "id": mid,
+                            "from": data.get("from", ""),
+                            "subject": data.get("subject", ""),
+                            "date": data.get("date", ""),
+                            "body": data.get("body", data.get("intro", "")),
+                            "received_at": time.time(),
+                        })
 
-            @sio.on("disconnect")
-            def on_dc():
-                entry["watching"] = False
+                @sio.on("disconnect")
+                def on_dc():
+                    entry["watching"] = False  # 标记断连，触发重试循环
 
-            sio.connect(
-                "https://www.fakemailgenerator.com",
-                transports=["polling", "websocket"],
-                wait_timeout=10,
-            )
-            # Keep connection alive for 30 minutes max
-            deadline = time.time() + 1800
-            while time.time() < deadline and entry.get("watching"):
-                time.sleep(1)
-            sio.disconnect()
-        except Exception as e:
-            entry["error"] = str(e)
-        finally:
-            entry["watching"] = False
+                try:
+                    sio.connect(
+                        "https://www.fakemailgenerator.com",
+                        transports=["polling", "websocket"],
+                        wait_timeout=15,
+                        namespaces=["/"],
+                    )
+                    entry["watching"] = True
+                    entry["error"] = None
+                except Exception as conn_err:
+                    entry["error"] = str(conn_err)
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(RETRY_DELAY)
+                    continue
+
+                # Keep connection alive for 30 minutes max
+                deadline = time.time() + 1800
+                while time.time() < deadline and entry.get("watching"):
+                    time.sleep(1)
+                try:
+                    sio.disconnect()
+                except Exception:
+                    pass
+
+                # 若正常到期（30min），不重试；否则（断连），重试
+                if time.time() >= deadline:
+                    break
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_DELAY)
+                    entry["watching"] = True  # 准备重试
+            except Exception as e:
+                entry["error"] = str(e)
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_DELAY)
+        entry["watching"] = False
 
     t = threading.Thread(target=_watch, daemon=True)
     t.start()
@@ -243,6 +273,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    # 强制释放端口，避免 pm2 重启时 "Address already in use"
+    import subprocess as _sp
+    _sp.run(f"fuser -k {PORT}/tcp 2>/dev/null || true", shell=True)
+    import time as _t; _t.sleep(0.4)
     server = HTTPServer(("127.0.0.1", PORT), Handler)
     print(f"FakeMail Bridge running on port {PORT}", flush=True)
     import signal
