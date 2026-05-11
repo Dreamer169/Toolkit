@@ -342,26 +342,17 @@ export const STEALTH_INIT = `
     if (!window.outerHeight) Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight });
   } catch (_) {}
 
-  // Screen properties via Proxy — ODP may fail on non-configurable window.screen.
-  // Fallback: direct assignment window.screen = proxy (works when ODP throws).
+  // Screen.prototype approach — probe confirmed this intercepts reads correctly.
+  // window.screen ODP silently fails on this Blink build (own accessor bypassed by C++ getter).
   try {
-    var _rs = window.screen;
-    var _screenProxy = new Proxy(_rs, {
-      get: function(t, p) {
-        if (p === 'availWidth')  return 1920;
-        if (p === 'availHeight') return 1040;
-        if (p === 'width')  return 1920;
-        if (p === 'height') return 1080;
-        if (p === 'colorDepth') return 24;
-        if (p === 'pixelDepth') return 24;
-        var v = t[p]; return typeof v === 'function' ? v.bind(t) : v;
-      },
+    Object.defineProperty(Screen.prototype, 'availHeight', {
+      get: function() { return window.innerHeight || 1040; },
+      configurable: true, enumerable: true,
     });
-    try {
-      Object.defineProperty(window, 'screen', { get: function() { return _screenProxy; }, configurable: true });
-    } catch (_odp) {
-      try { Object.getPrototypeOf(window).screen; window['screen'] = _screenProxy; } catch(_wa) {}
-    }
+    Object.defineProperty(Screen.prototype, 'availWidth', {
+      get: function() { return window.innerWidth || 1920; },
+      configurable: true, enumerable: true,
+    });
   } catch (_) {}
 
   // Battery — override on prototype so it is NOT an own property of navigator.
@@ -428,27 +419,15 @@ export const STEALTH_INIT = `
     } catch(_n) {}
   } catch (_) {}
 
-  // Notification.permission always 'default'.
-  // window.Notification is a getter — direct assignment silently fails.
-  // ODP with get: () => proxy ensures the Proxy is always returned.
+  // Notification.permission: probe confirmed direct ODP on constructor works.
+  // window.Notification Proxy approach silently fails on this Blink build.
   try {
-    if (window.Notification) {
-      var _RealNotif = window.Notification;
-      var _notifProxy = new Proxy(_RealNotif, {
-        get: function(t, p) {
-          if (p === 'permission') return 'default';
-          var v = t[p]; return typeof v === 'function' ? v.bind(t) : v;
-        },
-        construct: function(t, args) { return new t(...args); },
+    var _RN = window.Notification;
+    if (_RN) {
+      Object.defineProperty(_RN, 'permission', {
+        get: function() { return 'default'; },
+        configurable: true, enumerable: true,
       });
-      try {
-        Object.defineProperty(window, 'Notification', {
-          get: function() { return _notifProxy; },
-          configurable: true, enumerable: true,
-        });
-      } catch (_odp) {
-        try { window.Notification = _notifProxy; } catch (_) {}
-      }
     }
   } catch (_) {}
 
@@ -784,14 +763,10 @@ export const STEALTH_INIT = `
     var _shareStub = function share() { return Promise.reject(new DOMException('Share canceled','AbortError')); };
     var _canShareStub = function canShare() { return true; };
     try {
-      if (!('share' in Navigator.prototype)) {
-        Object.defineProperty(Navigator.prototype, 'share', { value: _shareStub, writable: true, configurable: true, enumerable: false });
-      }
+      Object.defineProperty(Navigator.prototype, 'share', { value: _shareStub, writable: true, configurable: true, enumerable: false });
     } catch(_p1) {}
     try {
-      if (!('canShare' in Navigator.prototype)) {
-        Object.defineProperty(Navigator.prototype, 'canShare', { value: _canShareStub, writable: true, configurable: true, enumerable: false });
-      }
+      Object.defineProperty(Navigator.prototype, 'canShare', { value: _canShareStub, writable: true, configurable: true, enumerable: false });
     } catch(_p2) {}
     // Fallback: if still absent, wrap window.navigator in a Proxy
     if (!('share' in navigator)) {
@@ -851,25 +826,38 @@ export const STEALTH_INIT = `
   // Patch: intercept getComputedStyle only when el has explicit inline ActiveText bg-color.
   try {
     var _gCS = window.getComputedStyle;
-    window.getComputedStyle = function getComputedStyle(el, pseudo) {
-        var result = _gCS(el, pseudo);
-        try {
-          if (el && el.getAttribute) {
-            var inl = el.getAttribute("style") || "";
-            if (/background-color\s*:\s*ActiveText/i.test(inl)) {
-              return new Proxy(result, {
-                get: function(t, p) {
-                  if (p === "backgroundColor") return "rgb(0, 120, 212)";
-                  var v = t[p];
-                  return typeof v === "function" ? v.bind(t) : v;
-                }
-              });
-            }
+    var _gCS_patched = function getComputedStyle(el, pseudo) {
+      var result = _gCS.call(window, el, pseudo);
+      try {
+        if (el) {
+          // Check inline style for ActiveText (both property access and getAttribute)
+          var _hasAT = false;
+          try { _hasAT = /ActiveText/i.test(el.getAttribute('style') || ''); } catch(_) {}
+          if (!_hasAT) { try { _hasAT = /ActiveText/i.test(el.style ? (el.style.backgroundColor + ' ' + el.style.color) : ''); } catch(_) {} }
+          if (_hasAT) {
+            return new Proxy(result, {
+              get: function(t, p) {
+                if (p === 'backgroundColor' || p === 'color') return 'rgb(0, 120, 212)';
+                if (p === 'getPropertyValue') return function(prop) {
+                  if (/^(background-color|color)$/i.test(prop)) return 'rgb(0, 120, 212)';
+                  return t.getPropertyValue(prop);
+                };
+                var v = t[p];
+                return typeof v === 'function' ? v.bind(t) : v;
+              }
+            });
           }
-        } catch(_2) {}
-        return result;
-      },
+        }
+      } catch(_2) {}
+      return result;
     };
+    try {
+      Object.defineProperty(window, 'getComputedStyle', {
+        value: _gCS_patched, writable: true, configurable: true,
+      });
+    } catch(_odp) {
+      window.getComputedStyle = _gCS_patched;
+    }
   } catch (_) {}
 
 
@@ -1106,6 +1094,67 @@ const _WORKER_BOOT_SUFFIX = `;(function(){
 })();`;
 const STEALTH_INIT_FULL = STEALTH_INIT + _WORKER_BOOT_SUFFIX;
 
+// LATE_FIX_PATCHES: fingerprint-chromium re-applies native getters during STEALTH_INIT
+// execution (when navigator properties are first accessed). Running these 4 critical
+// patches as a SECOND addInitScript guarantees they run AFTER fingerprint-chromium init.
+const LATE_FIX_PATCHES = `(function(){
+  try {
+    Object.defineProperty(Screen.prototype, "availHeight", {
+      get: function() { return window.innerHeight || 1040; },
+      configurable: true, enumerable: true,
+    });
+    Object.defineProperty(Screen.prototype, "availWidth", {
+      get: function() { return window.innerWidth || 1920; },
+      configurable: true, enumerable: true,
+    });
+  } catch(_) {}
+  try {
+    var _RN = window.Notification;
+    if (_RN) {
+      Object.defineProperty(_RN, "permission", {
+        get: function() { return "default"; },
+        configurable: true, enumerable: true,
+      });
+    }
+  } catch(_) {}
+  try {
+    var _shareStub = async function share() {
+      return Promise.reject(new DOMException("Share canceled", "AbortError"));
+    };
+    Object.defineProperty(Navigator.prototype, "share", {
+      value: _shareStub, configurable: true, writable: true, enumerable: false,
+    });
+    Object.defineProperty(Navigator.prototype, "canShare", {
+      value: function canShare() { return true; },
+      configurable: true, writable: true, enumerable: false,
+    });
+  } catch(_) {}
+  try {
+    var _gCS = window.getComputedStyle;
+    var _gCSP = function getComputedStyle(el, ps) {
+      var r = _gCS.call(window, el, ps);
+      try {
+        var at = /ActiveText/i.test(el && el.getAttribute
+          ? (el.getAttribute("style") || "") : "");
+        if (at) return new Proxy(r, { get: function(t, p) {
+          if (p === "backgroundColor" || p === "color") return "rgb(0, 120, 212)";
+          if (p === "getPropertyValue") return function(prop) {
+            if (/^(background-color|color)$/i.test(prop)) return "rgb(0, 120, 212)";
+            return t.getPropertyValue(prop);
+          };
+          var v = t[p]; return typeof v === "function" ? v.bind(t) : v;
+        }});
+      } catch(_) {}
+      return r;
+    };
+    try {
+      Object.defineProperty(window, "getComputedStyle", {
+        value: _gCSP, writable: true, configurable: true,
+      });
+    } catch(_) { try { window.getComputedStyle = _gCSP; } catch(_2) {} }
+  } catch(_) {}
+})();`;
+
 async function getBrowser(): Promise<Browser> {
   // If browser exists but is no longer connected (process died), reset.
   if (browserPromise) {
@@ -1245,6 +1294,7 @@ async function newFreshContext(): Promise<BrowserContext> {
   });
   ctx.on("close", () => { closedContexts.add(ctx); });
   await ctx.addInitScript(STEALTH_INIT_FULL);
+  await ctx.addInitScript(LATE_FIX_PATCHES);
   // Inject userAgentData patch into DedicatedWorkers (addInitScript doesn't reach them)
   ctx.on("page", (p) => { p.on("worker", (w) => { w.evaluate(WORKER_STEALTH_PATCH).catch(() => {}); }); });
   return ctx;
@@ -1322,6 +1372,7 @@ async function getStickyContext(hostname: string): Promise<BrowserContext> {
   }).then(async (c) => {
     c.on("close", () => { closedContexts.add(c); });
     await c.addInitScript(STEALTH_INIT_FULL);
+    await c.addInitScript(LATE_FIX_PATCHES);
     c.on("page", (p) => { p.on("worker", (w) => { w.evaluate(WORKER_STEALTH_PATCH).catch(() => {}); }); });
     try { await attachGoogleProxyRouting(c); } catch (e) { console.error("[google-route] attach failed:", (e as Error).message); }
     return c;
@@ -1814,6 +1865,7 @@ async function harvestGoogleCookiesFresh(): Promise<CK[]> {
   });
   try {
     await ctx.addInitScript(STEALTH_INIT_FULL);
+    await ctx.addInitScript(LATE_FIX_PATCHES);
     try { await attachGoogleProxyRouting(ctx); } catch {}
     const page = await ctx.newPage();
     const visit = async (u: string, dwell: number) => {
@@ -1973,6 +2025,7 @@ async function _bootstrapGoogleTrust(browser: Browser): Promise<void> {
       },
     });
     try { await ctx.addInitScript(STEALTH_INIT_FULL); } catch (_) { /* */ }
+    try { await ctx.addInitScript(LATE_FIX_PATCHES); } catch (_) { /* */ }
     const page = await ctx.newPage();
 
     // Phase 1: youtube.com (~10-13s) — 随机化滚动 + 鼠标
