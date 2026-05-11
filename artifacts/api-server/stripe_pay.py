@@ -34,7 +34,6 @@ CHKR_PROXY_PORTS: list = [
     int(p) for p in _os.environ.get("CHKR_PROXY_PORTS", "10910,10911,10912,10916").split(",")
     if p.strip().isdigit()
 ]
-RAPIDAPI_KEY   = _os.environ.get("RAPIDAPI_KEY", "")  # RapidAPI key for bin-checker19
 BIN_STATS_FILE = _os.environ.get("BIN_STATS_FILE",
     "/data/Toolkit/data/bin_stats.json")   # BIN 命中率持久化文件
 
@@ -215,7 +214,7 @@ def gen_cards_from_bin(bin_prefix: str, count: int = CHKR_MAX) -> list:
 # ── chkr.cc 卡检测 ─────────────────────────────────────────────────────────
 def check_card_chkr(card_str: str, log=print, proxy_port: int = 0) -> dict:
     """
-    Check a card via chkr.cc API (or RapidAPI if RAPIDAPI_KEY is set).
+    Check a card via chkr.cc API using curl_cffi browser impersonation.
     card_str: "CARDNUM|MM|YYYY|CVV"
     Returns: {"code": 1=live/0=die/2=unknown/-1=error, "status": "...", "message": "..."}
     """
@@ -228,21 +227,6 @@ def check_card_chkr(card_str: str, log=print, proxy_port: int = 0) -> dict:
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",
     }
-    # RapidAPI path (paid, reliable)
-    if RAPIDAPI_KEY:
-        try:
-            resp = requests.post(
-                "https://bin-checker19.p.rapidapi.com/check",
-                json={"data": card_str}, timeout=20,
-                headers={**h_common,
-                         "x-rapidapi-host": "bin-checker19.p.rapidapi.com",
-                         "x-rapidapi-key":  RAPIDAPI_KEY},
-            )
-            if resp.status_code == 200:
-                return resp.json()
-        except Exception as e:
-            log(f"[chkr] RapidAPI error: {e}", "warn")
-
     # curl_cffi session with browser impersonation
     sess = _get_chkr_session(proxy_port)
     try:
