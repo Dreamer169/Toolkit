@@ -44,10 +44,9 @@ module.exports = {
     },
     {
       "name": "openai-pool",
-      "script": "python3",
-      "args": "-m openai_pool_orchestrator",
+      "script": "/root/Toolkit/start-openai-pool.sh",
+      "interpreter": "bash",
       "cwd": "/root/Toolkit/artifacts/openai-pool",
-      "interpreter": "none",
       "env": {
         "PORT": "8000",
         "PYTHONPATH": "/root/Toolkit/artifacts/openai-pool"
