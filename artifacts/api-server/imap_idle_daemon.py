@@ -56,6 +56,10 @@ def _save_json(path: Path, obj):
 def _append_event(evt: dict):
     with _ev_lock:
         evts = _load_json(EVENTS_FILE, [])
+        # deduplicate by msg_id — safe across restarts
+        seen_ids = {e.get("msg_id") for e in evts if e.get("msg_id")}
+        if evt.get("msg_id") and evt["msg_id"] in seen_ids:
+            return
         evts.append(evt)
         _save_json(EVENTS_FILE, evts[-500:])
 
