@@ -2,6 +2,31 @@
   AI Account Toolkit — 更新日志
 ================================================================
 
+----------------------------------------------------------------
+[2026-05-11] v9.0 — 9平台指纹检测全自动化 + 告警系统
+----------------------------------------------------------------
+新增
+  + test_9platforms_v2.mjs: 9平台综合检测脚本v2，修复IPHey轮询、
+    FP.com提取逻辑、全程Asia/Hong_Kong时区
+  + scripts/send_alert.py: 通用Outlook告警发件，自动遍历DB账号，
+    Token失效自动换号，目标: rjrbaphnak@rommiui.com
+  + scripts/nightly_fingerprint_test.sh: 每晚3:00 cron，
+    跑检测→保存docs/test-results/→gh api推GitHub→发邮件
+  + docs/test-results/: 测试结果历史归档，每日一文件
+  + zombie-reaper.sh重大修复(Section2+3+grep引号bug)
+
+修复
+  ! 服务器负载100% - 9个zombie进程堆积
+  ! IPHey误报FAIL(等28s不足+误匹配营销文案)
+  ! Fingerprint.com误报bot(误匹配Bot Detection标题)
+
+基准: 9/9 PASSED (2026-05-11)
+  BrowserScan CreepJS(trust=100%) IPHey(Trustworthy)
+  PixelScan Cloudflare DataDome
+  Brotector(0signals) Sannysoft Fingerprint.com
+
+
+
 版本格式：[日期] 版本号 — 变更简述
 
 ----------------------------------------------------------------
