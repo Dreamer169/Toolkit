@@ -272,7 +272,7 @@ _kill_orphan_broker_chromium() {
     kill -9 "$pid" 2>/dev/null && echo "[start-browser-model] killed orphan chromium pid=$pid (--remote-debugging-port=9222)"
   done
   # 2) anything still bound to :9222 (extra safety)
-  pid=$(ss -lntp 2>/dev/null | grep -oP "127\.0\.0\.1:9222[^,]*pid=\K[0-9]+" | head -1)
+  pid=$(ss -lntp 2>/dev/null | grep ':9222' | grep -oP 'pid=\K[0-9]+' | head -1)
   if [[ -n "$pid" ]]; then
     kill -9 "$pid" 2>/dev/null && echo "[start-browser-model] killed leftover pid=$pid still bound to :9222"
   fi
@@ -292,10 +292,7 @@ fi
 # v8.64 — pre-bind: release port 8092 held by previous instance before exec.
 # Without this, PM2 rapid-restart leaves the old node process still bound,
 # causing EADDRINUSE → crash loop (78+ restarts witnessed 2026-05-11).
-_stale=$(ss -lntp 2>/dev/null | grep -oP "127\\.0\\.0\\.1:8092[^,]*pid=\\K[0-9]+" | head -1)
-if [[ -z "$_stale" ]]; then
-  _stale=$(ss -lntp 2>/dev/null | grep -oP "\\*:8092[^,]*pid=\\K[0-9]+" | head -1)
-fi
+_stale=$(ss -lntp 2>/dev/null | grep ':8092' | grep -oP 'pid=\K[0-9]+' | head -1)
 if [[ -n "$_stale" ]]; then
   kill -9 "$_stale" 2>/dev/null && echo "[start-browser-model] v8.64 killed stale pid=$_stale on :8092"
 else
