@@ -31,7 +31,7 @@ from urllib.request import Request, urlopen
 # ── 常量 ─────────────────────────────────────────────────────────────────────
 THUNDERBIRD_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
 CLIENT_ID   = os.environ.get("OUTLOOK_CLIENT_ID", THUNDERBIRD_CLIENT_ID)
-IMAP_CAPABLE = CLIENT_ID != THUNDERBIRD_CLIENT_ID   # 注册了正确权限的 client_id
+IMAP_CAPABLE = False  # opaque token issued for MSA: IMAP server requires JWT
 
 IMAP_SCOPE  = "https://outlook.office.com/IMAP.AccessAsUser.All offline_access"
 GRAPH_SCOPE = (
@@ -39,13 +39,13 @@ GRAPH_SCOPE = (
     "https://graph.microsoft.com/User.Read "
     "offline_access"
 )
-TOKEN_URL   = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
+TOKEN_URL   = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
 GRAPH_BASE  = "https://graph.microsoft.com/v1.0"
 
 IMAP_HOST   = "outlook.office365.com"
 IMAP_PORT   = 993
 
-POLL_INTERVAL    = 30       # Graph 轮询间隔（秒）
+POLL_INTERVAL    = 5        # 5s polling — near-real-time (was 30s)
 IDLE_TIMEOUT     = 25 * 60  # IMAP IDLE 最长等待（25min，微软30min断开）
 MAX_ACCOUNTS     = 60
 REFRESH_INTERVAL = 300      # 重新从 DB 加载账号列表的间隔
@@ -181,11 +181,16 @@ def _get_graph_token(refresh_tok: str) -> tuple[str, str]:
 
 def _get_imap_token(refresh_tok: str) -> tuple[str, str]:
     """
-    获取 IMAP XOAUTH2 token，只在 IMAP_CAPABLE 时调用。
-    新账号（用新 client_id 重授权后）refresh_token 兼容新 client_id。
-    旧账号的 refresh_token 不含 IMAP scope，此调用会失败（正常）。
+    获取 IMAP XOAUTH2 token。
+    Thunderbird client_id 已验证支持 IMAP.AccessAsUser.All scope（无需新 Azure App）。
+    先用 CLIENT_ID，失败则回退到 THUNDERBIRD_CLIENT_ID。
     """
-    return _exchange_token(refresh_tok, IMAP_SCOPE, CLIENT_ID)
+    if CLIENT_ID != THUNDERBIRD_CLIENT_ID:
+        try:
+            return _exchange_token(refresh_tok, IMAP_SCOPE, CLIENT_ID)
+        except RuntimeError:
+            pass
+    return _exchange_token(refresh_tok, IMAP_SCOPE, THUNDERBIRD_CLIENT_ID)
 
 
 # ── Graph API 读邮件 ──────────────────────────────────────────────────────────

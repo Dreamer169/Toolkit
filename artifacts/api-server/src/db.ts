@@ -43,7 +43,7 @@ export async function query<T = Record<string, unknown>>(
     return result.rows as T[];
   } catch (e: unknown) {
     const msg = (e instanceof Error ? e.message : String(e));
-    if (msg.includes("SASL") || msg.includes("password must be") || msg.includes("auth")) {
+    if (msg.includes("SASL") || msg.includes("password must be") || msg.includes("auth") || msg.includes("Connection terminated") || msg.includes("Client was closed") || msg.includes("read ECONNRESET")) {
       pool = null;
     }
     throw e;
@@ -65,7 +65,7 @@ export async function execute(sql: string, params: unknown[] = []): Promise<{ ro
     return { rowCount: result.rowCount ?? 0 };
   } catch (e: unknown) {
     const msg = (e instanceof Error ? e.message : String(e));
-    if (msg.includes("SASL") || msg.includes("password must be") || msg.includes("auth")) {
+    if (msg.includes("SASL") || msg.includes("password must be") || msg.includes("auth") || msg.includes("Connection terminated") || msg.includes("Client was closed") || msg.includes("read ECONNRESET")) {
       pool = null;
     }
     throw e;
