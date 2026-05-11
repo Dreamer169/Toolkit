@@ -2,12 +2,13 @@
 """
 IMAP IDLE 守护进程 — 为有 token 的 Outlook 账号实时监听新邮件。
 
-Token 架构说明:
-  - 系统用 device-code 流程获取 Graph-scope token（Mail.Read 等）
-  - Microsoft 个人账号 IMAP XOAUTH2 需要 IMAP.AccessAsUser.All scope
-  - 因此大多数账号 AUTHENTICATE 会失败 → 立即标记 imap_disabled，不重试
-  - 若 refresh_token 失效（HTTP 400）→ 标记 needs_oauth，不重试
-  - 少数账号若 IMAP 成功（较旧的 grant 或 mixed scope）→ 正常 IDLE 监听
+当前状态:
+  IMAP XOAUTH2 对所有账号均返回 AUTHENTICATE failed。
+  原因: client_id (9e5f94bc-..., Thunderbird 公开应用) 在 Azure AD 中
+       未注册 IMAP.AccessAsUser.All delegated permission，Microsoft
+       即使接受 token 换取请求也不会在 token 里附带 IMAP scope。
+  解决方案: 注册自有 Azure AD 应用并申请 IMAP.AccessAsUser.All 权限，
+            或改用 Graph API (Mail.Read) 读邮件。
 
 用法:
   DATABASE_URL=postgresql://... python3 imap_idle_daemon.py
@@ -28,22 +29,10 @@ IDLE_CYCLE_SECS    = 25 * 60   # re-issue IDLE every 25 min
 MAX_ACCOUNTS       = 60        # cap concurrent IMAP connections
 REFRESH_INTERVAL   = 300       # reload DB account list every 5 min
 
-CLIENT_ID      = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
-TOKEN_ENDPOINT = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
+CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
 
-# Graph scopes — same as device-code flow
-# Graph API scopes (used for Graph token refresh only — NOT for IMAP XOAUTH2)
-GRAPH_SCOPE = (
-    "https://graph.microsoft.com/Mail.Read "
-    "https://graph.microsoft.com/Mail.ReadWrite "
-    "https://graph.microsoft.com/Mail.Send "
-    "https://graph.microsoft.com/User.Read "
-    "https://graph.microsoft.com/IMAP.AccessAsUser.All "
-    "https://graph.microsoft.com/SMTP.Send "
-    "offline_access"
-)
-# IMAP-specific scope for personal Outlook.com accounts (outlook.office.com, not graph)
-IMAP_SCOPE_PERSONAL = "https://outlook.office.com/IMAP.AccessAsUser.All offline_access"
+# IMAP-specific scope for personal Outlook.com accounts
+IMAP_SCOPE = "https://outlook.office.com/IMAP.AccessAsUser.All offline_access"
 
 _stop_event = threading.Event()
 _ev_lock    = threading.Lock()
@@ -109,25 +98,29 @@ def _get_accounts():
         conn.close()
 
 
-def _refresh_token(refresh_tok: str) -> tuple[str, str]:
+def _refresh_imap_token(refresh_tok: str) -> tuple[str, str]:
     """
-    Exchange refresh_token for IMAP-capable (new_access_token, new_refresh_token).
+    Exchange refresh_token for an IMAP access_token.
 
-    Strategy (luoianun dual-endpoint, Bug #2+#3 fix):
-    1. consumers endpoint + outlook.office.com/IMAP scope  → works for most personal accounts
-    2. login.live.com/oauth20_token.srf fallback            → catches wl.imap-era grants
-    Both return a token accepted by IMAP XOAUTH2 on outlook.live.com / outlook.office365.com.
+    Uses two endpoints as fallback (luoianun pattern):
+      1. consumers + outlook.office.com/IMAP scope
+      2. login.live.com (legacy, no explicit scope)
+
+    NOTE: With the current Thunderbird client_id, token exchange succeeds
+    but the returned token lacks IMAP.AccessAsUser.All scope. AUTHENTICATE
+    will fail regardless. This function is kept for when a properly-scoped
+    client_id is configured.
     """
     import urllib.request, urllib.parse
 
-    _methods = [
+    methods = [
         {
             "url": "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
             "data": {
                 "grant_type":    "refresh_token",
                 "client_id":     CLIENT_ID,
                 "refresh_token": refresh_tok,
-                "scope":         IMAP_SCOPE_PERSONAL,  # outlook.office.com scope
+                "scope":         IMAP_SCOPE,
             },
             "label": "consumers/IMAP",
         },
@@ -137,14 +130,13 @@ def _refresh_token(refresh_tok: str) -> tuple[str, str]:
                 "grant_type":    "refresh_token",
                 "client_id":     CLIENT_ID,
                 "refresh_token": refresh_tok,
-                # login.live.com issues wl.imap-scoped tokens without explicit scope param
             },
             "label": "login.live.com",
         },
     ]
 
     last_error = "no attempt"
-    for method in _methods:
+    for method in methods:
         try:
             body = urllib.parse.urlencode(method["data"]).encode()
             req  = urllib.request.Request(
@@ -156,19 +148,18 @@ def _refresh_token(refresh_tok: str) -> tuple[str, str]:
             at = resp.get("access_token", "")
             rt = resp.get("refresh_token", refresh_tok)
             if at:
-                print(f"[idle] 🔑 IMAP token OK via {method['label']}", flush=True)
+                print(f"[idle] token refresh OK via {method['label']}", flush=True)
                 return at, rt
-            last_error = f"{resp.get('error','?')}: {resp.get('error_description','')[:80]}"
+            last_error = f"{resp.get('error', '?')}: {resp.get('error_description', '')[:80]}"
             print(f"[idle] ⚠ {method['label']} 失败: {last_error}", flush=True)
         except Exception as e:
             last_error = str(e)[:120]
             print(f"[idle] ⚠ {method['label']} 异常: {last_error}", flush=True)
 
-    raise RuntimeError(f"IMAP token 刷新失败（所有端点）: {last_error}")
+    raise RuntimeError(f"token 刷新失败（所有端点）: {last_error}")
 
 
 def _update_db_token(acct_id: int, access_token: str, refresh_token: str):
-    """Persist refreshed tokens back to DB."""
     import psycopg2
     try:
         conn = psycopg2.connect(DB_URL)
@@ -207,29 +198,27 @@ def _idle_worker(acct: dict):
 
     _set_status(acct_id, email, "starting")
 
-    # ── Step 1: try to refresh the token ─────────────────────────────────────
+    # ── Step 1: refresh token ─────────────────────────────────────────────────
     if rt:
         try:
-            new_at, new_rt = _refresh_token(rt)
+            new_at, new_rt = _refresh_imap_token(rt)
             if new_at != token or new_rt != rt:
                 _update_db_token(acct_id, new_at, new_rt)
             token = new_at
             rt    = new_rt
             print(f"[idle] 🔄 {email}: token 已刷新", flush=True)
-        except RuntimeError as re2:
-            err_str = str(re2)
+        except RuntimeError as e:
+            err_str = str(e)
             if not token:
-                # No fallback token — account needs re-OAuth
-                print(f"[idle] 🔑 {email}: refresh 失败且无 token，需要重新授权: {err_str}", flush=True)
+                print(f"[idle] {email}: refresh 失败且无 token，needs_oauth: {err_str}", flush=True)
                 _set_status(acct_id, email, "needs_oauth", err_str)
                 return
-            # Has old token — try it anyway but log the warning
             print(f"[idle] ⚠ {email}: refresh 失败，尝试旧 token: {err_str}", flush=True)
     elif not token:
         _set_status(acct_id, email, "needs_oauth", "no token and no refresh_token")
         return
 
-    # ── Step 2: try IMAP connection ───────────────────────────────────────────
+    # ── Step 2: IMAP connection ───────────────────────────────────────────────
     imap_host = IMAP_HOST_PRIMARY
     consecutive_errors = 0
 
@@ -261,12 +250,11 @@ def _idle_worker(acct: dict):
 
             if not connected:
                 if auth_failed:
-                    # v9.60: IMAP auth failed - could be account-level IMAP disabled
-                    # (Microsoft disables IMAP by default for new accounts since 2024).
-                    # Mark as imap_disabled in status file; daemon will retry on next restart.
+                    # XOAUTH2 auth failed — current client_id lacks IMAP.AccessAsUser.All scope.
+                    # Marking imap_disabled; switch to Graph API for mail reading.
                     _set_status(acct_id, email, "imap_disabled",
-                                f"IMAP XOAUTH2 failed (may need IMAP enabled in account settings): {last_error}")
-                    print(f"[idle] 🚫 {email}: AUTHENTICATE failed, marked imap_disabled (retryable on daemon restart)", flush=True)
+                                "XOAUTH2 AUTHENTICATE failed: client_id lacks IMAP.AccessAsUser.All scope")
+                    print(f"[idle] 🚫 {email}: IMAP AUTHENTICATE failed (client_id scope issue)", flush=True)
                     return
                 raise ConnectionError(f"两个 IMAP host 均连接失败: {last_error}")
 
@@ -299,7 +287,7 @@ def _idle_worker(acct: dict):
                             pass
 
                     if not responses:
-                        continue  # no new mail — re-issue IDLE
+                        continue
                 else:
                     for _ in range(60):
                         if _stop_event.is_set():
@@ -356,10 +344,9 @@ def _idle_worker(acct: dict):
                     return
                 time.sleep(1)
 
-            # On reconnect, try refreshing the token again
             if rt:
                 try:
-                    new_at, new_rt = _refresh_token(rt)
+                    new_at, new_rt = _refresh_imap_token(rt)
                     if new_at != token or new_rt != rt:
                         _update_db_token(acct_id, new_at, new_rt)
                     token = new_at
@@ -403,7 +390,7 @@ def main():
         )
         t.start()
         _threads[acc["id"]] = t
-        time.sleep(0.15)  # stagger slightly to avoid thundering herd
+        time.sleep(0.15)
 
     last_refresh = time.time()
     while not _stop_event.is_set():
