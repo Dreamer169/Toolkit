@@ -2211,6 +2211,7 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None, password:
         'https://graph.microsoft.com/User.Read',
         'https://graph.microsoft.com/IMAP.AccessAsUser.All',
         'https://graph.microsoft.com/SMTP.Send',
+        'https://outlook.office.com/IMAP.AccessAsUser.All',
     ]
     SCOPE = ' '.join(SCOPES)
 

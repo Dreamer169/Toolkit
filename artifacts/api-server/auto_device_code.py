@@ -83,7 +83,8 @@ DEVICE_CODE_SCOPE = (
     "https://graph.microsoft.com/Mail.Send "
     "https://graph.microsoft.com/User.Read "
     "https://graph.microsoft.com/IMAP.AccessAsUser.All "
-    "https://graph.microsoft.com/SMTP.Send"
+    "https://graph.microsoft.com/SMTP.Send "
+    "https://outlook.office.com/IMAP.AccessAsUser.All"
 )
 DEVICE_CODE_ENDPOINT = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode"
 
