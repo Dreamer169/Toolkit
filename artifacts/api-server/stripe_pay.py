@@ -548,9 +548,20 @@ async def auto_pay_chkr(payment_url: str, bins=None,
         {"ok": bool, "status": str, "card": str|None}
     """
     if not bins:
-        bins = DEFAULT_BINS
+        bins = list(DEFAULT_BINS)
         log(f"[chkr] CHKR_BINS 未配置，使用内置 {len(DEFAULT_BINS)} 个 BIN", "warn")
     else:
+        bins = list(bins)
+        # Always inject historically-live BINs from bin_stats.json
+        # (ensures 489537 etc. are tried even if not in CHKR_BINS env)
+        try:
+            _bs = load_bin_stats()
+            for _b, _s in _bs.items():
+                if _s.get("live", 0) > 0 and _b not in bins:
+                    bins = [_b] + bins  # prepend: highest priority
+                    log(f"[chkr] 注入历史 LIVE BIN: {_b}", "info")
+        except Exception:
+            pass
         log(f"[chkr] 使用 {len(bins)} 个 BIN: {bins[:4]}", "info")
 
     if not payment_url:
