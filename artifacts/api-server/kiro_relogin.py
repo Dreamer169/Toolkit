@@ -107,9 +107,9 @@ class KiroRelogin(KiroRegister):
         self.log("  3b: start...")
         if not self._exec("start", inputs=[fp_i]): return None
 
-        # 3c: submit email - use no actionId so AWS auto-detects existing vs new
-        self.log("  3c: submit email (no action_id)...")
-        r = self._exec("get-identity-user", inputs=[usr_i, fp_i])
+        # 3c: submit email with action_id=SUBMIT → AWS detects existing account → password challenge
+        self.log("  3c: submit email (action_id=SUBMIT for existing user)...")
+        r = self._exec("get-identity-user", inputs=[usr_i, fp_i], action_id="SUBMIT")
         if not r: return None
         self.log(f"  → stepId={r.get('stepId')} sid={self.sid}")
         return r
@@ -175,10 +175,11 @@ class KiroRelogin(KiroRegister):
             "requestId": req_id
         }
         
-        # Use signup prefix (matches step10_set_password URL pattern)
-        url = f"{SIGNIN}/platform/{DIR_ID}/signup/api/execute"
+        # For LOGIN: use normal /api/execute endpoint with stepId='get-password'
+        url = f"{SIGNIN}/platform/{DIR_ID}/api/execute"
+        body["stepId"] = step_id  # use the actual stepId from step3 response ('get-password')
         self.log(f"  POST {url}")
-        self.log(f"  stepId=get-new-password-for-password-creation wsh={str(self.wsh)[:40]}...")
+        self.log(f"  stepId={step_id} wsh={str(self.wsh)[:40]}...")
         
         import curl_cffi.requests as _cr_req
         h = {**UA,
@@ -187,7 +188,7 @@ class KiroRelogin(KiroRegister):
              "origin": SIGNIN,
              "x-amzn-requestid": req_id,
              "x-amz-date": time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime()),
-             "referer": f"{SIGNIN}/platform/{DIR_ID}/signup",
+             "referer": f"{SIGNIN}/platform/{DIR_ID}/login",
              "sec-fetch-site": "same-origin",
              "sec-fetch-mode": "cors",
              "sec-fetch-dest": "empty",

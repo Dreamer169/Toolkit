@@ -858,6 +858,137 @@ export const STEALTH_INIT = `
   } catch(_) {}
 
 })();
+
+// ── Like-headless mitigation patches ─────────────────────────────────────────
+// Reduces CreepJS likeHeadlessRating by faking absent APIs
+
+// 1. hasKnownBgColor: document.documentElement background
+(function(){
+  try {
+    const orig = window.getComputedStyle;
+    window.getComputedStyle = function(el, pseudo) {
+      const s = orig.call(this, el, pseudo);
+      if (el === document.documentElement || el === document.body) {
+        const origGetProp = s.getPropertyValue.bind(s);
+        return new Proxy(s, {
+          get(t, p) {
+            if (p === 'backgroundColor' || p === 'background-color') return 'rgb(248, 249, 250)';
+            const v = t[p];
+            return typeof v === 'function' ? v.bind(t) : v;
+          }
+        });
+      }
+      return s;
+    };
+  } catch(e) {}
+})();
+
+// 2. prefersLightColor — CreepJS checks matchMedia('prefers-color-scheme: light')
+(function(){
+  try {
+    const origMQL = window.matchMedia;
+    window.matchMedia = function(query) {
+      const mql = origMQL.call(this, query);
+      if (/prefers-color-scheme/.test(query)) {
+        const isDark = /dark/.test(query);
+        return Object.defineProperties(Object.create(mql), {
+          matches: { get: () => isDark ? false : true },
+          media: { get: () => query },
+          onchange: { value: null, writable: true },
+          addEventListener: { value: mql.addEventListener.bind(mql) },
+          removeEventListener: { value: mql.removeEventListener.bind(mql) },
+        });
+      }
+      return mql;
+    };
+  } catch(e) {}
+})();
+
+// 3. noTaskbar — fake screen.availHeight to show taskbar presence (40px)
+(function(){
+  try {
+    const screenHeight = window.screen.height || 1080;
+    const taskbarH = 40;
+    Object.defineProperty(window.screen, 'availHeight', {
+      get: () => screenHeight - taskbarH,
+      configurable: true
+    });
+    // Also override on screen object
+    Object.defineProperty(Screen.prototype, 'availHeight', {
+      get: function() { return this.height - taskbarH; },
+      configurable: true
+    });
+  } catch(e) {}
+})();
+
+// 4. noWebShare — fake navigator.share (Web Share API)
+(function(){
+  try {
+    if (!navigator.share) {
+      Object.defineProperty(navigator, 'share', {
+        value: async function(data) { return Promise.resolve(); },
+        configurable: true, writable: true
+      });
+      Object.defineProperty(navigator, 'canShare', {
+        value: function(data) { return true; },
+        configurable: true, writable: true
+      });
+    }
+  } catch(e) {}
+})();
+
+// 5. noContentIndex — fake ContentIndex API
+(function(){
+  try {
+    if (navigator.serviceWorker && !('ContentIndex' in window)) {
+      window.ContentIndex = function(){};
+      // Fake on ServiceWorkerRegistration
+      const origGetter = Object.getOwnPropertyDescriptor(ServiceWorkerRegistration.prototype, 'index');
+      if (!origGetter) {
+        Object.defineProperty(ServiceWorkerRegistration.prototype, 'index', {
+          get: function() { return { add: async()=>{}, delete: async()=>{}, getAll: async()=>[] }; },
+          configurable: true
+        });
+      }
+    }
+  } catch(e) {}
+})();
+
+// 6. noContactsManager — fake Contacts Manager API
+(function(){
+  try {
+    if (!navigator.contacts) {
+      Object.defineProperty(navigator, 'contacts', {
+        value: {
+          select: async function(props, opts) { return []; },
+          getProperties: async function() { return ['name', 'email', 'tel']; }
+        },
+        configurable: true, writable: true
+      });
+    }
+  } catch(e) {}
+})();
+
+// 7. noDownlinkMax — fake navigator.connection.downlinkMax
+(function(){
+  try {
+    if (navigator.connection && navigator.connection.downlinkMax === undefined) {
+      Object.defineProperty(navigator.connection, 'downlinkMax', {
+        get: () => 10,
+        configurable: true
+      });
+    } else if (!navigator.connection) {
+      Object.defineProperty(navigator, 'connection', {
+        value: { downlink: 10, downlinkMax: 10, effectiveType: '4g',
+                 rtt: 100, saveData: false, type: 'wifi',
+                 onchange: null },
+        configurable: true, writable: true
+      });
+    }
+  } catch(e) {}
+})();
+// ── End like-headless patches ─────────────────────────────────────────────────
+
 `;
 
 
