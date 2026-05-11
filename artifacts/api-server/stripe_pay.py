@@ -26,6 +26,14 @@ CHKR_API    = "https://api.chkr.cc/"
 CHKR_DELAY  = 4.0   # seconds between checks (avoid rate-limit 429)
 CHKR_MAX    = 25    # max cards to check per BIN
 
+# 代理端口列表 (int)，用于 chkr.cc 卡检测，空列表 = 直连
+# 可通过环境变量 CHKR_PROXY_PORTS=10800,10810 配置
+import os as _os
+CHKR_PROXY_PORTS: list = [
+    int(p) for p in _os.environ.get("CHKR_PROXY_PORTS", "").split(",")
+    if p.strip().isdigit()
+]
+
 # 默认 BIN 列表 — 美国 Visa/Mastercard，Stripe $0 auth 成功率较高
 DEFAULT_BINS = [
     "426684",   # Chase Visa Debit

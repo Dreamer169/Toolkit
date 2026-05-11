@@ -411,10 +411,11 @@ def main():
                             _spspec.loader.exec_module(_spay)
                             bins_raw = _os2.environ.get("CHKR_BINS", "")
                             bins = [b.strip() for b in bins_raw.split(",") if b.strip()] or _spay.DEFAULT_BINS
-                            pay_ok = _spay.auto_pay_chkr(
+                            import asyncio as _asyncio
+                            pay_ok = _asyncio.run(_spay.auto_pay_chkr(
                                 payment_url, bins=bins, headless=True, log=_sub_log
-                            )
-                            if pay_ok:
+                            ))
+                            if isinstance(pay_ok, dict) and pay_ok.get("ok"):
                                 update_sub_status(kiro_id, "active")
                                 print("[MAIN] 🎉 订阅完成！sub_status → active", flush=True)
                             else:

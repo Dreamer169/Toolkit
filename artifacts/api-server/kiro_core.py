@@ -1052,7 +1052,7 @@ class KiroRegister:
                     at = rd.get("accessToken", "")
                     ct = rd.get("csrfToken", "")
                     ei = rd.get("expiresIn", 0)
-                    rt = rd.get("refreshToken", "")  # Kiro Social refresh token
+                    rt = rd.get("refreshToken", "") or rd.get("refresh_token", "")  # Kiro Social refresh token
                     self.log(f"  ExchangeToken keys: {list(rd.keys())}")
                     if rt: self.log(f"  refreshToken={rt[:60]}...")
                     if at:
@@ -1369,37 +1369,9 @@ class KiroRegister:
             return None
         self.log(f"  ✅ clientId={client_id[:40]}...")
 
-        # ── PKCE 快速路径: 用 CODE11 + code_verifier 直接换 refreshToken ──
-        if getattr(self, "_auth_code", None) and getattr(self, "cv", None):
-            self.log("  ★ PKCE 快速路径: oidc/token (authorization_code + code_verifier)...")
-            pkce_h = {**reg_h, "amz-sdk-invocation-id": _uuid()}
-            pkce_body = {
-                "clientId": client_id,
-                "clientSecret": client_secret,
-                "code": self._auth_code,
-                "codeVerifier": self.cv,
-                "grantType": "authorization_code",
-                "redirectUri": f"{KIRO}/signin/oauth",
-            }
-            r_pkce = self.s.post(f"{OIDC}/token", headers=pkce_h, json=pkce_body)
-            self.log(f"  PKCE token status: {r_pkce.status_code}")
-            if r_pkce.status_code == 200:
-                pkce_tok = r_pkce.json()
-                pkce_rt = pkce_tok.get("refreshToken", "")
-                pkce_at = pkce_tok.get("accessToken", "")
-                if pkce_rt:
-                    self.log(f"  ✅ PKCE refreshToken={pkce_rt[:60]}...")
-                    return {
-                        "clientId": client_id,
-                        "clientSecret": client_secret,
-                        "accessToken": pkce_at,
-                        "refreshToken": pkce_rt,
-                    }
-                self.log(f"  PKCE resp 无 refreshToken: {pkce_tok}")
-            else:
-                try: self.log(f"  PKCE 失败 body: {r_pkce.text[:300]}")
-                except: pass
-            self.log("  PKCE 快速路径失败, 回退到 device auth 流程")
+        # PKCE 快速路径已禁用: _auth_code 已被 ExchangeToken 消耗，再次使用会 400
+        # (code already redeemed by ExchangeToken in step12e)
+
 
         # ── 12g: POST oidc/device_authorization ──
         self.log("  12g: POST oidc/device_authorization...")
@@ -1546,8 +1518,12 @@ class KiroRegister:
             self.log("  ❌ token 轮询超时")
             return None
 
-        oidc_access = oidc_token.get("accessToken", "")
-        refresh_token = oidc_token.get("refreshToken", "")
+        oidc_access = oidc_token.get("accessToken", "") or oidc_token.get("access_token", "")
+        refresh_token = oidc_token.get("refreshToken", "") or oidc_token.get("refresh_token", "")
+        if refresh_token:
+            self.log(f"  refreshToken={refresh_token[:60]}")
+        else:
+            self.log("  no refreshToken in oidc/token resp. Keys: " + str(list(oidc_token.keys())))
         self.log(f"  ✅ OIDC accessToken={oidc_access[:60]}...")
         self.log(f"  ✅ refreshToken={refresh_token[:60]}...")
         return {
