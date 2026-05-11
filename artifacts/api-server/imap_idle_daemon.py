@@ -137,7 +137,7 @@ def _update_db_tokens(acct_id: int, access_token: str, refresh_token: str):
 
 # ── Token 刷新 ────────────────────────────────────────────────────────────────
 
-def _exchange_token(refresh_tok: str, scope: str, client_id: str = CLIENT_ID) -> tuple[str, str]:
+def _exchange_token(refresh_tok: str, scope: str, client_id: str) -> tuple[str, str]:
     body = urlencode({
         "grant_type":    "refresh_token",
         "client_id":     client_id,
@@ -162,11 +162,30 @@ def _exchange_token(refresh_tok: str, scope: str, client_id: str = CLIENT_ID) ->
     return at, rt
 
 def _get_graph_token(refresh_tok: str) -> tuple[str, str]:
-    return _exchange_token(refresh_tok, GRAPH_SCOPE)
+    """
+    获取 Graph API token。
+    refresh_token 可能是用 Thunderbird client_id 创建的（旧账号）
+    或者用新 OUTLOOK_CLIENT_ID 创建的（重授权后的账号）。
+    先用当前 CLIENT_ID 试，失败则回退 Thunderbird（过渡期兼容）。
+    """
+    if CLIENT_ID != THUNDERBIRD_CLIENT_ID:
+        try:
+            return _exchange_token(refresh_tok, GRAPH_SCOPE, CLIENT_ID)
+        except RuntimeError as e:
+            err = str(e)
+            # 旧账号的 refresh_token 只接受 Thunderbird client_id
+            if "unauthorized_client" in err or "AADSTS700016" in err or "invalid_grant" in err:
+                return _exchange_token(refresh_tok, GRAPH_SCOPE, THUNDERBIRD_CLIENT_ID)
+            raise
+    return _exchange_token(refresh_tok, GRAPH_SCOPE, THUNDERBIRD_CLIENT_ID)
 
 def _get_imap_token(refresh_tok: str) -> tuple[str, str]:
-    """获取 IMAP XOAUTH2 专用 token（需要 CLIENT_ID 有 IMAP 权限）。"""
-    return _exchange_token(refresh_tok, IMAP_SCOPE)
+    """
+    获取 IMAP XOAUTH2 token，只在 IMAP_CAPABLE 时调用。
+    新账号（用新 client_id 重授权后）refresh_token 兼容新 client_id。
+    旧账号的 refresh_token 不含 IMAP scope，此调用会失败（正常）。
+    """
+    return _exchange_token(refresh_tok, IMAP_SCOPE, CLIENT_ID)
 
 
 # ── Graph API 读邮件 ──────────────────────────────────────────────────────────
