@@ -222,3 +222,81 @@ python3 deploy_model.py   # SCP 到远程 + pm2 restart captcha-api
 ```
 
 详细说明见 `scripts/captcha_recognition/README.md`。
+
+## 指纹检测自动化 (2026-05-11)
+
+### 检测脚本
+
+| 文件 | 说明 |
+|------|------|
+| `browser-model/artifacts/api-server/test_9platforms_v2.mjs` | 9平台指纹自动检测 v2（正确时区 Asia/Hong_Kong，IPHey 轮询，FP visitor ID）|
+| `browser-model/artifacts/api-server/test_iphey_fp_v2.mjs` | IPHey+Fingerprint.com 专项诊断脚本 |
+
+### 运维自动化
+
+| 文件 | 说明 |
+|------|------|
+| `scripts/nightly_fingerprint_test.sh` | 每晚 3:00 cron → 跑测试 → gh api 推 GitHub → 发邮件 |
+| `scripts/send_alert.py` | 通用告警发件：遍历 DB 有效 Outlook 账号，失败自动换下一个，发往 rjrbaphnak@rommiui.com |
+
+### 测试结果归档
+
+- 路径：`docs/test-results/YYYY-MM-DD.log`
+- 每日自动通过 `gh api` 推送到 GitHub，无需手动 commit
+
+### Cron 配置 (crontab -l)
+
+```
+0 3 * * * /root/Toolkit/scripts/nightly_fingerprint_test.sh >> /tmp/toolkit_logs/nightly_fp_cron.log 2>&1
+```
+
+### 9平台检测基准结果 (2026-05-11 首次运行)
+
+| 平台 | 结果 | 关键说明 |
+|------|------|---------|
+| BrowserScan | ✅ PASS | human |
+| CreepJS | ✅ PASS | 0% like-headless，trust=100% |
+| IPHey | ✅ PASS | Trustworthy；需轮询最多 90s 等 API 加载 |
+| PixelScan | ✅ PASS | human + all Clear |
+| Cloudflare (nowsecure.nl) | ✅ PASS | 无拦截 |
+| DataDome | ✅ PASS | 正常加载 |
+| Brotector | ✅ PASS | 0 bot signals |
+| Sannysoft | ✅ PASS | all checks passed |
+| Fingerprint.com | ✅ PASS | visitor_id 正常生成 |
+
+**总计：9/9 PASSED**
+
+### 检测关键参数
+
+- 代理端口 10857 → 时区 Asia/Hong_Kong（`_PROXY_PORT_TZ` 映射）
+- `timezoneId` 必须与代理出口时区一致，否则 IPHey 判定异常
+- IPHey：等待结果区 Temporary value 消失再读取（最长 90s）
+- Fingerprint.com：等待 visitor ID 加载，检查 32 位十六进制 ID 存在，不检查 Bot Detection 标题文字（为营销文案，非真实结果）
+
+
+
+## 运维自动化增补 (2026-05-11)
+
+### 新增 cron 任务
+
+| Cron | 说明 |
+|------|------|
+|  | 夜间指纹检测 → 保存本地 → 发邮件 |
+|  | test-results 保留最近30天；fp_run_*.tmp 保留7天 |
+|  | xvfb watchdog: Xvfb 挂掉自动清锁重启 |
+|  | browser-model watchdog: 8092 无响应自动重启 |
+
+### xvfb / browser-model 修复记录
+
+**问题**: 两服务均处于  循环
+- **xvfb**: 孤儿锁文件  残留 → 每次 pm2 重启失败，根因为前次进程被 SIGKILL 未清理锁
+- **browser-model**: 孤儿 node 进程(pid=3126610)占用 :8092，pm2 重启均 EADDRINUSE
+- **修复**: kill 孤儿进程 → 清锁 → pm2 restart；cron watchdog 防止复发
+
+### 检测脚本扩展
+
+| 文件 | 平台 |
+|------|------|
+|  | 5代理端口×时区 IPHey 一致性测试 |
+|  | incolumitas.com / deviceandbrowserinfo.com / f.vision |
+

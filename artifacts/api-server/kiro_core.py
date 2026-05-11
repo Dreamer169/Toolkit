@@ -984,12 +984,12 @@ class KiroRegister:
                     self.log(f"  ⚠️ step11: no state found in query or fragment!")
                 # ★ 关键: sso-token 的 authCode 是 step 11 的 workflowResultHandle
                 wrh11 = (qs11.get("workflowResultHandle", [None]) or fqs11.get("workflowResultHandle", [None]))[0]
-                # FIX: always update (even None) to clear stale step10 value
-                self._workflow_result_handle = wrh11
+                # FIX: only overwrite step10 value if step11 actually has one
                 if wrh11:
+                    self._workflow_result_handle = wrh11
                     self.log(f"  ★ step11 workflowResultHandle={wrh11[:60]}... (覆盖 step10 的値)")
                 else:
-                    self.log(f"  ⚠️ step11: redirect 无 workflowResultHandle, 已清除 step10 旧値")
+                    self.log(f"  ⚠️ step11: redirect 无 workflowResultHandle, 保留 step10 値={str(self._workflow_result_handle)[:40]}")
                 code11 = (qs11.get("code", [None]) or fqs11.get("code", [None]))[0]
                 if code11 and not self._auth_code:
                     self._auth_code = code11
@@ -1352,7 +1352,7 @@ class KiroRegister:
                 "urn:ietf:params:oauth:grant-type:device_code",
                 "refresh_token",
             ],
-            "redirectUris": [f"{KIRO}/signin/oauth"],
+            "redirectUris": ["http://127.0.0.1:54321"],  # loopback for public client
             "issuerUrl": "https://view.awsapps.com/start/",
         }
         r = self.s.post(f"{OIDC}/client/register", headers=reg_h,

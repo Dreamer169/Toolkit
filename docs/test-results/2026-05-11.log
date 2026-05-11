@@ -1,0 +1,45 @@
+[9p-v2] patches: STEALTH=39080 LATE_FIX=3095 WORKER=8630
+[9p-v2] proxy=socks5://127.0.0.1:10857 tz=Asia/Hong_Kong
+
+[11:00:47] === 1/9 BrowserScan ===
+  ✅ PASS human score=-
+
+[11:01:11] === 2/9 CreepJS ===
+  ✅ PASS 0% like-headless trust=100%
+
+[11:02:09] === 3/9 IPHey ===
+  ✅ PASS Trustworthy
+
+[11:02:59] === 4/9 PixelScan ===
+  ✅ PASS human + all Clear
+
+[11:03:38] === 5/9 Cloudflare ===
+  ✅ PASS page_loaded_no_block
+
+[11:04:03] === 6/9 DataDome ===
+  ✅ PASS page_loaded
+
+[11:04:26] === 7/9 Brotector ===
+  ✅ PASS 0 bot signals
+
+[11:04:47] === 8/9 Sannysoft ===
+  ✅ PASS all checks passed
+
+[11:05:06] === 9/9 Fingerprint.com ===
+  ✅ PASS visitor_id=f29a073ee39f...
+
+=========================================================
+[9-PLATFORM RESULTS v2] 2026-05-11T11:05:31.483Z
+=========================================================
+  ✅ BrowserScan     PASS human score=-
+  ✅ CreepJS         PASS 0% like-headless trust=100%
+  ✅ IPHey           PASS Trustworthy
+  ✅ PixelScan       PASS human + all Clear
+  ✅ Cloudflare      PASS page_loaded_no_block
+  ✅ DataDome        PASS page_loaded
+  ✅ Brotector       PASS 0 bot signals
+  ✅ Sannysoft       PASS all checks passed
+  ✅ Fingerprint     PASS visitor_id=f29a073ee39f...
+
+  Total: 9/9 PASSED
+=========================================================

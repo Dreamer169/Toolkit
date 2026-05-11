@@ -235,6 +235,17 @@ def wait_for_aws_otp(refresh_token: str, timeout: int = 120, tag: str = "") -> s
                     mid = m.get("id")
                     if not mid or mid in seen_ids:
                         continue
+                    # Only process emails received after our start_ts (avoids stale OTPs)
+                    recv_str = m.get("receivedDateTime", "")
+                    if recv_str:
+                        try:
+                            import datetime as _dt
+                            recv_dt = _dt.datetime.fromisoformat(recv_str.replace("Z", "+00:00"))
+                            if recv_dt.timestamp() < start_ts:
+                                seen_ids.add(mid)  # mark stale, skip
+                                continue
+                        except Exception:
+                            pass
                     subj = (m.get("subject") or "").lower()
                     from_addr = ((m.get("from") or {}).get("emailAddress") or {}).get("address", "").lower()
                     if "amazon" not in subj and "aws" not in subj and "verification" not in subj \

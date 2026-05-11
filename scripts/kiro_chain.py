@@ -18,7 +18,8 @@ DATABASE_URL    = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres
 CONCURRENCY     = int(os.environ.get("KIRO_CONCURRENCY", "1"))
 INTERVAL        = int(os.environ.get("KIRO_INTERVAL", "60"))
 MAX_PER_RUN     = int(os.environ.get("KIRO_MAX_PER_RUN", "0"))
-PROXY_PORTS_RAW = os.environ.get("KIRO_PROXY_PORTS", "10854,10857,10859,10851")
+# US: 10910/11/12/16, HK: 10854, others available
+PROXY_PORTS_RAW = os.environ.get("KIRO_PROXY_PORTS", "10910,10911,10912,10916,10854")
 PROXY_PORTS     = [int(p.strip()) for p in PROXY_PORTS_RAW.split(",") if p.strip()]
 SCRIPT_PATH     = "/root/Toolkit/artifacts/api-server/kiro_register.py"
 

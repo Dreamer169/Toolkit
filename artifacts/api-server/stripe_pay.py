@@ -30,7 +30,7 @@ CHKR_MAX    = 25    # max cards to check per BIN
 # 可通过环境变量 CHKR_PROXY_PORTS=10800,10810 配置
 import os as _os
 CHKR_PROXY_PORTS: list = [
-    int(p) for p in _os.environ.get("CHKR_PROXY_PORTS", "").split(",")
+    int(p) for p in _os.environ.get("CHKR_PROXY_PORTS", "10910,10911,10912,10916").split(",")
     if p.strip().isdigit()
 ]
 
