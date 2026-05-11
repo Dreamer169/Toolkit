@@ -18,7 +18,7 @@ def _refresh_access_token_raw(refresh_token: str) -> dict:
         "client_id": CLIENT_ID,
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
-        "scope": "offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read",
+        "scope": "offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read https://graph.microsoft.com/IMAP.AccessAsUser.All https://graph.microsoft.com/SMTP.Send",
     }).encode()
     req = urllib.request.Request(
         f"https://login.microsoftonline.com/{TENANT}/oauth2/v2.0/token",

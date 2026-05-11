@@ -41,7 +41,7 @@ async function getDeviceCode(email: string, proxy?: string | null): Promise<{
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         client_id: OAUTH_CLIENT_ID,
-        scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access",
+        scope: "offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read https://graph.microsoft.com/IMAP.AccessAsUser.All https://graph.microsoft.com/SMTP.Send",
       }).toString(),
     }, proxy);
     const d = await r.json() as { device_code?: string; user_code?: string; verification_uri?: string; error?: string };

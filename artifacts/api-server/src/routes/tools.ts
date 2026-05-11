@@ -5349,7 +5349,7 @@ router.post("/tools/outlook/batch-scan-inbox", async (req, res) => {
 
     // 单账号拉取（复用 fetch-messages-by-id 的 Graph token 刷新逻辑）
     const OAUTH_CID = process.env.OUTLOOK_CLIENT_ID || "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
-    const SCOPE_BASIC = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access";
+    const SCOPE_BASIC = FULL_GRAPH_SCOPE;  // fix: align with FULL_GRAPH_SCOPE
 
     async function scanOne(acc: typeof rows[0]): Promise<{
       accountId: number; email: string; messages: Array<{ id: string; subject: string; from: string; receivedAt: string; preview: string; code: string }>; error?: string

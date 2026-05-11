@@ -51,7 +51,7 @@ def validate_refresh_token(refresh_token: str) -> bool:
         "client_id": _GRAPH_CLIENT_ID,
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
-        "scope": "offline_access https://graph.microsoft.com/Mail.Read",
+        "scope": "offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read https://graph.microsoft.com/IMAP.AccessAsUser.All https://graph.microsoft.com/SMTP.Send",
     }).encode()
     try:
         resp = urllib.request.urlopen(
@@ -207,7 +207,7 @@ def wait_for_aws_otp(refresh_token: str, timeout: int = 120, tag: str = "") -> s
         "client_id": CLIENT_ID,
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
-        "scope": "offline_access https://graph.microsoft.com/Mail.Read",
+        "scope": "offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read https://graph.microsoft.com/IMAP.AccessAsUser.All https://graph.microsoft.com/SMTP.Send",
     }).encode()
     try:
         resp = urllib.request.urlopen(

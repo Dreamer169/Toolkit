@@ -169,7 +169,7 @@ def _refresh_outlook_access_token(account: dict) -> str | None:
             "grant_type": "refresh_token",
             "client_id": OAUTH_CLIENT_ID,
             "refresh_token": refresh_token,
-            "scope": "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access",
+            "scope": "offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read https://graph.microsoft.com/IMAP.AccessAsUser.All https://graph.microsoft.com/SMTP.Send",
         }).encode()
         req = urllib.request.Request(
             "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",

@@ -101,7 +101,7 @@ async function refreshToken(rt: string, proxy?: string | null): Promise<{ token:
         grant_type: "refresh_token",
         client_id: OAUTH_CLIENT_ID,
         refresh_token: rt,
-        scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access",
+        scope: "offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read https://graph.microsoft.com/IMAP.AccessAsUser.All https://graph.microsoft.com/SMTP.Send",
       }).toString(),
     }, proxy);
     const td = await r.json() as { access_token?: string; error?: string; error_description?: string };

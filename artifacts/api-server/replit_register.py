@@ -1739,7 +1739,7 @@ async def _fetch_replit_verify_url(email_addr: str, password: str, timeout_s: in
                     "client_id": _cid,
                     "grant_type": "refresh_token",
                     "refresh_token": _rt,
-                    "scope": "https://graph.microsoft.com/Mail.Read offline_access",
+                    "scope": "offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read https://graph.microsoft.com/IMAP.AccessAsUser.All https://graph.microsoft.com/SMTP.Send",
                 }).encode()
                 _tr = urllib.request.Request(
                     "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",

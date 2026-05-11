@@ -1763,7 +1763,7 @@ router.post("/replit/retry-verify", async (_req, res) => {
               grant_type: "refresh_token",
               client_id: "9e5f94bc-e8a4-4e73-b8be-63364c29d753",
               refresh_token: outlook.refresh_token,
-              scope: "https://graph.microsoft.com/Mail.Read offline_access",
+              scope: "offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read https://graph.microsoft.com/IMAP.AccessAsUser.All https://graph.microsoft.com/SMTP.Send",
             }).toString(),
           });
           const td = await tr.json() as { access_token?: string; refresh_token?: string };
