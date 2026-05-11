@@ -134,7 +134,7 @@ def refresh_ms_token(refresh_token):
         "grant_type": "refresh_token",
         "client_id": CLIENT_ID,
         "refresh_token": refresh_token,
-        "scope": "https://graph.microsoft.com/Mail.Read offline_access",
+        "scope": "https://graph.microsoft.com/Mail.Read offline_access https://outlook.office.com/IMAP.AccessAsUser.All",
     }).encode()
     req = urllib.request.Request(
         "https://login.microsoftonline.com/common/oauth2/v2.0/token",
