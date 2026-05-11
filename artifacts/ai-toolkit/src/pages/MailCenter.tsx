@@ -826,7 +826,7 @@ export default function MailCenter() {
           )}
                 {/* 实时验证状态栏 */}
       {liveVerify && (
-        <div className="flex items-center gap-3 px-4 py-2 bg-[#0d1117] border-b border-[#21262d] text-xs">
+        <div className="flex items-center gap-3 px-3 py-1.5 text-xs">
           <span className={`font-semibold ${liveVerify.enabled ? 'text-emerald-400' : 'text-gray-500'}`}>
             {liveVerify.enabled ? '🟢 实时验证：开启' : '⚫ 实时验证：关闭'}
           </span>
@@ -867,22 +867,7 @@ export default function MailCenter() {
               {batchOAuthBusy ? "发起中…" : "🔑 批量 OAuth 授权"}
             </button>
           )}
-          {/* 🤖 自动完成授权按钮（调用 Python 自动输入设备码） */}
-          {accounts.some(a => !hasOAuth(a)) && (
-            <button
-              onClick={() => startAutoComplete()}
-              disabled={autoCompleteBusy}
-              className="w-full py-1.5 bg-blue-700/60 hover:bg-blue-700/80 disabled:opacity-50 rounded text-xs text-white font-medium transition-colors"
-              title="用 Python 自动打开浏览器完成设备码 OAuth，无需手动输入验证码"
-            >
-              {autoCompleteBusy ? "自动授权中…" : "🤖 自动完成授权"}
-            </button>
-          )}
-          {autoCompleteMsg && (
-            <div className="text-[10px] px-1 py-0.5 rounded bg-[#21262d] text-blue-300 break-all">
-              {autoCompleteMsg}
-            </div>
-          )}
+          {/* 🤖 自动完成授权: 降级为辅助功能, 通过"重授权 Manual 账号"按钮触发 */}
           {/* 🔄 重授权 needs_oauth_manual 账号 */}
           {accounts.some(a => tagsOf(a).includes("needs_oauth_manual")) && (
             <button
@@ -910,22 +895,22 @@ export default function MailCenter() {
           )}
         </div>
 
+        {/* 自动检测按钮 — 固定区域，不随账号列表滚动 */}
+        <div className="px-2 py-1.5 border-b border-[#21262d] shrink-0">
+          <button
+            onClick={handleAutoCheck}
+            disabled={checkBusy}
+            className="w-full flex items-center justify-center gap-1 py-1 rounded text-xs font-medium bg-[#1c2128] hover:bg-[#21262d] border border-[#30363d] text-gray-300 disabled:opacity-50 transition-colors"
+          >
+            {checkBusy
+              ? <><svg className="w-3 h-3 animate-spin mr-1" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>检测中…</>
+              : <><svg className="w-3 h-3 mr-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>立即检测（30个）</>
+            }
+          </button>
+          {checkResult && <p className="text-[10px] text-blue-400 mt-0.5 leading-tight">{checkResult}</p>}
+          <p className="text-[10px] text-gray-600 mt-0.5 leading-tight">↻ 后台每 4 小时自动检测 50 个</p>
+        </div>
         <div className="flex-1 overflow-y-auto flex flex-col">
-          {/* 自动检测按钮 */}
-          <div className="px-2 pt-1.5 pb-0 shrink-0">
-            <button
-              onClick={handleAutoCheck}
-              disabled={checkBusy}
-              className="w-full flex items-center justify-center gap-1 py-1 rounded text-xs font-medium bg-[#1c2128] hover:bg-[#21262d] border border-[#30363d] text-gray-300 disabled:opacity-50 transition-colors"
-            >
-              {checkBusy
-                ? <><svg className="w-3 h-3 animate-spin mr-1" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>检测中…</>
-                : <><svg className="w-3 h-3 mr-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>立即检测（30个）</>
-              }
-            </button>
-            {checkResult && <p className="text-[10px] text-blue-400 mt-0.5 leading-tight">{checkResult}</p>}
-            <p className="text-[10px] text-gray-600 mt-0.5 leading-tight">↻ 后台每 4 小时自动检测 50 个</p>
-          </div>
           {/* 账号搜索过滤框 */}
           <div className="px-2 py-1.5 border-b border-[#21262d] shrink-0">
             <div className="relative">
@@ -1175,34 +1160,16 @@ export default function MailCenter() {
                   <p className="text-xs text-amber-400">该账号尚未授权，无法读取邮件。</p>
 
                   <div className="flex gap-1.5">
-                    {/* 主按钮：ROPC 一键授权 */}
+                    {/* 一键授权：优先用 refresh_token 刷新，无则提示手动设备码 */}
                     <button
                       onClick={() => autoAuth(selAccount)}
-                      disabled={authBusy === selAccount.id || verifying}
+                      disabled={authBusy === selAccount.id}
                       className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 rounded text-xs text-white font-semibold transition-colors"
                     >
                       {authBusy === selAccount.id ? "授权中…" : "⚡ 一键授权"}
                     </button>
-                    {/* 验证按钮 */}
-                    <button
-                      onClick={() => verifySingle(selAccount)}
-                      disabled={verifying || authBusy === selAccount.id}
-                      className="px-3 py-2 bg-blue-600/60 hover:bg-blue-600/80 disabled:opacity-50 rounded text-xs text-white transition-colors"
-                    >
-                      {verifying ? "…" : "🔍 验证"}
-                    </button>
                   </div>
 
-                  {/* 验证结果 */}
-                  {verifyStatus(selAccount.id) && (() => {
-                    const vr = verifyStatus(selAccount.id)!;
-                    const vb = verifyBadge(vr.status);
-                    return (
-                      <div className={`text-[11px] px-2 py-1 rounded bg-[#161b22] border border-[#30363d] ${vb.cls}`}>
-                        验证结果：{vb.label}{vr.error ? ` — ${vr.error.slice(0, 60)}` : ""}
-                      </div>
-                    );
-                  })()}
 
                   {/* 展开手动设备码授权 */}
                   {!showDevice && (

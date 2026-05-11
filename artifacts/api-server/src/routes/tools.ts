@@ -723,95 +723,6 @@ router.post("/tools/outlook/refresh-token", async (req, res) => {
   }
 });
 
-router.post("/tools/outlook/messages", async (req, res) => {
-  const { accessToken: suppliedAccessToken, accountId, folder, top, search } = req.body as {
-    accessToken?: string; accountId?: number; folder?: string; top?: number; search?: string;
-  };
-  let accessToken = suppliedAccessToken || "";
-  let resolvedAccountId: number | null = typeof accountId === "number" ? accountId : null;
-  let accountEmail: string | null = null;
-  let acctProxy: string | null = null;
-  const mailFolder = folder || "inbox";
-  const limit = Math.min(50, Math.max(1, top ?? 20));
-  try {
-    if (!accessToken) {
-      const rows = resolvedAccountId
-        ? await query<{ id: number; email: string; token: string | null; refresh_token: string | null }>(
-            "SELECT id, email, token, refresh_token FROM accounts WHERE id=$1 AND platform='outlook'",
-            [resolvedAccountId],
-          )
-        : await query<{ id: number; email: string; token: string | null; refresh_token: string | null }>(
-            "SELECT id, email, token, refresh_token FROM accounts WHERE platform='outlook' AND (COALESCE(token,'') <> '' OR COALESCE(refresh_token,'') <> '') ORDER BY updated_at DESC LIMIT 1",
-          );
-      if (!rows.length) {
-        res.status(400).json({ success: false, error: resolvedAccountId ? "账号不存在或不是 Outlook 账号" : "找不到可用 Outlook token" });
-        return;
-      }
-      const account = rows[0];
-      resolvedAccountId = account.id;
-      accountEmail = account.email;
-      accessToken = account.token || "";
-      acctProxy = await resolveAccountProxy(resolvedAccountId);
-      if (account.refresh_token) {
-        const tr = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({
-            grant_type: "refresh_token",
-            client_id: OAUTH_CLIENT_ID,
-            refresh_token: account.refresh_token,
-            scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access https://outlook.office.com/IMAP.AccessAsUser.All",
-          }).toString(),
-        }, acctProxy);
-        const td = await tr.json() as { access_token?: string; refresh_token?: string; error?: string; error_description?: string };
-        if (tr.ok && td.access_token) {
-          accessToken = td.access_token;
-          await execute(
-            "UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
-            [accessToken, td.refresh_token ?? account.refresh_token, account.id],
-          );
-        } else if (!accessToken) {
-          res.status(400).json({ success: false, error: td.error_description ?? td.error ?? "刷新 Outlook token 失败" });
-          return;
-        }
-      }
-    }
-    if (!accessToken) {
-      res.status(400).json({ success: false, error: "accessToken 不能为空" });
-      return;
-    }
-    let url = `https://graph.microsoft.com/v1.0/me/mailFolders/${mailFolder}/messages?$top=${limit}&$select=id,subject,from,receivedDateTime,bodyPreview,isRead&$orderby=receivedDateTime desc`;
-    if (search) url += `&$search="${encodeURIComponent(search)}"`;
-    const _msgsProxy = acctProxy ?? undefined;
-    const r = await microsoftFetch(url, {
-      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-    }, _msgsProxy);
-    const data = await r.json() as {
-      value?: Array<{
-        id: string; subject: string;
-        from: { emailAddress: { name: string; address: string } };
-        receivedDateTime: string; bodyPreview: string; isRead: boolean;
-      }>;
-      error?: { message: string; code: string };
-    };
-    if (!r.ok) {
-      res.status(r.status).json({ success: false, error: data.error?.message ?? "获取邮件失败" });
-      return;
-    }
-    const messages = (data.value ?? []).map((m) => ({
-      id: m.id,
-      subject: m.subject || "(无主题)",
-      from: m.from?.emailAddress?.address ?? "",
-      fromName: m.from?.emailAddress?.name ?? "",
-      receivedAt: m.receivedDateTime,
-      preview: m.bodyPreview,
-      isRead: m.isRead,
-    }));
-    res.json({ success: true, accountId: resolvedAccountId, email: accountEmail, messages, count: messages.length });
-  } catch (e: unknown) {
-    res.status(500).json({ success: false, error: String(e) });
-  }
-});
 router.get("/tools/outlook/profile", async (req, res) => {
   const token = req.headers["x-access-token"] as string;
   if (!token) { res.status(400).json({ success: false, error: "缺少 x-access-token" }); return; }
@@ -1045,22 +956,24 @@ async function createBatchOAuthSessions(rows: { id: number; email: string }[]) {
 // POST /tools/outlook/batch-oauth/start
 // 为没有 token 的账号批量申请设备码
 router.post("/tools/outlook/batch-oauth/start", async (req, res) => {
-  const { accountIds } = req.body as { accountIds?: number[] };
+  const { accountIds, filter } = req.body as { accountIds?: number[]; filter?: "needs_oauth_manual" };
   try {
     cleanOldBatchSessions();
     const { query: dbQ } = await import("../db.js");
 
-    // 查出所有没有 token 的 Outlook 账号（或指定 ID）
-    // Bug fix: 当传入 accountIds 时同样过滤已有 token 的账号，避免重复发起设备码授权
+    // filter="needs_oauth_manual": 只查有此标签账号，用于批量重授权已标记账号
+    const tagFilter = filter === "needs_oauth_manual"
+      ? " AND COALESCE(tags,'') LIKE '%needs_oauth_manual%' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%'"
+      : "";
     let rows: { id: number; email: string }[];
     if (accountIds?.length) {
       rows = await dbQ<{ id: number; email: string }>(
-        "SELECT id, email FROM accounts WHERE platform='outlook' AND id = ANY($1::int[]) AND (token IS NULL OR token='') AND (refresh_token IS NULL OR refresh_token='')",
+        `SELECT id, email FROM accounts WHERE platform='outlook' AND id = ANY($1::int[]) AND (token IS NULL OR token='') AND (refresh_token IS NULL OR refresh_token='')${tagFilter}`,
         [accountIds]
       );
     } else {
       rows = await dbQ<{ id: number; email: string }>(
-        "SELECT id, email FROM accounts WHERE platform='outlook' AND (token IS NULL OR token='') AND (refresh_token IS NULL OR refresh_token='')"
+        `SELECT id, email FROM accounts WHERE platform='outlook' AND (token IS NULL OR token='') AND (refresh_token IS NULL OR refresh_token='')${tagFilter}`
       );
     }
 
@@ -3435,59 +3348,6 @@ router.post("/tools/outlook/auto-auth", async (req, res) => {
 });
 
 // ── 批量一键授权（优先 refresh_token 刷新，无 refresh_token 账号提示设备码）────
-router.post("/tools/outlook/auto-auth-all", async (req, res) => {
-  try {
-    const { query, execute } = await import("../db.js");
-    const rows = await query<{
-      id: number; email: string; password: string | null; refresh_token: string | null;
-    }>(
-      "SELECT id, email, password, refresh_token FROM accounts WHERE platform=\'outlook\' AND (token IS NULL OR token=\'\') ",
-      []
-    );
-    if (rows.length === 0) {
-      res.json({ success: true, results: [], msg: "没有需要授权的账号" });
-      return;
-    }
-    const results: Array<{ id: number; email: string; ok: boolean; needsDeviceFlow?: boolean; error?: string }> = [];
-    for (const acc of rows) {
-      // 优先用 refresh_token 刷新
-      const acctProxy = await resolveAccountProxy(acc.id);
-      if (acc.refresh_token) {
-        try {
-          const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: new URLSearchParams({
-              grant_type: "refresh_token",
-              client_id: OAUTH_CLIENT_ID,
-              refresh_token: acc.refresh_token,
-              scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access https://outlook.office.com/IMAP.AccessAsUser.All",
-            }).toString(),
-          }, acctProxy);
-          const td = await r.json() as { access_token?: string; refresh_token?: string; error_description?: string };
-          if (td.access_token) {
-            await execute("UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
-              [td.access_token, td.refresh_token ?? acc.refresh_token, acc.id]);
-            results.push({ id: acc.id, email: acc.email, ok: true });
-            continue;
-          }
-          results.push({ id: acc.id, email: acc.email, ok: false, needsDeviceFlow: true, error: `refresh_token 已失效：${td.error_description ?? "需重新授权"}` });
-        } catch (e) {
-          results.push({ id: acc.id, email: acc.email, ok: false, error: String(e) });
-        }
-      } else {
-        // 无 refresh_token：需要设备码授权
-        results.push({ id: acc.id, email: acc.email, ok: false, needsDeviceFlow: true,
-          error: "无 OAuth token，请使用设备码授权（点击账号旁「设备码」按钮）" });
-      }
-    }
-    const ok = results.filter(r => r.ok).length;
-    res.json({ success: true, results, total: rows.length, authorized: ok, failed: rows.length - ok });
-  } catch (e: unknown) {
-    res.status(500).json({ success: false, error: String(e) });
-  }
-});
-
 // ── 按账号ID拉取邮件（自动刷新token）──────────────────────────────────────
 // 供邮件中心使用，前端只传账号ID，token管理完全在后端
 const DEFAULT_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";

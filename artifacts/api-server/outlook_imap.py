@@ -60,7 +60,9 @@ class _ProxiedIMAP4SSL(imaplib.IMAP4):
         try: self.sock.close()
         except Exception: pass
 
-IMAP_HOST = "outlook.office365.com"
+IMAP_HOST_PRIMARY  = "outlook.live.com"        # consumers-endpoint token
+IMAP_HOST_FALLBACK = "outlook.office365.com"   # login.live.com token / fallback
+IMAP_HOST = IMAP_HOST_PRIMARY   # default (backward compat)
 IMAP_PORT = 993
 
 
@@ -154,6 +156,20 @@ def parse_message(mid, mail) -> dict:
 
 
 # ── XOAUTH2 路径（imapclient）──────────────────────────────────────────────
+
+def fetch_inbox_xoauth2_host(address, access_token, limit=25,
+                              folder="INBOX", search="", proxy="",
+                              imap_host=""):
+    """Same as fetch_inbox_xoauth2 but with configurable IMAP host."""
+    global IMAP_HOST
+    orig = IMAP_HOST
+    if imap_host:
+        IMAP_HOST = imap_host
+    try:
+        return fetch_inbox_xoauth2(address, access_token, limit, folder, search, proxy)
+    finally:
+        IMAP_HOST = orig
+
 
 def fetch_inbox_xoauth2(address: str, access_token: str,
                          limit: int = 25, folder: str = "INBOX", search: str = "", proxy: str = ""):
@@ -341,9 +357,34 @@ if __name__ == "__main__":
         search  = params.get("search", "")
         check   = params.get("check_only", False)
 
+        proxy = params.get("proxy", "")
         if token:
-            # XOAUTH2 路径（与 hrhcode 相同）
-            result = check_login_xoauth2(email, token) if check else fetch_inbox_xoauth2(email, token, limit, folder, search)
+            # XOAUTH2: 优先 outlook.live.com（consumers endpoint），失败时回退 outlook.office365.com
+            if check:
+                result = check_login_xoauth2(email, token)
+                if not result.get("success"):
+                    result2 = fetch_inbox_xoauth2_host(email, token, imap_host=IMAP_HOST_FALLBACK)
+                    if result2.get("success"):
+                        result = {"success": True, "via": "xoauth2_fallback"}
+                    else:
+                        result["error"] = (
+                            result.get("error", "") +
+                            f" | fallback({IMAP_HOST_FALLBACK}): {result2.get('error', 'failed')}"
+                        )
+            else:
+                result = fetch_inbox_xoauth2(email, token, limit, folder, search, proxy)
+                if not result.get("success"):
+                    result2 = fetch_inbox_xoauth2_host(
+                        email, token, limit, folder, search, proxy, IMAP_HOST_FALLBACK
+                    )
+                    if result2.get("success"):
+                        result2["via"] = "xoauth2_fallback"
+                        result = result2
+                    else:
+                        result["error"] = (
+                            result.get("error", "") +
+                            f" | fallback({IMAP_HOST_FALLBACK}): {result2.get('error', '')}"
+                        )
         else:
             # Basic Auth 路径（可能被微软封锁）
             result = check_login(email, pw) if check else fetch_inbox(email, pw, limit, folder, search)
