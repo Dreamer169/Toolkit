@@ -21,6 +21,7 @@ import asyncio
 import json
 import random
 import re
+import hashlib
 import secrets
 import string
 import sys
@@ -2208,6 +2209,8 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None, password:
         'https://graph.microsoft.com/Mail.ReadWrite',
         'https://graph.microsoft.com/Mail.Send',
         'https://graph.microsoft.com/User.Read',
+        'https://graph.microsoft.com/IMAP.AccessAsUser.All',
+        'https://graph.microsoft.com/SMTP.Send',
     ]
     SCOPE = ' '.join(SCOPES)
 
@@ -2239,6 +2242,13 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None, password:
     try:
         # Dismiss passkey/interrupt pages before navigating to OAuth consent
         _skip_ms_interrupts(page, label='pre-oauth')
+        # ── PKCE (LainsNL reference) ──────────────────────────────────────────────
+        _pkce_chars = string.ascii_letters + string.digits + '-._~'
+        code_verifier  = ''.join(secrets.choice(_pkce_chars) for _ in range(128))
+        _cv_digest     = hashlib.sha256(code_verifier.encode()).digest()
+        import base64 as _b64pkce
+        code_challenge = _b64pkce.urlsafe_b64encode(_cv_digest).decode().rstrip('=')
+        # ──────────────────────────────────────────────────────────────────────
         scope_encoded = '%20'.join(_up.quote(s, safe=':/') for s in SCOPES)
         auth_url = (
             'https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize'
@@ -2248,6 +2258,8 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None, password:
             f'&scope={scope_encoded}'
             '&prompt=consent'
             f'&login_hint={_up.quote(email, safe="")}'
+            f'&code_challenge={code_challenge}'
+            '&code_challenge_method=S256'
         )
         print(f'[oauth] 导航到授权页（prompt=consent）...', flush=True)
         try:
@@ -2624,11 +2636,12 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None, password:
     print('[oauth] ✅ 获取到授权码，正在换取 token...', flush=True)
     try:
         token_body = _up.urlencode({
-            'grant_type':   'authorization_code',
-            'client_id':    CLIENT_ID,
-            'code':         code,
-            'redirect_uri': REDIRECT_URI,
-            'scope':        SCOPE,
+            'grant_type':    'authorization_code',
+            'client_id':     CLIENT_ID,
+            'code':          code,
+            'redirect_uri':  REDIRECT_URI,
+            'scope':         SCOPE,
+            'code_verifier': code_verifier,
         }).encode()
         req = _ur.Request(
             'https://login.microsoftonline.com/consumers/oauth2/v2.0/token',
