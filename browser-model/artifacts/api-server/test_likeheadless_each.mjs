@@ -7,6 +7,7 @@ const tsSrc  = readFileSync("/root/Toolkit/browser-model/artifacts/api-server/sr
 const STEALTH_INIT   = (tsSrc.match(/export const STEALTH_INIT = `([\s\S]*?)`;/)  ||[])[1]||"";
 const BOOT_SUFFIX    = (tsSrc.match(/const _WORKER_BOOT_SUFFIX = `([\s\S]*?)`;/)  ||[])[1]||"";
 const STEALTH_FULL   = STEALTH_INIT + (BOOT_SUFFIX||"");
+const LATE_FIX_PATCHES = (tsSrc.match(/const LATE_FIX_PATCHES = `([\s\S]*?)`;/) ||[])[1]||"";
 console.log(`STEALTH: ${STEALTH_INIT.length} chars`);
 
 const browser = await chromium.launch({
@@ -41,6 +42,7 @@ const ctx = await browser.newContext({
   },
 });
 await ctx.addInitScript(STEALTH_FULL);
+await ctx.addInitScript(LATE_FIX_PATCHES);
 ctx.on("page",async p=>{
   p.on("worker",w=>w.evaluate(STEALTH_FULL).catch(()=>{}));
 });
