@@ -18,9 +18,9 @@ while true; do
   if [ "$COUNT" -gt 0 ] 2>/dev/null; then
     log "发现 $COUNT 个Z状态僵尸进程，开始清理..."
     for zpid in $ZOMBIES; do
-      PPID=$(ps -o ppid= -p $zpid 2>/dev/null | tr -d ' ')
-      [ -z "$PPID" ] && continue
-      kill -SIGCHLD $PPID 2>/dev/null
+      _PPID=$(ps -o ppid= -p $zpid 2>/dev/null | tr -d ' ')
+      [ -z "$_PPID" ] && continue
+      kill -SIGCHLD $_PPID 2>/dev/null
     done
 
     sleep 2
@@ -29,13 +29,13 @@ while true; do
 
     if [ "$RCOUNT" -gt 0 ] 2>/dev/null; then
       for zpid in $REMAINING; do
-        PPID=$(ps -o ppid= -p $zpid 2>/dev/null | tr -d ' ')
-        [ -z "$PPID" ] && continue
-        GRANDPPID=$(ps -o ppid= -p $PPID 2>/dev/null | tr -d ' ')
-        PCMD=$(ps -o comm= -p $PPID 2>/dev/null)
+        _PPID=$(ps -o ppid= -p $zpid 2>/dev/null | tr -d ' ')
+        [ -z "$_PPID" ] && continue
+        GRANDPPID=$(ps -o ppid= -p $_PPID 2>/dev/null | tr -d ' ')
+        PCMD=$(ps -o comm= -p $_PPID 2>/dev/null)
         if [ "$GRANDPPID" = "1" ]; then
-          log "孤立父进程 $PPID ($PCMD) ppid=1 → SIGKILL"
-          kill -9 $PPID 2>/dev/null
+          log "孤立父进程 $_PPID ($PCMD) ppid=1 → SIGKILL"
+          kill -9 $_PPID 2>/dev/null
         fi
       done
     fi
@@ -57,9 +57,9 @@ while true; do
     PID=$(echo "$line" | awk '{print $1}')
     ELAPSED=$(echo "$line" | awk '{print $2}')
     [ -z "$PID" ] && continue
-    PPID=$(ps -o ppid= -p $PID 2>/dev/null | tr -d ' ')
+    _PPID=$(ps -o ppid= -p $PID 2>/dev/null | tr -d ' ')
     # 只清理父进程是 init(1) 或不存在的孤立进程
-    if [ "$PPID" = "1" ] || [ -z "$PPID" ]; then
+    if [ "$_PPID" = "1" ] || [ -z "$_PPID" ]; then
       log "孤立浏览器进程 PID=$PID elapsed=${ELAPSED}s → SIGKILL"
       kill -9 $PID 2>/dev/null
     fi

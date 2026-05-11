@@ -285,6 +285,10 @@ def main():
     # 等一次同步完成（最多 5 秒），用网关数据替换种子
     time.sleep(2)
 
+    # 强制释放端口，避免 pm2 重启时残留进程占用
+    import subprocess as _sp
+    _sp.run(f"fuser -k {PORT}/tcp 2>/dev/null || true", shell=True)
+    import time as _t; _t.sleep(0.4)
     s = socket.socket()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("127.0.0.1", PORT)); s.listen(64)

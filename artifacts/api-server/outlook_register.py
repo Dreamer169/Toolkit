@@ -2663,6 +2663,354 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None, password:
         return {}
 
 
+
+
+def enable_imap_in_browser(page, email, password=""):
+    """
+    v9.62 — 修复 v9.61 的 5 个核心 bug:
+      Bug1: SPA 不改 URL，"options/mail" not in url 永远 True → 每次 return False（已删除 URL 检查）
+      Bug2: 新版 Outlook 设置面板不用 role=tab → 改用 aria-label="Settings" + JS 全局文本搜索
+      Bug3: Forwarding 子项同理 → JS 文本搜索 forward/imap
+      Bug4: Sign-in 不一定弹新窗口，可能内联 dialog → 同时处理两种形态
+      Bug5: IMAP toggle 是 radio button（Enable/Disable），不是 switch → 专项 radio 处理
+      根因: SPA 冷启动直接 URL 会被重定向到 inbox，但 SPA 完整加载后再 goto 可直接路由
+    策略:
+      Path A: goto inbox → 等 SPA 完整加载(gear可见) → goto direct_url → SPA内部路由到IMAP设置
+      Path B: gear-click 流程（Path A 找不到 IMAP 元素时的 fallback）
+    """
+    safe = email.split("@")[0].replace("/", "_").replace("\\", "_")
+    DIRECT_URL = "https://outlook.live.com/mail/0/options/mail/popimap"
+    INBOX_URL  = "https://outlook.live.com/mail/0/inbox"
+
+    def _screenshot(tag):
+        try:
+            page.screenshot(path=f"/tmp/imap_{tag}_{safe}.png")
+        except Exception:
+            pass
+
+    def _save_settings():
+        for sel in [
+            'button:has-text("Save")', 'button:has-text("保存")',
+            'button[type="submit"]', 'input[type="submit"]',
+            'button[aria-label*="Save"]',
+        ]:
+            try:
+                loc = page.locator(sel).first
+                if loc.is_visible(timeout=1500):
+                    loc.click()
+                    page.wait_for_timeout(2000)
+                    print(f"[imap-enable] saved via {sel}", flush=True)
+                    return True
+            except Exception:
+                continue
+        try:
+            page.evaluate("""() => {
+                Array.from(document.querySelectorAll("button,input[type=submit]")).forEach(b => {
+                    var t = b.textContent.trim();
+                    if (/^(Save|保存)$/i.test(t) || b.value === 'Save') b.click();
+                });
+            }""")
+            page.wait_for_timeout(1500)
+            return True
+        except Exception:
+            pass
+        return False
+
+    def _try_enable_imap_toggle():
+        """
+        Bug5 Fix: 找 IMAP radio/switch/checkbox 并开启。
+        Outlook IMAP 设置页用 radio button (Enable IMAP / Disable IMAP)。
+        """
+        res = page.evaluate("""() => {
+            // S1: radio/checkbox/switch 附近含 imap 文本的容器
+            var inputs = Array.from(document.querySelectorAll(
+                'input[type="radio"], input[type="checkbox"], [role="radio"], [role="switch"], [role="checkbox"]'));
+            for (var el of inputs) {
+                var par = el.closest('li') || el.closest('label') ||
+                          el.closest('div') || el.closest('section') || el.parentElement;
+                var txt = (par ? par.textContent : "").toLowerCase();
+                if (txt.indexOf("imap") < 0) continue;
+                var chk = el.getAttribute("aria-checked") ||
+                          (el.checked !== undefined ? String(el.checked) : "false");
+                if (chk === "true" || el.checked) return "already-on";
+                el.click();
+                return "radio-clicked:" + (el.id || el.name || el.value || "?");
+            }
+            // S2: label 文字 "Enable IMAP" / "启用 IMAP"
+            var labels = Array.from(document.querySelectorAll("label"));
+            for (var lbl of labels) {
+                var lt = lbl.textContent.toLowerCase();
+                if (lt.indexOf("enable imap") >= 0 || lt.indexOf("启用 imap") >= 0 ||
+                    lt.indexOf("enable imap") >= 0) {
+                    var inp = lbl.control || document.getElementById(lbl.htmlFor);
+                    if (inp) { inp.click(); return "label-enable-clicked"; }
+                    lbl.click(); return "label-clicked";
+                }
+            }
+            // S3: aria-label 属性
+            var byAttr = Array.from(document.querySelectorAll(
+                '[aria-label*="IMAP"],[aria-label*="imap"],[data-testid*="imap"],[data-testid*="IMAP"]'));
+            for (var el of byAttr) {
+                var chk = el.getAttribute("aria-checked") ||
+                          (el.checked !== undefined ? String(el.checked) : "false");
+                if (chk === "true" || el.checked) return "attr-already-on";
+                el.click(); return "attr-clicked:" + (el.getAttribute("aria-label") || "");
+            }
+            // S4: 任意未选中 switch
+            var switches = Array.from(document.querySelectorAll('[role="switch"]'));
+            for (var sw of switches) {
+                if (sw.getAttribute("aria-checked") !== "true") {
+                    sw.click(); return "switch-clicked";
+                } else { return "switch-already-on"; }
+            }
+            return "not-found";
+        }""")
+        return res
+
+    def _wait_for_imap_content(timeout_ms=12000):
+        """等 IMAP 设置内容渲染，返回 True 表示找到"""
+        try:
+            page.wait_for_selector(
+                '[data-testid*="imap"], [data-testid*="IMAP"], '
+                '[aria-label*="IMAP"], [aria-label*="imap"], '
+                'input[type="radio"], [role="switch"], [role="radio"]',
+                timeout=timeout_ms,
+            )
+            return True
+        except Exception:
+            pass
+        # 备选: 等页面文字含 imap
+        try:
+            page.wait_for_function(
+                "() => document.body.innerText.toLowerCase().indexOf('imap') >= 0",
+                timeout=timeout_ms,
+            )
+            return True
+        except Exception:
+            pass
+        return False
+
+    print(f"[imap-enable] v9.62 starting for {email}", flush=True)
+    try:
+        # ── Path A: SPA 热路由 ────────────────────────────────────────────────
+        # 1. 先导航到 inbox，等 SPA 完整加载（gear 可见）
+        if "outlook.live.com" not in (page.url or ""):
+            print(f"[imap-enable] goto inbox for SPA warmup...", flush=True)
+            page.goto(INBOX_URL, timeout=40000, wait_until="domcontentloaded")
+
+        # 2. 等 gear 按钮可见（证明 SPA 已完整加载）
+        _gear_sel = '#owaSettingsBtn_container, [aria-label="Settings"], [aria-label="设置"]'
+        _gear_ready = False
+        try:
+            page.wait_for_selector(_gear_sel, timeout=30000)
+            _gear_ready = True
+            print(f"[imap-enable] SPA ready (gear visible)", flush=True)
+        except Exception:
+            print(f"[imap-enable] ⚠ gear not visible in 30s, url={page.url[:80]}", flush=True)
+
+        # 3. SPA 加载完成后，再 goto direct_url → SPA router 内部处理路由
+        print(f"[imap-enable] Path A: SPA-hot goto {DIRECT_URL}", flush=True)
+        try:
+            page.goto(DIRECT_URL, timeout=20000, wait_until="domcontentloaded")
+        except Exception as _ge:
+            print(f"[imap-enable] goto error (ok): {_ge}", flush=True)
+        page.wait_for_timeout(2000)
+
+        # 4. 检查是否在 IMAP 设置页（URL 含 popimap 或 DOM 含 IMAP 内容）
+        _imap_content = _wait_for_imap_content(timeout_ms=10000)
+        _cur_url = page.url or ""
+        print(f"[imap-enable] after hot-goto: url={_cur_url[:80]} imap_content={_imap_content}", flush=True)
+        _screenshot("A_before")
+
+        if _imap_content:
+            _res = _try_enable_imap_toggle()
+            print(f"[imap-enable] Path A toggle: {_res}", flush=True)
+            if _res != "not-found":
+                if "already" not in _res:
+                    _save_settings()
+                _screenshot("A_after")
+                print(f"[imap-enable] ✅ Path A done: {_res}", flush=True)
+                return True
+            else:
+                # debug info
+                try:
+                    _bt = page.evaluate("()=>document.body.innerText.slice(0,800)")
+                    print(f"[imap-enable] Path A page text: {_bt[:400]}", flush=True)
+                except Exception:
+                    pass
+                _screenshot("A_stuck")
+
+        # ── Path B: Gear-click flow (Bug1-4 已修复) ──────────────────────────
+        print(f"[imap-enable] Path B: gear-click", flush=True)
+
+        # B1: 确保在 inbox
+        if "outlook.live.com/mail" not in (page.url or ""):
+            page.goto(INBOX_URL, timeout=40000, wait_until="domcontentloaded")
+        try:
+            page.wait_for_selector(_gear_sel, timeout=25000)
+        except Exception:
+            page.wait_for_timeout(8000)
+
+        # B2: 点 gear
+        _gear_clicked = False
+        for _gs in [
+            '#owaSettingsBtn_container',
+            '[aria-label="Settings"]', '[aria-label="设置"]',
+            '[title="Settings"]', 'button[aria-label*="etting"]',
+        ]:
+            try:
+                _gl = page.locator(_gs).first
+                if _gl.is_visible(timeout=3000):
+                    _gl.click()
+                    page.wait_for_timeout(2500)
+                    _gear_clicked = True
+                    print(f"[imap-enable] gear clicked: {_gs}", flush=True)
+                    break
+            except Exception:
+                continue
+        if not _gear_clicked:
+            print(f"[imap-enable] ❌ gear not found", flush=True)
+            _screenshot("B_nogear")
+            return False
+
+        # B3: 点 Mail 导航项
+        # Bug1+Bug2 Fix: 不检查 URL，多策略找 Mail tab/nav
+        _mail_res = page.evaluate("""() => {
+            // 新版设置面板: role=option 或 button，aria-label="Mail"
+            var byLabel = document.querySelector('[aria-label="Mail"][role="option"],[aria-label="Mail"][role="tab"],[aria-label="邮件"]');
+            if (byLabel) { byLabel.click(); return "label-mail:" + byLabel.tagName; }
+            // 所有可交互元素，文字精确匹配 "Mail"
+            var els = Array.from(document.querySelectorAll(
+                'button, [role="option"], [role="menuitem"], [role="tab"], [role="treeitem"], li > a, nav a, a'));
+            for (var el of els) {
+                var t = el.textContent.trim();
+                if (t === "Mail" || t === "邮件") {
+                    el.click(); return "text-mail:" + el.tagName + "/" + (el.getAttribute("role") || "");
+                }
+            }
+            // 宽泛: 任意叶节点文字 "Mail"
+            for (var el of Array.from(document.querySelectorAll('*'))) {
+                if (el.children.length === 0) {
+                    var t = el.textContent.trim();
+                    if (t === "Mail" || t === "邮件") {
+                        (el.closest('button,a,[role]') || el).click();
+                        return "leaf-mail:" + el.tagName;
+                    }
+                }
+            }
+            return "mail-not-found";
+        }""")
+        print(f"[imap-enable] Mail nav: {_mail_res}", flush=True)
+        page.wait_for_timeout(2500)
+
+        # Bug1 Fix: 不再检查 URL，继续前进（settings panel 不改 URL）
+        if "not-found" in str(_mail_res):
+            print(f"[imap-enable] ⚠ Mail nav not found, trying direct Forwarding search", flush=True)
+
+        # B4: 点 Forwarding and IMAP 子项
+        # Bug3 Fix: 文本模糊匹配
+        page.evaluate("""() => {
+            var els = Array.from(document.querySelectorAll(
+                'button,[role="option"],[role="menuitem"],[role="tab"],[role="treeitem"],li>a,nav a,a,li'));
+            for (var el of els) {
+                var t = (el.textContent || "").toLowerCase();
+                if (t.indexOf("forward") >= 0 || t.indexOf("转发") >= 0 ||
+                    (t.indexOf("imap") >= 0 && t.indexOf("pop") >= 0)) {
+                    var clickEl = (el.tagName === "LI") ?
+                        (el.querySelector("button,a") || el) : el;
+                    clickEl.click();
+                    return "forwarding:" + el.textContent.trim().slice(0,50);
+                }
+            }
+            return "forwarding-not-found";
+        }""")
+        page.wait_for_timeout(3000)
+        _screenshot("B_forwarding")
+
+        # B5: Handle Sign-in (Bug4 Fix: 内联 + popup 两种)
+        _new_pages = []
+        try:
+            page.context.on("page", lambda _pg: _new_pages.append(_pg))
+        except Exception:
+            pass
+        try:
+            _si = page.locator('button:has-text("Sign in"),button:has-text("登录")').first
+            if _si.is_visible(timeout=3000):
+                print(f"[imap-enable] Sign in button, clicking...", flush=True)
+                _si.click()
+                page.wait_for_timeout(4000)
+                # 处理弹窗
+                _popup = None
+                if _new_pages:
+                    _popup = _new_pages[-1]
+                elif len(page.context.pages) > 1:
+                    _popup = page.context.pages[-1]
+                if _popup and not _popup.is_closed():
+                    _tgt = _popup if password else None
+                else:
+                    # Bug4 Fix: 内联 dialog
+                    try:
+                        _pw_inline = page.locator('input[type="password"],input[name="passwd"]').first
+                        _tgt = page if _pw_inline.is_visible(timeout=3000) else None
+                    except Exception:
+                        _tgt = None
+                if _tgt and password:
+                    try:
+                        _em = _tgt.locator('input[type="email"],input[name="loginfmt"]').first
+                        if _em.is_visible(timeout=3000):
+                            _em.fill(email)
+                            _tgt.wait_for_timeout(500)
+                            _tgt.locator('input[type="submit"],button[type="submit"],#idSIButton9').first.click()
+                            _tgt.wait_for_timeout(3000)
+                        _pw = _tgt.locator('input[type="password"],input[name="passwd"]').first
+                        if _pw.is_visible(timeout=5000):
+                            _pw.fill(password)
+                            _tgt.wait_for_timeout(500)
+                            _tgt.locator('input[type="submit"],button[type="submit"],#idSIButton9').first.click()
+                            _tgt.wait_for_timeout(5000)
+                            print(f"[imap-enable] sign-in submitted", flush=True)
+                    except Exception as _se:
+                        print(f"[imap-enable] sign-in fill: {_se}", flush=True)
+                    if _popup and not _popup.is_closed():
+                        try:
+                            _popup.wait_for_event("close", timeout=12000)
+                        except Exception:
+                            pass
+                        page.wait_for_timeout(3000)
+            else:
+                print(f"[imap-enable] no Sign in button", flush=True)
+        except Exception as _sie:
+            print(f"[imap-enable] sign-in: {_sie}", flush=True)
+
+        page.wait_for_timeout(2000)
+        _imap_content_b = _wait_for_imap_content(5000)
+        _screenshot("B_before_toggle")
+
+        # B6: Bug5 Fix — toggle IMAP
+        _res = _try_enable_imap_toggle()
+        print(f"[imap-enable] Path B toggle: {_res}", flush=True)
+        if _res == "not-found":
+            try:
+                _bt = page.evaluate("()=>document.body.innerText.slice(0,800)")
+                print(f"[imap-enable] page text: {_bt[:400]}", flush=True)
+            except Exception:
+                pass
+            _screenshot("B_stuck")
+            return False
+
+        if "already" not in _res:
+            _save_settings()
+        _screenshot("B_after")
+        print(f"[imap-enable] ✅ Path B done: {_res}", flush=True)
+        return True
+
+    except Exception as _e:
+        import traceback
+        print(f"[imap-enable] ❌ exception: {_e}\n{traceback.format_exc()[:600]}", flush=True)
+        _screenshot("exception")
+        return False
+
+
 def register_one(ctrl, engine_name: str, headless: bool, planned_username: str = "", planned_password: str = "", exit_ip: str = "", proxy_port: int = 0, proxy_formatted: str = "") -> dict:
     if planned_username:
         email = planned_username.split("@")[0].strip()
@@ -2791,6 +3139,11 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
                 result["access_token"]  = ""
                 result["refresh_token"] = ""
             # ───────────────────────────────────────────────────────────
+            # v9.60: enable IMAP (Microsoft disables it by default since 2024)
+            try:
+                enable_imap_in_browser(page, f"{actual_email}@outlook.com", password=password)
+            except Exception as _imap_ex:
+                print("[imap-enable] non-fatal: " + str(_imap_ex), flush=True)
             try:
                 page.screenshot(path=f"/tmp/outlook_ok_{actual_email}.png")
             except Exception:

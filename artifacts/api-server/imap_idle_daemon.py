@@ -261,11 +261,12 @@ def _idle_worker(acct: dict):
 
             if not connected:
                 if auth_failed:
-                    # AUTHENTICATE failed on ALL hosts → token scope insufficient
-                    # This is a permanent error for Graph-scoped tokens; stop immediately
+                    # v9.60: IMAP auth failed - could be account-level IMAP disabled
+                    # (Microsoft disables IMAP by default for new accounts since 2024).
+                    # Mark as imap_disabled in status file; daemon will retry on next restart.
                     _set_status(acct_id, email, "imap_disabled",
-                                f"IMAP XOAUTH2 认证失败（Graph token 不支持 IMAP scope）: {last_error}")
-                    print(f"[idle] 🚫 {email}: AUTHENTICATE 失败，停止（需要 IMAP scope token）", flush=True)
+                                f"IMAP XOAUTH2 failed (may need IMAP enabled in account settings): {last_error}")
+                    print(f"[idle] 🚫 {email}: AUTHENTICATE failed, marked imap_disabled (retryable on daemon restart)", flush=True)
                     return
                 raise ConnectionError(f"两个 IMAP host 均连接失败: {last_error}")
 

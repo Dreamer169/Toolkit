@@ -20494,27 +20494,27 @@ var require_router = __commonJS({
     var slice = Array.prototype.slice;
     var flatten = Array.prototype.flat;
     var methods = METHODS.map((method) => method.toLowerCase());
-    module.exports = Router6;
+    module.exports = Router7;
     module.exports.Route = Route;
-    function Router6(options) {
-      if (!(this instanceof Router6)) {
-        return new Router6(options);
+    function Router7(options) {
+      if (!(this instanceof Router7)) {
+        return new Router7(options);
       }
       const opts = options || {};
-      function router6(req, res, next) {
-        router6.handle(req, res, next);
+      function router7(req, res, next) {
+        router7.handle(req, res, next);
       }
-      Object.setPrototypeOf(router6, this);
-      router6.caseSensitive = opts.caseSensitive;
-      router6.mergeParams = opts.mergeParams;
-      router6.params = {};
-      router6.strict = opts.strict;
-      router6.stack = [];
-      return router6;
+      Object.setPrototypeOf(router7, this);
+      router7.caseSensitive = opts.caseSensitive;
+      router7.mergeParams = opts.mergeParams;
+      router7.params = {};
+      router7.strict = opts.strict;
+      router7.stack = [];
+      return router7;
     }
-    Router6.prototype = function() {
+    Router7.prototype = function() {
     };
-    Router6.prototype.param = function param(name, fn) {
+    Router7.prototype.param = function param(name, fn) {
       if (!name) {
         throw new TypeError("argument name is required");
       }
@@ -20534,7 +20534,7 @@ var require_router = __commonJS({
       params.push(fn);
       return this;
     };
-    Router6.prototype.handle = function handle(req, res, callback) {
+    Router7.prototype.handle = function handle(req, res, callback) {
       if (!callback) {
         throw new TypeError("argument callback is required");
       }
@@ -20661,7 +20661,7 @@ var require_router = __commonJS({
         }
       }
     };
-    Router6.prototype.use = function use(handler) {
+    Router7.prototype.use = function use(handler) {
       let offset = 0;
       let path3 = "/";
       if (typeof handler !== "function") {
@@ -20694,7 +20694,7 @@ var require_router = __commonJS({
       }
       return this;
     };
-    Router6.prototype.route = function route(path3) {
+    Router7.prototype.route = function route(path3) {
       const route2 = new Route(path3);
       const layer = new Layer(path3, {
         sensitive: this.caseSensitive,
@@ -20709,7 +20709,7 @@ var require_router = __commonJS({
       return route2;
     };
     methods.concat("all").forEach(function(method) {
-      Router6.prototype[method] = function(path3) {
+      Router7.prototype[method] = function(path3) {
         const route = this.route(path3);
         route[method].apply(route, slice.call(arguments, 1));
         return this;
@@ -20892,13 +20892,13 @@ var require_application = __commonJS({
     var compileTrust = require_utils3().compileTrust;
     var resolve = __require("node:path").resolve;
     var once = require_once();
-    var Router6 = require_router();
+    var Router7 = require_router();
     var slice = Array.prototype.slice;
     var flatten = Array.prototype.flat;
     var app2 = exports = module.exports = {};
     var trustProxyDefaultSymbol = "@@symbol:trust_proxy_default";
     app2.init = function init() {
-      var router6 = null;
+      var router7 = null;
       this.cache = /* @__PURE__ */ Object.create(null);
       this.engines = /* @__PURE__ */ Object.create(null);
       this.settings = /* @__PURE__ */ Object.create(null);
@@ -20907,13 +20907,13 @@ var require_application = __commonJS({
         configurable: true,
         enumerable: true,
         get: function getrouter() {
-          if (router6 === null) {
-            router6 = new Router6({
+          if (router7 === null) {
+            router7 = new Router7({
               caseSensitive: this.enabled("case sensitive routing"),
               strict: this.enabled("strict routing")
             });
           }
-          return router6;
+          return router7;
         }
       });
     };
@@ -20984,15 +20984,15 @@ var require_application = __commonJS({
       if (fns.length === 0) {
         throw new TypeError("app.use() requires a middleware function");
       }
-      var router6 = this.router;
+      var router7 = this.router;
       fns.forEach(function(fn2) {
         if (!fn2 || !fn2.handle || !fn2.set) {
-          return router6.use(path3, fn2);
+          return router7.use(path3, fn2);
         }
         debug(".use app under %s", path3);
         fn2.mountpath = path3;
         fn2.parent = this;
-        router6.use(path3, function mounted_app(req, res, next) {
+        router7.use(path3, function mounted_app(req, res, next) {
           var orig = req.app;
           fn2.handle(req, res, function(err) {
             Object.setPrototypeOf(req, orig.request);
@@ -23565,7 +23565,7 @@ var require_express = __commonJS({
     var EventEmitter = __require("node:events").EventEmitter;
     var mixin = require_merge_descriptors();
     var proto = require_application();
-    var Router6 = require_router();
+    var Router7 = require_router();
     var req = require_request();
     var res = require_response();
     exports = module.exports = createApplication;
@@ -23587,8 +23587,8 @@ var require_express = __commonJS({
     exports.application = proto;
     exports.request = req;
     exports.response = res;
-    exports.Route = Router6.Route;
-    exports.Router = Router6;
+    exports.Route = Router7.Route;
+    exports.Router = Router7;
     exports.json = bodyParser.json;
     exports.raw = bodyParser.raw;
     exports.static = require_serve_static();
@@ -25024,7 +25024,7 @@ var require_atomic_sleep = __commonJS({
   "../../node_modules/.pnpm/atomic-sleep@1.0.0/node_modules/atomic-sleep/index.js"(exports, module) {
     "use strict";
     if (typeof SharedArrayBuffer !== "undefined" && typeof Atomics !== "undefined") {
-      let sleep = function(ms) {
+      let sleep2 = function(ms) {
         const valid = ms > 0 && ms < Infinity;
         if (valid === false) {
           if (typeof ms !== "number" && typeof ms !== "bigint") {
@@ -25035,9 +25035,9 @@ var require_atomic_sleep = __commonJS({
         Atomics.wait(nil, 0, 0, Number(ms));
       };
       const nil = new Int32Array(new SharedArrayBuffer(4));
-      module.exports = sleep;
+      module.exports = sleep2;
     } else {
-      let sleep = function(ms) {
+      let sleep2 = function(ms) {
         const valid = ms > 0 && ms < Infinity;
         if (valid === false) {
           if (typeof ms !== "number" && typeof ms !== "bigint") {
@@ -25049,7 +25049,7 @@ var require_atomic_sleep = __commonJS({
         while (target > Date.now()) {
         }
       };
-      module.exports = sleep;
+      module.exports = sleep2;
     }
   }
 });
@@ -25062,7 +25062,7 @@ var require_sonic_boom = __commonJS({
     var EventEmitter = __require("events");
     var inherits = __require("util").inherits;
     var path3 = __require("path");
-    var sleep = require_atomic_sleep();
+    var sleep2 = require_atomic_sleep();
     var assert = __require("assert");
     var BUSY_WRITE_TIMEOUT = 100;
     var kEmptyBuffer = Buffer.allocUnsafe(0);
@@ -25208,7 +25208,7 @@ var require_sonic_boom = __commonJS({
           if ((err.code === "EAGAIN" || err.code === "EBUSY") && this.retryEAGAIN(err, this._writingBuf.length, this._len - this._writingBuf.length)) {
             if (this.sync) {
               try {
-                sleep(BUSY_WRITE_TIMEOUT);
+                sleep2(BUSY_WRITE_TIMEOUT);
                 this.release(void 0, 0);
               } catch (err2) {
                 this.release(err2);
@@ -25521,7 +25521,7 @@ var require_sonic_boom = __commonJS({
           if (shouldRetry && !this.retryEAGAIN(err, buf.length, this._len - buf.length)) {
             throw err;
           }
-          sleep(BUSY_WRITE_TIMEOUT);
+          sleep2(BUSY_WRITE_TIMEOUT);
         }
       }
       try {
@@ -25558,7 +25558,7 @@ var require_sonic_boom = __commonJS({
           if (shouldRetry && !this.retryEAGAIN(err, buf.length, this._len - buf.length)) {
             throw err;
           }
-          sleep(BUSY_WRITE_TIMEOUT);
+          sleep2(BUSY_WRITE_TIMEOUT);
         }
       }
     }
@@ -26299,7 +26299,7 @@ var require_transport = __commonJS({
     var { createRequire } = __require("module");
     var getCallers = require_caller();
     var { join, isAbsolute, sep } = __require("node:path");
-    var sleep = require_atomic_sleep();
+    var sleep2 = require_atomic_sleep();
     var onExit = require_on_exit_leak_free();
     var ThreadStream = require_thread_stream();
     function setupOnExit(stream) {
@@ -26333,7 +26333,7 @@ var require_transport = __commonJS({
           return;
         }
         stream.flushSync();
-        sleep(100);
+        sleep2(100);
         stream.end();
       }
       return stream;
@@ -54220,14 +54220,14 @@ var require_websocket_server = __commonJS({
 import { createServer } from "node:http";
 
 // src/app.ts
-var import_express6 = __toESM(require_express2(), 1);
+var import_express7 = __toESM(require_express2(), 1);
 var import_cors = __toESM(require_lib3(), 1);
 var import_pino_http = __toESM(require_logger(), 1);
 import path2 from "node:path";
 import fs2 from "node:fs";
 
 // src/routes/index.ts
-var import_express5 = __toESM(require_express2(), 1);
+var import_express6 = __toESM(require_express2(), 1);
 
 // src/routes/health.ts
 var import_express = __toESM(require_express2(), 1);
@@ -58376,6 +58376,51 @@ var BROWSER_TIMEZONE = _ptz.tz;
 var _TZ_STD = _ptz.std;
 var _TZ_DST = _ptz.dst;
 var _TZ_HAS_DST = _ptz.hasDst;
+var _geoCache = /* @__PURE__ */ new Map();
+var _GEO_CACHE_TTL = 30 * 60 * 1e3;
+var _effectiveTz = BROWSER_TIMEZONE;
+async function resolveProxyTimezone(proxyUrl) {
+  const cached = _geoCache.get(proxyUrl);
+  if (cached && Date.now() - cached.ts < _GEO_CACHE_TTL) return cached.tz;
+  const pm = proxyUrl.match(/socks5?:\/\/([\w.]+):(\d+)/);
+  if (!pm) return BROWSER_TIMEZONE;
+  const [, proxyHost, proxyPortStr] = pm;
+  const proxyPort = parseInt(proxyPortStr, 10);
+  try {
+    const { SocksClient: SocksClient2 } = await Promise.resolve().then(() => __toESM(require_build(), 1));
+    const { Agent: Agent2, fetch: undiciFetch2 } = await Promise.resolve().then(() => __toESM(require_undici(), 1));
+    const agent = new Agent2({
+      connect: (opts, callback) => {
+        const th = opts.hostname || opts.host;
+        const tp = Number(opts.port) || 80;
+        SocksClient2.createConnection(
+          { proxy: { host: proxyHost, port: proxyPort, type: 5 }, command: "connect", destination: { host: th, port: tp } },
+          (err, info) => {
+            if (err) return callback(err);
+            callback(null, info.socket);
+          }
+        );
+      }
+    });
+    const resp = await undiciFetch2(
+      "http://ip-api.com/json?fields=timezone,country,query",
+      { dispatcher: agent, signal: AbortSignal.timeout(8e3) }
+    );
+    const data = await resp.json();
+    if (data?.timezone) {
+      const tz = String(data.timezone);
+      _geoCache.set(proxyUrl, { tz, ts: Date.now() });
+      console.log(`[geo] ${proxyUrl} -> ${data.country} ${tz} (${data.query})`);
+      return tz;
+    }
+  } catch (e) {
+    console.warn("[geo] failed:", String(e).slice(0, 80));
+  }
+  const portFallback = _PROXY_PORT_TZ[pm[2]];
+  const fbTz = portFallback?.tz ?? BROWSER_TIMEZONE;
+  _geoCache.set(proxyUrl, { tz: fbTz, ts: Date.now() });
+  return fbTz;
+}
 var STEALTH_INIT = `
 // === Anti-fingerprint init script (runs before any page JS) ===
 (() => {
@@ -59453,6 +59498,9 @@ async function getBrowser() {
     const _useFpChrome = fs.existsSync(_fpChromeBin);
     const executablePath = process.env.REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE || (_useFpChrome ? _fpChromeBin : "/data/cache/ms-playwright/chromium-1208/chrome-linux64/chrome");
     const proxyServer = process.env.BROWSER_PROXY || void 0;
+    if (proxyServer) {
+      _effectiveTz = await resolveProxyTimezone(proxyServer);
+    }
     const userDataDir = "/tmp/broker-chromium-profile";
     try {
       fs.mkdirSync(userDataDir, { recursive: true });
@@ -59489,7 +59537,7 @@ async function getBrowser() {
         "--fingerprint-hardware-concurrency=4",
         "--lang=en-US",
         "--accept-lang=en-US,en",
-        `--timezone=${BROWSER_TIMEZONE}`,
+        `--timezone=${_effectiveTz}`,
         "--disable-non-proxied-udp"
       ] : [],
       "about:blank"
@@ -59537,7 +59585,7 @@ async function newFreshContext() {
     isMobile: false,
     hasTouch: false,
     locale: "en-US",
-    timezoneId: BROWSER_TIMEZONE,
+    timezoneId: _effectiveTz,
     colorScheme: "dark",
     ignoreHTTPSErrors: true,
     extraHTTPHeaders: {
@@ -59612,7 +59660,7 @@ async function getStickyContext(hostname) {
     isMobile: false,
     hasTouch: false,
     locale: "en-US",
-    timezoneId: BROWSER_TIMEZONE,
+    timezoneId: _effectiveTz,
     colorScheme: "dark",
     ignoreHTTPSErrors: true,
     extraHTTPHeaders: {
@@ -59750,7 +59798,7 @@ async function _behaviorSim(page, budgetMs = 6e3) {
   const t0 = Date.now();
   const elapsed = () => Date.now() - t0;
   const ri = (a, b) => Math.floor(Math.random() * (b - a + 1)) + a;
-  const sleep = (ms) => page.waitForTimeout(ms).catch(() => {
+  const sleep2 = (ms) => page.waitForTimeout(ms).catch(() => {
   });
   await page.evaluate(() => {
     const fire = (type, x, y) => {
@@ -59784,16 +59832,16 @@ async function _behaviorSim(page, budgetMs = 6e3) {
     for (const [px, py] of pts) {
       await page.mouse.move(px, py).catch(() => {
       });
-      await sleep(ri(8, 28));
+      await sleep2(ri(8, 28));
     }
     for (let j = 0; j < ri(2, 4); j++) {
       await page.mouse.move(tx + ri(-3, 3), ty + ri(-3, 3)).catch(() => {
       });
-      await sleep(ri(30, 80));
+      await sleep2(ri(30, 80));
     }
     cx = tx;
     cy = ty;
-    await sleep(ri(180, 500));
+    await sleep2(ri(180, 500));
   }
   if (elapsed() >= budgetMs - 800) return;
   const scrollSections = ri(2, 4);
@@ -59805,13 +59853,13 @@ async function _behaviorSim(page, budgetMs = 6e3) {
       const dy = Math.round(totalDy / chunks * (0.5 + factor * 0.8));
       await page.evaluate((d) => window.scrollBy({ top: d, behavior: "instant" }), dy).catch(() => {
       });
-      await sleep(ri(35, 90));
+      await sleep2(ri(35, 90));
     }
-    await sleep(ri(400, 1100));
+    await sleep2(ri(400, 1100));
     if (Math.random() < 0.6 && elapsed() < budgetMs - 800) {
       await page.mouse.move(ri(200, 1600), ri(150, 850), { steps: ri(6, 12) }).catch(() => {
       });
-      await sleep(ri(200, 600));
+      await sleep2(ri(200, 600));
     }
   }
   if (elapsed() >= budgetMs - 400) return;
@@ -59819,10 +59867,10 @@ async function _behaviorSim(page, budgetMs = 6e3) {
   for (let t = 0; t < tabPresses && elapsed() < budgetMs - 300; t++) {
     await page.keyboard.press("Tab").catch(() => {
     });
-    await sleep(ri(120, 350));
+    await sleep2(ri(120, 350));
   }
   const remainBudget = budgetMs - elapsed();
-  if (remainBudget > 200) await sleep(Math.min(remainBudget, 800));
+  if (remainBudget > 200) await sleep2(Math.min(remainBudget, 800));
 }
 async function renderWithBrowser(url, timeoutMs = 3e4, attempt = 0) {
   const targetHost = (() => {
@@ -60034,7 +60082,7 @@ async function harvestGoogleCookiesFresh() {
     userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
     viewport: { width: 1920, height: 1040 },
     locale: "en-US",
-    timezoneId: BROWSER_TIMEZONE,
+    timezoneId: _effectiveTz,
     proxy: { server: GOOGLE_HARVEST_PROXY }
   });
   try {
@@ -60172,7 +60220,7 @@ async function _bootstrapGoogleTrust(browser) {
       viewport: { width: 1920, height: 1040 },
       screen: { width: 1920, height: 1080 },
       locale: "en-US",
-      timezoneId: BROWSER_TIMEZONE,
+      timezoneId: _effectiveTz,
       ignoreHTTPSErrors: true,
       extraHTTPHeaders: {
         "Accept-Language": "en-US,en;q=0.9",
@@ -61245,13 +61293,8 @@ router4.get("/cf-warmup", async (req, res) => {
 });
 var cf_warmup_default = router4;
 
-// src/routes/index.ts
-var router5 = (0, import_express5.Router)();
-router5.use(health_default);
-router5.use(cdp_info_default);
-router5.use(cf_warmup_default);
-router5.use(proxy_default);
-var routes_default = router5;
+// src/routes/sync.ts
+var import_express5 = __toESM(require_express2(), 1);
 
 // src/lib/logger.ts
 var import_pino = __toESM(require_pino(), 1);
@@ -61271,56 +61314,175 @@ var logger = (0, import_pino.default)({
   }
 });
 
-// src/app.ts
-var app = (0, import_express6.default)();
-app.use(
-  (0, import_pino_http.default)({
-    logger,
-    serializers: {
-      req(req) {
-        return { id: req.id, method: req.method, url: req.url?.split("?")[0] };
-      },
-      res(res) {
-        return { statusCode: res.statusCode };
-      }
-    }
-  })
-);
-app.use((0, import_cors.default)());
-var skipForProxy = (mw) => (req, res, next) => {
-  if (req.path === "/api/proxy") return next();
-  return mw(req, res, next);
-};
-app.use(skipForProxy(import_express6.default.json()));
-app.use(skipForProxy(import_express6.default.urlencoded({ extended: true })));
-app.use("/api", routes_default);
-var FRONTEND_DIR = process.env["FRONTEND_DIR"] || path2.resolve(process.cwd(), "public");
-if (fs2.existsSync(FRONTEND_DIR)) {
-  logger.info({ FRONTEND_DIR }, "Serving frontend");
-  app.use(import_express6.default.static(FRONTEND_DIR, { index: false, maxAge: "1h" }));
-  app.get(/^(?!\/api\/).*/, (_req, res, next) => {
-    const idx = path2.join(FRONTEND_DIR, "index.html");
-    if (!fs2.existsSync(idx)) return next();
-    res.setHeader("cache-control", "no-store");
-    res.sendFile(idx);
-  });
-} else {
-  logger.warn({ FRONTEND_DIR }, "Frontend dir not found, only /api will be served");
-}
-var app_default = app;
-
-// ../../node_modules/.pnpm/ws@8.20.0/node_modules/ws/wrapper.mjs
-var import_stream = __toESM(require_stream(), 1);
-var import_extension = __toESM(require_extension(), 1);
-var import_permessage_deflate = __toESM(require_permessage_deflate2(), 1);
-var import_receiver = __toESM(require_receiver2(), 1);
-var import_sender = __toESM(require_sender2(), 1);
-var import_subprotocol = __toESM(require_subprotocol(), 1);
-var import_websocket = __toESM(require_websocket2(), 1);
-var import_websocket_server = __toESM(require_websocket_server(), 1);
-
 // src/lib/cdp-broker.ts
 import { chromium as chromium2 } from "playwright";
+
+// src/lib/geo-resolver.ts
+var DEFAULT_GEO = {
+  timezone: "America/Los_Angeles",
+  language: "en-US",
+  locale: "en-US",
+  latitude: 37.7749,
+  longitude: -122.4194,
+  countryCode: "US"
+};
+var TZ_LANG = [
+  ["America/", "en-US"],
+  ["Europe/London", "en-GB"],
+  ["Europe/Paris", "fr-FR"],
+  ["Europe/Berlin", "de-DE"],
+  ["Europe/Rome", "it-IT"],
+  ["Europe/Madrid", "es-ES"],
+  ["Europe/Lisbon", "pt-PT"],
+  ["Europe/Moscow", "ru-RU"],
+  ["Europe/Warsaw", "pl-PL"],
+  ["Europe/Amsterdam", "nl-NL"],
+  ["Asia/Tokyo", "ja-JP"],
+  ["Asia/Shanghai", "zh-CN"],
+  ["Asia/Seoul", "ko-KR"],
+  ["Asia/Singapore", "en-SG"],
+  ["Asia/Hong_Kong", "zh-HK"],
+  ["Asia/Kolkata", "hi-IN"],
+  ["Asia/Bangkok", "th-TH"],
+  ["Australia/", "en-AU"],
+  ["Pacific/Auckland", "en-NZ"]
+];
+function tzToLang(tz) {
+  for (const [prefix, lang] of TZ_LANG) {
+    if (tz.startsWith(prefix)) return lang;
+  }
+  return "en-US";
+}
+var IP_API_PATH = "/json?fields=status,timezone,lat,lon,countryCode";
+function parseHttpBody(raw) {
+  const sep = raw.indexOf("\r\n\r\n");
+  const body = sep === -1 ? raw.trim() : raw.slice(sep + 4).trim();
+  if (/^[0-9a-f]+\r\n/i.test(body)) {
+    return body.replace(/^[0-9a-f]+\r\n/gim, "").replace(/\r\n/g, "").trim();
+  }
+  return body;
+}
+function buildGeoProfile(j) {
+  const tz = j.timezone ?? "America/Los_Angeles";
+  const lang = tzToLang(tz);
+  return {
+    timezone: tz,
+    language: lang,
+    locale: lang,
+    latitude: j.lat ?? DEFAULT_GEO.latitude,
+    longitude: j.lon ?? DEFAULT_GEO.longitude,
+    countryCode: j.countryCode ?? "US"
+  };
+}
+async function fetchViaSocks5(host, port2) {
+  const { SocksClient: SocksClient2 } = await Promise.resolve().then(() => __toESM(require_build(), 1));
+  const { socket } = await SocksClient2.createConnection({
+    proxy: { host, port: port2, type: 5 },
+    command: "connect",
+    destination: { host: "ip-api.com", port: 80 },
+    timeout: 6e3
+  });
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => {
+      socket.destroy();
+      reject(new Error("geo socks5 timeout"));
+    }, 9e3);
+    let buf = "";
+    socket.setEncoding("utf8");
+    socket.write(`GET ${IP_API_PATH} HTTP/1.1\r
+Host: ip-api.com\r
+Connection: close\r
+\r
+`);
+    socket.on("data", (d) => {
+      buf += d;
+    });
+    socket.on("end", () => {
+      clearTimeout(t);
+      try {
+        const j = JSON.parse(parseHttpBody(buf));
+        if (j.status !== "success" || !j.timezone) {
+          reject(new Error("ip-api bad response"));
+          return;
+        }
+        resolve(buildGeoProfile(j));
+      } catch (e) {
+        reject(e);
+      }
+    });
+    socket.on("error", (e) => {
+      clearTimeout(t);
+      reject(e);
+    });
+  });
+}
+async function fetchViaHttpProxy(proxyUrl) {
+  const { connect: connect4 } = await import("node:net");
+  const proxyHost = proxyUrl.hostname;
+  const proxyPort = Number(proxyUrl.port) || 8080;
+  const raw = proxyUrl.username && proxyUrl.password ? Buffer.from(`${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password)}`).toString("base64") : null;
+  return new Promise((resolve, reject) => {
+    const socket = connect4(proxyPort, proxyHost);
+    const t = setTimeout(() => {
+      socket.destroy();
+      reject(new Error("geo http-proxy timeout"));
+    }, 9e3);
+    let reqLines = `GET http://ip-api.com${IP_API_PATH} HTTP/1.1\r
+Host: ip-api.com\r
+`;
+    if (raw) reqLines += `Proxy-Authorization: Basic ${raw}\r
+`;
+    reqLines += "Connection: close\r\n\r\n";
+    socket.on("connect", () => socket.write(reqLines));
+    let buf = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (d) => {
+      buf += d;
+    });
+    socket.on("end", () => {
+      clearTimeout(t);
+      try {
+        const j = JSON.parse(parseHttpBody(buf));
+        if (j.status !== "success" || !j.timezone) {
+          reject(new Error("ip-api bad response"));
+          return;
+        }
+        resolve(buildGeoProfile(j));
+      } catch (e) {
+        reject(e);
+      }
+    });
+    socket.on("error", (e) => {
+      clearTimeout(t);
+      reject(e);
+    });
+  });
+}
+var _cache = /* @__PURE__ */ new Map();
+var TTL = 5 * 6e4;
+async function resolveGeoProfile(proxy) {
+  const hit = _cache.get(proxy);
+  if (hit && Date.now() - hit.at < TTL) return hit.geo;
+  try {
+    const u = new URL(proxy.includes("://") ? proxy : `http://${proxy}`);
+    const scheme = u.protocol.replace(":", "").toLowerCase();
+    let geo;
+    if (scheme === "socks5" || scheme === "socks5h" || scheme === "socks4" || scheme === "socks") {
+      geo = await fetchViaSocks5(u.hostname || "127.0.0.1", Number(u.port) || 1080);
+    } else {
+      geo = await fetchViaHttpProxy(u);
+    }
+    _cache.set(proxy, { geo, at: Date.now() });
+    logger.info({ tz: geo.timezone, cc: geo.countryCode }, "[geo] resolved via proxy");
+    return geo;
+  } catch (e) {
+    logger.warn({ err: String(e) }, "[geo] resolve failed \u2192 using default (LA)");
+    return DEFAULT_GEO;
+  }
+}
+
+// src/lib/cdp-broker.ts
+var sessionRegistry = /* @__PURE__ */ new Map();
 var STEALTH_WORKER_BODY = "\n      try { Object.defineProperty(WorkerNavigator.prototype, 'hardwareConcurrency', { get: function(){return 8;}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'deviceMemory', { get: function(){return 8;}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'platform', { get: function(){return 'Linux x86_64';}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'language', { get: function(){return 'en-US';}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'languages', { get: function(){return ['en-US','en'];}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'userAgent', { get: function(){return 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36';}, configurable: true }); } catch (e) {}\n      try {\n        var brands = [{brand:'Chromium',version:'144'},{brand:'Not:A-Brand',version:'99'},{brand:'Google Chrome',version:'144'}];\n        var fullList = [{brand:'Chromium',version:'144.0.7559.132'},{brand:'Not:A-Brand',version:'99.0.0.0'},{brand:'Google Chrome',version:'144.0.7559.132'}];\n        var high = { architecture:'x86', bitness:'64', model:'', mobile:false, platform:'Linux', platformVersion:'6.8.0', uaFullVersion:'144.0.7559.132', wow64:false, formFactors:['Desktop'], fullVersionList:fullList, brands:brands };\n        var uaData = { brands: brands, mobile: false, platform: 'Linux',\n          getHighEntropyValues: function(hints){ var o={brands:brands, mobile:false, platform:'Linux'}; (hints||[]).forEach(function(h){ if(h in high) o[h]=high[h]; }); return Promise.resolve(o); },\n          toJSON: function(){ return {brands:brands, mobile:false, platform:'Linux'}; }\n        };\n        Object.defineProperty(WorkerNavigator.prototype, 'userAgentData', { get: function(){return uaData;}, configurable: true });\n      } catch (e) {}\n      try {\n        if (typeof WebGLRenderingContext !== 'undefined') {\n          var gp = WebGLRenderingContext.prototype.getParameter;\n          WebGLRenderingContext.prototype.getParameter = function(p){ if(p===37445)return 'Google Inc. (Intel)'; if(p===37446)return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)'; return gp.apply(this, arguments); };\n        }\n        if (typeof WebGL2RenderingContext !== 'undefined') {\n          var gp2 = WebGL2RenderingContext.prototype.getParameter;\n          WebGL2RenderingContext.prototype.getParameter = function(p){ if(p===37445)return 'Google Inc. (Intel)'; if(p===37446)return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)'; return gp2.apply(this, arguments); };\n        }\n      } catch (e) {}\n      try {\n        var gtoOrig = Date.prototype.getTimezoneOffset;\n        Date.prototype.getTimezoneOffset = function(){ var v = gtoOrig.call(this); if (v === 0) { var m = this.getUTCMonth(); return (m>=2 && m<=10) ? 420 : 480; } return v; };\n      } catch (e) {}\n      try {\n        var roOrig = Intl.DateTimeFormat.prototype.resolvedOptions;\n        Intl.DateTimeFormat.prototype.resolvedOptions = function(){ var r = roOrig.apply(this, arguments); if (!r.timeZone || r.timeZone === 'UTC') r.timeZone = 'America/Los_Angeles'; if (!r.locale || /^(zh|en-GB|de|fr|ja|ru|ko)/.test(r.locale)) r.locale = 'en-US'; return r; };\n      } catch (e) {}\n      try {\n        var _wself = (typeof self !== 'undefined') ? self : this;\n        if (!_wself.chrome) _wself.chrome = {};\n        var _wmk=function(){return{addListener:function(){},removeListener:function(){},hasListener:function(){return false;},hasListeners:function(){return false;}};};\n        _wself.chrome.runtime={id:undefined,lastError:null,onConnect:_wmk(),onMessage:_wmk(),onInstalled:_wmk(),onStartup:_wmk(),getManifest:function(){return undefined;},getPlatformInfo:function(cb){var i={os:'linux',arch:'x86-64',nacl_arch:'x86-64'};if(cb)cb(i);return Promise.resolve(i);}};\n        var _wt0=Date.now()/1000-(Math.random()*0.3+0.1);\n        _wself.chrome.loadTimes=function(){return{requestTime:_wt0,startLoadTime:_wt0,commitLoadTime:_wt0+0.05,finishDocumentLoadTime:_wt0+0.4,finishLoadTime:_wt0+0.5,firstPaintTime:_wt0+0.15,firstPaintAfterLoadTime:0,navigationType:'Other',wasFetchedViaSpdy:true,wasNpnNegotiated:true,npnNegotiatedProtocol:'h2',wasAlternateProtocolAvailable:false,connectionInfo:'h2'};};\n        _wself.chrome.csi=function(){return{startE:Date.now(),onloadT:Date.now(),pageT:Math.random()*800+200,tran:15};};\n      } catch(e) {}\n      try {\n        if(typeof AudioBuffer!=='undefined'&&AudioBuffer.prototype.getChannelData){\n          var _wOrigGCD=AudioBuffer.prototype.getChannelData;\n          AudioBuffer.prototype.getChannelData=function(){var d=_wOrigGCD.apply(this,arguments);try{var f=1+(Math.random()-0.5)*1e-7;for(var i=0;i<Math.min(d.length,512);i++)d[i]=d[i]*f;}catch(ee){}return d;};\n        }\n      } catch(e) {}\n    ";
 var STEALTH_WORKER_IIFE = "(function(){" + STEALTH_WORKER_BODY + "})();";
 var STEALTH_INIT2 = `
@@ -61576,7 +61738,7 @@ var STEALTH_INIT2 = `
   // \u7ED9\u6BCF\u5E27\u50CF\u7D20\u52A0 \xB11 \u5FAE\u566A\u97F3\uFF08per-session \u56FA\u5B9A\u79CD\u5B50\uFF09\uFF0C\u65E2\u80FD\u7834\u574F\u54C8\u5E0C\u4E00\u81F4\u6027\uFF0C
   // \u53C8\u4E0D\u5F71\u54CD\u89C6\u89C9\u3002\u6CE8\u610F\u5FC5\u987B in-place \u6539 ImageData\uFF0C\u56E0\u4E3A toDataURL \u5185\u90E8\u76F4\u8BFB\u3002
   try {
-    const seed = (Math.random() * 0xffffffff) >>> 0;
+    const seed = (typeof window.__bmFpSeed === 'number' && window.__bmFpSeed) ? window.__bmFpSeed : ((Math.random() * 0xffffffff) >>> 0);
     let s = seed || 1;
     const rng = () => { s = (s * 1664525 + 1013904223) >>> 0; return s; };
     const noisify = (canvas) => {
@@ -61632,10 +61794,13 @@ var STEALTH_INIT2 = `
 
   // === AudioContext \u6307\u7EB9\u9632\u62A4 ===
   // CreepJS \u7528 OfflineAudioContext \u6E32\u67D3\u6B63\u5F26\u6CE2 \u2192 getChannelData \u54C8\u5E0C\u3002
-  // \u7ED9\u6BCF\u4E2A\u91C7\u6837\u52A0 \xB11e-7 \u566A\u58F0\uFF0C\u7834\u574F\u54C8\u5E0C\u4F46\u542C\u4E0D\u51FA\u6765\u3002
+  // \u7ED9\u6BCF\u4E2A\u91C7\u6837\u52A0 \xB11e-7 \u566A\u58F0\uFF1B\u7528\u4E0E Canvas \u76F8\u540C\u7684 LCG \u79CD\u5B50\u786E\u4FDD\u540C\u4E00 session \u4E00\u81F4\u3002
   try {
+    const _aSeed = (typeof window.__bmFpSeed === 'number' && window.__bmFpSeed) ? window.__bmFpSeed : ((Math.random() * 0xffffffff) >>> 0);
+    let _aS = (_aSeed ^ 0xdeadbeef) >>> 0 || 1;
+    const _aRng = () => { _aS = (_aS * 1664525 + 1013904223) >>> 0; return _aS; };
     const arrNoise = (arr) => {
-      for (let i = 0; i < arr.length; i++) arr[i] = arr[i] + (Math.random() - 0.5) * 1e-7;
+      for (let i = 0; i < arr.length; i++) arr[i] = arr[i] + ((_aRng() / 0x100000000) - 0.5) * 1e-7;
       return arr;
     };
     if (typeof AnalyserNode !== 'undefined') {
@@ -61659,9 +61824,12 @@ var STEALTH_INIT2 = `
   } catch (_) {}
 
   // === ClientRects \u6307\u7EB9\u9632\u62A4 ===
-  // \u5B50\u50CF\u7D20\u5E03\u5C40\u6D4B\u91CF\u5728\u4E0D\u540C GPU/\u5B57\u4F53 hinting \u4E0B\u4E0D\u4E00\u6837 \u2192 \u7ED9\u5BBD\u5EA6\u52A0\u7EB3\u7C73\u7EA7\u566A\u58F0
+  // \u5B50\u50CF\u7D20\u5E03\u5C40\u6D4B\u91CF\u5728\u4E0D\u540C GPU/\u5B57\u4F53 hinting \u4E0B\u4E0D\u4E00\u6837 \u2192 \u7ED9\u5BBD\u5EA6\u52A0\u7EB3\u7C73\u7EA7\u566A\u58F0\uFF08seeded\uFF09
   try {
-    const noise = () => (Math.random() - 0.5) * 1e-4;
+    const _rSeed = (typeof window.__bmFpSeed === 'number' && window.__bmFpSeed) ? window.__bmFpSeed : ((Math.random() * 0xffffffff) >>> 0);
+    let _rS = (_rSeed ^ 0xc0ffee) >>> 0 || 1;
+    const _rRng = () => { _rS = (_rS * 1664525 + 1013904223) >>> 0; return _rS; };
+    const noise = () => ((_rRng() / 0x100000000) - 0.5) * 1e-4;
     const wrapRect = (r) => {
       try {
         Object.defineProperty(r, 'x',     { value: r.x     + noise(), configurable: true });
@@ -61935,7 +62103,17 @@ async function getBrowser2() {
   const _useFp = __require("fs").existsSync(_fpBin);
   const exe = process.env.REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE || process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || (_useFp ? _fpBin : void 0);
   const proxyEnv = process.env.BROWSER_PROXY;
-  const display = process.env.DISPLAY;
+  const _fsMod = __require("fs");
+  const _probeX = (n) => {
+    try {
+      _fsMod.statSync(`/tmp/.X11-unix/X${n}`);
+      return `:${n}`;
+    } catch {
+      return null;
+    }
+  };
+  const _rawDisp = (process.env.DISPLAY ?? "").replace(/^:/, "").split(".")[0];
+  const display = _probeX(_rawDisp) ?? _probeX("99") ?? _probeX("100") ?? _probeX("102") ?? _probeX("77") ?? null;
   const useHeaded = !!display && process.platform === "linux";
   const args = [
     "--no-sandbox",
@@ -62011,20 +62189,45 @@ async function getBrowser2() {
       LANG: "en_US.UTF-8",
       LC_ALL: "en_US.UTF-8",
       LANGUAGE: "en_US:en",
-      ...useHeaded ? { DISPLAY: display } : {}
+      ...useHeaded && display ? { DISPLAY: display } : {}
     }
   }).then((b) => {
     logger.info({ exe, proxy: !!proxyEnv, headed: useHeaded, display }, "[cdp-broker] browser launched");
     return b;
-  }).catch((err) => {
+  }).catch(async (err) => {
     _browserPromise = null;
+    const errStr = String(err.message ?? err);
+    const isXErr = useHeaded && (errStr.includes("Missing X server") || errStr.includes("cannot open display") || errStr.includes("failed to initialize") || errStr.includes("DISPLAY") || errStr.includes("XServer") || errStr.includes("ozone_platform"));
+    if (isXErr) {
+      logger.warn({ err: errStr.slice(0, 300) }, "[cdp-broker] headed launch failed \u2192 retrying headless");
+      const headlessArgs = args.filter(
+        (a) => !["--start-maximized", "--window-position=0,0", "--use-gl=angle", "--use-angle=swiftshader", "--enable-webgl"].includes(a)
+      );
+      headlessArgs.push("--disable-gpu");
+      _browserPromise = chromium2.launch({
+        headless: true,
+        executablePath: exe,
+        args: headlessArgs,
+        ignoreDefaultArgs: ["--enable-automation"],
+        env: { ...process.env, LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8", LANGUAGE: "en_US:en" }
+      }).then((b) => {
+        logger.info({ exe }, "[cdp-broker] browser launched (headless fallback)");
+        return b;
+      }).catch((err2) => {
+        _browserPromise = null;
+        throw err2;
+      });
+      return _browserPromise;
+    }
     throw err;
   });
   return _browserPromise;
 }
 var CdpSession = class {
-  constructor(ws) {
+  constructor(ws, sessionId) {
     this.ws = ws;
+    this.sessionId = sessionId || null;
+    this.fpSeed = Math.random() * 4294967295 >>> 0 || 1;
   }
   ctx = null;
   page = null;
@@ -62033,6 +62236,18 @@ var CdpSession = class {
   currentUrl = "about:blank";
   viewport = { w: 1280, h: 800 };
   lastStatus = 0;
+  sessionId = null;
+  fpSeed = 0;
+  /** Expose internals for CdpSynchronizer (read-only). */
+  getPage() {
+    return this.page;
+  }
+  getCdp() {
+    return this.cdp;
+  }
+  getCtx() {
+    return this.ctx;
+  }
   send(obj) {
     if (this.ws.readyState === 1) {
       try {
@@ -62044,6 +62259,17 @@ var CdpSession = class {
   async start(opts) {
     const browser = await getBrowser2();
     this.viewport = { w: opts.width, h: opts.height };
+    let _storageState;
+    if (this.sessionId) {
+      try {
+        const { readFile } = await import("node:fs/promises");
+        const raw = await readFile(`/root/browser-sessions/${this.sessionId}.json`, "utf-8");
+        _storageState = JSON.parse(raw);
+        logger.info({ sessionId: this.sessionId }, "[cdp-broker] loaded session state from disk");
+      } catch {
+      }
+    }
+    const geo = opts.geoProfile ?? (opts.proxy ? await resolveGeoProfile(opts.proxy) : DEFAULT_GEO);
     const ua = opts.userAgent || "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36";
     this.ctx = await browser.newContext({
       viewport: { width: opts.width, height: opts.height },
@@ -62053,8 +62279,10 @@ var CdpSession = class {
       isMobile: false,
       hasTouch: false,
       userAgent: ua,
-      locale: "en-US",
-      timezoneId: "America/Los_Angeles",
+      locale: geo.locale,
+      timezoneId: geo.timezone,
+      // Per-session proxy (overrides process-level --proxy-server for this context).
+      ...opts.proxy ? { proxy: { server: opts.proxy } } : {},
       colorScheme: "light",
       ignoreHTTPSErrors: true,
       // Client Hints —— 现代反爬必查项，必须跟 UA 串自洽。
@@ -62063,7 +62291,7 @@ var CdpSession = class {
       //   challenge 的 accept-ch + critical-ch 明确点名要这些; 缺一个就当 stale-ch
       //   = non-Chrome bot 标记 → cf_clearance 永远拿不到.
       extraHTTPHeaders: {
-        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Language": geo.language + ",en;q=0.9",
         "sec-ch-ua": '"Chromium";v="144", "Not:A-Brand";v="99", "Google Chrome";v="144"',
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Linux"',
@@ -62077,9 +62305,11 @@ var CdpSession = class {
       },
       // 跟时区一致：洛杉矶（Mission District 附近），地理位置/时区/locale 三者自洽
       // 否则反爬看到 timezone=LA 但 geolocation=null 立马起疑
-      geolocation: { latitude: 37.7749, longitude: -122.4194, accuracy: 50 },
-      permissions: ["geolocation", "clipboard-read", "clipboard-write", "notifications"]
+      geolocation: { latitude: geo.latitude, longitude: geo.longitude, accuracy: 50 },
+      permissions: ["geolocation", "clipboard-read", "clipboard-write", "notifications"],
+      ..._storageState !== void 0 ? { storageState: _storageState } : {}
     });
+    await this.ctx.addInitScript(`window.__bmFpSeed = ${this.fpSeed};`);
     await this.ctx.addInitScript({ content: STEALTH_INIT2 });
     await this.ctx.route("**/*", async (route, request) => {
       try {
@@ -62133,6 +62363,12 @@ var CdpSession = class {
     this.ctx.on("page", (p) => {
       if (p === this.page) return;
       const url = p.url();
+      const isAuthPopup = url && /oauth|\/auth\/|\/login|\/signin|callback|\/authorize/i.test(url);
+      if (isAuthPopup) {
+        this.send({ type: "popup", url });
+        p.on("close", () => this.send({ type: "popup_closed", url }));
+        return;
+      }
       p.close().catch(() => {
       });
       if (url && url !== "about:blank") {
@@ -62154,7 +62390,8 @@ var CdpSession = class {
       everyNthFrame: 1
     });
     this.send({ type: "ready", width: opts.width, height: opts.height });
-    logger.info({ w: opts.width, h: opts.height }, "[cdp-broker] session started");
+    if (this.sessionId) sessionRegistry.set(this.sessionId, this);
+    logger.info({ w: opts.width, h: opts.height, sessionId: this.sessionId, geo: geo.timezone }, "[cdp-broker] session started");
   }
   async handleMessage(raw) {
     if (this.closed || !this.page || !this.cdp) return;
@@ -62292,6 +62529,18 @@ var CdpSession = class {
   async close() {
     if (this.closed) return;
     this.closed = true;
+    if (this.sessionId && this.ctx) {
+      try {
+        const state = await this.ctx.storageState();
+        const { mkdir, writeFile } = await import("node:fs/promises");
+        const dir = "/root/browser-sessions";
+        await mkdir(dir, { recursive: true });
+        await writeFile(`${dir}/${this.sessionId}.json`, JSON.stringify(state));
+        logger.info({ sessionId: this.sessionId }, "[cdp-broker] session state saved");
+      } catch (e) {
+        logger.warn({ err: String(e), sessionId: this.sessionId }, "[cdp-broker] save session state failed");
+      }
+    }
     try {
       await this.cdp?.send("Page.stopScreencast");
     } catch {
@@ -62311,9 +62560,759 @@ var CdpSession = class {
     this.cdp = null;
     this.page = null;
     this.ctx = null;
+    if (this.sessionId) sessionRegistry.delete(this.sessionId);
     logger.info("[cdp-broker] session closed");
   }
 };
+
+// src/lib/cdp-synchronizer.ts
+var DEFAULT_OPTIONS = {
+  syncNavigation: true,
+  syncClick: true,
+  syncInput: true,
+  syncScroll: true,
+  syncKeyboard: true,
+  syncMouseMove: false,
+  syncBrowserUi: true,
+  clickDelayMs: 0,
+  inputDelayMs: 0
+};
+var BINDING_NAME = "__bmSyncBinding";
+var MASTER_CAPTURE_SCRIPT = String.raw`
+(() => {
+  if (window.__bmSyncInstalled) return 'already';
+  window.__bmSyncInstalled = true;
+  const BN = '__bmSyncBinding';
+  const emit = (type, payload) => {
+    const body = JSON.stringify({ type, payload, href: location.href, ts: Date.now() });
+    try { if (typeof window[BN] === 'function') { window[BN](body); return; } } catch(_) {}
+    try { console.debug('__BM_SYNC__' + body); } catch(_) {}
+  };
+
+  // CSS selector builder: id > data-testid/data-test/name > nth-of-type path
+  const cssEsc = v => { try { return CSS && CSS.escape ? CSS.escape(String(v)) : String(v).replace(/([^\w-])/g,'\\$1'); } catch(_){ return String(v); } };
+  const attrSel = (node, k) => {
+    const val = node.getAttribute(k); if (!val) return null;
+    const s = node.localName.toLowerCase()+'['+k+'="'+String(val).replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"]';
+    try { return document.querySelectorAll(s).length===1?s:null; } catch(_){ return null; }
+  };
+  const buildSel = node => {
+    if (!node || node.nodeType !== 1) return '';
+    if (node.id) return '#' + cssEsc(node.id);
+    for (const k of ['data-testid','data-test','name']) { const r = attrSel(node,k); if(r) return r; }
+    const parts = []; let cur = node;
+    while (cur && cur.nodeType===1 && parts.length<7) {
+      if (cur.id) { parts.unshift('#'+cssEsc(cur.id)); break; }
+      let p = cur.localName.toLowerCase();
+      const nm = cur.getAttribute && cur.getAttribute('name');
+      if (nm) p += '[name="'+String(nm).replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"]';
+      const par = cur.parentElement;
+      if (par) {
+        const sibs = Array.from(par.children).filter(s => s.localName===cur.localName);
+        if (sibs.length>1) p += ':nth-of-type('+(sibs.indexOf(cur)+1)+')';
+      }
+      parts.unshift(p);
+      try { if(document.querySelectorAll(parts.join(' > ')).length===1) break; } catch(_){}
+      cur = cur.parentElement;
+    }
+    return parts.join(' > ');
+  };
+
+  const pt = e => ({
+    x: e.clientX|0, y: e.clientY|0,
+    rx: window.innerWidth  ? e.clientX/window.innerWidth  : 0,
+    ry: window.innerHeight ? e.clientY/window.innerHeight : 0,
+  });
+
+  // Click
+  document.addEventListener('click', e => {
+    emit('click', { ...pt(e), selector: buildSel(e.target), button: e.button|0,
+      ctrlKey: !!e.ctrlKey, shiftKey: !!e.shiftKey, altKey: !!e.altKey, metaKey: !!e.metaKey });
+  }, true);
+
+  // Input / change (40ms debounce on input)
+  const emitInput = (type, e) => {
+    const t = e.target; if (!t || t.nodeType!==1) return;
+    const tag = (t.tagName||'').toLowerCase();
+    if (!['input','textarea','select'].includes(tag) && !t.isContentEditable) return;
+    emit(type, { selector: buildSel(t), tag, inputType: t.type||'',
+      value: t.isContentEditable ? t.innerText : (typeof t.value==='string'?t.value:''),
+      checked: typeof t.checked==='boolean' ? !!t.checked : null });
+  };
+  let _it = null;
+  document.addEventListener('input',  e => { clearTimeout(_it); _it = setTimeout(()=>emitInput('input',e), 40); }, true);
+  document.addEventListener('change', e => emitInput('change', e), true);
+
+  // Keydown (meaningful keys only: Enter/Tab/Esc/modifier combos)
+  document.addEventListener('keydown', e => {
+    if (!['Enter','Tab','Escape'].includes(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) return;
+    emit('keydown', { key: e.key, code: e.code, ctrlKey: !!e.ctrlKey, shiftKey: !!e.shiftKey,
+      altKey: !!e.altKey, metaKey: !!e.metaKey, selector: buildSel(document.activeElement) });
+  }, true);
+
+  // Wheel (rAF-throttled)
+  let _wf = null;
+  document.addEventListener('wheel', e => {
+    if (_wf) return;
+    _wf = requestAnimationFrame(() => { _wf = null;
+      emit('wheel', { deltaX: e.deltaX, deltaY: e.deltaY, x: e.clientX|0, y: e.clientY|0,
+        rx: window.innerWidth?e.clientX/window.innerWidth:0,
+        ry: window.innerHeight?e.clientY/window.innerHeight:0 }); });
+  }, { passive: true, capture: true });
+
+  // Scroll position ratio (window-level, rAF-throttled)
+  let _sf = null;
+  window.addEventListener('scroll', () => {
+    if (_sf) return;
+    _sf = requestAnimationFrame(() => { _sf = null;
+      const maxY = Math.max(document.documentElement.scrollHeight,document.body.scrollHeight)-window.innerHeight;
+      const maxX = Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) -window.innerWidth;
+      emit('scroll', { ratioY: maxY>0?window.scrollY/maxY:0, ratioX: maxX>0?window.scrollX/maxX:0 }); });
+  }, { passive: true, capture: true });
+
+  // Mouse move (rAF-throttled, only dispatched when syncMouseMove option is on)
+  let _mf = null, _mp = null;
+  document.addEventListener('mousemove', e => {
+    _mp = pt(e);
+    if (_mf) return;
+    _mf = requestAnimationFrame(() => { _mf = null; if (_mp) emit('mouse_move', _mp); });
+  }, { passive: true, capture: true });
+
+  return 'installed';
+})()
+`;
+function buildInputExpr(payload) {
+  const d = JSON.stringify(payload);
+  return `(()=>{
+    const p=${d};
+    let t=null; if(p.selector){try{t=document.querySelector(p.selector);}catch(_){}}
+    if(!t)return false;
+    t.focus?.();
+    if(p.tag==='select'){t.value=p.value??'';t.dispatchEvent(new Event('change',{bubbles:true}));return true;}
+    if(p.inputType==='checkbox'||p.inputType==='radio'){
+      t.checked=!!p.checked;
+      t.dispatchEvent(new Event('input',{bubbles:true}));
+      t.dispatchEvent(new Event('change',{bubbles:true}));
+      return true;
+    }
+    if(t.isContentEditable){t.innerText=p.value??'';}
+    else if('value' in t){t.value=p.value??'';}
+    else return false;
+    try{t.dispatchEvent(new InputEvent('input',{bubbles:true,data:String(p.value??''),inputType:'insertReplacementText'}));}
+    catch(_){t.dispatchEvent(new Event('input',{bubbles:true}));}
+    t.dispatchEvent(new Event('change',{bubbles:true}));
+    return true;
+  })()`;
+}
+function buildScrollExpr(payload) {
+  const d = JSON.stringify(payload);
+  return `(()=>{
+    const p=${d};
+    const maxY=Math.max(document.documentElement.scrollHeight,document.body.scrollHeight)-window.innerHeight;
+    const maxX=Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) -window.innerWidth;
+    window.scrollTo({
+      top:  Number.isFinite(+p.ratioY)&&maxY>0 ? +p.ratioY*maxY : 0,
+      left: Number.isFinite(+p.ratioX)&&maxX>0 ? +p.ratioX*maxX : 0,
+      behavior:'auto'
+    });
+    return true;
+  })()`;
+}
+function buildKeyExpr(payload) {
+  const d = JSON.stringify(payload);
+  return `(()=>{
+    const p=${d};
+    let t=document.activeElement||document.body;
+    if(p.selector){try{t=document.querySelector(p.selector)||t;}catch(_){}}
+    t.focus?.();
+    const init={key:p.key||'',code:p.code||'',ctrlKey:!!p.ctrlKey,shiftKey:!!p.shiftKey,
+      altKey:!!p.altKey,metaKey:!!p.metaKey,bubbles:true,cancelable:true};
+    t.dispatchEvent(new KeyboardEvent('keydown',init));
+    t.dispatchEvent(new KeyboardEvent('keyup',  init));
+    return true;
+  })()`;
+}
+function resolveClickPointExpr(payload) {
+  const d = JSON.stringify(payload);
+  return `(()=>{
+    const p=${d};
+    const clamp=pt=>({
+      x:Math.max(0,Math.min(window.innerWidth -1,Math.round(pt.x))),
+      y:Math.max(0,Math.min(window.innerHeight-1,Math.round(pt.y)))
+    });
+    let t=null;
+    if(p.selector){try{t=document.querySelector(p.selector);}catch(_){}}
+    if(!t){
+      const x=Number.isFinite(+p.x)?+p.x:(+p.rx||0)*window.innerWidth;
+      const y=Number.isFinite(+p.y)?+p.y:(+p.ry||0)*window.innerHeight;
+      t=document.elementFromPoint(x,y);
+    }
+    if(!t) return {ok:false};
+    t.focus?.();
+    const r=t.getBoundingClientRect();
+    if(!r||r.width<1||r.height<1){
+      const fb=clamp({
+        x:Number.isFinite(+p.x)?+p.x:(+p.rx||0)*window.innerWidth,
+        y:Number.isFinite(+p.y)?+p.y:(+p.ry||0)*window.innerHeight
+      });
+      return {ok:true,...fb};
+    }
+    return {ok:true,...clamp({x:r.left+r.width/2,y:r.top+r.height/2})};
+  })()`;
+}
+var CdpSynchronizer = class {
+  masterSessionId = null;
+  followerSessionIds = [];
+  opts = { ...DEFAULT_OPTIONS };
+  active = false;
+  eventCount = 0;
+  recentEvents = [];
+  errors = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  bindingListener = null;
+  masterCdp = null;
+  // Browser-UI tab sync (P3)
+  /** masterPage → (followerSessionId → FollowerTabEntry) */
+  tabMap = /* @__PURE__ */ new Map();
+  /** masterPage → CDPSession on that master tab (for capture-script injection + cleanup) */
+  masterTabCdps = /* @__PURE__ */ new Map();
+  ctxPageHandler = null;
+  masterCtx = null;
+  // ── Public API ──────────────────────────────────────────────────────────────
+  start(masterSessionId, followerSessionIds, options = {}) {
+    if (this.active) this.stop();
+    if (!masterSessionId) throw new Error("masterSessionId is required");
+    if (!followerSessionIds.length) throw new Error("at least one followerSessionId required");
+    const master = sessionRegistry.get(masterSessionId);
+    if (!master) throw new Error(`Master session "${masterSessionId}" not found in registry`);
+    for (const id of followerSessionIds) {
+      if (!sessionRegistry.get(id)) throw new Error(`Follower session "${id}" not found in registry`);
+    }
+    this.masterSessionId = masterSessionId;
+    this.followerSessionIds = [...followerSessionIds];
+    this.opts = { ...DEFAULT_OPTIONS, ...options };
+    this.eventCount = 0;
+    this.recentEvents = [];
+    this.errors = [];
+    this.active = true;
+    this._initMaster(master).catch((e) => this._addError(String(e)));
+    logger.info({ master: masterSessionId, followers: followerSessionIds }, "[sync] started");
+    return this.status();
+  }
+  stop() {
+    if (!this.active) return this.status();
+    if (this.masterCdp && this.bindingListener) {
+      try {
+        this.masterCdp.off("Runtime.bindingCalled", this.bindingListener);
+      } catch {
+      }
+    }
+    if (this.masterCtx && this.ctxPageHandler) {
+      try {
+        this.masterCtx.off("page", this.ctxPageHandler);
+      } catch {
+      }
+    }
+    for (const followerMap of this.tabMap.values()) {
+      for (const entry of followerMap.values()) {
+        if (!entry.page.isClosed()) entry.page.close().catch(() => {
+        });
+      }
+    }
+    this.tabMap.clear();
+    for (const cdp of this.masterTabCdps.values()) {
+      cdp.detach().catch(() => {
+      });
+    }
+    this.masterTabCdps.clear();
+    this.ctxPageHandler = null;
+    this.masterCtx = null;
+    this.bindingListener = null;
+    this.masterCdp = null;
+    this.active = false;
+    this.masterSessionId = null;
+    this.followerSessionIds = [];
+    logger.info("[sync] stopped");
+    return this.status();
+  }
+  status() {
+    return {
+      active: this.active,
+      masterSessionId: this.masterSessionId,
+      followerSessionIds: this.followerSessionIds,
+      options: this.opts,
+      eventCount: this.eventCount,
+      tabCount: this.tabMap.size,
+      recentEvents: this.recentEvents.slice(-20),
+      errors: this.errors.slice(-10)
+    };
+  }
+  /**
+   * Replay a pre-recorded sequence of CDP events to specified sessions.
+   *
+   * Each event: { type, payload, delayMs? }
+   * Options:
+   *   sessionIds   — target session IDs (default: all active followers)
+   *   includeMaster — also apply to the master session (default: false)
+   *
+   * Returns { replayed, errors } where replayed counts individual event×session dispatches.
+   */
+  async replay(events, opts = {}) {
+    if (!Array.isArray(events) || events.length === 0) return { replayed: 0, errors: [] };
+    const errors = [];
+    let replayed = 0;
+    const targetIds = opts.sessionIds ? [...opts.sessionIds] : [...this.followerSessionIds];
+    if (opts.includeMaster && this.masterSessionId && !targetIds.includes(this.masterSessionId)) {
+      targetIds.unshift(this.masterSessionId);
+    }
+    for (const event of events) {
+      if ((event.delayMs ?? 0) > 0) await sleep(event.delayMs);
+      for (const id of targetIds) {
+        const sess = sessionRegistry.get(id);
+        if (!sess) {
+          errors.push(`session "${id}" not in registry`);
+          continue;
+        }
+        try {
+          if (event.type === "navigate") {
+            const url = String(event.payload.url ?? "");
+            if (url) {
+              sess.getPage()?.goto(url, { waitUntil: "domcontentloaded", timeout: 6e4 }).catch(() => {
+              });
+            }
+          } else {
+            await this._applyToFollower(sess, event.type, event.payload);
+          }
+          replayed++;
+        } catch (e) {
+          errors.push(`${id}/${event.type}: ${String(e.message ?? e)}`);
+        }
+      }
+      this._record(`replay:${event.type}`, event.payload);
+    }
+    logger.info({ events: events.length, replayed, errors: errors.length }, "[sync] replay done");
+    return { replayed, errors };
+  }
+  navigate(url, includeMaster = true) {
+    let count = 0;
+    const ids = includeMaster && this.masterSessionId ? [this.masterSessionId, ...this.followerSessionIds] : [...this.followerSessionIds];
+    for (const id of ids) {
+      const page = sessionRegistry.get(id)?.getPage();
+      if (!page) continue;
+      page.goto(url, { waitUntil: "domcontentloaded", timeout: 6e4 }).catch(() => {
+      });
+      count++;
+    }
+    return { dispatched: count };
+  }
+  // ── Private ─────────────────────────────────────────────────────────────────
+  async _initMaster(master) {
+    const cdp = master.getCdp();
+    const page = master.getPage();
+    if (!cdp || !page) throw new Error("master page/cdp not yet available (session still starting?)");
+    this.masterCdp = cdp;
+    await cdp.send("Runtime.addBinding", { name: BINDING_NAME });
+    await page.evaluate(MASTER_CAPTURE_SCRIPT).catch(
+      (e) => logger.warn({ err: String(e) }, "[sync] capture script inject warning (non-fatal)")
+    );
+    page.on("load", () => {
+      if (!this.active) return;
+      cdp.send("Runtime.addBinding", { name: BINDING_NAME }).catch(() => {
+      });
+      page.evaluate(MASTER_CAPTURE_SCRIPT).catch(() => {
+      });
+    });
+    this.bindingListener = (p) => {
+      if (p.name !== BINDING_NAME) return;
+      try {
+        this._dispatchEvent(JSON.parse(p.payload));
+      } catch {
+      }
+    };
+    cdp.on("Runtime.bindingCalled", this.bindingListener);
+    cdp.on("Page.frameNavigated", (p) => {
+      if (!this.active || !this.opts.syncNavigation) return;
+      if (p.frame.parentId) return;
+      const url = p.frame.url;
+      if (!url || url === "about:blank" || url.startsWith("chrome://")) return;
+      this._broadcastNavigate(url);
+    });
+    if (this.opts.syncBrowserUi) {
+      const ctx = master.getCtx?.();
+      if (ctx) {
+        this.masterCtx = ctx;
+        this.ctxPageHandler = (newPage) => {
+          this._onMasterNewPage(newPage);
+        };
+        ctx.on("page", this.ctxPageHandler);
+        logger.info("[sync] browser-UI tab sync enabled (context hook attached)");
+      } else {
+        logger.warn("[sync] syncBrowserUi=true but master has no BrowserContext yet");
+      }
+    }
+  }
+  // ── Browser-UI Tab Sync methods ────────────────────────────────────────────
+  /**
+   * Called when master's BrowserContext emits "page" (a new tab/popup was opened).
+   * Creates a matching page in every follower context, then mirrors per-tab navigation
+   * and close events.
+   */
+  /**
+   * Called when master context emits "page" (a new tab/popup was opened).
+   *
+   * Actions:
+   *  1. Open a matching tab in every follower context.
+   *  2. Create a CDPSession on each follower tab (for Input.dispatch* event replay).
+   *  3. Create a CDPSession on the master tab, inject the capture script,
+   *     and forward click/input/scroll/key/wheel events to the matching follower tabs.
+   *  4. Mirror top-frame navigation (framenavigated) to follower tabs.
+   *  5. Close follower tabs when master tab closes.
+   */
+  _onMasterNewPage(masterPage) {
+    if (!this.active) return;
+    const initialUrl = masterPage.url();
+    if (initialUrl.startsWith("chrome://") || initialUrl.startsWith("devtools://")) return;
+    const followerMap = /* @__PURE__ */ new Map();
+    this.tabMap.set(masterPage, followerMap);
+    for (const fId of this.followerSessionIds) {
+      const fSess = sessionRegistry.get(fId);
+      const fCtx = fSess?.getCtx?.();
+      if (!fCtx) continue;
+      fCtx.newPage().then(async (fPage) => {
+        let fCdp = null;
+        try {
+          fCdp = await fCtx.newCDPSession(fPage);
+        } catch {
+        }
+        followerMap.set(fId, { page: fPage, cdp: fCdp });
+        const vp = masterPage.viewportSize();
+        if (vp) await fPage.setViewportSize(vp).catch(() => {
+        });
+        const url = masterPage.url();
+        if (url && url !== "about:blank") {
+          await fPage.goto(url, { waitUntil: "domcontentloaded", timeout: 3e4 }).catch(() => {
+          });
+        }
+        logger.info({ follower: fId, url }, "[sync] follower tab opened");
+      }).catch(
+        (e) => this._addError(`open follower tab ${fId}: ${String(e.message ?? e)}`)
+      );
+    }
+    masterPage.context().newCDPSession(masterPage).then(async (masterTabCdp) => {
+      this.masterTabCdps.set(masterPage, masterTabCdp);
+      const injectCapture = async () => {
+        await masterTabCdp.send("Runtime.addBinding", { name: BINDING_NAME }).catch(() => {
+        });
+        await masterPage.evaluate(MASTER_CAPTURE_SCRIPT).catch(() => {
+        });
+      };
+      await injectCapture();
+      masterPage.on("load", () => {
+        if (!this.active) return;
+        injectCapture().catch(() => {
+        });
+      });
+      masterTabCdp.on("Runtime.bindingCalled", (p) => {
+        if (p.name !== BINDING_NAME || !this.active) return;
+        try {
+          const event = JSON.parse(p.payload);
+          const optKey = {
+            navigate: "syncNavigation",
+            click: "syncClick",
+            input: "syncInput",
+            change: "syncInput",
+            wheel: "syncScroll",
+            scroll: "syncScroll",
+            keydown: "syncKeyboard",
+            mouse_move: "syncMouseMove"
+          }[event.type];
+          if (optKey && !this.opts[optKey]) return;
+          for (const entry of followerMap.values()) {
+            if (entry.page.isClosed()) continue;
+            const sessLike = {
+              getPage: () => entry.page,
+              getCdp: () => entry.cdp,
+              getCtx: () => null
+            };
+            this._applyToFollower(sessLike, event.type, event.payload).catch(() => {
+            });
+          }
+          this.eventCount++;
+          this._record(event.type, event.payload);
+        } catch {
+        }
+      });
+      logger.info({ url: initialUrl }, "[sync] master tab capture script injected");
+    }).catch(
+      (e) => this._addError(`master tab CDP session: ${String(e.message ?? e)}`)
+    );
+    masterPage.on("framenavigated", (frame) => {
+      if (!this.active) return;
+      if (frame !== masterPage.mainFrame()) return;
+      const url = frame.url();
+      if (!url || url === "about:blank" || url.startsWith("chrome://")) return;
+      for (const [fId, entry] of followerMap) {
+        if (entry.page.isClosed()) {
+          followerMap.delete(fId);
+          continue;
+        }
+        entry.page.goto(url, { waitUntil: "domcontentloaded", timeout: 3e4 }).catch(() => {
+        });
+      }
+      this._record("tab_navigate", { url });
+    });
+    masterPage.on("close", () => this._onMasterTabClose(masterPage));
+    this._record("tab_open", { url: initialUrl || "about:blank" });
+    logger.info(
+      { followers: this.followerSessionIds.length, url: initialUrl },
+      "[sync] new master tab \u2192 follower tabs queued"
+    );
+  }
+  /** Called when a master tab (non-primary) is closed. Closes all follower tabs for it. */
+  _onMasterTabClose(masterPage) {
+    const followerMap = this.tabMap.get(masterPage);
+    this.tabMap.delete(masterPage);
+    const masterTabCdp = this.masterTabCdps.get(masterPage);
+    if (masterTabCdp) {
+      masterTabCdp.detach().catch(() => {
+      });
+      this.masterTabCdps.delete(masterPage);
+    }
+    if (!followerMap) return;
+    let closed = 0;
+    for (const entry of followerMap.values()) {
+      if (!entry.page.isClosed()) {
+        entry.page.close().catch(() => {
+        });
+        closed++;
+      }
+    }
+    followerMap.clear();
+    this._record("tab_close", { closedFollowers: closed });
+    logger.info({ closedFollowers: closed }, "[sync] master tab closed \u2192 follower tabs closed");
+  }
+  _broadcastNavigate(url) {
+    for (const id of this.followerSessionIds) {
+      sessionRegistry.get(id)?.getPage()?.goto(url, { waitUntil: "domcontentloaded", timeout: 6e4 }).catch(() => {
+      });
+    }
+    this._record("navigate", { url });
+  }
+  _dispatchEvent(event) {
+    const { type, payload } = event;
+    const guard = {
+      navigate: "syncNavigation",
+      click: "syncClick",
+      input: "syncInput",
+      change: "syncInput",
+      wheel: "syncScroll",
+      scroll: "syncScroll",
+      keydown: "syncKeyboard",
+      mouse_move: "syncMouseMove"
+    };
+    const optKey = guard[type];
+    if (optKey && !this.opts[optKey]) return;
+    if (type === "navigate") {
+      this._broadcastNavigate(String(payload.url ?? ""));
+      return;
+    }
+    this.eventCount++;
+    this._record(type, payload);
+    for (const id of this.followerSessionIds) {
+      const sess = sessionRegistry.get(id);
+      if (!sess) continue;
+      this._applyToFollower(sess, type, payload).catch(
+        (e) => this._addError(`follower ${id}: ${String(e)}`)
+      );
+    }
+  }
+  async _applyToFollower(sess, type, payload) {
+    const page = sess.getPage();
+    const cdp = sess.getCdp();
+    if (!page || !cdp) return;
+    switch (type) {
+      case "click": {
+        if (this.opts.clickDelayMs) await sleep(this.opts.clickDelayMs);
+        const point = await page.evaluate(resolveClickPointExpr(payload)).catch(() => ({ ok: false }));
+        if (!point.ok) break;
+        const x = point.x ?? 0, y = point.y ?? 0;
+        const btn = payload.button === 1 ? "middle" : payload.button === 2 ? "right" : "left";
+        const mods = (payload.ctrlKey ? 2 : 0) | (payload.shiftKey ? 8 : 0) | (payload.altKey ? 1 : 0) | (payload.metaKey ? 4 : 0);
+        await cdp.send(
+          "Input.dispatchMouseEvent",
+          { type: "mousePressed", x, y, button: btn, buttons: 1, clickCount: 1, modifiers: mods }
+        ).catch(() => {
+        });
+        await cdp.send(
+          "Input.dispatchMouseEvent",
+          { type: "mouseReleased", x, y, button: btn, buttons: 0, clickCount: 1, modifiers: mods }
+        ).catch(() => {
+        });
+        break;
+      }
+      case "wheel":
+        await cdp.send("Input.dispatchMouseEvent", {
+          type: "mouseWheel",
+          x: Number(payload.x ?? 0),
+          y: Number(payload.y ?? 0),
+          deltaX: Number(payload.deltaX ?? 0),
+          deltaY: Number(payload.deltaY ?? 0)
+        }).catch(() => {
+        });
+        break;
+      case "input":
+      case "change":
+        if (this.opts.inputDelayMs) await sleep(this.opts.inputDelayMs);
+        await page.evaluate(buildInputExpr(payload)).catch(() => {
+        });
+        break;
+      case "scroll":
+        await page.evaluate(buildScrollExpr(payload)).catch(() => {
+        });
+        break;
+      case "keydown":
+        await page.evaluate(buildKeyExpr(payload)).catch(() => {
+        });
+        break;
+      case "mouse_move":
+        await cdp.send("Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x: Number(payload.x ?? 0),
+          y: Number(payload.y ?? 0)
+        }).catch(() => {
+        });
+        break;
+    }
+  }
+  _record(type, payload) {
+    this.recentEvents.push({ type, at: Date.now(), payload });
+    if (this.recentEvents.length > 200) this.recentEvents.splice(0, 100);
+  }
+  _addError(msg) {
+    logger.warn({ msg }, "[sync] dispatch error");
+    this.errors.push((/* @__PURE__ */ new Date()).toISOString() + " " + msg);
+    if (this.errors.length > 50) this.errors.splice(0, 25);
+  }
+};
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+var synchronizer = new CdpSynchronizer();
+
+// src/routes/sync.ts
+var router5 = (0, import_express5.Router)();
+router5.post("/browser/sync/start", (req, res) => {
+  try {
+    const { masterSessionId, followerSessionIds, options } = req.body;
+    if (!masterSessionId || !Array.isArray(followerSessionIds) || followerSessionIds.length === 0) {
+      res.status(400).json({ ok: false, error: "masterSessionId and non-empty followerSessionIds[] required" });
+      return;
+    }
+    const status = synchronizer.start(masterSessionId, followerSessionIds, options ?? {});
+    res.json({ ok: true, ...status });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: String(e.message ?? e) });
+  }
+});
+router5.post("/browser/sync/stop", (_req, res) => {
+  const status = synchronizer.stop();
+  res.json({ ok: true, ...status });
+});
+router5.get("/browser/sync/status", (_req, res) => {
+  res.json({ ok: true, ...synchronizer.status() });
+});
+router5.post("/browser/sync/navigate", (req, res) => {
+  try {
+    const { url, includeMaster } = req.body;
+    if (!url) {
+      res.status(400).json({ ok: false, error: "url required" });
+      return;
+    }
+    const result = synchronizer.navigate(url, includeMaster !== false);
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: String(e.message ?? e) });
+  }
+});
+router5.get("/browser/sync/sessions", (_req, res) => {
+  const sessions = Array.from(sessionRegistry.entries()).map(([id, sess]) => ({
+    sessionId: id,
+    hasPage: !!sess.getPage(),
+    hasCdp: !!sess.getCdp()
+  }));
+  res.json({ ok: true, count: sessions.length, sessions });
+});
+router5.post("/browser/sync/replay", async (req, res) => {
+  try {
+    const { events, sessionIds, includeMaster } = req.body;
+    if (!Array.isArray(events)) {
+      res.status(400).json({ ok: false, error: "events[] array is required" });
+      return;
+    }
+    const result = await synchronizer.replay(events, { sessionIds, includeMaster });
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e.message ?? e) });
+  }
+});
+var sync_default = router5;
+
+// src/routes/index.ts
+var router6 = (0, import_express6.Router)();
+router6.use(health_default);
+router6.use(cdp_info_default);
+router6.use(cf_warmup_default);
+router6.use(proxy_default);
+router6.use(sync_default);
+var routes_default = router6;
+
+// src/app.ts
+var app = (0, import_express7.default)();
+app.use(
+  (0, import_pino_http.default)({
+    logger,
+    serializers: {
+      req(req) {
+        return { id: req.id, method: req.method, url: req.url?.split("?")[0] };
+      },
+      res(res) {
+        return { statusCode: res.statusCode };
+      }
+    }
+  })
+);
+app.use((0, import_cors.default)());
+var skipForProxy = (mw) => (req, res, next) => {
+  if (req.path === "/api/proxy") return next();
+  return mw(req, res, next);
+};
+app.use(skipForProxy(import_express7.default.json()));
+app.use(skipForProxy(import_express7.default.urlencoded({ extended: true })));
+app.use("/api", routes_default);
+var FRONTEND_DIR = process.env["FRONTEND_DIR"] || path2.resolve(process.cwd(), "public");
+if (fs2.existsSync(FRONTEND_DIR)) {
+  logger.info({ FRONTEND_DIR }, "Serving frontend");
+  app.use(import_express7.default.static(FRONTEND_DIR, { index: false, maxAge: "1h" }));
+  app.get(/^(?!\/api\/).*/, (_req, res, next) => {
+    const idx = path2.join(FRONTEND_DIR, "index.html");
+    if (!fs2.existsSync(idx)) return next();
+    res.setHeader("cache-control", "no-store");
+    res.sendFile(idx);
+  });
+} else {
+  logger.warn({ FRONTEND_DIR }, "Frontend dir not found, only /api will be served");
+}
+var app_default = app;
+
+// ../../node_modules/.pnpm/ws@8.20.0/node_modules/ws/wrapper.mjs
+var import_stream = __toESM(require_stream(), 1);
+var import_extension = __toESM(require_extension(), 1);
+var import_permessage_deflate = __toESM(require_permessage_deflate2(), 1);
+var import_receiver = __toESM(require_receiver2(), 1);
+var import_sender = __toESM(require_sender2(), 1);
+var import_subprotocol = __toESM(require_subprotocol(), 1);
+var import_websocket = __toESM(require_websocket2(), 1);
+var import_websocket_server = __toESM(require_websocket_server(), 1);
 
 // src/lib/cdp-ws-server.ts
 var WS_PATH = "/api/cdp/ws";
@@ -62330,13 +63329,15 @@ function attachCdpWebSocket(server2) {
     const w = Math.max(320, Math.min(2560, Number(url.searchParams.get("w") || 1280)));
     const h = Math.max(240, Math.min(1600, Number(url.searchParams.get("h") || 800)));
     const initialUrl = url.searchParams.get("url");
-    const session = new CdpSession(ws);
+    const sessionId = url.searchParams.get("sessionId") || void 0;
+    const proxyParam = url.searchParams.get("proxy") || void 0;
+    const session = new CdpSession(ws, sessionId);
     ws.on("message", (data) => session.handleMessage(data));
     ws.on("close", () => session.close().catch(() => {
     }));
     ws.on("error", (e) => logger.warn({ err: String(e) }, "[cdp-ws] socket error"));
     try {
-      await session.start({ width: w, height: h });
+      await session.start({ width: w, height: h, proxy: proxyParam });
       if (initialUrl) {
         await session.handleMessage(JSON.stringify({ type: "navigate", url: initialUrl }));
       }

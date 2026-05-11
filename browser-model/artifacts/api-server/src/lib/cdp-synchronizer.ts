@@ -13,7 +13,7 @@
  */
 import { logger } from "./logger.js";
 import { sessionRegistry } from "./cdp-broker.js";
-import type { Page, CDPSession as PwCDPSession } from "playwright";
+import type { Page, CDPSession as PwCDPSession, BrowserContext } from "playwright";
 
 export interface SyncOptions {
   syncNavigation?: boolean;
@@ -255,13 +255,22 @@ export interface SyncStatus {
   followerSessionIds: string[];
   options: SyncOptions;
   eventCount: number;
+  tabCount: number;
   recentEvents: EventRecord[];
   errors: string[];
+}
+
+/** Entry stored for each follower tab page (secondary tab opened via context.on("page")). */
+interface FollowerTabEntry {
+  page: Page;
+  /** CDPSession on the follower tab page — used for Input.dispatch* event replay. */
+  cdp:  PwCDPSession | null;
 }
 
 interface SessionLike {
   getPage: () => Page | null;
   getCdp:  () => PwCDPSession | null;
+  getCtx:  () => BrowserContext | null;
 }
 
 // ─── CdpSynchronizer ─────────────────────────────────────────────────────────
@@ -277,6 +286,14 @@ export class CdpSynchronizer {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private bindingListener: ((p: any) => void) | null = null;
   private masterCdp: PwCDPSession | null = null;
+
+  // Browser-UI tab sync (P3)
+  /** masterPage → (followerSessionId → FollowerTabEntry) */
+  private tabMap = new Map<Page, Map<string, FollowerTabEntry>>();
+  /** masterPage → CDPSession on that master tab (for capture-script injection + cleanup) */
+  private masterTabCdps = new Map<Page, PwCDPSession>();
+  private ctxPageHandler: ((p: Page) => void) | null = null;
+  private masterCtx: BrowserContext | null = null;
 
   // ── Public API ──────────────────────────────────────────────────────────────
 
@@ -309,6 +326,23 @@ export class CdpSynchronizer {
     if (this.masterCdp && this.bindingListener) {
       try { this.masterCdp.off("Runtime.bindingCalled", this.bindingListener); } catch { /* ignore */ }
     }
+    // Tear down tab-sync: remove ctx listener + close all follower tab pages
+    if (this.masterCtx && this.ctxPageHandler) {
+      try { this.masterCtx.off("page", this.ctxPageHandler); } catch { /* ignore */ }
+    }
+    for (const followerMap of this.tabMap.values()) {
+      for (const entry of followerMap.values()) {
+        if (!entry.page.isClosed()) entry.page.close().catch(() => {});
+      }
+    }
+    this.tabMap.clear();
+    // Detach master-tab CDPSessions
+    for (const cdp of this.masterTabCdps.values()) {
+      cdp.detach().catch(() => {});
+    }
+    this.masterTabCdps.clear();
+    this.ctxPageHandler  = null;
+    this.masterCtx       = null;
     this.bindingListener = null;
     this.masterCdp       = null;
     this.active          = false;
@@ -325,9 +359,64 @@ export class CdpSynchronizer {
       followerSessionIds: this.followerSessionIds,
       options:            this.opts,
       eventCount:         this.eventCount,
+      tabCount:           this.tabMap.size,
       recentEvents:       this.recentEvents.slice(-20),
       errors:             this.errors.slice(-10),
     };
+  }
+
+  /**
+   * Replay a pre-recorded sequence of CDP events to specified sessions.
+   *
+   * Each event: { type, payload, delayMs? }
+   * Options:
+   *   sessionIds   — target session IDs (default: all active followers)
+   *   includeMaster — also apply to the master session (default: false)
+   *
+   * Returns { replayed, errors } where replayed counts individual event×session dispatches.
+   */
+  async replay(
+    events: Array<{ type: string; payload: Record<string, unknown>; delayMs?: number }>,
+    opts: { sessionIds?: string[]; includeMaster?: boolean } = {},
+  ): Promise<{ replayed: number; errors: string[] }> {
+    if (!Array.isArray(events) || events.length === 0) return { replayed: 0, errors: [] };
+    const errors: string[] = [];
+    let replayed = 0;
+
+    // Build target list
+    const targetIds: string[] = opts.sessionIds
+      ? [...opts.sessionIds]
+      : [...this.followerSessionIds];
+    if (opts.includeMaster && this.masterSessionId && !targetIds.includes(this.masterSessionId)) {
+      targetIds.unshift(this.masterSessionId);
+    }
+
+    for (const event of events) {
+      if ((event.delayMs ?? 0) > 0) await sleep(event.delayMs!);
+
+      for (const id of targetIds) {
+        const sess = sessionRegistry.get(id);
+        if (!sess) { errors.push(`session "${id}" not in registry`); continue; }
+        try {
+          if (event.type === "navigate") {
+            const url = String(event.payload.url ?? "");
+            if (url) {
+              sess.getPage()?.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 })
+                .catch(() => {});
+            }
+          } else {
+            await this._applyToFollower(sess, event.type, event.payload);
+          }
+          replayed++;
+        } catch (e) {
+          errors.push(`${id}/${event.type}: ${String((e as Error).message ?? e)}`);
+        }
+      }
+      this._record(`replay:${event.type}`, event.payload);
+    }
+
+    logger.info({ events: events.length, replayed, errors: errors.length }, "[sync] replay done");
+    return { replayed, errors };
   }
 
   navigate(url: string, includeMaster = true): { dispatched: number } {
@@ -383,6 +472,156 @@ export class CdpSynchronizer {
       if (!url || url === "about:blank" || url.startsWith("chrome://")) return;
       this._broadcastNavigate(url);
     });
+
+    // Browser-UI tab sync: hook master context for new tabs opened after sync starts.
+    // (Pages already open at sync-start time are not retroactively tracked.)
+    if (this.opts.syncBrowserUi) {
+      const ctx = (master as SessionLike).getCtx?.();
+      if (ctx) {
+        this.masterCtx = ctx;
+        this.ctxPageHandler = (newPage: Page) => { this._onMasterNewPage(newPage); };
+        ctx.on("page", this.ctxPageHandler);
+        logger.info("[sync] browser-UI tab sync enabled (context hook attached)");
+      } else {
+        logger.warn("[sync] syncBrowserUi=true but master has no BrowserContext yet");
+      }
+    }
+  }
+
+  // ── Browser-UI Tab Sync methods ────────────────────────────────────────────
+
+  /**
+   * Called when master's BrowserContext emits "page" (a new tab/popup was opened).
+   * Creates a matching page in every follower context, then mirrors per-tab navigation
+   * and close events.
+   */
+  /**
+   * Called when master context emits "page" (a new tab/popup was opened).
+   *
+   * Actions:
+   *  1. Open a matching tab in every follower context.
+   *  2. Create a CDPSession on each follower tab (for Input.dispatch* event replay).
+   *  3. Create a CDPSession on the master tab, inject the capture script,
+   *     and forward click/input/scroll/key/wheel events to the matching follower tabs.
+   *  4. Mirror top-frame navigation (framenavigated) to follower tabs.
+   *  5. Close follower tabs when master tab closes.
+   */
+  private _onMasterNewPage(masterPage: Page): void {
+    if (!this.active) return;
+    const initialUrl = masterPage.url();
+    if (initialUrl.startsWith("chrome://") || initialUrl.startsWith("devtools://")) return;
+
+    const followerMap = new Map<string, FollowerTabEntry>();
+    this.tabMap.set(masterPage, followerMap);
+
+    // Open a matching page in each follower context + create CDPSession on it
+    for (const fId of this.followerSessionIds) {
+      const fSess = sessionRegistry.get(fId);
+      const fCtx  = fSess?.getCtx?.();
+      if (!fCtx) continue;
+      fCtx.newPage().then(async (fPage) => {
+        // Create CDPSession on follower tab for Input.dispatch* commands
+        let fCdp: PwCDPSession | null = null;
+        try { fCdp = await fCtx.newCDPSession(fPage); } catch { /* non-fatal */ }
+        followerMap.set(fId, { page: fPage, cdp: fCdp });
+        // Match viewport
+        const vp = masterPage.viewportSize();
+        if (vp) await fPage.setViewportSize(vp).catch(() => {});
+        // Catch up to current master URL
+        const url = masterPage.url();
+        if (url && url !== "about:blank") {
+          await fPage.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => {});
+        }
+        logger.info({ follower: fId, url }, "[sync] follower tab opened");
+      }).catch((e: unknown) =>
+        this._addError(`open follower tab ${fId}: ${String((e as Error).message ?? e)}`),
+      );
+    }
+
+    // ── Set up capture script on master tab (async) ────────────────────────
+    masterPage.context().newCDPSession(masterPage).then(async (masterTabCdp) => {
+      this.masterTabCdps.set(masterPage, masterTabCdp);
+
+      const injectCapture = async () => {
+        await masterTabCdp.send("Runtime.addBinding", { name: BINDING_NAME }).catch(() => {});
+        await masterPage.evaluate(MASTER_CAPTURE_SCRIPT).catch(() => {});
+      };
+      await injectCapture();
+
+      // Re-inject after each navigation (page JS is wiped on load)
+      masterPage.on("load", () => {
+        if (!this.active) return;
+        injectCapture().catch(() => {});
+      });
+
+      // Forward captured events to follower TAB pages (not primary follower pages)
+      masterTabCdp.on("Runtime.bindingCalled", (p: { name: string; payload: string }) => {
+        if (p.name !== BINDING_NAME || !this.active) return;
+        try {
+          const event = JSON.parse(p.payload) as SyncEvent;
+          const optKey = ({
+            navigate: "syncNavigation", click: "syncClick", input: "syncInput",
+            change: "syncInput", wheel: "syncScroll", scroll: "syncScroll",
+            keydown: "syncKeyboard", mouse_move: "syncMouseMove",
+          } as Record<string, keyof Required<SyncOptions>>)[event.type];
+          if (optKey && !this.opts[optKey]) return;
+          for (const entry of followerMap.values()) {
+            if (entry.page.isClosed()) continue;
+            const sessLike: SessionLike = {
+              getPage: () => entry.page,
+              getCdp:  () => entry.cdp,
+              getCtx:  () => null,
+            };
+            this._applyToFollower(sessLike, event.type, event.payload).catch(() => {});
+          }
+          this.eventCount++;
+          this._record(event.type, event.payload);
+        } catch { /* malformed payload */ }
+      });
+
+      logger.info({ url: initialUrl }, "[sync] master tab capture script injected");
+    }).catch((e: unknown) =>
+      this._addError(`master tab CDP session: ${String((e as Error).message ?? e)}`),
+    );
+
+    // Mirror top-frame navigations to corresponding follower tab pages
+    masterPage.on("framenavigated", (frame) => {
+      if (!this.active) return;
+      if (frame !== masterPage.mainFrame()) return;
+      const url = frame.url();
+      if (!url || url === "about:blank" || url.startsWith("chrome://")) return;
+      for (const [fId, entry] of followerMap) {
+        if (entry.page.isClosed()) { followerMap.delete(fId); continue; }
+        entry.page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => {});
+      }
+      this._record("tab_navigate", { url });
+    });
+
+    // Close follower tabs when this master tab closes
+    masterPage.on("close", () => this._onMasterTabClose(masterPage));
+
+    this._record("tab_open", { url: initialUrl || "about:blank" });
+    logger.info(
+      { followers: this.followerSessionIds.length, url: initialUrl },
+      "[sync] new master tab → follower tabs queued",
+    );
+  }
+
+  /** Called when a master tab (non-primary) is closed. Closes all follower tabs for it. */
+  private _onMasterTabClose(masterPage: Page): void {
+    const followerMap = this.tabMap.get(masterPage);
+    this.tabMap.delete(masterPage);
+    // Detach master tab CDPSession
+    const masterTabCdp = this.masterTabCdps.get(masterPage);
+    if (masterTabCdp) { masterTabCdp.detach().catch(() => {}); this.masterTabCdps.delete(masterPage); }
+    if (!followerMap) return;
+    let closed = 0;
+    for (const entry of followerMap.values()) {
+      if (!entry.page.isClosed()) { entry.page.close().catch(() => {}); closed++; }
+    }
+    followerMap.clear();
+    this._record("tab_close", { closedFollowers: closed });
+    logger.info({ closedFollowers: closed }, "[sync] master tab closed → follower tabs closed");
   }
 
   private _broadcastNavigate(url: string): void {

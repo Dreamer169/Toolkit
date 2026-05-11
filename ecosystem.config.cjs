@@ -67,6 +67,20 @@ module.exports = {
       "autorestart": true
     },
     {
+      "name": "imap-idle-daemon",
+      "script": "/root/Toolkit/artifacts/api-server/imap_idle_daemon.py",
+      "interpreter": "python3",
+      "cwd": "/root/Toolkit",
+      "restart_delay": 10000,
+      "max_restarts": 5,
+      "watch": false,
+      "autorestart": true,
+      "env": {
+        "DATABASE_URL": "postgresql://postgres:postgres@localhost/toolkit",
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
       "name": "xray",
       "script": "/usr/local/bin/xray",
       "args": "run -c /root/Toolkit/xray.json",
