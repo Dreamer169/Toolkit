@@ -138,6 +138,9 @@ export default function MailCenter() {
   const [verifying, setVerifying]         = useState(false);
   const [purging,   setPurging]           = useState(false);
   const [purgeStats, setPurgeStats]       = useState<{ valid: number; purged: number; kept: number } | null>(null);
+  const [statusFilter, setStatusFilter]   = useState<"all"|"active"|"suspended"|"noauth">("all");
+  const [bulkDelBusy, setBulkDelBusy]     = useState(false);
+  const [bulkDelResult, setBulkDelResult] = useState("");
   const [batchOAuth, setBatchOAuth]       = useState<BatchOAuthState | null>(null);
   const [batchOAuthBusy, setBatchOAuthBusy] = useState(false);
   const [autoCompleteBusy, setAutoCompleteBusy] = useState(false);
@@ -154,6 +157,12 @@ export default function MailCenter() {
   const [reauthManualLogFile, setReauthManualLogFile] = useState("");
   const [reauthManualDone, setReauthManualDone] = useState(false);
   const reauthManualLogRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // IMAP IDLE daemon state
+  const [idleDaemonRunning, setIdleDaemonRunning] = useState(false);
+  const [idleDaemonBusy,    setIdleDaemonBusy]    = useState(false);
+  const [idleEvents,        setIdleEvents]         = useState<Array<{ account_id: number; email: string; subject: string; from: string; ts: string }>>([]);
+  const idleEventsPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const idleLastTs        = useRef<string>("");
   // compose state
   const [showCompose, setShowCompose] = useState(false);
   const [composeTo, setComposeTo] = useState("");
@@ -259,6 +268,7 @@ export default function MailCenter() {
 
   useEffect(() => {
     loadLiveVerifyStatus();
+    checkIdleStatus();
     const iv = setInterval(loadLiveVerifyStatus, 3_000);
     return () => clearInterval(iv);
   }, [loadLiveVerifyStatus]);
@@ -564,12 +574,28 @@ export default function MailCenter() {
     if (retokenPollRef.current)      clearInterval(retokenPollRef.current);
     if (autoCompleteLogRef.current)  clearInterval(autoCompleteLogRef.current);
     if (reauthManualLogRef.current)  clearInterval(reauthManualLogRef.current);
+    if (idleEventsPollRef.current)   clearInterval(idleEventsPollRef.current);
   }, []);
 
   // ── 批量设备码 OAuth 授权 ─────────────────────────────────────────────────
   // 设计：deviceCode 存在 React state 中，直接轮询 /device-poll（已有接口），
   // 成功后调 /save-token（已有接口）。不依赖服务端 session，服务器重启不影响。
   const CLIENT_ID_BATCH = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
+
+  const bulkDeleteSuspended = async () => {
+    const cnt = accounts.filter(a => a.status === "suspended").length;
+    if (!confirm(`将永久删除 ${cnt} 个已封禁账号（suspended），不可恢复。确定继续？`)) return;
+    setBulkDelBusy(true); setBulkDelResult("");
+    let ok = 0, fail = 0;
+    for (const a of accounts.filter(x => x.status === "suspended")) {
+      const r = await fetch(`${API}/tools/outlook/account/${a.id}`, { method: "DELETE" })
+        .then(res => res.json()).catch(() => ({ success: false }));
+      if (r.success) ok++; else fail++;
+    }
+    setBulkDelBusy(false);
+    setBulkDelResult(`✓ 已删除 ${ok} 个，失败 ${fail} 个`);
+    loadAccounts();
+  };
 
   const startAutoComplete = async (ids?: number[]) => {
     setAutoCompleteBusy(true); setAutoCompleteMsg("");
@@ -766,6 +792,44 @@ export default function MailCenter() {
     loadAccounts();
   };
 
+  // ── IMAP IDLE daemon ──────────────────────────────────────────────────────
+  const checkIdleStatus = async () => {
+    try {
+      const d = await fetch(`${API}/tools/outlook/imap-idle/status`).then(r => r.json()).catch(() => null);
+      if (d?.success) setIdleDaemonRunning(!!d.running);
+    } catch { /* ignore */ }
+  };
+
+  const pollIdleEvents = async () => {
+    try {
+      const since = idleLastTs.current ? `&since=${encodeURIComponent(idleLastTs.current)}` : "";
+      const d = await fetch(`${API}/tools/outlook/imap-idle/events?limit=20${since}`).then(r => r.json()).catch(() => null);
+      if (d?.success && d.events?.length) {
+        setIdleEvents(prev => [...prev, ...d.events].slice(-100));
+        idleLastTs.current = d.events[d.events.length - 1].ts;
+      }
+    } catch { /* ignore */ }
+  };
+
+  const toggleIdleDaemon = async () => {
+    setIdleDaemonBusy(true);
+    try {
+      if (idleDaemonRunning) {
+        await fetch(`${API}/tools/outlook/imap-idle/stop`, { method: "POST" }).then(r => r.json()).catch(() => null);
+        setIdleDaemonRunning(false);
+        if (idleEventsPollRef.current) { clearInterval(idleEventsPollRef.current); idleEventsPollRef.current = null; }
+      } else {
+        await fetch(`${API}/tools/outlook/imap-idle/start`, { method: "POST" }).then(r => r.json()).catch(() => null);
+        setIdleDaemonRunning(true);
+        idleLastTs.current = new Date().toISOString();
+        if (idleEventsPollRef.current) clearInterval(idleEventsPollRef.current);
+        idleEventsPollRef.current = setInterval(pollIdleEvents, 5000);
+      }
+    } finally {
+      setIdleDaemonBusy(false);
+    }
+  };
+
   // 有 OAuth token → Graph API（最快）
   const hasOAuth  = (acc: Account) => !!(acc.token || acc.refresh_token);
   // 有密码但无 token → IMAP 直连（自动，无需额外授权）
@@ -786,19 +850,13 @@ export default function MailCenter() {
           </div>
           <div className="flex gap-1.5">
             <button
-              onClick={verifyAll}
-              disabled={verifying || accounts.length === 0}
+              onClick={handleAutoCheck}
+              disabled={checkBusy || accounts.length === 0}
               className="flex-1 py-1.5 bg-blue-600/60 hover:bg-blue-600/80 disabled:opacity-50 rounded text-xs text-white font-medium transition-colors"
+              title="用 Graph API 检测账号状态（取代 ROPC 验证）"
             >
-              {verifying ? "验证中…" : "🔍 批量验证"}
+              {checkBusy ? "检测中…" : "🔍 检测账号状态"}
             </button>
-            {verifyResults.length > 0 && (
-              <button
-                onClick={() => setVerifyResults([])}
-                className="px-2 py-1.5 bg-[#21262d] hover:bg-[#30363d] rounded text-xs text-gray-400 transition-colors"
-                title="清除验证结果"
-              >✕</button>
-            )}
           </div>
           {/* 一键清洗风控账号 */}
           <button
@@ -826,26 +884,21 @@ export default function MailCenter() {
           )}
                 {/* 实时验证状态栏 */}
       {liveVerify && (
-        <div className="flex items-center gap-3 px-3 py-1.5 text-xs">
+        <div className="flex items-center gap-2 py-1 text-xs">
           <span className={`font-semibold ${liveVerify.enabled ? 'text-emerald-400' : 'text-gray-500'}`}>
             {liveVerify.enabled ? '🟢 实时验证：开启' : '⚫ 实时验证：关闭'}
           </span>
           {liveVerify.lastRun && (
-            <span className="text-gray-500">
-              上次扫描：{new Date(liveVerify.lastRun).toLocaleTimeString('zh-CN')} &nbsp;
-              ✅ {liveVerify.lastStats.clicked} 已点击 / 失败 {liveVerify.lastStats.failed} / 跳过 {liveVerify.lastStats.skipped}
+            <span className="text-gray-600 truncate">
+              {new Date(liveVerify.lastRun).toLocaleTimeString('zh-CN')} · ✅{liveVerify.lastStats.clicked} ✗{liveVerify.lastStats.failed}
             </span>
           )}
           <button
             onClick={toggleLiveVerify}
             disabled={liveVerifyBusy}
-            className={`ml-auto px-3 py-1 rounded text-xs font-medium transition-colors ${
-              liveVerify.enabled
-                ? 'bg-red-900/40 hover:bg-red-800/60 text-red-300'
-                : 'bg-emerald-900/40 hover:bg-emerald-800/60 text-emerald-300'
-            } disabled:opacity-50`}
+            className={`ml-auto shrink-0 px-2 py-0.5 rounded text-xs font-medium transition-colors ${liveVerify.enabled ? 'bg-red-900/40 hover:bg-red-800/60 text-red-300' : 'bg-emerald-900/40 hover:bg-emerald-800/60 text-emerald-300'} disabled:opacity-50`}
           >
-            {liveVerifyBusy ? '处理中…' : liveVerify.enabled ? '暂停自动验证' : '开启自动验证'}
+            {liveVerifyBusy ? '…' : liveVerify.enabled ? '暂停' : '开启'}
           </button>
         </div>
       )}
@@ -867,18 +920,8 @@ export default function MailCenter() {
               {batchOAuthBusy ? "发起中…" : "🔑 批量 OAuth 授权"}
             </button>
           )}
-          {/* 🔑 授权 Manual 账号：弹窗显示设备码，需用户手动输入（不依赖 Python 自动化） */}
-          {accounts.some(a => tagsOf(a).includes("needs_oauth_manual")) && (
-            <button
-              onClick={() => startBatchOAuth(undefined, "needs_oauth_manual")}
-              disabled={batchOAuthBusy}
-              className="w-full py-1.5 bg-violet-800/50 hover:bg-violet-800/70 disabled:opacity-50 rounded text-xs text-white font-medium transition-colors"
-              title="为所有 needs_oauth_manual 账号发起批量设备码授权，弹窗显示验证码供手动输入"
-            >
-              {batchOAuthBusy ? "发起中…" : "🔑 授权 Manual 账号"}
-            </button>
-          )}
-          {/* 🤖 自动授权 Manual 账号：Python 自动打开浏览器完成设备码流程 */}
+
+          {/* 🤖 自动重授权 Manual 账号 */}
           {accounts.some(a => tagsOf(a).includes("needs_oauth_manual")) && (
             <button
               onClick={() => startReauthManual()}
@@ -886,12 +929,39 @@ export default function MailCenter() {
               className="w-full py-1.5 bg-violet-700/40 hover:bg-violet-700/60 disabled:opacity-50 rounded text-xs text-gray-300 font-medium transition-colors"
               title="用 Python 自动打开浏览器完成设备码 OAuth，无需手动输入验证码"
             >
-              {reauthManualBusy ? "自动授权中…" : "🤖 自动授权 Manual 账号"}
+              {reauthManualBusy ? "自动授权中…" : "🤖 自动重授权 Manual 账号"}
             </button>
           )}
           {reauthManualMsg && (
             <div className="text-[10px] px-1 py-0.5 rounded bg-[#21262d] text-violet-300 break-all">
               {reauthManualMsg}
+            </div>
+          )}
+          {/* IMAP IDLE 守护进程 */}
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={toggleIdleDaemon}
+              disabled={idleDaemonBusy}
+              className={`flex-1 py-1.5 rounded text-xs font-medium transition-colors disabled:opacity-50 ${
+                idleDaemonRunning
+                  ? "bg-teal-800/50 hover:bg-teal-800/70 text-teal-300"
+                  : "bg-[#21262d] hover:bg-[#30363d] text-gray-400"
+              }`}
+              title="启动/停止 IMAP IDLE 守护进程，实时监听所有账号新邮件"
+            >
+              {idleDaemonBusy ? "…" : idleDaemonRunning ? "🔔 IDLE 运行中" : "🔕 IDLE 已停止"}
+            </button>
+            {idleEvents.length > 0 && (
+              <button onClick={() => setIdleEvents([])} className="px-1.5 py-1.5 bg-[#21262d] hover:bg-[#30363d] rounded text-xs text-gray-500 transition-colors" title="清除 IDLE 事件">✕</button>
+            )}
+          </div>
+          {idleEvents.length > 0 && (
+            <div className="space-y-0.5 max-h-20 overflow-y-auto">
+              {idleEvents.slice(-8).map((e, i) => (
+                <div key={i} className="text-[10px] truncate px-1 py-0.5 rounded bg-[#161b22] text-teal-300">
+                  📬 {e.email.split("@")[0]}: {e.subject}
+                </div>
+              ))}
             </div>
           )}
           {batchResults.length > 0 && (
@@ -921,6 +991,38 @@ export default function MailCenter() {
           <p className="text-[10px] text-gray-600 mt-0.5 leading-tight">↻ 后台每 4 小时自动检测 50 个</p>
         </div>
         <div className="flex-1 overflow-y-auto flex flex-col">
+          {/* 状态过滤标签栏 */}
+          <div className="px-2 py-1 border-b border-[#21262d] shrink-0 flex gap-1 flex-wrap">
+            {([
+              { key: "all",       label: "全部",   count: accounts.length },
+              { key: "active",    label: "活跃",   count: accounts.filter(a => a.status === "active").length },
+              { key: "suspended", label: "🔴 被封", count: accounts.filter(a => a.status === "suspended").length },
+              { key: "noauth",    label: "⚠ 未授权", count: accounts.filter(a => !hasOAuth(a) && !hasImap(a)).length },
+            ] as const).map(t => (
+              <button key={t.key}
+                onClick={() => setStatusFilter(t.key)}
+                className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors ${
+                  statusFilter === t.key
+                    ? "bg-blue-600/20 border-blue-500/40 text-blue-300"
+                    : "border-transparent text-gray-500 hover:text-gray-300"
+                }`}>
+                {t.label} {t.count > 0 && <span className="opacity-60">({t.count})</span>}
+              </button>
+            ))}
+          </div>
+          {/* 被封账号管理操作栏 */}
+          {statusFilter === "suspended" && (
+            <div className="px-2 py-1.5 border-b border-[#21262d] shrink-0 space-y-1">
+              <button
+                onClick={bulkDeleteSuspended}
+                disabled={bulkDelBusy || accounts.filter(a => a.status === "suspended").length === 0}
+                className="w-full py-1 bg-red-800/50 hover:bg-red-800/70 disabled:opacity-40 rounded text-[11px] text-red-300 font-medium transition-colors"
+              >
+                {bulkDelBusy ? "删除中…" : `🗑 批量删除 ${accounts.filter(a => a.status === "suspended").length} 个被封账号`}
+              </button>
+              {bulkDelResult && <p className="text-[10px] text-gray-400">{bulkDelResult}</p>}
+            </div>
+          )}
           {/* 账号搜索过滤框 */}
           <div className="px-2 py-1.5 border-b border-[#21262d] shrink-0">
             <div className="relative">
@@ -937,7 +1039,9 @@ export default function MailCenter() {
             </div>
             {accSearch && (
               <p className="text-[10px] text-gray-600 mt-0.5 px-0.5">
-                {accounts.filter(a => a.email.toLowerCase().includes(accSearch.toLowerCase())).length} / {accounts.length} 个
+                {accounts
+                  .filter(a => { if (statusFilter==="active") return a.status==="active"; if (statusFilter==="suspended") return a.status==="suspended"; if (statusFilter==="noauth") return !hasOAuth(a)&&!hasImap(a); return true; })
+                  .filter(a => a.email.toLowerCase().includes(accSearch.toLowerCase())).length} / {accounts.length} 个
               </p>
             )}
           </div>
@@ -945,7 +1049,15 @@ export default function MailCenter() {
           {accounts.length === 0 && (
             <p className="text-xs text-gray-600 text-center mt-8 px-4">暂无 Outlook 账号<br/>去「Outlook 工作流」注册</p>
           )}
-          {(accSearch ? accounts.filter(a => a.email.toLowerCase().includes(accSearch.toLowerCase())) : accounts).map((acc) => {
+          {(accounts
+            .filter(a => {
+              if (statusFilter === "active")    return a.status === "active";
+              if (statusFilter === "suspended") return a.status === "suspended";
+              if (statusFilter === "noauth")    return !hasOAuth(a) && !hasImap(a);
+              return true;
+            })
+            .filter(a => !accSearch || a.email.toLowerCase().includes(accSearch.toLowerCase()))
+          ).map((acc) => {
             const active       = selAccount?.id === acc.id;
             const isSuspended  = acc.status === "suspended";
             const isNeedsOAuth = acc.status === "needs_oauth" || acc.status === "needs_oauth_pending";
@@ -1464,13 +1576,23 @@ export default function MailCenter() {
                 2. 逐个复制「用户码」粘贴到授权页，并用对应账号密码登录<br/>
                 3. 后台每 4 秒自动检测，授权完成后自动存储 token 并显示 ✓
               </p>
-              <a
-                href={batchOAuth.accounts.find(a => a.status === "pending")?.verificationUri ?? "https://microsoft.com/devicelogin"}
-                target="_blank" rel="noopener noreferrer"
-                className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-xs text-white font-medium transition-colors"
-              >
-                🌐 打开微软授权页面
-              </a>
+              <div className="mt-2 flex items-center gap-2 flex-wrap">
+                <a
+                  href={batchOAuth.accounts.find(a => a.status === "pending")?.verificationUri ?? "https://microsoft.com/devicelogin"}
+                  target="_blank" rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-xs text-white font-medium transition-colors"
+                >
+                  🌐 打开微软授权页面
+                </a>
+                <button
+                  onClick={() => startAutoComplete()}
+                  disabled={autoCompleteBusy}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 bg-violet-700/60 hover:bg-violet-700/80 disabled:opacity-50 rounded text-xs text-white font-medium transition-colors"
+                  title="用浏览器自动化完成设备码输入（无需手动操作）"
+                >
+                  {autoCompleteBusy ? "自动完成中…" : "🤖 自动完成授权"}
+                </button>
+              </div>
             </div>
 
             {/* 账号列表 */}
