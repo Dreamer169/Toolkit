@@ -1,38 +1,36 @@
 #!/usr/bin/env python3
 """
-IMAP IDLE 守护进程 — 为有 token 的 Outlook 账号实时监听新邮件。
+Graph API 邮件轮询守护进程 — 替代 IMAP IDLE，用 Microsoft Graph 读新邮件。
 
-当前状态:
-  IMAP XOAUTH2 对所有账号均返回 AUTHENTICATE failed。
-  原因: client_id (9e5f94bc-..., Thunderbird 公开应用) 在 Azure AD 中
-       未注册 IMAP.AccessAsUser.All delegated permission，Microsoft
-       即使接受 token 换取请求也不会在 token 里附带 IMAP scope。
-  解决方案: 注册自有 Azure AD 应用并申请 IMAP.AccessAsUser.All 权限，
-            或改用 Graph API (Mail.Read) 读邮件。
+原因: 现有 refresh_token 含 Mail.Read (Graph) scope，不含 IMAP.AccessAsUser.All，
+      IMAP XOAUTH2 必然失败。Graph API 对所有现有账号均可用。
 
 用法:
   DATABASE_URL=postgresql://... python3 imap_idle_daemon.py
 """
-import base64, email as email_lib, json, os, signal, sys, threading, time
-from datetime import datetime
-from email.header import decode_header, make_header
+import json, os, signal, sys, threading, time
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+from urllib.parse import urlencode, quote
 
-EVENTS_FILE  = Path("/tmp/imap_idle_events.json")
-STATUS_FILE  = Path("/tmp/imap_idle_status.json")
-PID_FILE     = Path("/tmp/imap_idle_daemon.pid")
+EVENTS_FILE     = Path("/tmp/imap_idle_events.json")
+STATUS_FILE     = Path("/tmp/imap_idle_status.json")
+PID_FILE        = Path("/tmp/imap_idle_daemon.pid")
 
-IMAP_HOST_PRIMARY  = "outlook.live.com"
-IMAP_HOST_FALLBACK = "outlook.office365.com"
-IMAP_PORT          = 993
-IDLE_CYCLE_SECS    = 25 * 60   # re-issue IDLE every 25 min
-MAX_ACCOUNTS       = 60        # cap concurrent IMAP connections
-REFRESH_INTERVAL   = 300       # reload DB account list every 5 min
+POLL_INTERVAL   = 30           # seconds between Graph API checks per account
+MAX_ACCOUNTS    = 60
+REFRESH_INTERVAL = 300         # reload DB account list every 5 min
 
-CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
-
-# IMAP-specific scope for personal Outlook.com accounts
-IMAP_SCOPE = "https://outlook.office.com/IMAP.AccessAsUser.All offline_access"
+CLIENT_ID  = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+GRAPH_SCOPE = (
+    "https://graph.microsoft.com/Mail.Read "
+    "https://graph.microsoft.com/User.Read "
+    "offline_access"
+)
+TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
+GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 _stop_event = threading.Event()
 _ev_lock    = threading.Lock()
@@ -42,7 +40,7 @@ _threads: dict[int, threading.Thread] = {}
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@localhost/toolkit")
 
 
-# ── persistence helpers ───────────────────────────────────────────────────────
+# ── persistence ───────────────────────────────────────────────────────────────
 
 def _load_json(path: Path, default):
     try:
@@ -71,7 +69,7 @@ def _set_status(acct_id: int, email: str, status: str, error: str = ""):
         _save_json(STATUS_FILE, st)
 
 
-# ── DB helpers ────────────────────────────────────────────────────────────────
+# ── DB ────────────────────────────────────────────────────────────────────────
 
 def _get_accounts():
     import psycopg2
@@ -98,65 +96,27 @@ def _get_accounts():
         conn.close()
 
 
-def _refresh_imap_token(refresh_tok: str) -> tuple[str, str]:
-    """
-    Exchange refresh_token for an IMAP access_token.
+# ── token refresh ─────────────────────────────────────────────────────────────
 
-    Uses two endpoints as fallback (luoianun pattern):
-      1. consumers + outlook.office.com/IMAP scope
-      2. login.live.com (legacy, no explicit scope)
-
-    NOTE: With the current Thunderbird client_id, token exchange succeeds
-    but the returned token lacks IMAP.AccessAsUser.All scope. AUTHENTICATE
-    will fail regardless. This function is kept for when a properly-scoped
-    client_id is configured.
-    """
-    import urllib.request, urllib.parse
-
-    methods = [
-        {
-            "url": "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
-            "data": {
-                "grant_type":    "refresh_token",
-                "client_id":     CLIENT_ID,
-                "refresh_token": refresh_tok,
-                "scope":         IMAP_SCOPE,
-            },
-            "label": "consumers/IMAP",
-        },
-        {
-            "url": "https://login.live.com/oauth20_token.srf",
-            "data": {
-                "grant_type":    "refresh_token",
-                "client_id":     CLIENT_ID,
-                "refresh_token": refresh_tok,
-            },
-            "label": "login.live.com",
-        },
-    ]
-
-    last_error = "no attempt"
-    for method in methods:
-        try:
-            body = urllib.parse.urlencode(method["data"]).encode()
-            req  = urllib.request.Request(
-                method["url"],
-                data=body,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-            resp = json.loads(urllib.request.urlopen(req, timeout=20).read())
-            at = resp.get("access_token", "")
-            rt = resp.get("refresh_token", refresh_tok)
-            if at:
-                print(f"[idle] token refresh OK via {method['label']}", flush=True)
-                return at, rt
-            last_error = f"{resp.get('error', '?')}: {resp.get('error_description', '')[:80]}"
-            print(f"[idle] ⚠ {method['label']} 失败: {last_error}", flush=True)
-        except Exception as e:
-            last_error = str(e)[:120]
-            print(f"[idle] ⚠ {method['label']} 异常: {last_error}", flush=True)
-
-    raise RuntimeError(f"token 刷新失败（所有端点）: {last_error}")
+def _refresh_graph_token(refresh_tok: str) -> tuple[str, str]:
+    """Exchange refresh_token for Graph API access_token."""
+    body = urlencode({
+        "grant_type":    "refresh_token",
+        "client_id":     CLIENT_ID,
+        "refresh_token": refresh_tok,
+        "scope":         GRAPH_SCOPE,
+    }).encode()
+    req = Request(TOKEN_URL, data=body,
+                  headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        resp = json.loads(urlopen(req, timeout=20).read())
+    except HTTPError as e:
+        raise RuntimeError(f"token refresh HTTP {e.code}: {e.read()[:120]}")
+    at = resp.get("access_token", "")
+    rt = resp.get("refresh_token", refresh_tok)
+    if not at:
+        raise RuntimeError(f"{resp.get('error','?')}: {resp.get('error_description','')[:80]}")
+    return at, rt
 
 
 def _update_db_token(acct_id: int, access_token: str, refresh_token: str):
@@ -173,24 +133,43 @@ def _update_db_token(acct_id: int, access_token: str, refresh_token: str):
         finally:
             conn.close()
     except Exception as e:
-        print(f"[idle] ⚠ DB token update failed for id={acct_id}: {e}", flush=True)
+        print(f"[poll] ⚠ DB token update failed id={acct_id}: {e}", flush=True)
 
 
-# ── message helpers ───────────────────────────────────────────────────────────
+# ── Graph API calls ───────────────────────────────────────────────────────────
 
-def _decode_subject(raw):
+def _graph_get(path: str, token: str) -> dict:
+    url = GRAPH_BASE + path
+    req = Request(url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
     try:
-        return str(make_header(decode_header(raw or "")))
-    except Exception:
-        return raw or ""
+        return json.loads(urlopen(req, timeout=20).read())
+    except HTTPError as e:
+        body = e.read()
+        raise RuntimeError(f"Graph {e.code}: {body[:120]}")
 
 
-# ── IMAP IDLE worker ──────────────────────────────────────────────────────────
+def _fetch_new_messages(token: str, since_dt: str | None, top: int = 10) -> list[dict]:
+    """
+    Fetch inbox messages newer than since_dt (ISO8601 string).
+    Returns list sorted oldest-first.
+    """
+    params = {
+        "$top": str(top),
+        "$select": "id,subject,from,receivedDateTime,isRead",
+        "$orderby": "receivedDateTime desc",
+    }
+    if since_dt:
+        params["$filter"] = f"receivedDateTime gt {since_dt}"
 
-def _idle_worker(acct: dict):
-    from imapclient import IMAPClient
-    from imapclient import exceptions as imap_exc
+    qs = "&".join(f"{k}={quote(str(v), safe='$@')}" for k, v in params.items())
+    data = _graph_get(f"/me/mailFolders/inbox/messages?{qs}", token)
+    msgs = data.get("value", [])
+    return list(reversed(msgs))   # oldest first
 
+
+# ── poll worker ───────────────────────────────────────────────────────────────
+
+def _poll_worker(acct: dict):
     acct_id = acct["id"]
     email   = acct["email"]
     token   = acct["token"] or ""
@@ -198,179 +177,115 @@ def _idle_worker(acct: dict):
 
     _set_status(acct_id, email, "starting")
 
-    # ── Step 1: refresh token ─────────────────────────────────────────────────
+    # ── Initial token refresh ─────────────────────────────────────────────────
     if rt:
         try:
-            new_at, new_rt = _refresh_imap_token(rt)
+            new_at, new_rt = _refresh_graph_token(rt)
             if new_at != token or new_rt != rt:
                 _update_db_token(acct_id, new_at, new_rt)
             token = new_at
             rt    = new_rt
-            print(f"[idle] 🔄 {email}: token 已刷新", flush=True)
+            print(f"[poll] 🔄 {email}: token 已刷新", flush=True)
         except RuntimeError as e:
-            err_str = str(e)
+            err = str(e)
             if not token:
-                print(f"[idle] {email}: refresh 失败且无 token，needs_oauth: {err_str}", flush=True)
-                _set_status(acct_id, email, "needs_oauth", err_str)
+                print(f"[poll] {email}: refresh 失败且无 token: {err}", flush=True)
+                _set_status(acct_id, email, "needs_oauth", err)
                 return
-            print(f"[idle] ⚠ {email}: refresh 失败，尝试旧 token: {err_str}", flush=True)
+            print(f"[poll] ⚠ {email}: refresh 失败，尝试旧 token: {err}", flush=True)
     elif not token:
         _set_status(acct_id, email, "needs_oauth", "no token and no refresh_token")
         return
 
-    # ── Step 2: IMAP connection ───────────────────────────────────────────────
-    imap_host = IMAP_HOST_PRIMARY
+    # ── Verify token works + get baseline ────────────────────────────────────
     consecutive_errors = 0
+    last_received_dt: str | None = None   # ISO8601 of most recent message we've seen
 
+    try:
+        msgs = _fetch_new_messages(token, since_dt=None, top=1)
+        if msgs:
+            last_received_dt = msgs[-1]["receivedDateTime"]
+        _set_status(acct_id, email, "polling")
+        print(f"[poll] ✅ {email}: Graph OK, last_dt={last_received_dt or 'none'}", flush=True)
+    except RuntimeError as e:
+        err = str(e)
+        print(f"[poll] ❌ {email}: initial Graph call failed: {err}", flush=True)
+        _set_status(acct_id, email, "error", err)
+        # fall through — will retry in loop
+
+    # ── Poll loop ─────────────────────────────────────────────────────────────
     while not _stop_event.is_set():
-        client = None
-        try:
-            connected   = False
-            auth_failed = False
-            last_error  = ""
-
-            for host in (imap_host, IMAP_HOST_FALLBACK):
-                try:
-                    client = IMAPClient(host, IMAP_PORT, ssl=True, timeout=30.0)
-                    client.oauth2_login(email, token)
-                    imap_host = host
-                    connected = True
-                    break
-                except Exception as ce:
-                    err_str = str(ce)
-                    last_error = err_str
-                    print(f"[idle] ⚠ {email}: {host} 连接失败: {err_str}", flush=True)
-                    if "AUTHENTICATE failed" in err_str:
-                        auth_failed = True
-                    try:
-                        client.logout()
-                    except Exception:
-                        pass
-                    client = None
-
-            if not connected:
-                if auth_failed:
-                    # XOAUTH2 auth failed — current client_id lacks IMAP.AccessAsUser.All scope.
-                    # Marking imap_disabled; switch to Graph API for mail reading.
-                    _set_status(acct_id, email, "imap_disabled",
-                                "XOAUTH2 AUTHENTICATE failed: client_id lacks IMAP.AccessAsUser.All scope")
-                    print(f"[idle] 🚫 {email}: IMAP AUTHENTICATE failed (client_id scope issue)", flush=True)
-                    return
-                raise ConnectionError(f"两个 IMAP host 均连接失败: {last_error}")
-
-            # ── Connected ─────────────────────────────────────────────────────
-            mailbox        = client.select_folder("INBOX", readonly=True)
-            idle_supported = b"IDLE" in client.capabilities()
-            all_uids       = client.search(["ALL"])
-            last_uid       = max(all_uids) if all_uids else 0
-
-            _set_status(acct_id, email, "idle" if idle_supported else "poll")
-            consecutive_errors = 0
-            print(
-                f"[idle] ✅ {email}: 已连接 {imap_host}, "
-                f"IDLE={'yes' if idle_supported else 'no'}, last_uid={last_uid}",
-                flush=True,
-            )
-
-            # ── IDLE / poll loop ──────────────────────────────────────────────
-            while not _stop_event.is_set():
-                if idle_supported:
-                    client.idle()
-                    try:
-                        responses = client.idle_check(timeout=IDLE_CYCLE_SECS)
-                    except (imap_exc.IMAPClientAbortError, imap_exc.IllegalStateError, OSError):
-                        responses = []
-                    finally:
-                        try:
-                            client.idle_done()
-                        except Exception:
-                            pass
-
-                    if not responses:
-                        continue
-                else:
-                    for _ in range(60):
-                        if _stop_event.is_set():
-                            break
-                        time.sleep(1)
-
-                # ── fetch new messages ────────────────────────────────────────
-                try:
-                    new_uids = client.search(["UID", f"{last_uid + 1}:*"])
-                    new_uids = [u for u in new_uids if u > last_uid]
-                except Exception:
-                    new_uids = []
-
-                for uid in new_uids[:10]:
-                    try:
-                        fetched = client.fetch([uid], ["RFC822.HEADER", "FLAGS"])
-                        payload = fetched.get(uid, {})
-                        raw_hdr = payload.get(b"RFC822.HEADER") or payload.get("RFC822.HEADER")
-                        flags   = payload.get(b"FLAGS") or payload.get("FLAGS", ())
-                        if raw_hdr:
-                            msg       = email_lib.message_from_bytes(raw_hdr)
-                            subject   = _decode_subject(msg.get("Subject", ""))
-                            from_     = msg.get("From", "")
-                            date_     = msg.get("Date", "")
-                            is_unread = b"\\Seen" not in flags
-                            evt = {
-                                "account_id": acct_id, "email": email,
-                                "uid": uid, "subject": subject,
-                                "from": from_, "date": date_,
-                                "is_unread": is_unread,
-                                "ts": datetime.utcnow().isoformat(),
-                            }
-                            _append_event(evt)
-                            print(f"[idle] 📬 {email}: {subject[:60]}", flush=True)
-                        last_uid = max(last_uid, uid)
-                    except Exception as fe:
-                        print(f"[idle] fetch err {email} uid={uid}: {fe}", flush=True)
-
-        except Exception as e:
-            consecutive_errors += 1
-            err_str = str(e)[:160]
-            _set_status(acct_id, email, "error", err_str)
-            print(f"[idle] ❌ {email}: {err_str} (errors={consecutive_errors})", flush=True)
-
-            if consecutive_errors >= 5:
-                _set_status(acct_id, email, "disabled", "Too many network errors")
-                print(f"[idle] 停止监听 {email}", flush=True)
+        # sleep in 1-second increments so we can react to stop_event quickly
+        for _ in range(POLL_INTERVAL):
+            if _stop_event.is_set():
                 return
+            time.sleep(1)
 
-            wait = min(30 * (2 ** (consecutive_errors - 1)), 300)
-            print(f"[idle] {email} 等待 {wait}s 后重连...", flush=True)
-            for _ in range(wait):
-                if _stop_event.is_set():
-                    return
-                time.sleep(1)
+        try:
+            new_msgs = _fetch_new_messages(token, since_dt=last_received_dt, top=10)
 
-            if rt:
-                try:
-                    new_at, new_rt = _refresh_imap_token(rt)
-                    if new_at != token or new_rt != rt:
+            if new_msgs:
+                for m in new_msgs:
+                    subj    = m.get("subject", "")
+                    from_   = m.get("from", {}).get("emailAddress", {})
+                    sender  = from_.get("address", "")
+                    name    = from_.get("name", "")
+                    recv_dt = m.get("receivedDateTime", "")
+                    msg_id  = m.get("id", "")
+                    is_read = m.get("isRead", True)
+
+                    evt = {
+                        "account_id": acct_id,
+                        "email":      email,
+                        "msg_id":     msg_id,
+                        "subject":    subj,
+                        "from":       f"{name} <{sender}>" if name else sender,
+                        "date":       recv_dt,
+                        "is_unread":  not is_read,
+                        "ts":         datetime.utcnow().isoformat(),
+                    }
+                    _append_event(evt)
+                    print(f"[poll] 📬 {email}: {subj[:60]}", flush=True)
+
+                    if recv_dt and recv_dt > (last_received_dt or ""):
+                        last_received_dt = recv_dt
+
+            consecutive_errors = 0
+            _set_status(acct_id, email, "polling")
+
+        except RuntimeError as e:
+            err = str(e)
+            consecutive_errors += 1
+            print(f"[poll] ⚠ {email}: Graph error ({consecutive_errors}): {err}", flush=True)
+            _set_status(acct_id, email, "error", err)
+
+            if "401" in err or "InvalidAuthenticationToken" in err or "token" in err.lower():
+                # Token expired — try to refresh
+                if rt:
+                    try:
+                        new_at, new_rt = _refresh_graph_token(rt)
                         _update_db_token(acct_id, new_at, new_rt)
-                    token = new_at
-                    rt    = new_rt
-                    print(f"[idle] 🔄 {email}: 重连前刷新 token", flush=True)
-                except Exception:
-                    pass
+                        token = new_at
+                        rt    = new_rt
+                        print(f"[poll] 🔄 {email}: token 已重新刷新", flush=True)
+                        consecutive_errors = 0
+                    except RuntimeError as re2:
+                        print(f"[poll] ❌ {email}: token 刷新失败: {re2}", flush=True)
 
-        finally:
-            if client is not None:
-                try:
-                    client.logout()
-                except Exception:
-                    pass
+            if consecutive_errors >= 10:
+                print(f"[poll] 停止监听 {email} (10次连续错误)", flush=True)
+                _set_status(acct_id, email, "disabled", err)
+                return
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
     PID_FILE.write_text(str(os.getpid()))
-    print(f"[idle-daemon] PID={os.getpid()} 启动...", flush=True)
+    print(f"[poll-daemon] PID={os.getpid()} 启动...", flush=True)
 
     def _sig(sig, frame):
-        print(f"[idle-daemon] 收到信号 {sig}，停止...", flush=True)
+        print(f"[poll-daemon] 收到信号 {sig}，停止...", flush=True)
         _stop_event.set()
 
     signal.signal(signal.SIGTERM, _sig)
@@ -379,18 +294,18 @@ def main():
     try:
         accounts = _get_accounts()
     except Exception as e:
-        print(f"[idle-daemon] 读取账号失败: {e}", flush=True)
+        print(f"[poll-daemon] 读取账号失败: {e}", flush=True)
         sys.exit(1)
 
-    print(f"[idle-daemon] 加载 {len(accounts)} 个账号", flush=True)
+    print(f"[poll-daemon] 加载 {len(accounts)} 个账号", flush=True)
     for acc in accounts:
         t = threading.Thread(
-            target=_idle_worker, args=(acc,),
-            daemon=True, name=f"idle-{acc['email']}"
+            target=_poll_worker, args=(acc,),
+            daemon=True, name=f"poll-{acc['email']}"
         )
         t.start()
         _threads[acc["id"]] = t
-        time.sleep(0.15)
+        time.sleep(0.1)
 
     last_refresh = time.time()
     while not _stop_event.is_set():
@@ -402,18 +317,18 @@ def main():
                 existing = set(_threads.keys())
                 for acc in new_accs:
                     if acc["id"] not in existing:
-                        print(f"[idle-daemon] 新账号 {acc['email']} 加入监听", flush=True)
+                        print(f"[poll-daemon] 新账号 {acc['email']} 加入监听", flush=True)
                         t = threading.Thread(
-                            target=_idle_worker, args=(acc,),
-                            daemon=True, name=f"idle-{acc['email']}"
+                            target=_poll_worker, args=(acc,),
+                            daemon=True, name=f"poll-{acc['email']}"
                         )
                         t.start()
                         _threads[acc["id"]] = t
             except Exception as e:
-                print(f"[idle-daemon] 刷新账号失败: {e}", flush=True)
+                print(f"[poll-daemon] 刷新账号失败: {e}", flush=True)
 
     PID_FILE.unlink(missing_ok=True)
-    print("[idle-daemon] 已退出", flush=True)
+    print("[poll-daemon] 已退出", flush=True)
 
 
 if __name__ == "__main__":
