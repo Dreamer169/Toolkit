@@ -397,7 +397,7 @@ def main():
                     )
                     _ksub = _ilu2.module_from_spec(_sspec)
                     _sspec.loader.exec_module(_ksub)
-                    sub_result = _ksub.subscribe_pro(access_token_val, log=_sub_log)
+                    sub_result = _ksub.subscribe_pro(access_token_val, proxy=proxy, log=_sub_log)
                     if sub_result and sub_result.get("ok") and sub_result.get("payment_url"):
                         payment_url = sub_result["payment_url"]
                         print(f"[MAIN] ✅ 获得支付 URL，启动 chkr.cc BIN 自动支付...", flush=True)
