@@ -424,56 +424,13 @@ def main():
                 except Exception as _wup_exc:
                     print(f"[MAIN] 预热异常(继续): {_wup_exc}", flush=True)
 
-                # B. 立即发起订阅（趁 token 新鲜有效，不等 24h）
-                print("[MAIN] 立即发起 Pro 订阅（token 刚拿到，此时有效）...", flush=True)
-                try:
-                    import importlib.util as _ilu2, os as _os2
-                    _sspec = _ilu2.spec_from_file_location(
-                        "kiro_subscribe",
-                        "/data/Toolkit/artifacts/api-server/kiro_subscribe.py",
-                    )
-                    _ksub = _ilu2.module_from_spec(_sspec)
-                    _sspec.loader.exec_module(_ksub)
-                    sub_result = _ksub.subscribe_pro(access_token_val, proxy=proxy, log=_sub_log)
-                    if sub_result and sub_result.get("ok") and sub_result.get("payment_url"):
-                        payment_url = sub_result["payment_url"]
-                        print(f"[MAIN] ✅ 获得支付 URL，启动 chkr.cc BIN 自动支付...", flush=True)
-                        try:
-                            import importlib.util as _ilu3
-                            _spspec = _ilu3.spec_from_file_location(
-                                "stripe_pay",
-                                "/data/Toolkit/artifacts/api-server/stripe_pay.py",
-                            )
-                            _spay = _ilu3.module_from_spec(_spspec)
-                            _spspec.loader.exec_module(_spay)
-                            bins_raw = _os2.environ.get("CHKR_BINS", "")
-                            bins = [b.strip() for b in bins_raw.split(",") if b.strip()] or _spay.DEFAULT_BINS
-                            import asyncio as _asyncio
-                            pay_ok = _asyncio.run(_spay.auto_pay_chkr(
-                                payment_url, bins=bins, headless=True, log=_sub_log,
-                                proxy=proxy
-                            ))
-                            if isinstance(pay_ok, dict) and pay_ok.get("ok"):
-                                update_sub_status(kiro_id, "active")
-                                print("[MAIN] 🎉 订阅完成！sub_status → active", flush=True)
-                            else:
-                                update_sub_status(kiro_id, "pay_failed")
-                                print("[MAIN] ⚠️  Stripe 支付失败 → pay_failed", flush=True)
-                        except Exception as _pay_exc:
-                            print(f"[MAIN] ⚠️  stripe_pay 异常: {_pay_exc}", flush=True)
-                            update_sub_status(kiro_id, "pay_failed")
-                    elif sub_result and not sub_result.get("ok"):
-                        err2 = sub_result.get("error", "?")
-                        print(f"[MAIN] ⚠️  订阅失败: {err2}，入队 6h 后重试", flush=True)
-                        update_sub_status(kiro_id, "pending", retry_hours=6)
-                    else:
-                        print("[MAIN] ⚠️  订阅返回 None（403/token 问题），入队 6h 后重试", flush=True)
-                        update_sub_status(kiro_id, "pending", retry_hours=6)
-                except Exception as _sub_exc2:
-                    print(f"[MAIN] ⚠️  订阅流程异常: {_sub_exc2}", flush=True)
-                    update_sub_status(kiro_id, "pending", retry_hours=6)
+                # 注册后入队等待 1h 再订阅 — 直接订阅触发 Kiro 403 安全锁定
+                print("[MAIN] 注册成功，1h 后首次订阅（避免 Kiro 立刻锁号）...", flush=True)
+                update_sub_status(kiro_id, "pending", retry_hours=1)
+                sys.exit(0)
             else:
-                print("[MAIN] 无 accessToken，跳过预热/入队", flush=True)
+                print("[MAIN] 无 accessToken，入队 1h 后重试...", flush=True)
+                update_sub_status(kiro_id, "pending", retry_hours=1)
         except Exception as _sub_exc:
             print(f"[MAIN] 预热/入队异常: {_sub_exc}", flush=True)
 

@@ -63,7 +63,8 @@ def pending_accounts() -> list[dict]:
     conn = _db()
     cur  = conn.cursor()
     cur.execute("""
-        SELECT id, email, token, notes, sub_status, proxy_formatted
+        SELECT id, email, token, notes, sub_status, proxy_formatted,
+               updated_at, password
         FROM   accounts
         WHERE  platform = 'kiro'
           AND  sub_status IN ('pending', 'suspended')
@@ -75,7 +76,7 @@ def pending_accounts() -> list[dict]:
     cur.close(); conn.close()
     result = []
     for row in rows:
-        acc_id, email, access_token, notes_raw, sub_status, proxy_fmt = row
+        acc_id, email, access_token, notes_raw, sub_status, proxy_fmt, updated_at, password = row
         try:
             notes = json.loads(notes_raw or "{}")
         except Exception:
@@ -87,6 +88,8 @@ def pending_accounts() -> list[dict]:
             "profile_arn":  notes.get("profileArn", ""),
             "sub_status":   sub_status,
             "proxy":        proxy_fmt or "",   # 账号注册时使用的代理，用于 IP 一致性
+            "updated_at":   updated_at,
+            "password":     password or "",
         })
     return result
 
@@ -143,6 +146,45 @@ def process_account(acc: dict, ksub, kwarmup) -> str:
         _log(f"  ❌ 无 access_token，标记 failed", "warn")
         _update_status(acc_id, "failed")
         return "failed"
+
+    # Token 年龄检查：accessToken 8h 后过期，提前用 kiro_relogin 刷新
+    from datetime import datetime as _dt
+    token_age_h = 0
+    if acc.get("updated_at"):
+        try:
+            token_age_h = (_dt.now() - acc["updated_at"].replace(tzinfo=None)).total_seconds() / 3600
+        except Exception:
+            token_age_h = 9  # 保守估计：假设已过期
+    if token_age_h > 7:
+        if acc.get("password"):
+            _log(f"  ⚠ token 已 {token_age_h:.1f}h（接近/超过 8h 过期），尝试 relogin...", "warn")
+            try:
+                import importlib.util as _ilu_rl
+                _rl_spec = _ilu_rl.spec_from_file_location("kiro_relogin", f"{_API_DIR}/kiro_relogin.py")
+                _rl_mod = _ilu_rl.module_from_spec(_rl_spec)
+                _rl_spec.loader.exec_module(_rl_mod)
+                import psycopg2 as _pg
+                _rl_conn = _pg.connect(_DB_URL)
+                rows = _rl_mod.get_accounts(_rl_conn, account_id=acc_id)
+                _rl_conn.close()
+                if rows:
+                    # row = (id, email, password, sub_status, token, refresh_token, ol_rt)
+                    row = rows[0]
+                    ok, rr = _rl_mod.run_relogin(
+                        row[0], row[1], row[2], ol_rt=row[6]
+                    )
+                    if ok and rr.get("access_token"):
+                        access_token = rr["access_token"]
+                        acc["access_token"] = access_token
+                        _log(f"  ✅ relogin 成功，token 刷新", "ok")
+                    else:
+                        _log(f"  ❌ relogin 失败: {rr.get('error', '?')}，继续用旧 token", "warn")
+                else:
+                    _log(f"  ❌ get_accounts 返回空，无法 relogin", "warn")
+            except Exception as _rl_exc:
+                _log(f"  ⚠ relogin 异常: {_rl_exc}", "warn")
+        else:
+            _log(f"  ⚠ token 已 {token_age_h:.1f}h 但无密码，无法 relogin", "warn")
 
     # pending = 首次订阅；suspended = 重试，先预热
     if prev_status == "suspended":
