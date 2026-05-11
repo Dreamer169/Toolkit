@@ -93,12 +93,16 @@ def gen_cards_from_bin(bin_prefix: str, count: int = CHKR_MAX) -> list:
 
 
 # ── chkr.cc 卡检测 ─────────────────────────────────────────────────────────
-def check_card_chkr(card_str: str, log=print) -> dict:
+def check_card_chkr(card_str: str, log=print, proxy_port: int = 0) -> dict:
     """
     通过 chkr.cc API 检测单张卡。
     card_str: "CARDNUM|MM|YYYY|CVV"
     返回: {"code": 1=live/0=die/2=unknown/-1=error, "status": "...", "message": "..."}
     """
+    proxies = None
+    if proxy_port:
+        _p = f"socks5://127.0.0.1:{proxy_port}"
+        proxies = {"http": _p, "https": _p}
     try:
         resp = requests.post(
             CHKR_API,
@@ -110,10 +114,11 @@ def check_card_chkr(card_str: str, log=print) -> dict:
                 "Origin":       "https://chkr.cc",
                 "Referer":      "https://chkr.cc/",
             },
+            proxies=proxies,
         )
         if resp.status_code == 429:
-            log("[chkr] 限速 (429)，等待 20s...", "warn")
-            time.sleep(20)
+            log(f"[chkr] 限速 (429) proxy={proxy_port or 'direct'}，等待 8s...", "warn")
+            time.sleep(8)
             return {"code": -1, "status": "rate_limited"}
         if resp.status_code != 200:
             return {"code": -1, "status": f"http_{resp.status_code}"}
@@ -129,13 +134,17 @@ def find_live_card(bins: list, max_per_bin: int = CHKR_MAX,
     返回 "CARDNUM|MM|YYYY|CVV" 或 None。
     """
     log(f"[chkr] 开始查找 Live 卡，共 {len(bins)} 个 BIN，每个最多检测 {max_per_bin} 张", "info")
+    _proxy_cycle = list(CHKR_PROXY_PORTS) or [0]
+    _proxy_idx = 0
     for bin6 in bins:
         log(f"[chkr] 测试 BIN {bin6} ...", "info")
         cards = gen_cards_from_bin(bin6, count=max_per_bin)
         for i, card_str in enumerate(cards):
             preview = card_str[:10] + "xxxxxx|" + "|".join(card_str.split("|")[1:])
             log(f"[chkr] [{i+1}/{len(cards)}] {preview}", "dbg")
-            result  = check_card_chkr(card_str, log=log)
+            _port = _proxy_cycle[_proxy_idx % len(_proxy_cycle)]
+            _proxy_idx += 1
+            result  = check_card_chkr(card_str, log=log, proxy_port=_port)
             code    = result.get("code", -1)
             msg     = result.get("message", "")
             if code == 1:
