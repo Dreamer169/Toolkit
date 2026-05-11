@@ -383,7 +383,7 @@ def main():
                 # A. 预热：模拟 Kiro IDE 首次启动，让账号在 AWS 侧建立使用记录
                 print("[MAIN] 账号预热中 (模拟 IDE 首次启动)...", flush=True)
                 try:
-                    _kwup.warmup(access_token_val, log=_sub_log)
+                    _kwup.warmup(access_token_val, proxy=proxy, log=_sub_log)
                 except Exception as _wup_exc:
                     print(f"[MAIN] 预热异常(继续): {_wup_exc}", flush=True)
 
