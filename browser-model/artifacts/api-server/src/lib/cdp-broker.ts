@@ -284,7 +284,7 @@ const STEALTH_INIT = `
   // 给每帧像素加 ±1 微噪音（per-session 固定种子），既能破坏哈希一致性，
   // 又不影响视觉。注意必须 in-place 改 ImageData，因为 toDataURL 内部直读。
   try {
-    const seed = (Math.random() * 0xffffffff) >>> 0;
+    const seed = (typeof window.__bmFpSeed === 'number' && window.__bmFpSeed) ? window.__bmFpSeed : ((Math.random() * 0xffffffff) >>> 0);
     let s = seed || 1;
     const rng = () => { s = (s * 1664525 + 1013904223) >>> 0; return s; };
     const noisify = (canvas) => {
@@ -340,10 +340,13 @@ const STEALTH_INIT = `
 
   // === AudioContext 指纹防护 ===
   // CreepJS 用 OfflineAudioContext 渲染正弦波 → getChannelData 哈希。
-  // 给每个采样加 ±1e-7 噪声，破坏哈希但听不出来。
+  // 给每个采样加 ±1e-7 噪声；用与 Canvas 相同的 LCG 种子确保同一 session 一致。
   try {
+    const _aSeed = (typeof window.__bmFpSeed === 'number' && window.__bmFpSeed) ? window.__bmFpSeed : ((Math.random() * 0xffffffff) >>> 0);
+    let _aS = (_aSeed ^ 0xdeadbeef) >>> 0 || 1;
+    const _aRng = () => { _aS = (_aS * 1664525 + 1013904223) >>> 0; return _aS; };
     const arrNoise = (arr) => {
-      for (let i = 0; i < arr.length; i++) arr[i] = arr[i] + (Math.random() - 0.5) * 1e-7;
+      for (let i = 0; i < arr.length; i++) arr[i] = arr[i] + ((_aRng() / 0x100000000) - 0.5) * 1e-7;
       return arr;
     };
     if (typeof AnalyserNode !== 'undefined') {
@@ -367,9 +370,12 @@ const STEALTH_INIT = `
   } catch (_) {}
 
   // === ClientRects 指纹防护 ===
-  // 子像素布局测量在不同 GPU/字体 hinting 下不一样 → 给宽度加纳米级噪声
+  // 子像素布局测量在不同 GPU/字体 hinting 下不一样 → 给宽度加纳米级噪声（seeded）
   try {
-    const noise = () => (Math.random() - 0.5) * 1e-4;
+    const _rSeed = (typeof window.__bmFpSeed === 'number' && window.__bmFpSeed) ? window.__bmFpSeed : ((Math.random() * 0xffffffff) >>> 0);
+    let _rS = (_rSeed ^ 0xc0ffee) >>> 0 || 1;
+    const _rRng = () => { _rS = (_rS * 1664525 + 1013904223) >>> 0; return _rS; };
+    const noise = () => ((_rRng() / 0x100000000) - 0.5) * 1e-4;
     const wrapRect = (r) => {
       try {
         Object.defineProperty(r, 'x',     { value: r.x     + noise(), configurable: true });
@@ -828,8 +834,14 @@ export class CdpSession {
   private currentUrl = "about:blank";
   private viewport = { w: 1280, h: 800 };
   private lastStatus = 0;
+  private sessionId: string | null = null;
+  private fpSeed: number = 0;
 
-  constructor(private ws: WebSocket) {}
+  constructor(private ws: WebSocket, sessionId?: string) {
+    this.sessionId = sessionId || null;
+    // per-session fixed seed — stable across page reloads within same WS connection
+    this.fpSeed = ((Math.random() * 0xffffffff) >>> 0) || 1;
+  }
 
   send(obj: Record<string, unknown>) {
     if (this.ws.readyState === 1) {
@@ -840,6 +852,17 @@ export class CdpSession {
   async start(opts: SessionOpts) {
     const browser = await getBrowser();
     this.viewport = { w: opts.width, h: opts.height };
+
+    // ── Session persistence: load saved Cookie/Storage from disk ──────────
+    let _storageState: import("playwright").BrowserContextOptions["storageState"] | undefined;
+    if (this.sessionId) {
+      try {
+        const { readFile } = await import("node:fs/promises");
+        const raw = await readFile(`/root/browser-sessions/${this.sessionId}.json`, "utf-8");
+        _storageState = JSON.parse(raw) as typeof _storageState;
+        logger.info({ sessionId: this.sessionId }, "[cdp-broker] loaded session state from disk");
+      } catch { /* first connection or file missing — normal */ }
+    }
     // UA 必须 (a) Linux 平台 (b) Chrome 145（playwright 1.59 / chromium-1208 实际版本）
     // 否则 sec-ch-ua 客户端提示和 UA 不一致 → 现代反爬 (Cloudflare BM, Akamai BMP) 立刻识破
     const ua = opts.userAgent || (
@@ -880,7 +903,10 @@ export class CdpSession {
       // 否则反爬看到 timezone=LA 但 geolocation=null 立马起疑
       geolocation: { latitude: 37.7749, longitude: -122.4194, accuracy: 50 },
       permissions: ["geolocation", "clipboard-read", "clipboard-write", "notifications"],
+      ...((_storageState !== undefined) ? { storageState: _storageState } : {}),
     });
+    // inject per-session fingerprint seed BEFORE stealth script so Canvas/Audio RNG is stable
+    await this.ctx.addInitScript(`window.__bmFpSeed = ${this.fpSeed};`);
     await this.ctx.addInitScript({ content: STEALTH_INIT });
     // === 服务端拦截 ServiceWorker 主脚本: prepend stealth ===
     // SW spec 禁止 blob:/data: URL, 同源 Blob hook 必失败. 必须在 HTTP 响应层注入.
@@ -934,11 +960,18 @@ export class CdpSession {
       this.send({ type: "dialog", kind: dialog.type(), message: dialog.message() });
       dialog.dismiss().catch(() => {});
     });
-    // window.open() 弹窗页面不会画到当前 canvas —— 把它的 URL 拿出来在主页面跳转，
-    //   行为类似按住 Ctrl 点链接的反向：把"新窗口"重定向回当前 tab。
+    // window.open() 弹窗处理：
+    //   OAuth/SSO 弹窗（URL 含 oauth/auth/login/signin/callback/authorize）放行，
+    //   通知前端有 popup 打开；其余弹窗重定向回当前 tab（原行为）。
     this.ctx.on("page", (p) => {
       if (p === this.page) return;
       const url = p.url();
+      const isAuthPopup = url && /oauth|\/auth\/|\/login|\/signin|callback|\/authorize/i.test(url);
+      if (isAuthPopup) {
+        this.send({ type: "popup", url });
+        p.on("close", () => this.send({ type: "popup_closed", url }));
+        return;
+      }
       p.close().catch(() => {});
       if (url && url !== "about:blank") {
         this.page?.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 }).catch(() => {});
@@ -1096,6 +1129,19 @@ export class CdpSession {
   async close() {
     if (this.closed) return;
     this.closed = true;
+    // ── Session persistence: save Cookie/Storage to disk ──────────────────
+    if (this.sessionId && this.ctx) {
+      try {
+        const state = await this.ctx.storageState();
+        const { mkdir, writeFile } = await import("node:fs/promises");
+        const dir = "/root/browser-sessions";
+        await mkdir(dir, { recursive: true });
+        await writeFile(`${dir}/${this.sessionId}.json`, JSON.stringify(state));
+        logger.info({ sessionId: this.sessionId }, "[cdp-broker] session state saved");
+      } catch (e) {
+        logger.warn({ err: String(e), sessionId: this.sessionId }, "[cdp-broker] save session state failed");
+      }
+    }
     try { await this.cdp?.send("Page.stopScreencast"); } catch {}
     try { await this.cdp?.detach(); } catch {}
     try { await this.page?.close({ runBeforeUnload: false }); } catch {}
