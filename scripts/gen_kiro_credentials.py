@@ -55,8 +55,7 @@ def fetch_kiro_accounts():
     cur.execute("""
         SELECT id, email, token, proxy_formatted,
                refresh_token,
-               notes::json->>'clientId'    AS client_id,
-               notes::json->>'clientSecret' AS client_secret
+               notes
         FROM   accounts
         WHERE  platform = 'kiro'
           AND  status   = 'active'
@@ -82,7 +81,14 @@ def main():
     next_id   = max_existing_id + 1
 
     for row in rows:
-        acc_id, email, token, proxy_fmt, db_refresh_token, client_id, client_secret = row
+        acc_id, email, token, proxy_fmt, db_refresh_token, notes_raw = row
+        # Safely parse notes JSON
+        try:
+            notes_json = json.loads(notes_raw or '{}') if notes_raw and notes_raw.strip().startswith('{') else {}
+        except Exception:
+            notes_json = {}
+        client_id     = notes_json.get('clientId', '')
+        client_secret = notes_json.get('clientSecret', '')
         if email in manual_emails:
             print(f"[gen] skip (already in manual): {email}")
             continue
