@@ -176,6 +176,7 @@ export default function MailCenter() {
   const [moveMenuOpen, setMoveMenuOpen] = useState(false);
 
   const batchPollRef                      = useRef<ReturnType<typeof setInterval> | null>(null);
+  const retokenPollRef                    = useRef<ReturnType<typeof setInterval> | null>(null);
   const [liveVerify, setLiveVerify]         = useState<{ enabled: boolean; lastRun: string | null; lastStats: { total: number; clicked: number; skipped: number; failed: number } } | null>(null);
   const searchRef = useRef(search);
   useEffect(() => { searchRef.current = search; }, [search]);
@@ -425,10 +426,10 @@ export default function MailCenter() {
     }).then(r => r.json()).catch(() => ({ success: false, error: '网络错误' }));
     if (!d.success) { setRetokenBusy(false); alert(d.error ?? '启动失败'); return; }
     setRetokenJobId(d.jobId);
-    const iv = setInterval(async () => {
+    retokenPollRef.current = setInterval(async () => {
       const st = await fetch(`${API}/tools/outlook/auto-retoken/${d.jobId}`).then(r => r.json()).catch(() => ({}));
       if (st.logs) setRetokenLog(st.logs.map((l: {message: string}) => l.message));
-      if (st.status === 'done') { clearInterval(iv); setRetokenBusy(false); await loadAccounts(); }
+      if (st.status === 'done') { if (retokenPollRef.current) { clearInterval(retokenPollRef.current); retokenPollRef.current = null; } setRetokenBusy(false); await loadAccounts(); }
     }, 3000);
   };
 
@@ -556,10 +557,13 @@ export default function MailCenter() {
   };
 
   useEffect(() => () => {
-    if (pollRef.current)        clearInterval(pollRef.current);
-    if (batchPollRef.current)   clearInterval(batchPollRef.current);
-    if (autoRefreshRef.current) clearInterval(autoRefreshRef.current);
-    if (cdTimerRef.current)     clearInterval(cdTimerRef.current);
+    if (pollRef.current)             clearInterval(pollRef.current);
+    if (batchPollRef.current)        clearInterval(batchPollRef.current);
+    if (autoRefreshRef.current)      clearInterval(autoRefreshRef.current);
+    if (cdTimerRef.current)          clearInterval(cdTimerRef.current);
+    if (retokenPollRef.current)      clearInterval(retokenPollRef.current);
+    if (autoCompleteLogRef.current)  clearInterval(autoCompleteLogRef.current);
+    if (reauthManualLogRef.current)  clearInterval(reauthManualLogRef.current);
   }, []);
 
   // ── 批量设备码 OAuth 授权 ─────────────────────────────────────────────────
@@ -614,7 +618,7 @@ export default function MailCenter() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         accountId: selAccount.id,
-        to: composeTo.trim(),
+        to: composeTo.trim().split(",").map(s => s.trim()).filter(Boolean),
         subject: composeSubject.trim(),
         body: composeBody,
         bodyType: "Text",
