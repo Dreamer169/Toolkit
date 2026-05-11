@@ -155,6 +155,7 @@ def process_account(acc: dict, ksub, kwarmup) -> str:
             token_age_h = (_dt.now() - acc["updated_at"].replace(tzinfo=None)).total_seconds() / 3600
         except Exception:
             token_age_h = 9  # 保守估计：假设已过期
+    _token_refreshed = False  # track whether relogin gave us a fresh token
     if token_age_h > 7:
         if acc.get("password"):
             _log(f"  ⚠ token 已 {token_age_h:.1f}h（接近/超过 8h 过期），尝试 relogin...", "warn")
@@ -177,15 +178,25 @@ def process_account(acc: dict, ksub, kwarmup) -> str:
                     if ok and rr.get("access_token"):
                         access_token = rr["access_token"]
                         acc["access_token"] = access_token
+                        _token_refreshed = True
                         _log(f"  ✅ relogin 成功，token 刷新", "ok")
                     else:
-                        _log(f"  ❌ relogin 失败: {rr.get('error', '?')}，继续用旧 token", "warn")
+                        err_hint = (rr or {}).get("error", "unknown")
+                        _log(f"  ❌ relogin 失败: {err_hint} — token 已过期且无法刷新，永久标记 failed", "warn")
+                        _update_status(acc_id, "failed", extra_notes={"subError": "token_expired_relogin_failed"})
+                        return "failed"
                 else:
-                    _log(f"  ❌ get_accounts 返回空，无法 relogin", "warn")
+                    _log(f"  ❌ get_accounts 返回空，无法 relogin — 永久标记 failed", "warn")
+                    _update_status(acc_id, "failed", extra_notes={"subError": "token_expired_no_account_row"})
+                    return "failed"
             except Exception as _rl_exc:
-                _log(f"  ⚠ relogin 异常: {_rl_exc}", "warn")
+                _log(f"  ⚠ relogin 异常: {_rl_exc} — 短暂重试 2h", "warn")
+                _update_status(acc_id, "suspended", retry_after_hours=2)
+                return "suspended"
         else:
-            _log(f"  ⚠ token 已 {token_age_h:.1f}h 但无密码，无法 relogin", "warn")
+            _log(f"  ⚠ token 已 {token_age_h:.1f}h 但无密码，永久标记 failed", "warn")
+            _update_status(acc_id, "failed", extra_notes={"subError": "token_expired_no_password"})
+            return "failed"
 
     # pending = 首次订阅；suspended = 重试，先预热
     if prev_status == "suspended":
@@ -209,13 +220,13 @@ def process_account(acc: dict, ksub, kwarmup) -> str:
             log=_sub_log,
         )
     except Exception as e:
-        _log(f"  ❌ subscribe_pro 异常: {e}", "error")
-        _update_status(acc_id, "suspended", retry_after_hours=24)
+        _log(f"  ❌ subscribe_pro 异常: {e}，2h 后重试", "error")
+        _update_status(acc_id, "suspended", retry_after_hours=2)
         return "suspended"
 
     if not result:
-        _log("  ❌ 返回 None，24h 后重试", "error")
-        _update_status(acc_id, "suspended", retry_after_hours=24)
+        _log("  ❌ 返回 None，2h 后重试", "error")
+        _update_status(acc_id, "suspended", retry_after_hours=2)
         return "suspended"
 
     if result.get("ok") and result.get("payment_url"):
