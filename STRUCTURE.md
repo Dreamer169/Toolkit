@@ -312,13 +312,25 @@ python3 deploy_model.py   # SCP 到远程 + pm2 restart captcha-api
 
 ```bash
 cd /root/Toolkit/browser-model/artifacts/api-server
-# 3并发 1轮
-CONCURRENCY=3 node test_load_concurrent.mjs
-# 5并发 2轮（评估峰值）
-CONCURRENCY=5 ROUNDS=2 node test_load_concurrent.mjs
+# 2并发（推荐最大值）
+CONCURRENCY=2 ROUNDS=1 node test_load_concurrent.mjs
+# 单并发（稳定模式）
+CONCURRENCY=1 ROUNDS=3 node test_load_concurrent.mjs
 ```
 
+**实测结论（2026-05-11，CONCURRENCY=2）**：
+- 基准：Chromium 47进程 / 2.1GB，load avg 38+（服务器本底负载已高）
+- 压测后：Chromium 60进程 / 4.0GB，load avg 45+
+- IPHey 在高负载下 60s 超时 → 页面无法在限时内渲染
+- **结论：该VPS不适合 >1 并发 browser-model。生产建议 CONCURRENCY=1。**
+
 **评估指标**：
-- Chromium 进程内存 < 2GB → 正常
+- Chromium 内存 < 2GB → 正常；> 3GB → 危险
 - Load avg < CPU核数 → 正常
 - 通过率 ≥ 2/3任务/worker → 可接受
+
+### incolumitas.com 特殊说明
+
+incolumitas behavioral score 需要加载 `abs.incolumitas.com/lib.js`（独立子域名）。
+若代理无法路由该子域名，评分 JS 不执行，结果永远为 "..."。
+测试脚本会自动检测此情况并报 **SKIP**（不计入失败，不是指纹问题）。

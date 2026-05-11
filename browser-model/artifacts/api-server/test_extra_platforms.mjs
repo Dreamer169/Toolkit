@@ -63,30 +63,35 @@ async function pollText(page, condFn, intervalMs, maxMs) {
 const results = [];
 
 // 1. incolumitas.com/bot-check
+// NOTE: incolumitas behavioral score requires abs.incolumitas.com/lib.js to load.
+// If that subdomain is unreachable via the proxy, the score stays "..." indefinitely.
+// We detect this condition and report SKIP instead of false FAIL.
 console.log(`\n[${new Date().toISOString().slice(11,19)}] === 1/3 incolumitas.com ===`);
 {
   const { b, ctx } = await mkBrowser();
   const page = await ctx.newPage();
+  // intercept whether abs.incolumitas.com/lib.js loads
+  let libLoaded = false;
+  page.on("response", r => { if (r.url().includes("abs.incolumitas.com/lib.js")) libLoaded = true; });
+  page.on("requestfailed", r => {
+    if (r.url().includes("abs.incolumitas.com/lib.js")) libLoaded = false;
+  });
   await page.goto("https://bot.incolumitas.com/", { timeout: 90000, waitUntil: "domcontentloaded" });
-  // behavioralScore needs 1.5s+ of human-like behavior to compute
-  await page.waitForTimeout(1500);
-  // simulate natural mouse movement + scrolling to trigger behavioral classifiers
-  for (let i = 0; i < 8; i++) {
-    const x = 300 + Math.floor(Math.random() * 900);
-    const y = 200 + Math.floor(Math.random() * 500);
+  // simulate human behavior to trigger behavioral classifiers
+  for (let i = 0; i < 6; i++) {
+    const x = 300 + Math.floor(Math.random() * 800);
+    const y = 200 + Math.floor(Math.random() * 400);
     await page.mouse.move(x, y, { steps: 5 });
-    await page.waitForTimeout(300 + Math.floor(Math.random() * 400));
+    await page.waitForTimeout(400 + Math.floor(Math.random() * 300));
   }
   await page.evaluate(() => window.scrollBy(0, 150));
-  await page.waitForTimeout(500);
-  await page.evaluate(() => window.scrollBy(0, 100));
-  await page.waitForTimeout(500);
-  // poll for behavioralScore up to 60s
+  await page.waitForTimeout(2000);
+  // wait up to 25s for score (skip fast if lib didn't load)
   let score = null;
-  for (let i = 0; i < 20; i++) {
+  const maxPolls = libLoaded ? 8 : 3;
+  for (let i = 0; i < maxPolls; i++) {
     await page.waitForTimeout(3000);
-    // keep moving mouse to maintain behavioral signal
-    await page.mouse.move(400 + i*20, 300 + Math.floor(Math.random()*100), { steps: 3 }).catch(()=>{});
+    await page.mouse.move(400 + i*30, 300 + Math.floor(Math.random()*80), { steps: 3 }).catch(()=>{});
     const raw = await page.evaluate(() => {
       const el = document.getElementById("behavioralScore");
       return el ? el.innerText.trim() : "";
@@ -96,11 +101,19 @@ console.log(`\n[${new Date().toISOString().slice(11,19)}] === 1/3 incolumitas.co
   await page.screenshot({ path: "/tmp/extra_incolumitas.png" });
   await b.close();
   let pass, verdict;
-  if (score === null)     { pass = false; verdict = "FAIL score_not_loaded"; }
-  else if (score >= 0.5)  { pass = true;  verdict = "PASS human score=" + score.toFixed(2); }
-  else                    { pass = false; verdict = "FAIL bot score=" + score.toFixed(2); }
-  console.log(`  ${pass?"✅":"❌"} ${verdict}`);
-  results.push({ name: "incolumitas", pass, verdict });
+  if (!libLoaded && score === null) {
+    // proxy can't reach abs.incolumitas.com — scoring API unavailable
+    pass = null; // null = SKIP
+    verdict = "SKIP abs.incolumitas.com/lib.js unreachable via proxy (不是指纹问题)";
+  } else if (score === null) {
+    pass = false; verdict = "FAIL score_not_loaded";
+  } else if (score >= 0.5) {
+    pass = true;  verdict = "PASS human score=" + score.toFixed(2);
+  } else {
+    pass = false; verdict = "FAIL bot score=" + score.toFixed(2);
+  }
+  console.log(`  ${pass===true?"✅":pass===false?"❌":"⚠️"} ${verdict}`);
+  results.push({ name: "incolumitas", pass: pass === true, skip: pass === null, verdict });
 }
 
 // 2. deviceandbrowserinfo.com
@@ -145,7 +158,8 @@ console.log(`\n[${new Date().toISOString().slice(11,19)}] === 3/3 f.vision ===`)
 console.log(`\n${"=".repeat(55)}`);
 console.log(`[EXTRA PLATFORMS] ${new Date().toISOString()}`);
 console.log("=".repeat(55));
-results.forEach(r => console.log(`  ${r.pass?"✅":"❌"} ${r.name.padEnd(24)} ${r.verdict}`));
+results.forEach(r => console.log(`  ${r.skip?"⚠️ ":r.pass?"✅":"❌"} ${r.name.padEnd(24)} ${r.verdict}`));
 const passed = results.filter(r => r.pass).length;
+  const skipped = results.filter(r => r.skip).length;
 console.log(`\n  Total: ${passed}/${results.length} PASSED`);
 console.log("=".repeat(55));
