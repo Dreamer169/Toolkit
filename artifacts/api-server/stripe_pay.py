@@ -64,16 +64,16 @@ def _get_chkr_session(proxy_port: int = 0):
 
 # 默认 BIN 列表 — 美国 Visa/Mastercard，Stripe $0 auth 成功率较高
 DEFAULT_BINS = [
-    "426684",   # Chase Visa Debit
-    "415487",   # Chase Visa Credit
-    "431940",   # Citi Visa
-    "454313",   # Bank of America Visa
-    "411777",   # Capital One Visa
-    "516782",   # Mastercard
-    "526918",   # Citi Mastercard
-    "542418",   # Capital One MC
-    "554360",   # USAA MC
-    "489509",   # Wells Fargo Visa
+    "489537",   # Visa US (high live-rate, chkr.cc verified)
+    "424631",   # Chase Bank USA Visa (US)
+    "461046",   # JPMorgan Chase Visa (US)
+    "402718",   # MetaBank Visa Debit (US)
+    "450875",   # Co-Operative Bank Visa (US)
+    "426684",   # Visa US
+    "411777",   # Capital One Visa (US)
+    "431940",   # Citi Visa (US)
+    "516782",   # Mastercard US
+    "554360",   # Mastercard (recognized, Compass)
 ]
 
 
@@ -121,8 +121,11 @@ def gen_cards_from_bin(bin_prefix: str, count: int = CHKR_MAX) -> list:
         if card in seen:
             continue
         seen.add(card)
-        month = random.randint(1, 12)
-        year  = random.randint(2026, 2029)
+        import datetime as _dt
+        _now = _dt.datetime.now()
+        year  = random.randint(_now.year, _now.year + 3)
+        min_month = _now.month if year == _now.year else 1
+        month = random.randint(min_month, 12)
         cvv   = f"{random.randint(100, 999)}"
         cards.append(f"{card}|{month:02d}|{year}|{cvv}")
     return cards
