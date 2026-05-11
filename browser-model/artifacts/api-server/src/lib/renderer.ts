@@ -1099,61 +1099,34 @@ const STEALTH_INIT_FULL = STEALTH_INIT + _WORKER_BOOT_SUFFIX;
 // patches as a SECOND addInitScript guarantees they run AFTER fingerprint-chromium init.
 const LATE_FIX_PATCHES = `(function(){
   try {
-    Object.defineProperty(Screen.prototype, "availHeight", {
-      get: function() { return window.innerHeight || 1040; },
-      configurable: true, enumerable: true,
-    });
-    Object.defineProperty(Screen.prototype, "availWidth", {
-      get: function() { return window.innerWidth || 1920; },
-      configurable: true, enumerable: true,
-    });
+    Object.defineProperty(Screen.prototype,"availHeight",{get:function(){return window.innerHeight||1040;},configurable:true,enumerable:true});
+    Object.defineProperty(Screen.prototype,"availWidth",{get:function(){return window.innerWidth||1920;},configurable:true,enumerable:true});
   } catch(_) {}
   try {
-    var _RN = window.Notification;
-    if (_RN) {
-      Object.defineProperty(_RN, "permission", {
-        get: function() { return "default"; },
-        configurable: true, enumerable: true,
-      });
-    }
+    var _RN=window.Notification;
+    if(_RN){Object.defineProperty(_RN,"permission",{get:function(){return"default";},configurable:true,enumerable:true});}
   } catch(_) {}
   try {
-    var _shareStub = async function share() {
-      return Promise.reject(new DOMException("Share canceled", "AbortError"));
-    };
-    Object.defineProperty(Navigator.prototype, "share", {
-      value: _shareStub, configurable: true, writable: true, enumerable: false,
-    });
-    Object.defineProperty(Navigator.prototype, "canShare", {
-      value: function canShare() { return true; },
-      configurable: true, writable: true, enumerable: false,
-    });
+    Object.defineProperty(Navigator.prototype,"share",{value:async function share(){return Promise.reject(new DOMException("Share canceled","AbortError"));},configurable:true,writable:true,enumerable:false});
+    Object.defineProperty(Navigator.prototype,"canShare",{value:function canShare(){return true;},configurable:true,writable:true,enumerable:false});
   } catch(_) {}
   try {
-    var _gCS = window.getComputedStyle;
-    var _gCSP = function getComputedStyle(el, ps) {
-      var r = _gCS.call(window, el, ps);
-      try {
-        var at = /ActiveText/i.test(el && el.getAttribute
-          ? (el.getAttribute("style") || "") : "");
-        if (at) return new Proxy(r, { get: function(t, p) {
-          if (p === "backgroundColor" || p === "color") return "rgb(0, 120, 212)";
-          if (p === "getPropertyValue") return function(prop) {
-            if (/^(background-color|color)$/i.test(prop)) return "rgb(0, 120, 212)";
-            return t.getPropertyValue(prop);
-          };
-          var v = t[p]; return typeof v === "function" ? v.bind(t) : v;
-        }});
-      } catch(_) {}
-      return r;
-    };
-    try {
-      Object.defineProperty(window, "getComputedStyle", {
-        value: _gCSP, writable: true, configurable: true,
-      });
-    } catch(_) { try { window.getComputedStyle = _gCSP; } catch(_2) {} }
+    var _gCS=window.getComputedStyle;
+    window.getComputedStyle=function getComputedStyle(el,ps){var r=_gCS.call(window,el,ps);try{var s=el&&el.getAttribute?(el.getAttribute("style")||""): "";if(/ActiveText/i.test(s)){return new Proxy(r,{get:function(t,p){if(p==="backgroundColor"||p==="color")return"rgb(0, 120, 212)";if(p==="getPropertyValue")return function(prop){if(/^(background-color|color)$/i.test(prop))return"rgb(0, 120, 212)";return t.getPropertyValue(prop);};var v=t[p];return typeof v==="function"?v.bind(t):v;}});}}catch(_){}return r;};
+    Object.defineProperty(window,"getComputedStyle",{value:window.getComputedStyle,writable:true,configurable:true});
   } catch(_) {}
-})();`;
+  try {
+    var _origMM=window.matchMedia;
+    window.matchMedia=function matchMedia(query){var q=String(query||"");if(q.indexOf("prefers-color-scheme")!==-1){var isDark=q.indexOf("dark")!==-1;return{matches:isDark,media:q,onchange:null,addListener:function(){},removeListener:function(){},addEventListener:function(){},removeEventListener:function(){},dispatchEvent:function(){return false;}};}return _origMM.call(window,q);};
+  } catch(_) {}
+  try { if(!("ContentIndex" in window)){ window.ContentIndex=function ContentIndex(){}; } } catch(_) {}
+  try { if(!("ContactsManager" in window)){ window.ContactsManager=function ContactsManager(){}; } } catch(_) {}
+  try {
+    var _conn=navigator.connection;
+    if(_conn&&!("downlinkMax" in _conn)){try{Object.defineProperty(Object.getPrototypeOf(_conn),"downlinkMax",{get:function(){return Infinity;},configurable:true,enumerable:true});}catch(_2){try{Object.defineProperty(_conn,"downlinkMax",{get:function(){return Infinity;},configurable:true,enumerable:true});}catch(_3){}}}
+    else if(!_conn){try{var _NI=window.NetworkInformation;if(_NI&&_NI.prototype&&!("downlinkMax" in _NI.prototype)){Object.defineProperty(_NI.prototype,"downlinkMax",{get:function(){return Infinity;},configurable:true,enumerable:true});}}catch(_2){}}
+  } catch(_) {}
+})()`;
 
 async function getBrowser(): Promise<Browser> {
   // If browser exists but is no longer connected (process died), reset.
@@ -1276,7 +1249,7 @@ async function newFreshContext(): Promise<BrowserContext> {
     hasTouch: false,
     locale: "en-US",
     timezoneId: BROWSER_TIMEZONE,
-    colorScheme: "light",
+    colorScheme: "dark",
     ignoreHTTPSErrors: true,
     extraHTTPHeaders: {
       "Accept-Language": "en-US,en;q=0.9",
@@ -1354,7 +1327,7 @@ async function getStickyContext(hostname: string): Promise<BrowserContext> {
     hasTouch: false,
     locale: "en-US",
     timezoneId: BROWSER_TIMEZONE,
-    colorScheme: "light",
+    colorScheme: "dark",
     ignoreHTTPSErrors: true,
     extraHTTPHeaders: {
       "Accept-Language": "en-US,en;q=0.9",
