@@ -1107,8 +1107,10 @@ const LATE_FIX_PATCHES = `(function(){
     if(_RN){Object.defineProperty(_RN,"permission",{get:function(){return"default";},configurable:true,enumerable:true});}
   } catch(_) {}
   try {
-    Object.defineProperty(Navigator.prototype,"share",{value:async function share(){return Promise.reject(new DOMException("Share canceled","AbortError"));},configurable:true,writable:true,enumerable:false});
-    Object.defineProperty(Navigator.prototype,"canShare",{value:function canShare(){return true;},configurable:true,writable:true,enumerable:false});
+    var _sF=async function share(d){return Promise.reject(new DOMException("Share canceled","AbortError"));};var _sB=_sF.bind(null);try{Object.defineProperty(_sB,"name",{value:"share"});}catch(_e){}
+    Object.defineProperty(Navigator.prototype,"share",{value:_sB,configurable:true,writable:true,enumerable:false});
+    var _cF=function canShare(d){return true;};var _cB=_cF.bind(null);try{Object.defineProperty(_cB,"name",{value:"canShare"});}catch(_e){}
+    Object.defineProperty(Navigator.prototype,"canShare",{value:_cB,configurable:true,writable:true,enumerable:false});
   } catch(_) {}
   try {
     var _gCS=window.getComputedStyle;
