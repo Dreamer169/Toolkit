@@ -1059,6 +1059,28 @@ const WORKER_STEALTH_PATCH = `(function() {
       };
     }
   } catch(_) {}
+  
+  // === ContentIndex stub (noContentIndex) ===
+  try { if(!("ContentIndex" in self)){ self.ContentIndex = function ContentIndex(){}; } } catch(_) {}
+
+  // === ContactsManager stub (noContactsManager) ===
+  try { if(!("ContactsManager" in self)){ self.ContactsManager = function ContactsManager(){}; } } catch(_) {}
+
+  // === NetworkInformation.downlinkMax stub (noDownlinkMax) ===
+  try {
+    var _wConn = self.navigator && self.navigator.connection;
+    if (_wConn && !("downlinkMax" in _wConn)) {
+      try {
+        Object.defineProperty(Object.getPrototypeOf(_wConn), "downlinkMax", {
+          get: function() { return Infinity; }, configurable: true, enumerable: true,
+        });
+      } catch(_2) {
+        Object.defineProperty(_wConn, "downlinkMax", {
+          get: function() { return Infinity; }, configurable: true, enumerable: true,
+        });
+      }
+    }
+  } catch(_) {}
 })();`;
 
 // Worker constructor bootstrap (GeekezBrowser approach):
