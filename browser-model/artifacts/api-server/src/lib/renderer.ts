@@ -1368,6 +1368,134 @@ async function _dumpCaptcha(html: string, finalUrl: string, status: number, atte
 }
 
 
+
+// ── Human-behavior simulation layer ─────────────────────────────────────────
+// Datadome + similar ML-based detectors collect: mouse event count, scroll
+// events, time-on-page, event timing entropy, and interaction "naturalness".
+// This layer runs AFTER page load and BEFORE HTML extraction to seed those
+// signals with realistic values.
+
+// Domains that require behavioral warm-up (Datadome / DataDome-adjacent).
+// Extend this list as new protected sites are encountered.
+const _BEHAVIOR_SIM_HOSTS = [
+  /datadome\.co$/i,
+  /(^|\.)antoinelouis\.co$/i,
+  // add more Datadome-protected e-commerce/news domains here:
+  /(^|\.)foot\.fr$/i,
+  /(^|\.)lemonde\.fr$/i,
+  /(^|\.)leboncoin\.fr$/i,
+  /(^|\.)cdiscount\.com$/i,
+  /(^|\.)fnac\.com$/i,
+];
+
+function _needsBehaviorSim(hostname: string): boolean {
+  return _BEHAVIOR_SIM_HOSTS.some((re) => re.test(hostname));
+}
+
+// Cubic Bezier interpolation for mouse trajectories.
+// Returns N evenly-spaced points along the curve.
+function _bezierPoints(
+  x0: number, y0: number,
+  x1: number, y1: number,
+  x2: number, y2: number,
+  x3: number, y3: number,
+  steps: number
+): Array<[number, number]> {
+  const pts: Array<[number, number]> = [];
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const u = 1 - t;
+    const x = u*u*u*x0 + 3*u*u*t*x1 + 3*u*t*t*x2 + t*t*t*x3;
+    const y = u*u*u*y0 + 3*u*u*t*y1 + 3*u*t*t*y2 + t*t*t*y3;
+    pts.push([Math.round(x), Math.round(y)]);
+  }
+  return pts;
+}
+
+async function _behaviorSim(page: import("playwright").Page, budgetMs = 6000): Promise<void> {
+  const t0 = Date.now();
+  const elapsed = () => Date.now() - t0;
+  const ri = (a: number, b: number) => Math.floor(Math.random() * (b - a + 1)) + a;
+  const sleep = (ms: number) => page.waitForTimeout(ms).catch(() => {});
+
+  // 1) Inject JS-side mouse/scroll event counters so Datadome sees real DOM
+  //    events flowing (not just CDP synthetic events which some detectors flag).
+  await page.evaluate(() => {
+    const fire = (type: string, x: number, y: number) => {
+      try {
+        document.dispatchEvent(new MouseEvent(type, {
+          bubbles: true, cancelable: true, view: window,
+          clientX: x, clientY: y, screenX: x + 10, screenY: y + 80,
+          movementX: Math.round(Math.random() * 6 - 3),
+          movementY: Math.round(Math.random() * 6 - 3),
+        }));
+      } catch { /* ignore */ }
+    };
+    // seed initial mouse position near center
+    fire("mousemove", 800, 400);
+    fire("mouseover", 800, 400);
+  }).catch(() => {});
+
+  // 2) Bezier mouse movement sequences
+  let cx = ri(300, 1200), cy = ri(200, 700);
+  const moveCount = ri(3, 5);
+  for (let m = 0; m < moveCount && elapsed() < budgetMs - 1200; m++) {
+    const tx = ri(150, 1750), ty = ri(120, 900);
+    // control points with natural "overshoot" bias
+    const cp1x = cx + ri(-200, 200), cp1y = cy + ri(-150, 150);
+    const cp2x = tx + ri(-150, 150), cp2y = ty + ri(-100, 100);
+    const steps = ri(18, 35);
+    const pts = _bezierPoints(cx, cy, cp1x, cp1y, cp2x, cp2y, tx, ty, steps);
+    for (const [px, py] of pts) {
+      await page.mouse.move(px, py).catch(() => {});
+      // variable inter-step delay (fast in middle, slow at start/end)
+      await sleep(ri(8, 28));
+    }
+    // micro-jitter pause (human hand tremor)
+    for (let j = 0; j < ri(2, 4); j++) {
+      await page.mouse.move(tx + ri(-3, 3), ty + ri(-3, 3)).catch(() => {});
+      await sleep(ri(30, 80));
+    }
+    cx = tx; cy = ty;
+    await sleep(ri(180, 500));
+  }
+
+  if (elapsed() >= budgetMs - 800) return;
+
+  // 3) Realistic scroll with ease-in/ease-out
+  const scrollSections = ri(2, 4);
+  for (let s = 0; s < scrollSections && elapsed() < budgetMs - 600; s++) {
+    const totalDy = ri(200, 600) * (Math.random() < 0.85 ? 1 : -1);
+    const chunks = ri(6, 14);
+    for (let c = 0; c < chunks; c++) {
+      // ease curve: sin(π * c/chunks) * factor
+      const factor = Math.sin(Math.PI * c / chunks);
+      const dy = Math.round((totalDy / chunks) * (0.5 + factor * 0.8));
+      await page.evaluate((d: number) => window.scrollBy({ top: d, behavior: "instant" }), dy).catch(() => {});
+      await sleep(ri(35, 90));
+    }
+    await sleep(ri(400, 1100));
+    // occasional mouse move after scroll (simulates reading)
+    if (Math.random() < 0.6 && elapsed() < budgetMs - 800) {
+      await page.mouse.move(ri(200, 1600), ri(150, 850), { steps: ri(6, 12) }).catch(() => {});
+      await sleep(ri(200, 600));
+    }
+  }
+
+  if (elapsed() >= budgetMs - 400) return;
+
+  // 4) Tab-key focus navigation (signals keyboard presence to Datadome)
+  const tabPresses = ri(1, 3);
+  for (let t = 0; t < tabPresses && elapsed() < budgetMs - 300; t++) {
+    await page.keyboard.press("Tab").catch(() => {});
+    await sleep(ri(120, 350));
+  }
+
+  // 5) Final idle dwell (time-on-page signal)
+  const remainBudget = budgetMs - elapsed();
+  if (remainBudget > 200) await sleep(Math.min(remainBudget, 800));
+}
+
 export async function renderWithBrowser(
   url: string,
   timeoutMs = 30000,
@@ -1430,6 +1558,13 @@ export async function renderWithBrowser(
       }
     } catch {
       /* ignore */
+    }
+
+    // Behavioral warm-up for Datadome / ML-based detectors.
+    // Runs after page load to seed genuine mouse/scroll/keyboard signals.
+    if (_needsBehaviorSim(targetHost)) {
+      const _behaviorBudget = Math.max(0, timeoutMs - (Date.now() - (page as any)._t0 ?? 0) - 3000);
+      await _behaviorSim(page, Math.min(_behaviorBudget, 7000)).catch(() => {});
     }
 
     const html = await getPageContent(page);
