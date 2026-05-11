@@ -53,7 +53,10 @@ def fetch_kiro_accounts():
     conn = psycopg2.connect(DB_URL)
     cur  = conn.cursor()
     cur.execute("""
-        SELECT id, email, token, proxy_formatted
+        SELECT id, email, token, proxy_formatted,
+               refresh_token,
+               notes::json->>'clientId'    AS client_id,
+               notes::json->>'clientSecret' AS client_secret
         FROM   accounts
         WHERE  platform = 'kiro'
           AND  status   = 'active'
@@ -78,7 +81,8 @@ def main():
     new_creds = []
     next_id   = max_existing_id + 1
 
-    for acc_id, email, token, proxy_fmt in rows:
+    for row in rows:
+        acc_id, email, token, proxy_fmt, db_refresh_token, client_id, client_secret = row
         if email in manual_emails:
             print(f"[gen] skip (already in manual): {email}")
             continue
@@ -87,12 +91,16 @@ def main():
         country  = geo.get("country", "unknown")
         priority = geo_priority(proxy_fmt or "")
 
+        from datetime import datetime, timezone, timedelta
+        expires_in_8h = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Use real refreshToken from DB if available; else fall back to accessToken (social mode)
+        real_refresh = db_refresh_token if db_refresh_token and len(db_refresh_token) > 50 else token
         cred = {
             "id":           next_id,
             "email":        email,
             "accessToken":  token,
-            "refreshToken": token,      # Social: same token used for refresh via desktop endpoint
-            "expiresAt":    "2030-01-01T00:00:00Z",
+            "refreshToken": real_refresh,
+            "expiresAt":    expires_in_8h,
             "authMethod":   "social",
             "machineId":    gen_machine_id(),
             "priority":     priority,
