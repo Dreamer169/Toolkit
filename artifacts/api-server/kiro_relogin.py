@@ -41,21 +41,18 @@ def get_accounts(conn, limit=10, account_id=None):
     cur = conn.cursor()
     if account_id:
         cur.execute("""
-            SELECT id, email, password, sub_status, token, refresh_token, expires_at
+            SELECT id, email, password, sub_status, token, refresh_token
             FROM accounts
             WHERE id = %s AND platform = 'kiro'
         """, (account_id,))
     else:
         cur.execute("""
-            SELECT id, email, password, sub_status, token, refresh_token, expires_at
+            SELECT id, email, password, sub_status, token, refresh_token
             FROM accounts
             WHERE platform = 'kiro'
               AND sub_status IN ('pending', 'suspended')
               AND password IS NOT NULL AND password != ''
-              AND (
-                expires_at IS NULL
-                OR expires_at < NOW() - INTERVAL '30 minutes'
-              )
+
             ORDER BY id
             LIMIT %s
         """, (limit,))
@@ -63,30 +60,27 @@ def get_accounts(conn, limit=10, account_id=None):
     cur.close()
     return rows
 
-def update_token(conn, account_id, access_token, refresh_token, expires_at=None, sub_status=None):
+def update_token(conn, account_id, access_token, refresh_token, expires_at=None, sub_status=None):  # expires_at ignored (column does not exist in DB)
     """Update account tokens in DB."""
     cur = conn.cursor()
     now = datetime.now(timezone.utc)
-    exp = expires_at or (now + timedelta(hours=8))
     if sub_status:
         cur.execute("""
             UPDATE accounts SET
                 token = %s,
                 refresh_token = %s,
-                expires_at = %s,
                 sub_status = %s,
                 updated_at = NOW()
             WHERE id = %s
-        """, (access_token, refresh_token, exp, sub_status, account_id))
+        """, (access_token, refresh_token, sub_status, account_id))
     else:
         cur.execute("""
             UPDATE accounts SET
                 token = %s,
                 refresh_token = %s,
-                expires_at = %s,
                 updated_at = NOW()
             WHERE id = %s
-        """, (access_token, refresh_token, exp, account_id))
+        """, (access_token, refresh_token, account_id))
     conn.commit()
     cur.close()
 
@@ -328,8 +322,8 @@ def main():
     ok = 0
     failed = 0
     for row in accounts:
-        acc_id, email, password, sub_status, token, rt, exp_at = row
-        log(f"Processing [{acc_id}] {email} (status={sub_status}, exp={exp_at})")
+        acc_id, email, password, sub_status, token, rt = row
+        log(f"Processing [{acc_id}] {email} (status={sub_status})")
 
         if not password:
             log(f"  ⚠️ No password stored, skipping", "WARN")
@@ -344,7 +338,6 @@ def main():
                 conn, acc_id,
                 access_token=result["access_token"],
                 refresh_token=result.get("refresh_token", ""),
-                expires_at=exp,
                 sub_status="pending"  # keep pending so sub_retry picks it up with fresh token
             )
             log(f"  ✅ DB updated for [{acc_id}]", "OK")
