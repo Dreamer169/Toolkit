@@ -199,7 +199,8 @@ def process_account(acc: dict, ksub, kwarmup) -> str:
 
                 pay_result = _aio.run(
                     _spmod.auto_pay_chkr(pay_url, bins=chkr_bins,
-                                         headless=True, log=_plog)
+                                         headless=True, log=_plog,
+                                         proxy=acc["proxy"])
                 )
                 if pay_result and pay_result.get("ok"):
                     _log(f"  ✅ 自动支付成功!")

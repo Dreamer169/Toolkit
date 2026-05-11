@@ -171,7 +171,8 @@ def find_live_card(bins: list, max_per_bin: int = CHKR_MAX,
 
 # ── Playwright Stripe $0 自动填表 ──────────────────────────────────────────
 async def _stripe_pay_playwright(payment_url: str, card_str: str,
-                                  headless: bool = True, log=print) -> dict:
+                                  headless: bool = True, log=print,
+                                  proxy: str | None = None) -> dict:
     """用 Playwright 自动填写并提交 Stripe $0 Checkout 表单。"""
     from playwright.async_api import async_playwright
 
@@ -185,10 +186,14 @@ async def _stripe_pay_playwright(payment_url: str, card_str: str,
     log(f"[stripe] 卡: {card_num[:6]}xxxxxxxxxx  到期: {exp_str}", "info")
 
     async with async_playwright() as pw:
+        _launch_args = ["--no-sandbox", "--disable-dev-shm-usage",
+                        "--disable-blink-features=AutomationControlled"]
+        if proxy:
+            _launch_args.append(f"--proxy-server={proxy}")
+            log(f"[stripe] Playwright 使用代理: {proxy}", "info")
         browser = await pw.chromium.launch(
             headless=headless,
-            args=["--no-sandbox", "--disable-dev-shm-usage",
-                  "--disable-blink-features=AutomationControlled"],
+            args=_launch_args,
         )
         ctx  = await browser.new_context(
             viewport={"width": 1280, "height": 900},
@@ -359,7 +364,8 @@ async def _stripe_pay_playwright(payment_url: str, card_str: str,
 
 # ── 公共主入口 ──────────────────────────────────────────────────────────────
 async def auto_pay_chkr(payment_url: str, bins=None,
-                        headless: bool = True, log=print) -> dict:
+                        headless: bool = True, log=print,
+                        proxy: str | None = None) -> dict:
     """
     完整流程: BIN 生成卡号 → chkr.cc Live 检测 → Playwright Stripe $0 支付。
 
@@ -389,7 +395,8 @@ async def auto_pay_chkr(payment_url: str, bins=None,
     # 2. Playwright 自动支付
     log("[stripe] 找到 Live 卡，启动 Stripe 自动支付...", "info")
     return await _stripe_pay_playwright(payment_url, live_card,
-                                        headless=headless, log=log)
+                                        headless=headless, log=log,
+                                        proxy=proxy)
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────

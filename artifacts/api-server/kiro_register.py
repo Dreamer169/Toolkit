@@ -450,7 +450,8 @@ def main():
                             bins = [b.strip() for b in bins_raw.split(",") if b.strip()] or _spay.DEFAULT_BINS
                             import asyncio as _asyncio
                             pay_ok = _asyncio.run(_spay.auto_pay_chkr(
-                                payment_url, bins=bins, headless=True, log=_sub_log
+                                payment_url, bins=bins, headless=True, log=_sub_log,
+                                proxy=proxy
                             ))
                             if isinstance(pay_ok, dict) and pay_ok.get("ok"):
                                 update_sub_status(kiro_id, "active")
