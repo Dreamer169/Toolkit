@@ -164,7 +164,8 @@ def process_account(acc: dict, ksub, kwarmup) -> str:
                 _rl_mod = _ilu_rl.module_from_spec(_rl_spec)
                 _rl_spec.loader.exec_module(_rl_mod)
                 import psycopg2 as _pg
-                _rl_conn = _pg.connect(_DB_URL)
+                _rl_dsn = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@localhost/toolkit")
+                _rl_conn = _pg.connect(_rl_dsn)
                 rows = _rl_mod.get_accounts(_rl_conn, account_id=acc_id)
                 _rl_conn.close()
                 if rows:
