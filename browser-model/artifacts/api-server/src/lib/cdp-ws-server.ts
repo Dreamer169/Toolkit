@@ -26,6 +26,9 @@ export function attachCdpWebSocket(server: HttpServer): void {
     const initialUrl = url.searchParams.get("url");
     // ?sessionId=xxx  → persists Cookie/Storage across reconnections
     const sessionId = url.searchParams.get("sessionId") || undefined;
+    // ?proxy=http://user:pass@host:port or ?proxy=socks5://host:port
+    // Allows per-session proxy routing (overrides global BROWSER_PROXY env).
+    const proxyParam = url.searchParams.get("proxy") || undefined;
 
     const session = new CdpSession(ws, sessionId);
     ws.on("message", (data) => session.handleMessage(data as Buffer));
@@ -33,7 +36,7 @@ export function attachCdpWebSocket(server: HttpServer): void {
     ws.on("error", (e) => logger.warn({ err: String(e) }, "[cdp-ws] socket error"));
 
     try {
-      await session.start({ width: w, height: h });
+      await session.start({ width: w, height: h, proxy: proxyParam });
       if (initialUrl) {
         await session.handleMessage(JSON.stringify({ type: "navigate", url: initialUrl }));
       }

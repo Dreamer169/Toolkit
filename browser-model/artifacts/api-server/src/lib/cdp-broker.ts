@@ -18,8 +18,18 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import type { WebSocket } from "ws";
 import { logger } from "./logger.js";
+import { resolveGeoProfile, DEFAULT_GEO, type GeoProfile } from "./geo-resolver.js";
 
 type CDPSession = Awaited<ReturnType<BrowserContext["newCDPSession"]>>;
+
+/** Forward-reference type used by the session registry (filled by CdpSession class below). */
+export type CdpSession_ = { getPage(): Page | null; getCdp(): CDPSession | null; getCtx(): BrowserContext | null };
+
+/**
+ * Live session registry — keyed by sessionId (?sessionId= URL param).
+ * Consumed by CdpSynchronizer for master/follower lookup.
+ */
+export const sessionRegistry = new Map<string, CdpSession_>();
 
 /**
  * 反指纹 init script —— 在每个页面 JS 之前注入。
@@ -699,6 +709,9 @@ interface SessionOpts {
   height: number;
   proxy?: string;
   userAgent?: string;
+  deviceScaleFactor?: number;
+  /** Pre-resolved geo profile (skips ip-api.com lookup if provided). */
+  geoProfile?: GeoProfile;
 }
 
 let _browserPromise: Promise<Browser> | null = null;
@@ -720,7 +733,18 @@ async function getBrowser(): Promise<Browser> {
   const proxyEnv = process.env.BROWSER_PROXY;
   // 如果有 DISPLAY（生产环境的 Xvfb :99），就跑 headed Chromium —— 真 X 显示器
   // 上的 Chrome 比 headless Chromium 难被反爬检测（Cloudflare / hCaptcha 等）
-  const display = process.env.DISPLAY;
+  //
+  // Bug-fix: DISPLAY env may linger in pm2 after Xvfb crashes on a different
+  // display number. We verify the Unix socket file actually exists before
+  // attempting a headed launch. We also probe common Xvfb displays as fallbacks.
+  const _fsMod = require("fs") as typeof import("fs");
+  const _probeX = (n: string | number): string | null => {
+    try { _fsMod.statSync(`/tmp/.X11-unix/X${n}`); return `:${n}`; } catch { return null; }
+  };
+  const _rawDisp = (process.env.DISPLAY ?? "").replace(/^:/, "").split(".")[0];
+  // Try declared display, then known Xvfb fallback numbers
+  const display: string | null =
+    _probeX(_rawDisp) ?? _probeX("99") ?? _probeX("100") ?? _probeX("102") ?? _probeX("77") ?? null;
   const useHeaded = !!display && process.platform === "linux";
 
   const args = [
@@ -814,13 +838,40 @@ async function getBrowser(): Promise<Browser> {
       LANG: "en_US.UTF-8",
       LC_ALL: "en_US.UTF-8",
       LANGUAGE: "en_US:en",
-      ...(useHeaded ? { DISPLAY: display } : {}),
+      ...(useHeaded && display ? { DISPLAY: display } : {}),
     } as Record<string, string>,
   }).then((b) => {
     logger.info({ exe, proxy: !!proxyEnv, headed: useHeaded, display }, "[cdp-broker] browser launched");
     return b;
-  }).catch((err) => {
+  }).catch(async (err: unknown) => {
     _browserPromise = null;
+    const errStr = String((err as Error).message ?? err);
+    // If headed launch failed because X server is unavailable, retry in headless mode.
+    // This makes the service self-healing when Xvfb crashes or restarts on a new display.
+    const isXErr = useHeaded && (
+      errStr.includes("Missing X server") ||
+      errStr.includes("cannot open display") ||
+      errStr.includes("failed to initialize") ||
+      errStr.includes("DISPLAY") ||
+      errStr.includes("XServer") ||
+      errStr.includes("ozone_platform")
+    );
+    if (isXErr) {
+      logger.warn({ err: errStr.slice(0, 300) }, "[cdp-broker] headed launch failed → retrying headless");
+      const headlessArgs = args.filter(a =>
+        !["--start-maximized","--window-position=0,0","--use-gl=angle","--use-angle=swiftshader","--enable-webgl"].includes(a)
+      );
+      headlessArgs.push("--disable-gpu");
+      _browserPromise = chromium.launch({
+        headless: true, executablePath: exe, args: headlessArgs,
+        ignoreDefaultArgs: ["--enable-automation"],
+        env: { ...process.env, LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8", LANGUAGE: "en_US:en" } as Record<string, string>,
+      }).then((b) => {
+        logger.info({ exe }, "[cdp-broker] browser launched (headless fallback)");
+        return b;
+      }).catch((err2: unknown) => { _browserPromise = null; throw err2; });
+      return _browserPromise;
+    }
     throw err;
   });
   return _browserPromise;
@@ -843,6 +894,11 @@ export class CdpSession {
     this.fpSeed = ((Math.random() * 0xffffffff) >>> 0) || 1;
   }
 
+  /** Expose internals for CdpSynchronizer (read-only). */
+  getPage(): Page | null          { return this.page; }
+  getCdp():  CDPSession | null    { return this.cdp; }
+  getCtx():  BrowserContext | null { return this.ctx; }
+
   send(obj: Record<string, unknown>) {
     if (this.ws.readyState === 1) {
       try { this.ws.send(JSON.stringify(obj)); } catch { /* ignore */ }
@@ -863,6 +919,11 @@ export class CdpSession {
         logger.info({ sessionId: this.sessionId }, "[cdp-broker] loaded session state from disk");
       } catch { /* first connection or file missing — normal */ }
     }
+    // Geo resolution: derive timezone/language/geolocation from proxy exit IP.
+    // Falls back instantly to LA defaults when no proxy or lookup fails.
+    const geo: GeoProfile = opts.geoProfile
+      ?? (opts.proxy ? await resolveGeoProfile(opts.proxy) : DEFAULT_GEO);
+
     // UA 必须 (a) Linux 平台 (b) Chrome 145（playwright 1.59 / chromium-1208 实际版本）
     // 否则 sec-ch-ua 客户端提示和 UA 不一致 → 现代反爬 (Cloudflare BM, Akamai BMP) 立刻识破
     const ua = opts.userAgent || (
@@ -877,8 +938,10 @@ export class CdpSession {
       isMobile: false,
       hasTouch: false,
       userAgent: ua,
-      locale: "en-US",
-      timezoneId: "America/Los_Angeles",
+      locale: geo.locale,
+      timezoneId: geo.timezone,
+      // Per-session proxy (overrides process-level --proxy-server for this context).
+      ...(opts.proxy ? { proxy: { server: opts.proxy } } : {}),
       colorScheme: "light",
       ignoreHTTPSErrors: true,
       // Client Hints —— 现代反爬必查项，必须跟 UA 串自洽。
@@ -887,7 +950,7 @@ export class CdpSession {
       //   challenge 的 accept-ch + critical-ch 明确点名要这些; 缺一个就当 stale-ch
       //   = non-Chrome bot 标记 → cf_clearance 永远拿不到.
       extraHTTPHeaders: {
-        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Language": geo.language + ",en;q=0.9",
         "sec-ch-ua": "\"Chromium\";v=\"144\", \"Not:A-Brand\";v=\"99\", \"Google Chrome\";v=\"144\"",
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": "\"Linux\"",
@@ -901,7 +964,7 @@ export class CdpSession {
       },
       // 跟时区一致：洛杉矶（Mission District 附近），地理位置/时区/locale 三者自洽
       // 否则反爬看到 timezone=LA 但 geolocation=null 立马起疑
-      geolocation: { latitude: 37.7749, longitude: -122.4194, accuracy: 50 },
+      geolocation: { latitude: geo.latitude, longitude: geo.longitude, accuracy: 50 },
       permissions: ["geolocation", "clipboard-read", "clipboard-write", "notifications"],
       ...((_storageState !== undefined) ? { storageState: _storageState } : {}),
     });
@@ -994,7 +1057,9 @@ export class CdpSession {
     });
 
     this.send({ type: "ready", width: opts.width, height: opts.height });
-    logger.info({ w: opts.width, h: opts.height }, "[cdp-broker] session started");
+    // Register in live session registry (enables synchronizer lookup)
+    if (this.sessionId) sessionRegistry.set(this.sessionId, this as unknown as CdpSession_);
+    logger.info({ w: opts.width, h: opts.height, sessionId: this.sessionId, geo: geo.timezone }, "[cdp-broker] session started");
   }
 
   async handleMessage(raw: string | Buffer) {
@@ -1149,6 +1214,8 @@ export class CdpSession {
     this.cdp = null;
     this.page = null;
     this.ctx = null;
+    // Remove from live session registry
+    if (this.sessionId) sessionRegistry.delete(this.sessionId);
     logger.info("[cdp-broker] session closed");
   }
 }
