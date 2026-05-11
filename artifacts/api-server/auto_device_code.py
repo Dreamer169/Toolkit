@@ -10,7 +10,7 @@
 import asyncio, json, sys, os, random
 
 MAX_CONCURRENCY = 8
-CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+CLIENT_ID = os.environ.get("OUTLOOK_CLIENT_ID", "9e5f94bc-e8a4-4e73-b8be-63364c29d753")
 TOKEN_ENDPOINT = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
 DB_URL = "postgresql://postgres:postgres@localhost/toolkit"
 

@@ -77,7 +77,8 @@ module.exports = {
       "autorestart": true,
       "env": {
         "DATABASE_URL": "postgresql://postgres:postgres@localhost/toolkit",
-        "PYTHONUNBUFFERED": "1"
+        "PYTHONUNBUFFERED": "1",
+        "OUTLOOK_CLIENT_ID": process.env.OUTLOOK_CLIENT_ID || ""
       }
     },
     {

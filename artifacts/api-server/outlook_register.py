@@ -2201,7 +2201,8 @@ def get_oauth_token_in_browser(page, email: str, captcha_handler=None, password:
     """
     import urllib.parse as _up, urllib.request as _ur, json as _json
 
-    CLIENT_ID    = '9e5f94bc-e8a4-4e73-b8be-63364c29d753'
+    import os as _ose
+    CLIENT_ID    = _ose.environ.get('OUTLOOK_CLIENT_ID', '9e5f94bc-e8a4-4e73-b8be-63364c29d753')
     REDIRECT_URI = 'https://login.microsoftonline.com/common/oauth2/nativeclient'
     SCOPES = [
         'offline_access',

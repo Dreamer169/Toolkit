@@ -7,7 +7,8 @@ outlook_graph.py — Microsoft Graph API 邮件读取工具
 """
 import json, time, re, urllib.request, urllib.parse, urllib.error
 
-CLIENT_ID  = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+import os as _os
+CLIENT_ID  = _os.environ.get("OUTLOOK_CLIENT_ID", "9e5f94bc-e8a4-4e73-b8be-63364c29d753")
 TENANT     = "consumers"
 TOKEN_FILE = "/tmp/ms_tokens.json"
 
