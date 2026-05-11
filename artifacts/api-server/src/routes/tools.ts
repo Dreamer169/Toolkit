@@ -963,7 +963,7 @@ router.post("/tools/outlook/batch-oauth/start", async (req, res) => {
 
     // filter="needs_oauth_manual": 只查有此标签账号，用于批量重授权已标记账号
     const tagFilter = filter === "needs_oauth_manual"
-      ? " AND COALESCE(tags,'') LIKE '%needs_oauth_manual%' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%'"
+      ? " AND COALESCE(tags,'') LIKE '%needs_oauth_manual%'"
       : "";
     let rows: { id: number; email: string }[];
     if (accountIds?.length) {

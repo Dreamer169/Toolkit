@@ -673,14 +673,14 @@ export default function MailCenter() {
     }
   };
 
-  const startBatchOAuth = async (ids?: number[]) => {
+  const startBatchOAuth = async (ids?: number[], filter?: "needs_oauth_manual") => {
     setBatchOAuthBusy(true);
     if (batchPollRef.current) { clearInterval(batchPollRef.current); batchPollRef.current = null; }
 
     const d = await fetch(`${API}/tools/outlook/batch-oauth/start`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(ids?.length ? { accountIds: ids } : {}),
+      body: JSON.stringify(ids?.length ? { accountIds: ids } : filter ? { filter } : {}),
     }).then(r => r.json()).catch(() => ({ success: false, error: "网络错误" }));
     setBatchOAuthBusy(false);
 
@@ -867,16 +867,26 @@ export default function MailCenter() {
               {batchOAuthBusy ? "发起中…" : "🔑 批量 OAuth 授权"}
             </button>
           )}
-          {/* 🤖 自动完成授权: 降级为辅助功能, 通过"重授权 Manual 账号"按钮触发 */}
-          {/* 🔄 重授权 needs_oauth_manual 账号 */}
+          {/* 🔑 授权 Manual 账号：弹窗显示设备码，需用户手动输入（不依赖 Python 自动化） */}
+          {accounts.some(a => tagsOf(a).includes("needs_oauth_manual")) && (
+            <button
+              onClick={() => startBatchOAuth(undefined, "needs_oauth_manual")}
+              disabled={batchOAuthBusy}
+              className="w-full py-1.5 bg-violet-800/50 hover:bg-violet-800/70 disabled:opacity-50 rounded text-xs text-white font-medium transition-colors"
+              title="为所有 needs_oauth_manual 账号发起批量设备码授权，弹窗显示验证码供手动输入"
+            >
+              {batchOAuthBusy ? "发起中…" : "🔑 授权 Manual 账号"}
+            </button>
+          )}
+          {/* 🤖 自动授权 Manual 账号：Python 自动打开浏览器完成设备码流程 */}
           {accounts.some(a => tagsOf(a).includes("needs_oauth_manual")) && (
             <button
               onClick={() => startReauthManual()}
               disabled={reauthManualBusy}
-              className="w-full py-1.5 bg-violet-700/60 hover:bg-violet-700/80 disabled:opacity-50 rounded text-xs text-white font-medium transition-colors"
-              title="为所有 needs_oauth_manual 标签账号清零旧 token 并重新发起设备码 OAuth 授权"
+              className="w-full py-1.5 bg-violet-700/40 hover:bg-violet-700/60 disabled:opacity-50 rounded text-xs text-gray-300 font-medium transition-colors"
+              title="用 Python 自动打开浏览器完成设备码 OAuth，无需手动输入验证码"
             >
-              {reauthManualBusy ? "重授权中…" : "🔄 重授权 Manual 账号"}
+              {reauthManualBusy ? "自动授权中…" : "🤖 自动授权 Manual 账号"}
             </button>
           )}
           {reauthManualMsg && (
