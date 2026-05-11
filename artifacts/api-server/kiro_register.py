@@ -16,6 +16,26 @@ sys.path.insert(0, "/root/Toolkit/artifacts/api-server")
 
 import psycopg2
 
+# ── cyCronet shim (Chrome 144 TLS, HTTP/2) — replaces curl_cffi.Sessions ────
+# Falls back to curl_cffi if cyCronet is not installed.
+import sys as _sys, types as _types
+_CYCRONET_ACTIVE = False
+try:
+    import cycronet_shim as _cyshim
+    import curl_cffi as _cf
+    _fake_requests = _types.SimpleNamespace(
+        Session=_cyshim.Session,
+        **{k: getattr(_cf.requests, k)
+           for k in dir(_cf.requests)
+           if k not in ("Session",) and not k.startswith("__")}
+    )
+    _sys.modules["curl_cffi.requests"] = _fake_requests  # type: ignore
+    _cf.requests = _fake_requests
+    _CYCRONET_ACTIVE = True
+    print("[kiro_register] HTTP backend: cyCronet (Chrome 144 TLS)", flush=True)
+except Exception as _ce:
+    print(f"[kiro_register] HTTP backend: curl_cffi (cycronet unavailable: {_ce})", flush=True)
+
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@localhost/toolkit")
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
@@ -284,7 +304,13 @@ def run_kiro_register(email: str, refresh_token: str, proxy: str | None,
         "kiro_core", "/root/Toolkit/artifacts/api-server/kiro_core.py"
     )
     kiro_core = importlib.util.module_from_spec(spec)
+    # Apply cycronet shim to this fresh kiro_core module before exec
+    if _CYCRONET_ACTIVE:
+        kiro_core.curl_requests = _fake_requests
     spec.loader.exec_module(kiro_core)
+    # Belt-and-suspenders: re-apply after exec in case the module reset it
+    if _CYCRONET_ACTIVE:
+        kiro_core.curl_requests = _fake_requests
 
     # 替换 OTP 函数 (core.py 通过模块级 wait_for_otp 调用)
     def _our_otp(account_id=None, timeout=120, tag=tag):
