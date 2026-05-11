@@ -24,8 +24,10 @@ export function attachCdpWebSocket(server: HttpServer): void {
     const w = Math.max(320, Math.min(2560, Number(url.searchParams.get("w") || 1280)));
     const h = Math.max(240, Math.min(1600, Number(url.searchParams.get("h") || 800)));
     const initialUrl = url.searchParams.get("url");
+    // ?sessionId=xxx  → persists Cookie/Storage across reconnections
+    const sessionId = url.searchParams.get("sessionId") || undefined;
 
-    const session = new CdpSession(ws);
+    const session = new CdpSession(ws, sessionId);
     ws.on("message", (data) => session.handleMessage(data as Buffer));
     ws.on("close", () => session.close().catch(() => {}));
     ws.on("error", (e) => logger.warn({ err: String(e) }, "[cdp-ws] socket error"));
