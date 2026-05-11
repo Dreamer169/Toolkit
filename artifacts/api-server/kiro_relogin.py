@@ -235,7 +235,11 @@ class KiroRelogin(KiroRegister):
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
             wait_for_aws_otp = mod.wait_for_aws_otp
-        return wait_for_aws_otp(rt, timeout=timeout, tag=tag)
+        result = wait_for_aws_otp(rt, timeout=timeout, tag=tag)
+        if not result or result == "TOKEN_EXPIRED":
+            self.log(f"  ⚠️ OTP unavailable (result={result})")
+            return None
+        return result
 
     def _submit_otp(self, otp: str, prev_resp: dict):
         """Submit OTP to AWS /api/execute endpoint."""
