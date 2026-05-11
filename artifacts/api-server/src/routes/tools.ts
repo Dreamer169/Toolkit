@@ -810,7 +810,7 @@ router.post("/tools/outlook/device-code", async (req, res) => {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         client_id: cid,
-        scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access https://outlook.office.com/IMAP.AccessAsUser.All",
+        scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
       }).toString(),
     });
     const data = await r.json() as {
@@ -912,7 +912,7 @@ function cleanOldBatchSessions() {
 async function createBatchOAuthSessions(rows: { id: number; email: string }[]) {
   cleanOldBatchSessions();
   const CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
-  const SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access https://outlook.office.com/IMAP.AccessAsUser.All";
+  const SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access";
   const sessionList: BatchOAuthSession[] = [];
   await Promise.allSettled(rows.map(async (acc) => {
     try {
@@ -956,7 +956,65 @@ async function createBatchOAuthSessions(rows: { id: number; email: string }[]) {
 // POST /tools/outlook/batch-oauth/start
 // 为没有 token 的账号批量申请设备码
 router.post("/tools/outlook/batch-oauth/start", async (req, res) => {
-  const { accountIds, filter } = req.body as { accountIds?: number[]; filter?: "needs_oauth_manual" };
+  const { accountIds, filter, mode } = req.body as {
+    accountIds?: number[];
+    filter?: "needs_oauth_manual";
+    mode?: "device_code" | "auto_browser";   // auto_browser = ex-reauth-manual behaviour
+  };
+
+  // ── mode=auto_browser: spawn Python auto-complete (absorbs reauth-manual) ──
+  if (mode === "auto_browser") {
+    try {
+      cleanOldBatchSessions();
+      const { query: dbQAb, execute: dbEAb } = await import("../db.js");
+      const tagFlt = filter === "needs_oauth_manual"
+        ? `AND COALESCE(tags,'') LIKE '%needs_oauth_manual%'
+           AND COALESCE(tags,'') NOT LIKE '%abuse_mode%'
+           AND status NOT IN ('suspended','needs_oauth_pending')`
+        : "AND (token IS NULL OR token='') AND (refresh_token IS NULL OR refresh_token='')";
+      let abRows: { id: number; email: string; password: string }[];
+      if (accountIds?.length) {
+        abRows = await dbQAb<{ id: number; email: string; password: string }>(
+          `SELECT id, email, COALESCE(password,'') AS password FROM accounts WHERE platform='outlook' AND id = ANY($1::int[]) AND password IS NOT NULL AND password != '' ${tagFlt}`,
+          [accountIds]
+        );
+      } else {
+        abRows = await dbQAb<{ id: number; email: string; password: string }>(
+          `SELECT id, email, COALESCE(password,'') AS password FROM accounts WHERE platform='outlook' AND password IS NOT NULL AND password != '' ${tagFlt} ORDER BY updated_at ASC LIMIT 10`
+        );
+      }
+      if (!abRows.length) { res.json({ success: false, error: "没有符合条件的账号（需有密码）" }); return; }
+      if (filter === "needs_oauth_manual") {
+        for (const r of abRows) {
+          await dbEAb(
+            "UPDATE accounts SET token=NULL, refresh_token=NULL, status='needs_oauth_pending', updated_at=NOW() WHERE id=$1",
+            [r.id]
+          );
+        }
+      }
+      const abPayload = abRows.map(r => ({
+        accountId: r.id, email: r.email, password: r.password,
+        userCode: "", deviceCode: "",
+        dbUrl: process.env.DATABASE_URL || "postgresql://postgres:postgres@localhost/toolkit",
+        removeTag: filter === "needs_oauth_manual" ? "needs_oauth_manual" : undefined,
+      }));
+      const abLogPath = `/tmp/dc_auto_${Date.now()}.log`;
+      const { spawn: spAb } = await import("child_process");
+      const { openSync: osAb } = await import("fs");
+      const abScript = new URL("../auto_device_code.py", import.meta.url).pathname;
+      const abFd = osAb(abLogPath, "a");
+      const abProc = spAb("python3", [abScript, JSON.stringify(abPayload), ""], {
+        detached: true, stdio: ["ignore", abFd, abFd],
+        env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: "1" },
+      });
+      abProc.unref();
+      res.json({ success: true, logFile: abLogPath, accounts: abPayload.map(x => ({ accountId: x.accountId, email: x.email })) });
+      return;
+    } catch (e: unknown) {
+      res.status(500).json({ success: false, error: String(e) });
+      return;
+    }
+  }
   try {
     cleanOldBatchSessions();
     const { query: dbQ } = await import("../db.js");
@@ -1231,6 +1289,78 @@ router.post("/tools/outlook/batch-oauth/reauth-manual", async (req, res) => {
     rmProc.on("close", (exitCode) => {
       console.log("[reauth-manual] exit=" + exitCode + " log=" + rmLogPath);
     });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+
+// ── IMAP IDLE 守护进程路由 ────────────────────────────────────────────────────
+// imap_idle_daemon.py: 为有 token 的账号维持 IMAP IDLE 连接，实时捕获新邮件
+
+let _idleDaemonPid: number | null = null;
+
+router.post("/tools/outlook/imap-idle/start", async (req, res) => {
+  try {
+    if (_idleDaemonPid) {
+      try { process.kill(_idleDaemonPid, 0); res.json({ success: true, already: true, pid: _idleDaemonPid }); return; } catch { _idleDaemonPid = null; }
+    }
+    const { spawn: spId } = await import("child_process");
+    const { openSync: osId } = await import("fs");
+    const daemonScript = new URL("../imap_idle_daemon.py", import.meta.url).pathname;
+    const logFd = osId("/tmp/imap_idle_daemon.log", "a");
+    const daemon = spId("python3", [daemonScript], {
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: "1" },
+    });
+    daemon.unref();
+    _idleDaemonPid = daemon.pid ?? null;
+    res.json({ success: true, pid: _idleDaemonPid });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+router.post("/tools/outlook/imap-idle/stop", async (req, res) => {
+  try {
+    if (!_idleDaemonPid) { res.json({ success: true, msg: "未运行" }); return; }
+    try { process.kill(_idleDaemonPid, "SIGTERM"); } catch { /* already gone */ }
+    const pid = _idleDaemonPid;
+    _idleDaemonPid = null;
+    res.json({ success: true, stoppedPid: pid });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+router.get("/tools/outlook/imap-idle/status", async (req, res) => {
+  try {
+    const { readFileSync } = await import("fs");
+    let running = false;
+    if (_idleDaemonPid) {
+      try { process.kill(_idleDaemonPid, 0); running = true; } catch { _idleDaemonPid = null; }
+    }
+    let statusMap: Record<string, unknown> = {};
+    try { statusMap = JSON.parse(readFileSync("/tmp/imap_idle_status.json", "utf8")); } catch { /* no file yet */ }
+    res.json({ success: true, running, pid: _idleDaemonPid, accounts: statusMap });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+router.get("/tools/outlook/imap-idle/events", async (req, res) => {
+  try {
+    const { since, limit: limitStr } = req.query as { since?: string; limit?: string };
+    const limitN = parseInt(limitStr || "50", 10) || 50;
+    const { readFileSync } = await import("fs");
+    let events: unknown[] = [];
+    try { events = JSON.parse(readFileSync("/tmp/imap_idle_events.json", "utf8")); } catch { /* no file yet */ }
+    if (since) {
+      events = (events as Array<{ ts: string }>).filter(e => e.ts > since);
+    }
+    const recent = (events as unknown[]).slice(-limitN);
+    res.json({ success: true, events: recent, total: events.length });
   } catch (e: unknown) {
     res.status(500).json({ success: false, error: String(e) });
   }
@@ -3322,7 +3452,7 @@ router.post("/tools/outlook/auto-auth", async (req, res) => {
           grant_type: "refresh_token",
           client_id: OAUTH_CLIENT_ID,
           refresh_token: acc.refresh_token,
-          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access https://outlook.office.com/IMAP.AccessAsUser.All",
+          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
         }).toString(),
       }, acctProxy);
       const td = await r.json() as { access_token?: string; refresh_token?: string; error_description?: string };
@@ -3694,7 +3824,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
           grant_type: "refresh_token",
           client_id: OAUTH_CLIENT_ID,
           refresh_token: acc.refresh_token,
-          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access https://outlook.office.com/IMAP.AccessAsUser.All",
+          scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
         }).toString(),
       }, acctProxy);
       const td = await r.json() as { access_token?: string; refresh_token?: string; error_description?: string; error?: string };
@@ -3763,7 +3893,32 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
         res.json({ success: true, messages: xoauthResult.messages, count: (xoauthResult.messages as unknown[]).length, email: acc.email, via: "imap_xoauth2" });
         return;
       }
-      // XOAUTH2 失败 → 判断是否为永久封禁账号（suspended+abuse_mode）
+      // XOAUTH2 失败 → 尝试 login.live.com/oauth20_token.srf 获取 IMAP-专属 token（luoianun 方案）
+      if (acc.refresh_token) {
+        try {
+          const liveR = await microsoftFetch("https://login.live.com/oauth20_token.srf", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              grant_type: "refresh_token",
+              client_id: OAUTH_CLIENT_ID,
+              refresh_token: acc.refresh_token,
+              scope: "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
+            }).toString(),
+          }, acctProxy);
+          const liveTd = await liveR.json() as { access_token?: string; refresh_token?: string };
+          if (liveTd.access_token) {
+            const liveImapResult = await fetchViaImap(acc.email, acc.password ?? "", mailFolder, limit, search ?? "", liveTd.access_token, acctProxy);
+            if (liveImapResult.success) {
+              if ((liveImapResult.messages as unknown[]).length > 0) { try { await addAccountTags(accountId, ["inbox_verified"]); } catch {} }
+              if (liveTd.refresh_token) { try { await execute("UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3", [liveTd.access_token, liveTd.refresh_token, accountId]); } catch {} }
+              res.json({ success: true, messages: liveImapResult.messages, count: (liveImapResult.messages as unknown[]).length, email: acc.email, via: "imap_xoauth2_live" });
+              return;
+            }
+          }
+        } catch { /* live.com fallback 失败，继续走原逻辑 */ }
+      }
+      // XOAUTH2 两端点均失败 → 判断是否为永久封禁账号（suspended+abuse_mode）
       // 永久封禁账号不提示重授权，正常显示错误；其他账号提示 token 失效需重授权
       const _isSuspAbuse = acc.status === "suspended" && (acc.tags ?? "").includes("abuse_mode");
       if (!_isSuspAbuse) {
@@ -4923,7 +5078,7 @@ router.post("/tools/waf/scrape", async (req, res) => {
 // 立即检测: status=active 账号 + Graph API 二次验证 + 自动打标签 (v9.14)
 router.post("/tools/outlook/auto-check", async (req, res) => {
   const BATCH = 30;
-  const SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access https://outlook.office.com/IMAP.AccessAsUser.All";
+  const SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access";
   const addTag = async (id: number, tag: string, newStatus?: string) => {
     const statusPart = newStatus ? `, status='${newStatus}'` : "";
     await execute(
@@ -4936,7 +5091,7 @@ router.post("/tools/outlook/auto-check", async (req, res) => {
       id: number; email: string;
       token: string | null; refresh_token: string | null; tags: string | null;
     }>(
-      "SELECT id,email,token,refresh_token,tags FROM accounts WHERE platform='outlook' AND status='active' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' ORDER BY updated_at ASC LIMIT " + BATCH
+      "SELECT id,email,token,refresh_token,tags FROM accounts WHERE platform='outlook' AND status='active' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' AND COALESCE(tags,'') NOT LIKE '%token_invalid%' ORDER BY updated_at ASC LIMIT " + BATCH
     );
     let checked = 0, valid = 0, needsAuth = 0, banned = 0, skipped = 0;
     const details: { email: string; result: string; error?: string }[] = [];
@@ -5017,5 +5172,251 @@ router.post("/tools/outlook/auto-check", async (req, res) => {
   }
 });
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CSV 导入 / 导出  (MailPilot 参考实现)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** GET /tools/outlook/export-csv
+ *  将 accounts 表 outlook 账号导出为 CSV，列：email,password,token,refresh_token,status,tags
+ */
+router.get("/tools/outlook/export-csv", async (_req, res) => {
+  try {
+    const { query } = await import("../db.js");
+    const rows = await query<{
+      email: string; password: string | null; token: string | null;
+      refresh_token: string | null; status: string | null; tags: string | null;
+    }>(
+      `SELECT email, password, token, refresh_token, status, tags
+       FROM accounts WHERE platform='outlook' ORDER BY created_at ASC`
+    );
+
+    const esc = (v: string | null) => {
+      const s = v ?? "";
+      return s.includes(",") || s.includes('"') || s.includes("\n")
+        ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const header = "email,password,token,refresh_token,status,tags";
+    const lines = rows.map(r =>
+      [r.email, r.password, r.token, r.refresh_token, r.status, r.tags].map(esc).join(",")
+    );
+    const csv = [header, ...lines].join("\r\n");
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="outlook_accounts_${new Date().toISOString().slice(0,10)}.csv"`);
+    res.send(csv);
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+/** POST /tools/outlook/import-csv
+ *  Body: { csv: string }
+ *  解析 CSV（列：email[,password][,token][,refresh_token][,status][,tags]），
+ *  UPSERT 到 accounts 表（已存在则更新 password/token/refresh_token/tags，不覆盖 status 为 active）。
+ */
+router.post("/tools/outlook/import-csv", async (req, res) => {
+  const { csv } = req.body as { csv?: string };
+  if (!csv || typeof csv !== "string") {
+    res.status(400).json({ success: false, error: "csv 字段不能为空" });
+    return;
+  }
+  try {
+    const { execute, query: dbQ } = await import("../db.js");
+    const lines = csv.replace(/\r/g, "").split("\n").filter(l => l.trim());
+    if (!lines.length) { res.json({ success: false, error: "CSV 为空" }); return; }
+
+    // 解析 header
+    const parseCsvLine = (line: string): string[] => {
+      const result: string[] = [];
+      let cur = "", inQuote = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"') {
+          if (inQuote && line[i+1] === '"') { cur += '"'; i++; }
+          else { inQuote = !inQuote; }
+        } else if (ch === "," && !inQuote) { result.push(cur); cur = ""; }
+        else { cur += ch; }
+      }
+      result.push(cur);
+      return result;
+    };
+
+    const headers = parseCsvLine(lines[0]).map(h => h.trim().toLowerCase());
+    const emailIdx   = headers.indexOf("email");
+    const pwIdx      = headers.indexOf("password");
+    const tokenIdx   = headers.indexOf("token");
+    const rtIdx      = headers.indexOf("refresh_token");
+    const statusIdx  = headers.indexOf("status");
+    const tagsIdx    = headers.indexOf("tags");
+
+    if (emailIdx === -1) { res.json({ success: false, error: "CSV 缺少 email 列" }); return; }
+
+    const dataLines = lines.slice(1);
+    let inserted = 0, updated = 0, skipped = 0;
+
+    for (const line of dataLines) {
+      if (!line.trim()) continue;
+      const cols = parseCsvLine(line);
+      const email = cols[emailIdx]?.trim().toLowerCase();
+      if (!email || !email.includes("@")) { skipped++; continue; }
+
+      const password     = pwIdx     >= 0 ? (cols[pwIdx]?.trim()     || null) : null;
+      const token        = tokenIdx  >= 0 ? (cols[tokenIdx]?.trim()  || null) : null;
+      const refreshToken = rtIdx     >= 0 ? (cols[rtIdx]?.trim()     || null) : null;
+      const status       = statusIdx >= 0 ? (cols[statusIdx]?.trim() || "active") : "active";
+      const tags         = tagsIdx   >= 0 ? (cols[tagsIdx]?.trim()   || null) : null;
+
+      // 检查是否已存在
+      const exist = await dbQ<{ id: number }>(
+        "SELECT id FROM accounts WHERE platform='outlook' AND email=$1", [email]
+      );
+
+      if (exist.length) {
+        // 更新：只覆盖非空字段
+        await execute(
+          `UPDATE accounts SET
+             password      = COALESCE($1, password),
+             token         = COALESCE($2, token),
+             refresh_token = COALESCE($3, refresh_token),
+             status        = CASE WHEN $4 != '' THEN $4 ELSE status END,
+             tags          = COALESCE(NULLIF($5,''), tags),
+             updated_at    = NOW()
+           WHERE id=$6`,
+          [password, token, refreshToken, status, tags, exist[0].id]
+        );
+        updated++;
+      } else {
+        await execute(
+          `INSERT INTO accounts (platform, email, password, token, refresh_token, status, tags, created_at, updated_at)
+           VALUES ('outlook', $1, $2, $3, $4, $5, $6, NOW(), NOW())`,
+          [email, password, token, refreshToken, status || "active", tags]
+        );
+        inserted++;
+      }
+    }
+
+    res.json({ success: true, total: dataLines.length, inserted, updated, skipped });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 跨账号批量扫码视图  (MailPilot batch-get-mails + code_extractor)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** POST /tools/outlook/batch-scan-inbox
+ *  同时从多个账号拉收件箱，提取验证码汇聚到一个视图。
+ *  Body: { accountIds?: number[], limit?: number, search?: string, codeOnly?: boolean }
+ *  codeOnly=true 时只返回含验证码的邮件。
+ */
+router.post("/tools/outlook/batch-scan-inbox", async (req, res) => {
+  const { accountIds, limit = 5, search = "", codeOnly = false } = req.body as {
+    accountIds?: number[]; limit?: number; search?: string; codeOnly?: boolean;
+  };
+  try {
+    const { query: dbQ, execute: dbE } = await import("../db.js");
+
+    let rows: { id: number; email: string; token: string | null; refresh_token: string | null; password: string | null; status: string | null; tags: string | null }[];
+    if (accountIds?.length) {
+      rows = await dbQ(
+        `SELECT id, email, token, refresh_token, password, status, tags
+         FROM accounts WHERE platform='outlook' AND id = ANY($1::int[]) AND status != 'suspended'`,
+        [accountIds]
+      );
+    } else {
+      rows = await dbQ(
+        `SELECT id, email, token, refresh_token, password, status, tags
+         FROM accounts WHERE platform='outlook' AND status != 'suspended'
+         AND (token IS NOT NULL AND token != '' OR refresh_token IS NOT NULL AND refresh_token != '' OR password IS NOT NULL AND password != '')
+         ORDER BY updated_at DESC LIMIT 30`
+      );
+    }
+
+    if (!rows.length) { res.json({ success: true, results: [], total: 0 }); return; }
+
+    // 验证码提取（与前端 extractCode 逻辑一致）
+    const extractCode = (text: string): string => {
+      const m6  = text.match(/\b(\d{6,8})\b/);
+      const mAZ = text.match(/\b([A-Z0-9]{6,10})\b/);
+      return m6 ? m6[1] : mAZ ? mAZ[1] : "";
+    };
+
+    // 单账号拉取（复用 fetch-messages-by-id 的 Graph token 刷新逻辑）
+    const OAUTH_CID = process.env.OUTLOOK_CLIENT_ID || "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
+    const SCOPE_BASIC = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access";
+
+    async function scanOne(acc: typeof rows[0]): Promise<{
+      accountId: number; email: string; messages: Array<{ id: string; subject: string; from: string; receivedAt: string; preview: string; code: string }>; error?: string
+    }> {
+      let accessToken = acc.token ?? "";
+
+      // 尝试刷新 refresh_token
+      if (acc.refresh_token) {
+        try {
+          const tr = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              grant_type: "refresh_token", client_id: OAUTH_CID,
+              refresh_token: acc.refresh_token, scope: SCOPE_BASIC,
+            }).toString(),
+          });
+          const td = await tr.json() as { access_token?: string; refresh_token?: string };
+          if (td.access_token) {
+            accessToken = td.access_token;
+            await dbE("UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
+              [accessToken, td.refresh_token ?? acc.refresh_token, acc.id]);
+          }
+        } catch { /* ignore refresh error */ }
+      }
+
+      if (!accessToken) return { accountId: acc.id, email: acc.email, messages: [], error: "无 token" };
+
+      const topN = Math.min(50, Math.max(1, limit));
+      const url = search
+        ? `https://graph.microsoft.com/v1.0/me/messages?$top=${topN}&$search="${encodeURIComponent(search)}"&$select=id,subject,from,receivedDateTime,bodyPreview&$orderby=receivedDateTime desc`
+        : `https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=${topN}&$select=id,subject,from,receivedDateTime,bodyPreview&$orderby=receivedDateTime desc`;
+
+      try {
+        const gr = await microsoftFetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+        if (!gr.ok) {
+          const ed = await gr.json() as { error?: { message?: string } };
+          return { accountId: acc.id, email: acc.email, messages: [], error: ed.error?.message ?? `HTTP ${gr.status}` };
+        }
+        const gd = await gr.json() as { value?: Array<{ id: string; subject?: string; from?: { emailAddress?: { address?: string } }; receivedDateTime?: string; bodyPreview?: string }> };
+        const msgs = (gd.value ?? []).map(m => {
+          const preview = m.bodyPreview ?? "";
+          const subject = m.subject ?? "";
+          const code = extractCode(preview + " " + subject);
+          return { id: m.id, subject, from: m.from?.emailAddress?.address ?? "", receivedAt: m.receivedDateTime ?? "", preview: preview.slice(0, 200), code };
+        });
+        const filtered = codeOnly ? msgs.filter(m => m.code) : msgs;
+        return { accountId: acc.id, email: acc.email, messages: filtered };
+      } catch (e: unknown) {
+        return { accountId: acc.id, email: acc.email, messages: [], error: String(e).slice(0, 80) };
+      }
+    }
+
+    // 并发 5 个账号同时扫（MailPilot 方案）
+    const CONCURRENCY = 5;
+    const results: Awaited<ReturnType<typeof scanOne>>[] = [];
+    for (let i = 0; i < rows.length; i += CONCURRENCY) {
+      const batch = rows.slice(i, i + CONCURRENCY);
+      const settled = await Promise.allSettled(batch.map(scanOne));
+      for (const r of settled) {
+        results.push(r.status === "fulfilled" ? r.value : { accountId: 0, email: "?", messages: [], error: String((r as PromiseRejectedResult).reason) });
+      }
+    }
+
+    const total = results.reduce((s, r) => s + r.messages.length, 0);
+    const codesFound = results.reduce((s, r) => s + r.messages.filter(m => m.code).length, 0);
+
+    res.json({ success: true, results, total, codesFound, scanned: rows.length });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
 
 export default router;
