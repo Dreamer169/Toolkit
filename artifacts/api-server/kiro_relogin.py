@@ -41,21 +41,24 @@ def get_accounts(conn, limit=10, account_id=None):
     cur = conn.cursor()
     if account_id:
         cur.execute("""
-            SELECT id, email, password, sub_status, token, refresh_token,
-                   notes::jsonb->>'source_outlook_refresh_token' as ol_rt
-            FROM accounts
-            WHERE id = %s AND platform = 'kiro'
+            SELECT k.id, k.email, k.password, k.sub_status, k.token, k.refresh_token,
+                   ol.refresh_token as ol_rt
+            FROM accounts k
+            LEFT JOIN accounts ol ON ol.id = (k.notes::jsonb->>'source_outlook_id')::int
+                                  AND ol.platform = 'outlook'
+            WHERE k.id = %s AND k.platform = 'kiro'
         """, (account_id,))
     else:
         cur.execute("""
-            SELECT id, email, password, sub_status, token, refresh_token,
-                   notes::jsonb->>'source_outlook_refresh_token' as ol_rt
-            FROM accounts
-            WHERE platform = 'kiro'
-              AND sub_status IN ('pending', 'suspended')
-              AND password IS NOT NULL AND password != ''
-
-            ORDER BY id
+            SELECT k.id, k.email, k.password, k.sub_status, k.token, k.refresh_token,
+                   ol.refresh_token as ol_rt
+            FROM accounts k
+            LEFT JOIN accounts ol ON ol.id = (k.notes::jsonb->>'source_outlook_id')::int
+                                  AND ol.platform = 'outlook'
+            WHERE k.platform = 'kiro'
+              AND k.sub_status IN ('pending', 'suspended')
+              AND k.password IS NOT NULL AND k.password != ''
+            ORDER BY k.id
             LIMIT %s
         """, (limit,))
     rows = cur.fetchall()
