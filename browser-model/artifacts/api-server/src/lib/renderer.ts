@@ -79,6 +79,51 @@ const BROWSER_TIMEZONE = _ptz.tz;
 const _TZ_STD = _ptz.std;
 const _TZ_DST = _ptz.dst;
 const _TZ_HAS_DST = _ptz.hasDst;
+
+// -- Dynamic geo resolver (v2): resolves actual exit-IP timezone via ip-api.com --
+// Replaces stale static _PROXY_PORT_TZ when proxy IPs rotate.
+// Cached 30 min per proxy URL; falls back to static map on error.
+const _geoCache = new Map<string, { tz: string; ts: number }>();
+const _GEO_CACHE_TTL = 30 * 60 * 1000;
+let _effectiveTz: string = BROWSER_TIMEZONE;
+
+async function resolveProxyTimezone(proxyUrl: string): Promise<string> {
+  const cached = _geoCache.get(proxyUrl);
+  if (cached && Date.now() - cached.ts < _GEO_CACHE_TTL) return cached.tz;
+  const pm = proxyUrl.match(/socks5?:\/\/([\w.]+):(\d+)/);
+  if (!pm) return BROWSER_TIMEZONE;
+  const [, proxyHost, proxyPortStr] = pm;
+  const proxyPort = parseInt(proxyPortStr, 10);
+  try {
+    const { SocksClient } = await import("socks");
+    const { Agent, fetch: undiciFetch } = await import("undici");
+    const agent = new Agent({
+      connect: (opts: any, callback: any) => {
+        const th: string = opts.hostname || opts.host;
+        const tp: number = Number(opts.port) || 80;
+        SocksClient.createConnection(
+          { proxy: { host: proxyHost, port: proxyPort, type: 5 }, command: "connect", destination: { host: th, port: tp } },
+          (err: any, info: any) => { if (err) return callback(err); callback(null, info.socket); }
+        );
+      },
+    });
+    const resp = await (undiciFetch as any)(
+      "http://ip-api.com/json?fields=timezone,country,query",
+      { dispatcher: agent, signal: AbortSignal.timeout(8000) }
+    );
+    const data: any = await resp.json();
+    if (data?.timezone) {
+      const tz = String(data.timezone);
+      _geoCache.set(proxyUrl, { tz, ts: Date.now() });
+      console.log(`[geo] ${proxyUrl} -> ${data.country} ${tz} (${data.query})`);
+      return tz;
+    }
+  } catch (e) { console.warn("[geo] failed:", String(e).slice(0, 80)); }
+  const portFallback = _PROXY_PORT_TZ[pm[2]];
+  const fbTz = portFallback?.tz ?? BROWSER_TIMEZONE;
+  _geoCache.set(proxyUrl, { tz: fbTz, ts: Date.now() });
+  return fbTz;
+}
 export const STEALTH_INIT = `
 // === Anti-fingerprint init script (runs before any page JS) ===
 (() => {
@@ -1172,6 +1217,7 @@ async function getBrowser(): Promise<Browser> {
     const executablePath = process.env.REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE
       || (_useFpChrome ? _fpChromeBin : "/data/cache/ms-playwright/chromium-1208/chrome-linux64/chrome");
     const proxyServer = process.env.BROWSER_PROXY || undefined;
+    if (proxyServer) { _effectiveTz = await resolveProxyTimezone(proxyServer); }
     const userDataDir = "/tmp/broker-chromium-profile";
     try { fs.mkdirSync(userDataDir, { recursive: true }); } catch { /* ignore */ }
     // We must spawn chromium directly (not chromium.launch) because Playwright
@@ -1212,7 +1258,7 @@ async function getBrowser(): Promise<Browser> {
         "--fingerprint-hardware-concurrency=4",
         "--lang=en-US",
         "--accept-lang=en-US,en",
-        `--timezone=${BROWSER_TIMEZONE}`,
+        `--timezone=${_effectiveTz}`,
         "--disable-non-proxied-udp",
       ] : []),
       "about:blank",
@@ -1272,7 +1318,7 @@ async function newFreshContext(): Promise<BrowserContext> {
     isMobile: false,
     hasTouch: false,
     locale: "en-US",
-    timezoneId: BROWSER_TIMEZONE,
+    timezoneId: _effectiveTz,
     colorScheme: "dark",
     ignoreHTTPSErrors: true,
     extraHTTPHeaders: {
@@ -1350,7 +1396,7 @@ async function getStickyContext(hostname: string): Promise<BrowserContext> {
     isMobile: false,
     hasTouch: false,
     locale: "en-US",
-    timezoneId: BROWSER_TIMEZONE,
+    timezoneId: _effectiveTz,
     colorScheme: "dark",
     ignoreHTTPSErrors: true,
     extraHTTPHeaders: {
@@ -1857,7 +1903,7 @@ async function harvestGoogleCookiesFresh(): Promise<CK[]> {
     userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
     viewport: { width: 1920, height: 1040 },
     locale: "en-US",
-    timezoneId: BROWSER_TIMEZONE,
+    timezoneId: _effectiveTz,
     proxy: { server: GOOGLE_HARVEST_PROXY },
   });
   try {
@@ -2012,7 +2058,7 @@ async function _bootstrapGoogleTrust(browser: Browser): Promise<void> {
       viewport: { width: 1920, height: 1040 },
       screen: { width: 1920, height: 1080 },
       locale: "en-US",
-      timezoneId: BROWSER_TIMEZONE,
+      timezoneId: _effectiveTz,
       ignoreHTTPSErrors: true,
       extraHTTPHeaders: {
         "Accept-Language": "en-US,en;q=0.9",

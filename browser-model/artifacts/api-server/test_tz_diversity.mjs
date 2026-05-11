@@ -6,6 +6,20 @@
  */
 import { chromium } from "playwright";
 import { readFileSync } from "fs";
+import { execSync } from "child_process";
+
+// Real-time geo resolution - replaces stale static PORT_TZ map
+function resolvePortTz(port) {
+  try {
+    const raw = execSync(
+      `curl -s --socks5 127.0.0.1:${port} --max-time 10 "http://ip-api.com/json?fields=timezone,country,query"`,
+      { timeout: 14000, encoding: "utf8" }
+    ).trim();
+    const d = JSON.parse(raw);
+    if (d.timezone) return { tz: d.timezone, country: d.country, ip: d.query };
+  } catch (_) {}
+  return null;
+}
 
 const BINARY = "/opt/fingerprint-chromium/squashfs-root/opt/ungoogled-chromium/chrome";
 const SRC    = "/root/Toolkit/browser-model/artifacts/api-server/src/lib/renderer.ts";
@@ -17,13 +31,12 @@ const LATE_FIX_PATCHES = (tsSrc.match(/const LATE_FIX_PATCHES = `([\s\S]*?)`;/) 
 const WORKER_STEALTH   = (tsSrc.match(/const WORKER_STEALTH_PATCH = `([\s\S]*?)`;/)||[])[1]||"";
 const STEALTH_FULL     = STEALTH_INIT + (BOOT_SUFFIX||"");
 
-// 端口 → 时区映射 (来自 renderer.ts _PROXY_PORT_TZ)
-const PORT_TZ = {
-  "10857": "Asia/Hong_Kong",
-  "10859": "Europe/Amsterdam",
-  "10853": "America/Los_Angeles",
-  "10855": "Europe/London",
-  "10851": "America/New_York",
+// 端口列表 — 时区通过 ip-api.com 实时解析，不依赖静态映射
+const PORT_LIST = ["10857", "10859", "10853", "10855", "10851"];
+// 静态 fallback (仅 ip-api 不可达时使用)
+const PORT_TZ_FB = {
+  "10857": "Asia/Hong_Kong", "10859": "Asia/Hong_Kong",
+  "10853": "America/Los_Angeles", "10855": "Europe/London", "10851": "America/New_York",
 };
 
 async function mkBrowser(port, tz) {
@@ -57,9 +70,18 @@ async function mkBrowser(port, tz) {
   return { b, ctx };
 }
 
-async function testIPHey(port, tz) {
+async function testIPHey(port, _staticTz) {
+  // Real-time geo resolve per port
+  process.stdout.write(`\n[${new Date().toISOString().slice(11,19)}] === IPHey port=${port} (geo resolving...)\n`);
+  const geo = resolvePortTz(port);
+  const tz = geo?.tz ?? _staticTz;
+  if (tz !== _staticTz) {
+    console.log(`  ⚠️  static was ${_staticTz}, real geo: ${tz} (${geo?.country}, ${geo?.ip})`);
+  } else {
+    console.log(`  ✓ geo confirmed: ${tz} (${geo?.country ?? "fallback"}, ${geo?.ip ?? "?"})`);
+  }
   const label = `port=${port} tz=${tz}`;
-  console.log(`\n[${new Date().toISOString().slice(11,19)}] === IPHey ${label} ===`);
+  console.log(`[${new Date().toISOString().slice(11,19)}] === IPHey ${label} ===`);
   let b, ctx;
   try {
     ({ b, ctx } = await mkBrowser(port, tz));
@@ -95,7 +117,8 @@ async function testIPHey(port, tz) {
 }
 
 const results = [];
-for (const [port, tz] of Object.entries(PORT_TZ)) {
+for (const port of PORT_LIST) {
+  const tz = PORT_TZ_FB[port] || "UTC"; // used only as fallback arg
   const r = await testIPHey(port, tz);
   results.push(r);
 }
