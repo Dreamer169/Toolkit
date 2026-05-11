@@ -18,10 +18,48 @@ DATABASE_URL    = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres
 CONCURRENCY     = int(os.environ.get("KIRO_CONCURRENCY", "1"))
 INTERVAL        = int(os.environ.get("KIRO_INTERVAL", "60"))
 MAX_PER_RUN     = int(os.environ.get("KIRO_MAX_PER_RUN", "0"))
-# US: 10910/11/12/16, HK: 10854, others available
+# 代理端口配置 (优先使用 US/JP/KR 出口 IP)
 PROXY_PORTS_RAW = os.environ.get("KIRO_PROXY_PORTS", "10910,10911,10912,10916,10854")
 PROXY_PORTS     = [int(p.strip()) for p in PROXY_PORTS_RAW.split(",") if p.strip()]
 SCRIPT_PATH     = "/root/Toolkit/artifacts/api-server/kiro_register.py"
+
+# 偏好的出口国家 (按优先级)
+PREFERRED_COUNTRIES = {"US", "JP", "KR", "HK", "SG"}
+_port_country_cache: dict = {}  # port → country code (cached)
+
+def _check_port_country(port: int) -> str:
+    """检查代理端口的出口国家，缓存结果。返回大写国家代码或 '' 表示失败。"""
+    if port in _port_country_cache:
+        return _port_country_cache[port]
+    try:
+        import urllib.request as _ur
+        proxies_env = f"socks5h://127.0.0.1:{port}"
+        # Python 内置 urllib 不支持 socks5，用 curl_cffi
+        sys.path.insert(0, "/root/Toolkit/artifacts/api-server")
+        from curl_cffi import requests as _cr
+        s = _cr.Session(impersonate="chrome131")
+        s.proxies = {"http": f"socks5://127.0.0.1:{port}",
+                     "https": f"socks5://127.0.0.1:{port}"}
+        r = s.get("https://ipinfo.io/country", timeout=6)
+        country = r.text.strip().upper()
+        _port_country_cache[port] = country
+        print(f"[geo] port {port} → {country}", flush=True)
+        return country
+    except Exception as e:
+        _port_country_cache[port] = ""
+        return ""
+
+def pick_best_port() -> int:
+    """选出口在偏好国家中的代理端口，随机打乱后取第一个可用的。"""
+    ports = list(PROXY_PORTS)
+    random.shuffle(ports)
+    # 先试偏好国家
+    for p in ports:
+        c = _check_port_country(p)
+        if c in PREFERRED_COUNTRIES:
+            return p
+    # 没有偏好国家则随机选
+    return random.choice(PROXY_PORTS) if PROXY_PORTS else 10910
 
 _stop_flag = threading.Event()
 
@@ -109,7 +147,7 @@ def main():
             print(f"[{ts()}] 已达本次上限 {MAX_PER_RUN}, 退出", flush=True)
             break
 
-        port = random.choice(PROXY_PORTS)
+        port = pick_best_port()
         print(f"[{ts()}] 开始注册 (proxy=:{port})...", flush=True)
 
         ok = run_one_register(port)

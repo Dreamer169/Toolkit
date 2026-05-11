@@ -1277,39 +1277,57 @@ class KiroRegister:
     # SPA 通过 view.awsapps.com/api/oidc/ 代理调用, 代理用 SSO session cookie 认证
     # 我们直接调用 portal.sso 用 bearer token 认证
     def _fetch_portal_bearer(self):
-        """Run step12a to get portal.sso bearer token for device auth confirmation."""
+        """Run step12a to get portal.sso bearer token for device auth confirmation.
+        Tries multiple authCode/state combinations to handle both SHORTCUT and full paths."""
         PORTAL = "https://portal.sso.us-east-1.amazonaws.com"
-        if not self._portal_csrf_token or not self._workflow_result_handle or not self._step11_state:
-            self.log("  _fetch_portal_bearer: missing required data, skipping")
+        if not self._portal_csrf_token:
+            self.log("  _fetch_portal_bearer: no csrf token, skipping")
             return None
-        try:
-            sso_h = {
-                **UA,
-                "accept": "application/json, text/plain, */*",
-                "content-type": "application/x-www-form-urlencoded",
-                "x-amz-sso-csrf-token": self._portal_csrf_token,
-                "origin": "https://view.awsapps.com",
-                "referer": "https://view.awsapps.com/",
-                "sec-fetch-site": "cross-site",
-                "sec-fetch-mode": "cors",
-                "sec-fetch-dest": "empty",
-            }
-            sso_body = urlencode({
-                "authCode": self._workflow_result_handle,
-                "state": self._step11_state,
-                "orgId": "view",
-            })
-            r = self.s.post(f"{PORTAL}/auth/sso-token", headers=sso_h, data=sso_body)
-            self.log(f"  _fetch_portal_bearer: status={r.status_code}")
-            if r.status_code == 200:
-                token = r.json().get("token", "")
-                if token:
-                    self.log(f"  _fetch_portal_bearer: OK token={token[:60]}...")
-                    return token
-            else:
-                self.log(f"  _fetch_portal_bearer: failed {r.text[:200]}")
-        except Exception as e:
-            self.log(f"  _fetch_portal_bearer: exception {e}")
+
+        sso_h = {
+            **UA,
+            "accept": "application/json, text/plain, */*",
+            "content-type": "application/x-www-form-urlencoded",
+            "x-amz-sso-csrf-token": self._portal_csrf_token,
+            "origin": "https://view.awsapps.com",
+            "referer": "https://view.awsapps.com/",
+            "sec-fetch-site": "cross-site",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-dest": "empty",
+        }
+
+        # 尝试多种 authCode/state 组合
+        attempts = []
+        if self._workflow_result_handle and self._step11_state:
+            attempts.append((self._workflow_result_handle, self._step11_state, "wrh+s11"))
+        if self._auth_code and self._step11_state:
+            attempts.append((self._auth_code, self._step11_state, "code+s11"))
+        if self._workflow_result_handle and self.state:
+            attempts.append((self._workflow_result_handle, self.state, "wrh+pkce_state"))
+        if self._auth_code and self.state:
+            attempts.append((self._auth_code, self.state, "code+pkce_state"))
+        if not attempts:
+            self.log("  _fetch_portal_bearer: no authCode candidates")
+            return None
+
+        for auth_code_val, state_val, label in attempts:
+            try:
+                sso_body = urlencode({
+                    "authCode": auth_code_val,
+                    "state": state_val,
+                    "orgId": "view",
+                })
+                r = self.s.post(f"{PORTAL}/auth/sso-token", headers=sso_h, data=sso_body)
+                self.log(f"  _fetch_portal_bearer [{label}]: status={r.status_code}")
+                if r.status_code == 200:
+                    token = r.json().get("token", "")
+                    if token:
+                        self.log(f"  _fetch_portal_bearer [{label}]: OK token={token[:60]}...")
+                        return token
+                else:
+                    self.log(f"  _fetch_portal_bearer [{label}]: {r.text[:150]}")
+            except Exception as e:
+                self.log(f"  _fetch_portal_bearer [{label}]: exception {e}")
         return None
 
     def step12f_device_auth(self, bearer_token):

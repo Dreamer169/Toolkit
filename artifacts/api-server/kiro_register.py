@@ -65,6 +65,25 @@ def validate_refresh_token(refresh_token: str) -> bool:
         print(f"[validate_rt] network err: {e}", flush=True); return True
 
 
+def detect_exit_ip(proxy: str | None) -> str:
+    """通过代理检测出口 IP，优先 US/JP/KR。返回 IP 字符串或空串。"""
+    try:
+        from curl_cffi import requests as _cr
+        s = _cr.Session(impersonate="chrome131")
+        if proxy:
+            s.proxies = {"http": proxy, "https": proxy}
+        r = s.get("https://ipinfo.io/json", timeout=8)
+        if r.status_code == 200:
+            d = r.json()
+            country = d.get("country", "")
+            ip      = d.get("ip", "")
+            print(f"[EXIT_IP] {ip} ({country})", flush=True)
+            return ip
+    except Exception as e:
+        print(f"[EXIT_IP] 检测失败: {e}", flush=True)
+    return ""
+
+
 def pick_outlook_account():
     """从 DB 中取一个未使用 Kiro 注册的 Outlook 账号"""
     conn = _db()
@@ -386,6 +405,7 @@ def main():
 
     elapsed = int(time.time() - start_t)
     if result.get("ok"):
+        _exit_ip = detect_exit_ip(proxy) if proxy else ""
         kiro_id = save_kiro_account(
             outlook_id=account["id"],
             email=result["email"],
@@ -396,7 +416,7 @@ def main():
             client_secret=result.get("clientSecret", ""),
             session_token=result.get("sessionToken", ""),
             proxy=proxy or "",
-            exit_ip="",
+            exit_ip=_exit_ip,
         )
         mark_outlook_kiro_done(account["id"], success=True)
         print(f"✅ 注册成功! Kiro ID={kiro_id} email={result['email']} ({elapsed}s)", flush=True)

