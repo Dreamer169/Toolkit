@@ -373,8 +373,8 @@ module.exports = {
         "SB_ACC_DIR": "/root/obvious-accounts",
         "SB_MIN_POOL": "10",
         "SB_CHECK_INTERVAL": "600",
-        "SB_PORT_START": "10860",
-        "SB_PORT_END": "10869",
+        "SB_PORT_START": "10820",
+        "SB_PORT_END": "10835",
         "DISPLAY": ":99",
         "PYTHONUNBUFFERED": "1"
       },

@@ -41,13 +41,15 @@ def get_accounts(conn, limit=10, account_id=None):
     cur = conn.cursor()
     if account_id:
         cur.execute("""
-            SELECT id, email, password, sub_status, token, refresh_token
+            SELECT id, email, password, sub_status, token, refresh_token,
+                   notes::jsonb->>'source_outlook_refresh_token' as ol_rt
             FROM accounts
             WHERE id = %s AND platform = 'kiro'
         """, (account_id,))
     else:
         cur.execute("""
-            SELECT id, email, password, sub_status, token, refresh_token
+            SELECT id, email, password, sub_status, token, refresh_token,
+                   notes::jsonb->>'source_outlook_refresh_token' as ol_rt
             FROM accounts
             WHERE platform = 'kiro'
               AND sub_status IN ('pending', 'suspended')
@@ -212,6 +214,56 @@ class KiroRelogin(KiroRegister):
         self.log(f"  Resp: {json.dumps(d, ensure_ascii=False)[:400]}")
         return d, None
 
+    def set_otp_refresh_token(self, rt: str | None):
+        self._otp_rt = rt
+
+    def _get_otp(self, tag: str = "", timeout: int = 120) -> str | None:
+        """Read OTP from outlook inbox via Graph API."""
+        rt = getattr(self, "_otp_rt", None)
+        if not rt:
+            self.log(f"  ⚠️ No outlook refresh_token — cannot read OTP")
+            return None
+        try:
+            from kiro_register import wait_for_aws_otp
+        except ImportError:
+            import importlib.util, pathlib
+            spec = importlib.util.spec_from_file_location(
+                "kiro_register", "/data/Toolkit/artifacts/api-server/kiro_register.py")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            wait_for_aws_otp = mod.wait_for_aws_otp
+        return wait_for_aws_otp(rt, timeout=timeout, tag=tag)
+
+    def _submit_otp(self, otp: str, prev_resp: dict):
+        """Submit OTP to AWS /api/execute endpoint."""
+        wsh = prev_resp.get("workflowStateHandle", self.wsh)
+        step_id = prev_resp.get("stepId", "")
+        url = f"{SIGNIN}/platform/{DIR_ID}/api/execute"
+        body = {
+            "workflowStateHandle": wsh,
+            "stepId": step_id,
+            "actionId": "SUBMIT",
+            "formFields": [{"id": "otpCode", "value": otp}],
+        }
+        h = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": UA,
+        }
+        r = self.s.post(url, headers=h, json=body)
+        self.log(f"  OTP submit Status: {r.status_code}")
+        self._capture_cookies(r)
+        if r.status_code != 200:
+            self.log(f"  ❌ {r.status_code}: {r.text[:300]}")
+            return None, f"http_{r.status_code}"
+        try:
+            d = r.json()
+        except Exception:
+            return None, "non_json"
+        if d.get("workflowStateHandle"):
+            self.wsh = d["workflowStateHandle"]
+        return d, None
+
     def relogin(self, email, password, tag="relogin"):
         """
         Full re-login flow for existing kiro account.
@@ -264,6 +316,18 @@ class KiroRelogin(KiroRegister):
         if r4 is None:
             return None, f"step4_failed_{err}"
 
+        # Step 4b-OTP: Handle email OTP challenge if returned by step4
+        r4_step = r4.get("stepId", "") if isinstance(r4, dict) else ""
+        if "otp" in r4_step.lower() or "credential" in r4_step.lower():
+            self.log(f"  OTP challenge: stepId={r4_step}")
+            otp = self._get_otp(tag=tag, timeout=120)
+            if not otp:
+                return None, "step4b_otp_timeout"
+            r4, err = self._submit_otp(otp, r4)
+            if r4 is None:
+                return None, f"step4b_otp_submit_failed_{err}"
+            self.log(f"  OTP submitted → stepId={r4.get('stepId') if isinstance(r4,dict) else '?'}")
+
         # Step 11: Final login
         r11 = self.step11_final_login(email, r4)
         if r11 is None:
@@ -277,10 +341,11 @@ class KiroRelogin(KiroRegister):
         return tokens, None
 
 
-def run_relogin(account_id, email, password, dry_run=False):
+def run_relogin(account_id, email, password, dry_run=False, ol_rt=None):
     """Re-login a single account. Returns (success, result_dict)."""
     tag = f"{account_id}"
     kr = KiroRelogin(tag=tag)
+    kr.set_otp_refresh_token(ol_rt)
     try:
         tokens, err = kr.relogin(email=email, password=password, tag=tag)
         if err or not tokens:
@@ -323,7 +388,7 @@ def main():
     ok = 0
     failed = 0
     for row in accounts:
-        acc_id, email, password, sub_status, token, rt = row
+        acc_id, email, password, sub_status, token, rt, ol_rt = row
         log(f"Processing [{acc_id}] {email} (status={sub_status})")
 
         if not password:
@@ -331,7 +396,7 @@ def main():
             failed += 1
             continue
 
-        success, result = run_relogin(acc_id, email, password, dry_run=args.dry_run)
+        success, result = run_relogin(acc_id, email, password, dry_run=args.dry_run, ol_rt=ol_rt)
         
         if success and not args.dry_run:
             exp = datetime.now(timezone.utc) + timedelta(seconds=result.get("expires_in", 28800))
