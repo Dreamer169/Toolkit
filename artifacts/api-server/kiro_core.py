@@ -1629,10 +1629,13 @@ class KiroRegister:
         refresh_token = ""
         client_id = ""
         client_secret = ""
-        try:
-            device_result = self.step12f_device_auth(bearer_for_device)
-        except Exception as _12f_exc:
-            self.log(f"  step12f exc(non-fatal): {type(_12f_exc).__name__}: {_12f_exc}")
+        if bearer_for_device:
+            try:
+                device_result = self.step12f_device_auth(bearer_for_device)
+            except Exception as _12f_exc:
+                self.log(f"  step12f exc(non-fatal): {type(_12f_exc).__name__}: {_12f_exc}")
+        else:
+            self.log("  step12f: skip (SHORTCUT path — no portal bearer, refreshToken unavailable)")
         if device_result:
             refresh_token = device_result.get("refreshToken", "")
             client_id = device_result.get("clientId", "")
