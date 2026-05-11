@@ -51,6 +51,34 @@ process.once("exit",   () => { killChromiumProc(); });
 process.once("SIGTERM", () => { killChromiumProc(); process.exit(0); });
 process.once("SIGINT",  () => { killChromiumProc(); process.exit(0); });
 
+
+// -- Proxy-aware timezone resolution (added to fix IPHey Unreliable verdict) --
+// Maps SOCKS proxy port to exit-IP geographic timezone so that Playwright
+// timezoneId, Chrome --timezone flag, and JS Intl patch all stay consistent.
+// (c20544f only patched browser_fingerprint.py; this file was missed.)
+const _PROXY_PORT_TZ: Record<string, { tz: string; std: number; dst: number; hasDst: boolean }> = {
+  "10857": { tz: "Asia/Hong_Kong",       std: -480, dst: -480, hasDst: false },
+  "10859": { tz: "Europe/Amsterdam",    std:  -60, dst: -120, hasDst: true  },
+  "10853": { tz: "America/Los_Angeles", std:  480, dst:  420, hasDst: true  },
+  "10855": { tz: "Europe/London",       std:    0, dst:  -60, hasDst: true  },
+  "10851": { tz: "America/New_York",    std:  300, dst:  240, hasDst: true  },
+  "10854": { tz: "Asia/Seoul",          std: -540, dst: -540, hasDst: false },
+  "10910": { tz: "America/Los_Angeles", std:  480, dst:  420, hasDst: true  },
+  "10911": { tz: "America/Los_Angeles", std:  480, dst:  420, hasDst: true  },
+  "10912": { tz: "America/Los_Angeles", std:  480, dst:  420, hasDst: true  },
+  "10914": { tz: "Europe/London",       std:    0, dst:  -60, hasDst: true  },
+  "10915": { tz: "America/Mexico_City", std:  360, dst:  300, hasDst: true  },
+  "10916": { tz: "America/Los_Angeles", std:  480, dst:  420, hasDst: true  },
+};
+function _resolveProxyTz() {
+  const m = (process.env.BROWSER_PROXY || "").match(/:(\d+)$/);
+  return _PROXY_PORT_TZ[m?.[1] ?? ""] ?? { tz: "America/Los_Angeles", std: 480, dst: 420, hasDst: true };
+}
+const _ptz = _resolveProxyTz();
+const BROWSER_TIMEZONE = _ptz.tz;
+const _TZ_STD = _ptz.std;
+const _TZ_DST = _ptz.dst;
+const _TZ_HAS_DST = _ptz.hasDst;
 export const STEALTH_INIT = `
 // === Anti-fingerprint init script (runs before any page JS) ===
 (() => {
@@ -476,7 +504,7 @@ export const STEALTH_INIT = `
     const origRO = Intl.DateTimeFormat.prototype.resolvedOptions;
     Intl.DateTimeFormat.prototype.resolvedOptions = function resolvedOptions() {
       const r = origRO.apply(this, arguments);
-      if (!r.timeZone || r.timeZone === "UTC") r.timeZone = "America/Los_Angeles";
+      if (!r.timeZone || r.timeZone === "UTC") r.timeZone = "${BROWSER_TIMEZONE}";
       if (!r.locale || r.locale === "en-GB") r.locale = "en-US";
       return r;
     };
@@ -491,9 +519,9 @@ export const STEALTH_INIT = `
     const origGTO = Date.prototype.getTimezoneOffset;
     Date.prototype.getTimezoneOffset = function getTimezoneOffset() {
       const v = origGTO.call(this);
-      if (v === 0) {
+      if (v === 0 && ${_TZ_STD} !== 0) {
         const month = this.getUTCMonth();
-        return (month >= 2 && month <= 10) ? 420 : 480;
+        return ${_TZ_HAS_DST} ? ((month >= 2 && month <= 10) ? ${_TZ_DST} : ${_TZ_STD}) : ${_TZ_STD};
       }
       return v;
     };
@@ -1104,7 +1132,7 @@ async function getBrowser(): Promise<Browser> {
         "--fingerprint-hardware-concurrency=4",
         "--lang=en-US",
         "--accept-lang=en-US,en",
-        "--timezone=America/Los_Angeles",
+        `--timezone=${BROWSER_TIMEZONE}`,
         "--disable-non-proxied-udp",
       ] : []),
       "about:blank",
@@ -1164,7 +1192,7 @@ async function newFreshContext(): Promise<BrowserContext> {
     isMobile: false,
     hasTouch: false,
     locale: "en-US",
-    timezoneId: "America/Los_Angeles",
+    timezoneId: BROWSER_TIMEZONE,
     colorScheme: "light",
     ignoreHTTPSErrors: true,
     extraHTTPHeaders: {
@@ -1241,7 +1269,7 @@ async function getStickyContext(hostname: string): Promise<BrowserContext> {
     isMobile: false,
     hasTouch: false,
     locale: "en-US",
-    timezoneId: "America/Los_Angeles",
+    timezoneId: BROWSER_TIMEZONE,
     colorScheme: "light",
     ignoreHTTPSErrors: true,
     extraHTTPHeaders: {
@@ -1611,7 +1639,7 @@ async function harvestGoogleCookiesFresh(): Promise<CK[]> {
     userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
     viewport: { width: 1920, height: 1040 },
     locale: "en-US",
-    timezoneId: "America/Los_Angeles",
+    timezoneId: BROWSER_TIMEZONE,
     proxy: { server: GOOGLE_HARVEST_PROXY },
   });
   try {
@@ -1765,7 +1793,7 @@ async function _bootstrapGoogleTrust(browser: Browser): Promise<void> {
       viewport: { width: 1920, height: 1040 },
       screen: { width: 1920, height: 1080 },
       locale: "en-US",
-      timezoneId: "America/Los_Angeles",
+      timezoneId: BROWSER_TIMEZONE,
       ignoreHTTPSErrors: true,
       extraHTTPHeaders: {
         "Accept-Language": "en-US,en;q=0.9",
