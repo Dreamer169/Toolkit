@@ -19,7 +19,7 @@ unitool_login.py — unitool.ai 自动登录模块 v1.0
   [FAIL] email|reason
   [DONE] ok/total
 """
-import asyncio, random, json, os, sys, time, socket, argparse
+import asyncio, random, json, os, sys, time, socket, argparse, subprocess
 
 CHROME = None
 for _p in [
