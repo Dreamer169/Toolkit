@@ -393,6 +393,37 @@ def _extract_signup_na(html: str) -> str:
 _RST = "%5B%22%22%2C%7B%22children%22%3A%5B%5B%22lang%22%2C%22en%22%2C%22d%22%5D%2C%7B%22children%22%3A%5B%22entry%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%5D%7D%5D%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D"
 
 
+# ── Turnstile postMessage interceptor — module-level constant ────────────────
+# Injected via execute_script to capture CF iframe→parent postMessage token.
+# CSS uses single-quoted attr value [name='cf-turnstile-response'] (valid CSS3).
+_PM_JS = (
+    "(function(){"
+    "if(window.__cf_pm_hooked)return;"
+    "window.__cf_pm_hooked=true;"
+    "window.__cf_captured_token='';"
+    "window.addEventListener('message',function(ev){"
+    "try{"
+    "var d=ev.data;"
+    "if(typeof d==='string'){try{d=JSON.parse(d);}catch(e){}}"
+    "var tok='';"
+    "if(d&&typeof d==='object'){"
+    "tok=d.token||d.cf_token||d.turnstileToken||d.response||'';}"
+    "if(!tok&&typeof ev.data==='string'&&ev.data.length>80)tok=ev.data;"
+    "if(tok&&tok.length>20&&window.__cf_captured_token.length<20){"
+    "window.__cf_captured_token=tok;"
+    "var inp=document.querySelector('[name=\'cf-turnstile-response\']');"
+    "if(inp&&(!inp.value||inp.value.length<20)){"
+    "try{"
+    "var s=Object.getOwnPropertyDescriptor("
+    "window.HTMLInputElement.prototype,'value').set;"
+    "s.call(inp,tok);"
+    "inp.dispatchEvent(new Event('input',{bubbles:true}));"
+    "inp.dispatchEvent(new Event('change',{bubbles:true}));"
+    "}catch(e){inp.value=tok;}}}"
+    "}catch(e){}},true);})();"
+)
+
+
 async def _pydoll_register(
     email: str,
     password: str,
@@ -484,20 +515,39 @@ async def _pydoll_register(
         except Exception as _pmje:
             log(f"  [{label}] postMessage hook warn: {_pmje}")
 
-        # Wait for CF iframe
-        for i in range(20):
+        # Wait for CF iframe OR token (whichever comes first)
+        # render=explicit: iframe is created dynamically after JS bundle loads.
+        # invisible mode: token may appear even before iframe is visible.
+        t0 = time.time()
+        for i in range(25):
             await asyncio.sleep(1)
+            # Check token first (invisible mode populates without needing iframe click)
+            try:
+                n_tok = await _tok_len(tab)
+            except Exception:
+                n_tok = 0
+            if n_tok > 20:
+                log(f"  [{label}] early token at {i+1}s len={n_tok} (invisible auto-solved)")
+                return True
+            # Check iframe (any CF challenge URL)
             try:
                 n_iframe = int(_s(await tab.execute_script(
-                    "document.querySelectorAll('iframe[src*=\"challenges.cloudflare\"]').length",
+                    "document.querySelectorAll('iframe[src*=\'cloudflare\']').length",
                     return_by_value=True)) or 0)
             except Exception:
                 n_iframe = 0
             if n_iframe > 0:
-                log(f"  [{label}] CF iframe ready at {i+1}s")
+                log(f"  [{label}] CF iframe ready at {i+1}s (n={n_iframe})")
                 break
             if i % 5 == 4:
-                log(f"  [{label}] [{i+1}s] waiting CF iframe (n={n_iframe})...")
+                # Diagnose: list all iframes
+                try:
+                    all_fr = _s(await tab.execute_script(
+                        "JSON.stringify(Array.from(document.querySelectorAll('iframe')).map(f=>f.src.slice(0,60)))",
+                        return_by_value=True))
+                except Exception:
+                    all_fr = "?"
+                log(f"  [{label}] [{i+1}s] waiting CF iframe (n={n_iframe}) all={all_fr[:120]}")
 
         t0 = time.time()
         _managed_tried = False
