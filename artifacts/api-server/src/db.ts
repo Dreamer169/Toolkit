@@ -37,17 +37,21 @@ export async function query<T = Record<string, unknown>>(
   sql: string,
   params: unknown[] = []
 ): Promise<T[]> {
-  const p = getPool();
-  try {
-    const result = await p.query(sql, params);
-    return result.rows as T[];
-  } catch (e: unknown) {
-    const msg = (e instanceof Error ? e.message : String(e));
-    if (msg.includes("SASL") || msg.includes("password must be") || msg.includes("auth") || msg.includes("Connection terminated") || msg.includes("Client was closed") || msg.includes("read ECONNRESET")) {
-      pool = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const p = getPool();
+    try {
+      const result = await p.query(sql, params);
+      return result.rows as T[];
+    } catch (e: unknown) {
+      const msg = (e instanceof Error ? e.message : String(e));
+      if (msg.includes("SASL") || msg.includes("password must be") || msg.includes("auth") || msg.includes("Connection terminated") || msg.includes("Client was closed") || msg.includes("read ECONNRESET")) {
+        pool = null;
+        if (attempt === 0) { await new Promise(r => setTimeout(r, 500)); continue; }
+      }
+      throw e;
     }
-    throw e;
   }
+  throw new Error("query: unreachable");
 }
 
 export async function queryOne<T = Record<string, unknown>>(
@@ -59,17 +63,21 @@ export async function queryOne<T = Record<string, unknown>>(
 }
 
 export async function execute(sql: string, params: unknown[] = []): Promise<{ rowCount: number }> {
-  const p = getPool();
-  try {
-    const result = await p.query(sql, params);
-    return { rowCount: result.rowCount ?? 0 };
-  } catch (e: unknown) {
-    const msg = (e instanceof Error ? e.message : String(e));
-    if (msg.includes("SASL") || msg.includes("password must be") || msg.includes("auth") || msg.includes("Connection terminated") || msg.includes("Client was closed") || msg.includes("read ECONNRESET")) {
-      pool = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const p = getPool();
+    try {
+      const result = await p.query(sql, params);
+      return { rowCount: result.rowCount ?? 0 };
+    } catch (e: unknown) {
+      const msg = (e instanceof Error ? e.message : String(e));
+      if (msg.includes("SASL") || msg.includes("password must be") || msg.includes("auth") || msg.includes("Connection terminated") || msg.includes("Client was closed") || msg.includes("read ECONNRESET")) {
+        pool = null;
+        if (attempt === 0) { await new Promise(r => setTimeout(r, 500)); continue; }
+      }
+      throw e;
     }
-    throw e;
   }
+  throw new Error("execute: unreachable");
 }
 
 export async function initDatabase(): Promise<void> {

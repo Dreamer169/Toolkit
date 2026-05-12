@@ -1440,7 +1440,6 @@ router.post('/tools/outlook/enable-imap/batch', async (req, res) => {
       return;
     }
 
-    import('psycopg2' as never).catch(() => {/* ok */});
     const { spawn } = await import('child_process');
     const scriptPath = new URL('../enable_imap.py', import.meta.url).pathname;
     const results: Array<{ account_id: number; success: boolean; exitCode: number | null }> = [];

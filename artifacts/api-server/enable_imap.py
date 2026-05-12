@@ -101,6 +101,35 @@ def log(msg: str):
     print(msg, flush=True)
 
 
+
+
+# ─── RESI proxy helper ────────────────────────────────────────────────────────
+_RESI_PORTS = [10851, 10853, 10854, 10855, 10857, 10859]
+
+def _pick_resi_proxy() -> str:
+    """Pick first reachable RESI SOCKS5 proxy port."""
+    import socket
+    for port in _RESI_PORTS:
+        try:
+            s = socket.create_connection(("127.0.0.1", port), timeout=2)
+            s.close()
+            return f"socks5://127.0.0.1:{port}"
+        except Exception:
+            continue
+    log("  [proxy] ⚠ 所有 RESI 端口不通，使用直连")
+    return ""
+
+def _is_error_page(page) -> bool:
+    """Check if page is an error/no-internet page due to proxy failure."""
+    try:
+        txt = page.evaluate("()=>document.body?.innerText?.slice(0,300)||''") or ""
+        url = page.url or ""
+        return ("ERR_PROXY" in txt or "No internet" in txt or
+                "ERR_NETWORK" in txt or "ERR_CONNECTION" in txt or
+                "chrome-error://" in url)
+    except Exception:
+        return False
+
 # ─── DB helpers ───────────────────────────────────────────────────────────────
 _DB_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@localhost/toolkit")
 
@@ -948,9 +977,14 @@ def main():
         password      = acc.get("password") or ""
         cookies_json  = (acc.get("cookies_json") or "").strip()
         fingerprint_json = (acc.get("fingerprint_json") or "").strip()
-        if not args.proxy and acc.get("proxy_port"):
-            args.proxy = f"socks5://127.0.0.1:{acc['proxy_port']}"
-        log(f"[cli] 从 DB 读取账号: id={acc_id} email={email}")
+        log(f"[cli] 从 DB 读取账号: id={acc_id} email={email} "
+             f"(DB proxy_port={acc.get('proxy_port')} ignored – ephemeral)")
+
+    # DB proxy_port 是临时 XrayRelay 端口，跨 session 必然失效；改用 RESI
+    if not args.proxy:
+        args.proxy = _pick_resi_proxy()
+        if args.proxy:
+            log(f"[cli] 自动选择 RESI 代理: {args.proxy}")
 
     if not email:
         ap.error("必须提供 --email 或 --account-id")
