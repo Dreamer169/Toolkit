@@ -136,17 +136,128 @@ async def _execmd_fill(tab, selector: str, value: str) -> bool:
     _log(f"    fill {selector}: {r}")
     return "ok=true" in r
 
-async def _bypass_turnstile(tab, label="", timeout=15) -> bool:
-    """手动触发 shadow root 点击，返回是否成功"""
-    for attempt in range(3):
+# ── Turnstile postMessage interceptor JS (module-level) ──────────────────────
+# Injected into every tab before navigation. Captures CF Turnstile token from
+# iframe→parent postMessage and populates the hidden input field.
+_PM_HOOK_JS = (
+    "(function(){"
+    "if(window.__cf_pm_hooked)return;"
+    "window.__cf_pm_hooked=true;"
+    "window.__cf_captured_token='';"
+    "window.addEventListener('message',function(ev){"
+    "try{"
+    "var d=ev.data;"
+    "if(typeof d==='string'){try{d=JSON.parse(d);}catch(e){}}"
+    "var tok='';"
+    "if(d&&typeof d==='object'){"
+    "tok=d.token||d.cf_token||d.turnstileToken||d.response||'';}"
+    "if(!tok&&typeof ev.data==='string'&&ev.data.length>80)tok=ev.data;"
+    "if(tok&&tok.length>20&&window.__cf_captured_token.length<20){"
+    "window.__cf_captured_token=tok;"
+    "var inp=document.querySelector('[name=\\\"cf-turnstile-response\\\"]');"
+    "if(inp&&(!inp.value||inp.value.length<20)){"
+    "try{"
+    "var s=Object.getOwnPropertyDescriptor("
+    "window.HTMLInputElement.prototype,'value').set;"
+    "s.call(inp,tok);"
+    "inp.dispatchEvent(new Event('input',{bubbles:true}));"
+    "inp.dispatchEvent(new Event('change',{bubbles:true}));"
+    "}catch(e){inp.value=tok;}}}"
+    "}catch(e){}},true);})();"
+)
+
+
+async def _inject_pm_hook(tab):
+    """注入 postMessage 拦截器（幂等，多次调用安全）"""
+    try:
+        await tab.execute_script(_PM_HOOK_JS, return_by_value=True)
+    except Exception:
+        pass
+
+
+async def _wait_natural_token(tab, label="", field="cf-turnstile-response",
+                               captcha_action="", max_wait=30) -> str:
+    """
+    等待 Turnstile token 自然出现（Invisible 自动求解 / postMessage 回传）。
+    使用已有的 _tok_len/_get_full_token helpers（避免内联 JS 引号问题）。
+    captcha_action 非空时校验 input[name=captcha_action] 值匹配。
+    返回 token 字符串（空串 = 超时）。
+    """
+    for i in range(max_wait):
+        await asyncio.sleep(1)
+        n = await _tok_len(tab, field)          # uses existing helper with correct escaping
+        if n > 20:
+            if captcha_action:
+                ca = _s(await tab.execute_script(
+                    "(document.querySelector('[name=\"captcha_action\"]')||{value:'?'}).value",
+                    return_by_value=True))
+                if ca != captcha_action:
+                    if i % 8 == 7:
+                        _log(f"    [{label}] [{i+1}s] token len={n} action={ca} (want {captcha_action})")
+                    continue
+            tok = await _get_full_token(tab, field)
+            _log(f"    [{label}] natural token at {i+1}s len={len(tok)}")
+            return tok
         try:
-            await tab._bypass_cloudflare({}, time_to_wait_captcha=timeout)
-            _log(f"    [{label}] _bypass_cloudflare OK (attempt {attempt+1})")
-            return True
+            pm_tok = _s(await tab.execute_script(
+                "window.__cf_captured_token||''", return_by_value=True))
+        except Exception:
+            pm_tok = ""
+        if len(pm_tok) > 20:
+            _log(f"    [{label}] postMessage token at {i+1}s len={len(pm_tok)}")
+            return pm_tok
+        if i % 10 == 9:
+            _log(f"    [{label}] [{i+1}s] waiting token (len={n})...")
+    return ""
+
+
+async def _bypass_turnstile(tab, label="", timeout=35) -> bool:
+    """
+    Turnstile bypass v4 — Invisible mode first, Managed checkbox as fallback.
+
+    Invisible Turnstile (unitool current mode):
+      CF auto-solves based on browser fingerprint → token appears in hidden input.
+      We just wait for it; no user interaction or span.cb-i click needed.
+
+    Managed Turnstile (old checkbox mode):
+      Requires pydoll._bypass_cloudflare to click span.cb-i in shadow DOM.
+      Used only as fallback if token doesn't appear within ~22s.
+
+    Steps:
+      1. Inject postMessage listener (idempotent)
+      2. Wait for natural token (invisible mode, up to 22s)
+      3. If no token: try pydoll managed bypass (checkbox)
+      4. Final wait 8s
+    """
+    await _inject_pm_hook(tab)
+
+    # Phase 1: wait for natural/invisible token
+    tok = await _wait_natural_token(tab, label=label, max_wait=22)
+    if tok:
+        return True
+
+    # Phase 2: managed bypass fallback (checkbox / span.cb-i)
+    for attempt in range(2):
+        try:
+            await tab._bypass_cloudflare({}, time_to_wait_captcha=8)
+            _log(f"    [{label}] managed bypass OK (attempt {attempt+1})")
         except Exception as e:
-            _log(f"    [{label}] bypass attempt {attempt+1} err: {e}")
+            em = str(e)
+            if any(k in em for k in ("cb-i", "shadow root", "Timed out")):
+                _log(f"    [{label}] managed N/A (invisible mode): {em[:60]}")
+                break
+            _log(f"    [{label}] managed err {attempt+1}: {em[:80]}")
             await asyncio.sleep(2)
+
+    # Phase 3: final wait using existing helper
+    for i in range(8):
+        await asyncio.sleep(1)
+        n = await _tok_len(tab)                 # uses existing helper
+        if n > 20:
+            _log(f"    [{label}] late token at +{i+1}s len={n}")
+            return True
     return False
+
 
 # ── 单账号登录 ─────────────────────────────────────────────────────────────────
 async def login_one(email: str, password: str, headless: bool = True,
@@ -208,16 +319,20 @@ async def login_one(email: str, password: str, headless: bool = True,
 
         # ── 1. 加载页面 ──────────────────────────────────────────────────────
         _log(f"  [{email}] goto {TARGET}")
+        # Inject postMessage interceptor before page navigates (catches CF token early)
+        await _inject_pm_hook(tab)
         try:
             await tab.go_to(TARGET)
         except Exception as _nav_e:
             _log(f"  [{email}] go_to FAILED: {_nav_e}")
             return {"ok": False, "email": email, "reason": "navigation_timeout"}
         await asyncio.sleep(4)
+        # Re-inject after navigation (page reload clears window state)
+        await _inject_pm_hook(tab)
 
         # ── 2. bypass signup Turnstile (page load) ───────────────────────────
         _log(f"  [{email}] bypassing signup Turnstile...")
-        await _bypass_turnstile(tab, "signup", timeout=15)
+        await _bypass_turnstile(tab, "signup", timeout=35)
 
         # 等 signup token 确认
         for _ in range(15):

@@ -472,64 +472,105 @@ async def _pydoll_register(
                 break
         return "".join(parts)
 
-    async def _bypass_wait(tab, label="", rounds=3, per_round=20) -> bool:
-        """等 Turnstile iframe → 多轮 bypass → reload 兜底"""
-        for i in range(18):
-            await asyncio.sleep(1)
-            n_iframe = int(_s(await tab.execute_script(
-                "document.querySelectorAll('iframe[src*=\"challenges.cloudflare\"]').length",
-                return_by_value=True)) or 0)
-            if n_iframe > 0:
-                log(f"  [{label}] Turnstile iframe ready at {i+1}s")
-                break
-            if i % 3 == 2:
-                log(f"  [{label}] [{i+1}s] waiting iframe...")
-
-        for rnd in range(rounds):
-            try:
-                _bp_t0 = time.time()
-                log(f"  [{label}] bypass start round={rnd+1}")
-                await tab._bypass_cloudflare({}, time_to_wait_captcha=10)
-                log(f"  [{label}] bypass done round={rnd+1} bp={time.time()-_bp_t0:.1f}s")
-            except Exception as e:
-                log(f"  [{label}] bypass err round={rnd+1}: {e}")
-            for i in range(per_round):
-                await asyncio.sleep(1)
-                n = await _tok_len(tab)
-                if n > 20:
-                    log(f"  [{label}] token ready rnd={rnd+1} t={i+1}s len={n}")
-                    return True
-                if i % 5 == 4:
-                    log(f"  [{label}] [{i+1}s] token len={n} ...")
-            log(f"  [{label}] round {rnd+1} token=0, retry bypass...")
-            await asyncio.sleep(3 + rnd * 2)  # progressive backoff: 3s, 5s, 7s
-
-        # 最终兜底: reload
-        log(f"  [{label}] all rounds failed, reloading...")
-        await tab.go_to(f"{UNITOOL_BASE}/en/entry")
-        await asyncio.sleep(6)
-        for i in range(12):
-            await asyncio.sleep(1)
-            n_iframe = int(_s(await tab.execute_script(
-                "document.querySelectorAll('iframe[src*=\"challenges.cloudflare\"]').length",
-                return_by_value=True)) or 0)
-            if n_iframe > 0:
-                break
+    async def _bypass_wait(tab, label="", timeout=90) -> bool:
+        """
+        Turnstile bypass v4.0 — Invisible mode + Managed fallback.
+        Invisible: token auto-populates, just wait.
+        Managed:   pydoll _bypass_cloudflare clicks span.cb-i (fallback at 30s).
+        """
         try:
-            _bp_t0 = time.time()
-            log(f"  [{label}] bypass start reload")
-            await tab._bypass_cloudflare({}, time_to_wait_captcha=10)
-            log(f"  [{label}] bypass done reload bp={time.time()-_bp_t0:.1f}s")
-        except Exception as e:
-            log(f"  [{label}] reload bypass err: {e}")
+            await tab.execute_script(_PM_JS, return_by_value=True)
+            log(f"  [{label}] postMessage hook injected")
+        except Exception as _pmje:
+            log(f"  [{label}] postMessage hook warn: {_pmje}")
+
+        # Wait for CF iframe
         for i in range(20):
             await asyncio.sleep(1)
-            n = await _tok_len(tab)
-            if n > 20:
-                log(f"  [{label}] final token len={n} at {i+1}s")
-                return True
-        return False
+            try:
+                n_iframe = int(_s(await tab.execute_script(
+                    "document.querySelectorAll('iframe[src*=\"challenges.cloudflare\"]').length",
+                    return_by_value=True)) or 0)
+            except Exception:
+                n_iframe = 0
+            if n_iframe > 0:
+                log(f"  [{label}] CF iframe ready at {i+1}s")
+                break
+            if i % 5 == 4:
+                log(f"  [{label}] [{i+1}s] waiting CF iframe (n={n_iframe})...")
 
+        t0 = time.time()
+        _managed_tried = False
+        _reloaded = False
+
+        while time.time() - t0 < timeout:
+            elapsed = time.time() - t0
+
+            # Natural token (invisible auto-solve)
+            try:
+                n = await _tok_len(tab)
+            except Exception:
+                n = 0
+            if n > 20:
+                log(f"  [{label}] token ready (natural) at {elapsed:.0f}s len={n}")
+                return True
+
+            # postMessage-captured token
+            try:
+                pm_tok = _s(await tab.execute_script(
+                    "window.__cf_captured_token||''", return_by_value=True))
+            except Exception:
+                pm_tok = ""
+            if len(pm_tok) > 20:
+                log(f"  [{label}] token via postMessage at {elapsed:.0f}s len={len(pm_tok)}")
+                return True
+
+            # 30s: managed bypass fallback (checkbox/span.cb-i)
+            if elapsed > 30 and not _managed_tried:
+                _managed_tried = True
+                log(f"  [{label}] 30s no token → managed bypass attempt...")
+                try:
+                    await tab._bypass_cloudflare({}, time_to_wait_captcha=10)
+                    log(f"  [{label}] managed bypass returned")
+                except Exception as e:
+                    em = str(e)
+                    if any(k in em for k in ("cb-i", "shadow root", "Timed out")):
+                        log(f"  [{label}] managed N/A (invisible): {em[:60]}")
+                    else:
+                        log(f"  [{label}] managed err: {em[:80]}")
+                await asyncio.sleep(3)
+                continue
+
+            # 60s: reload once
+            if elapsed > 60 and not _reloaded:
+                _reloaded = True
+                log(f"  [{label}] 60s no token → reloading...")
+                try:
+                    await tab.go_to(f"{UNITOOL_BASE}/en/entry")
+                    await asyncio.sleep(6)
+                    await tab.execute_script(
+                        "window.__cf_pm_hooked=false;window.__cf_captured_token='';",
+                        return_by_value=True)
+                    await tab.execute_script(_PM_JS, return_by_value=True)
+                    _managed_tried = False
+                    for i in range(15):
+                        await asyncio.sleep(1)
+                        try:
+                            ni = int(_s(await tab.execute_script(
+                                "document.querySelectorAll('iframe[src*=\"challenges.cloudflare\"]').length",
+                                return_by_value=True)) or 0)
+                        except Exception:
+                            ni = 0
+                        if ni > 0:
+                            break
+                except Exception as _re:
+                    log(f"  [{label}] reload err: {_re}")
+                continue
+
+            await asyncio.sleep(1)
+
+        log(f"  [{label}] bypass timeout after {timeout}s")
+        return False
     try:
         async with Chrome(options=opt, connection_port=_free_port()) as browser:
             tab = await browser.start()
