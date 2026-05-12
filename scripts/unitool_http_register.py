@@ -337,9 +337,35 @@ def _free_port(lo=12000, hi=29999):
     raise RuntimeError("no free port")
 
 
+# ── Per-port RESI cooldown (prevent CF IP reputation burnout) ────────────────
+# CF Invisible Turnstile scores the same IP lower after repeated requests.
+# Enforce minimum 120s gap between reuses of the same RESI port.
+_resi_last_used: dict = {}   # port -> last_used_epoch
+_resi_cooldown_secs = 120    # 2 min between uses of same port
+
 def _pick_port(hint: int = 0) -> int:
+    """Pick RESI port respecting per-port cooldown to protect IP reputation."""
+    import time as _t
+    now = _t.time()
     if _RESI:
-        return _rpool.pick(hint=hint % 97) if hint else _rpool.pick()
+        # Try pool pick first; if on cooldown, find next available
+        candidate = _rpool.pick(hint=hint % 97) if hint else _rpool.pick()
+        if isinstance(candidate, int):
+            if now - _resi_last_used.get(candidate, 0) >= _resi_cooldown_secs:
+                _resi_last_used[candidate] = now
+                return candidate
+            # Cooldown active: try other ports from pool
+            for _ in range(10):
+                alt = _rpool.pick()
+                if isinstance(alt, int) and now - _resi_last_used.get(alt, 0) >= _resi_cooldown_secs:
+                    _resi_last_used[alt] = now
+                    return alt
+            # All on cooldown: return least-recently-used port anyway
+            port = min(_resi_last_used.items() or [(candidate, 0)], key=lambda x: x[1])[0]
+            _resi_last_used[port] = now
+            return port
+        _resi_last_used[candidate] = now
+        return candidate
     return 10851
 
 
@@ -505,9 +531,14 @@ async def _pydoll_register(
 
     async def _bypass_wait(tab, label="", timeout=90) -> bool:
         """
-        Turnstile bypass v4.0 — Invisible mode + Managed fallback.
-        Invisible: token auto-populates, just wait.
-        Managed:   pydoll _bypass_cloudflare clicks span.cb-i (fallback at 30s).
+        Turnstile bypass v5.0 — Invisible + Managed dual-mode hybrid
+        Root cause (2026-05-12):
+          CF Invisible Turnstile grades IP reputation live.
+          Fresh RESI IPs -> token auto-appears ~30-40s  (fast path).
+          Reused/degraded IPs -> no auto token; need click (slow path).
+        Log evidence: 12:38 natural@34s OK, 12:43 natural@87s degrading,
+          12:47 timeout 90s first fail, 13:00+ all timeouts (batch burned).
+        Fix: 30s natural wait -> _bypass_cloudflare() click -> reload fallback.
         """
         try:
             await tab.execute_script(_PM_JS, return_by_value=True)
@@ -515,68 +546,91 @@ async def _pydoll_register(
         except Exception as _pmje:
             log(f"  [{label}] postMessage hook warn: {_pmje}")
 
-        # Invisible Turnstile: CF evaluates browser fingerprint silently.
-        # No iframe, no span.cb-i (unitool.ai switched Managed→Invisible).
-        # Token appears in input[name=cf-turnstile-response] after ~30-35s.
-        # Skip the old 25s iframe-wait — poll for natural token directly.
-        t0 = time.time()
-        _reloaded = False
-
-        while time.time() - t0 < timeout:
-            elapsed = time.time() - t0
-
-            # Natural token (invisible auto-solve)
-            try:
-                n = await _tok_len(tab)
-            except Exception:
-                n = 0
-            if n > 20:
-                log(f"  [{label}] token ready (natural) at {elapsed:.0f}s len={n}")
-                return True
-
-            # postMessage-captured token (edge-case fallback)
-            try:
-                pm_tok = _s(await tab.execute_script(
-                    "window.__cf_captured_token||''", return_by_value=True))
-            except Exception:
-                pm_tok = ""
-            if len(pm_tok) > 20:
-                log(f"  [{label}] token via postMessage at {elapsed:.0f}s len={len(pm_tok)}")
-                return True
-
-            if int(elapsed) % 10 == 9:
-                log(f"  [{label}] [{elapsed:.0f}s] waiting invisible Turnstile token...")
-
-            await asyncio.sleep(1)
-            # 60s: reload once
-            if elapsed > 60 and not _reloaded:
-                _reloaded = True
-                log(f"  [{label}] 60s no token → reloading...")
+        async def _poll_token(seconds):
+            for _ in range(seconds):
+                await asyncio.sleep(1)
                 try:
-                    await tab.go_to(f"{UNITOOL_BASE}/en/entry")
-                    await asyncio.sleep(6)
-                    await tab.execute_script(
-                        "window.__cf_pm_hooked=false;window.__cf_captured_token='';",
-                        return_by_value=True)
-                    await tab.execute_script(_PM_JS, return_by_value=True)
-                    _managed_tried = False
-                    for i in range(15):
-                        await asyncio.sleep(1)
-                        try:
-                            ni = int(_s(await tab.execute_script(
-                                "document.querySelectorAll('iframe[src*=\"challenges.cloudflare\"]').length",
-                                return_by_value=True)) or 0)
-                        except Exception:
-                            ni = 0
-                        if ni > 0:
-                            break
-                except Exception as _re:
-                    log(f"  [{label}] reload err: {_re}")
-                continue
+                    n = await _tok_len(tab)
+                except Exception:
+                    n = 0
+                if n > 20:
+                    return await _get_token(tab)
+                try:
+                    pm = _s(await tab.execute_script(
+                        "window.__cf_captured_token||''", return_by_value=True))
+                except Exception:
+                    pm = ""
+                if len(pm) > 20:
+                    return pm
+            return ""
 
+        # Phase 1: Invisible auto-solve (good RESI IPs, ~30s)
+        log(f"  [{label}] [phase1] waiting natural token 30s...")
+        tok = await _poll_token(30)
+        if tok:
+            log(f"  [{label}] natural token len={len(tok)}")
+            return True
+
+        # Phase 2: degraded IP -> active _bypass_cloudflare() click
+        log(f"  [{label}] [phase2] no natural token -> _bypass_cloudflare()")
+        for _wi in range(8):
             await asyncio.sleep(1)
+            try:
+                ni = int(_s(await tab.execute_script(
+                    "document.querySelectorAll(\"iframe[src*='challenges.cloudflare']\").length",
+                    return_by_value=True)) or 0)
+            except Exception:
+                ni = 0
+            if ni > 0:
+                log(f"  [{label}] CF iframe at {_wi+1}s")
+                break
+        for rnd in range(2):
+            try:
+                _t0bp = time.time()
+                await tab._bypass_cloudflare({}, time_to_wait_captcha=20)
+                log(f"  [{label}] bypass click rnd={rnd+1} took={time.time()-_t0bp:.1f}s")
+            except Exception as _be:
+                log(f"  [{label}] bypass click rnd={rnd+1} err: {_be}")
+            tok = await _poll_token(15)
+            if tok:
+                log(f"  [{label}] managed token rnd={rnd+1} len={len(tok)}")
+                return True
+            log(f"  [{label}] rnd={rnd+1} no token, retry...")
 
-        log(f"  [{label}] bypass timeout after {timeout}s")
+        # Phase 3: reload fallback
+        log(f"  [{label}] [phase3] reload + final bypass")
+        try:
+            await tab.go_to(f"{UNITOOL_BASE}/en/entry")
+            await asyncio.sleep(5)
+            await tab.execute_script(
+                "window.__cf_pm_hooked=false;window.__cf_captured_token='';",
+                return_by_value=True)
+            await tab.execute_script(_PM_JS, return_by_value=True)
+        except Exception as _re:
+            log(f"  [{label}] reload err: {_re}")
+        tok = await _poll_token(20)
+        if tok:
+            log(f"  [{label}] reload natural token len={len(tok)}")
+            return True
+        for _wi in range(8):
+            await asyncio.sleep(1)
+            try:
+                ni = int(_s(await tab.execute_script(
+                    "document.querySelectorAll(\"iframe[src*='challenges.cloudflare']\").length",
+                    return_by_value=True)) or 0)
+            except Exception:
+                ni = 0
+            if ni > 0:
+                break
+        try:
+            await tab._bypass_cloudflare({}, time_to_wait_captcha=25)
+        except Exception as _be:
+            log(f"  [{label}] reload bypass err: {_be}")
+        tok = await _poll_token(20)
+        if tok:
+            log(f"  [{label}] reload managed token len={len(tok)}")
+            return True
+        log(f"  [{label}] all phases failed")
         return False
     try:
         async with Chrome(options=opt, connection_port=_free_port()) as browser:
