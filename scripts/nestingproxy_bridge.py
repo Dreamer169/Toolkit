@@ -243,7 +243,6 @@ class NestProxy(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body_b)
         except Exception as e:
             self.send_error(502, str(e)[:120])
-        self.send_error(502, str(e)[:120])
 
     def _handle_status(self):
         body = json.dumps({

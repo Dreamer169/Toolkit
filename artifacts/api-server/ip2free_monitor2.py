@@ -33,18 +33,15 @@ COMMON_H = {
 }
 
 ACCOUNTS = [
-    ("emily_gomez98@outlook.com",    "inAyy$X87Uj^",     10820),
-    ("sophiagray574@outlook.com",    "8nQDovHvbR@%mWL$", 10822),
-    ("e.lewis904@outlook.com",       "Aa123456",          10840),
-    ("rylan_rivera98@outlook.com",   "AWgpis7xb0",        10825),
+    ("emily_gomez98@outlook.com",    "inAyy$X87Uj^",     10851),
+    ("sophiagray574@outlook.com",    "8nQDovHvbR@%mWL$", 10853),
+    ("e.lewis904@outlook.com",       "Aa123456",          10855),
+    ("rylan_rivera98@outlook.com",   "AWgpis7xb0",        10857),
 ]
 
-import ddddocr as _ddddocr
-_ocr_std = _ddddocr.DdddOcr(show_ad=False)
-try:
-    _ocr_beta = _ddddocr.DdddOcr(show_ad=False, beta=True)
-except:
-    _ocr_beta = None
+# OCR.space free API: 500 req/day per IP
+# Get free key: https://ocr.space/ocrapi/freekey
+OCRSPACE_KEY = "helloworld"  # replace with your registered free key
 
 SS_DIR = "/tmp/ip2free_monitor_ss"
 os.makedirs(SS_DIR, exist_ok=True)
@@ -97,61 +94,94 @@ def check_task_done_api(email, pw, port):
         return False
 
 def ocr_png(png_bytes, save_path=None):
-    """Fast OCR using only ddddocr (easyocr is too slow and inaccurate for these captchas).
-    Tries: beta-orig, std-orig, beta-upscale3x, std-upscale3x.
-    RGBA→RGB conversion with white background before processing.
-    """
+    # OCR for ip2free captcha = 4 Chinese characters in a 120x40 RGBA PNG.
+    # Primary: ddddocr (local, fast, no rate limit, Chinese-capable).
+    # Fallback: OCR.space Engine3/eng via RESI socks5 proxy (bypasses IP rate limit).
+    import io, re
+    from PIL import Image
+
     if save_path:
         with open(save_path, "wb") as f:
             f.write(png_bytes)
+
     results = []
-    import io, tempfile, os
-    from PIL import Image, ImageEnhance
-    # RGBA→RGB with white background (captcha uses transparency)
+
+    # --- Primary: ddddocr (local, no API key) ---
     try:
-        base_img = Image.open(io.BytesIO(png_bytes))
-        if base_img.mode == "RGBA":
-            bg = Image.new("RGB", base_img.size, (255, 255, 255))
-            bg.paste(base_img, mask=base_img.split()[3])
-            base_img = bg
+        import ddddocr as _ddddocr
+        _ocr = _ddddocr.DdddOcr(show_ad=False)
+        text = (_ocr.classification(png_bytes) or "").strip()
+        cn = re.sub(r"[^一-鿿]", "", text)
+        log(f"    ddddocr: raw={text!r} cn={cn!r}")
+        if len(cn) >= 2:
+            results.append(cn)
+            return results  # fast path
+    except Exception as _e:
+        log(f"    ddddocr err: {_e}")
+
+    # --- Fallback: OCR.space Engine3/eng via RESI socks5 proxy ---
+    # Route through RESI pool to bypass VPS-IP rate limiting on helloworld key.
+    _RESI_PROXIES_SOCKS = [
+        "socks5h://127.0.0.1:10851",
+        "socks5h://127.0.0.1:10853",
+        "socks5h://127.0.0.1:10855",
+        "socks5h://127.0.0.1:10857",
+    ]
+    try:
+        img = Image.open(io.BytesIO(png_bytes))
+        if img.mode == "RGBA":
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[3])
+            img = bg
         else:
-            base_img = base_img.convert("RGB")
-        w, h = base_img.size
-        # 3x upscale — helps ddddocr read small 120×40 Chinese characters
-        upscale = base_img.resize((w * 3, h * 3), Image.LANCZOS)
-        _tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        upscale.save(_tmp.name)
-        _tmp.close()
-        up_bytes = open(_tmp.name, "rb").read()
-        os.unlink(_tmp.name)
-    except Exception as e:
-        log(f"    OCR preprocess err: {e}")
-        up_bytes = png_bytes
-    # ddddocr: try beta then std, on orig + upscaled
-    for label, ocr in [("beta", _ocr_beta), ("std", _ocr_std)]:
-        if ocr is None:
-            continue
-        for lbl2, bts in [("orig", png_bytes), ("up3x", up_bytes)]:
-            try:
-                txt = ocr.classification(bts).strip()
-                log(f"    OCR dddd[{label}/{lbl2}]: {txt!r}")
-                if txt and txt not in results:
-                    results.append(txt)
-            except Exception as e:
-                log(f"    OCR dddd[{label}/{lbl2}] err: {e}")
+            img = img.convert("RGB")
+        img4x = img.resize((img.width * 4, img.height * 4), Image.LANCZOS)
+        buf = io.BytesIO()
+        img4x.save(buf, "PNG")
+        b64_str = base64.b64encode(buf.getvalue()).decode()
+
+        import random as _random
+        _proxy = _random.choice(_RESI_PROXIES_SOCKS)
+        _pmap = {"https": _proxy, "http": _proxy}
+
+        r = _req.post("https://api.ocr.space/parse/image", data={
+            "apikey": OCRSPACE_KEY or "helloworld",
+            "base64Image": "data:image/png;base64," + b64_str,
+            "language": "eng",
+            "OCREngine": "3",
+            "scale": "true",
+            "isOverlayRequired": "false",
+        }, proxies=_pmap, timeout=25)
+        res = r.json()
+        raw = (res.get("ParsedResults") or [{}])[0].get("ParsedText", "").strip()
+        cn2 = re.sub(r"[^一-鿿]", "", raw)
+        log(f"    OCR.space E3/eng via proxy {_proxy}: raw={raw!r} cn={cn2!r}")
+        if len(cn2) >= 2 and cn2 not in results:
+            results.append(cn2)
+    except Exception as _e2:
+        log(f"    OCR.space proxy err: {_e2}")
+
     return results
 
 def blob_to_png(page, blob_url):
-    # Strategy: on_response saves PNG to {SS_DIR}/cap_{username}.png
-    # Wait for that file to appear (on_response fires when browser gets response)
-    # Fall back to dialog screenshot if file never appears
-    import time as _t2, os as _os2, base64 as _b64
-    # Derive cap file path from blob_url context (email is in closure via outer scope)
-    # Use glob to find any cap_*.png written in last 10 seconds
+    import time as _t2, os as _os2, base64 as _b64, glob as _gl
     _cap_glob_pat = SS_DIR + "/cap_*.png"
-    import glob as _gl
+    _PNG = bytes([0x89, 80, 78, 71])  # PNG magic
 
-    # Delete stale cap files first so we detect fresh writes
+    # 1. Direct blob URL fetch via page.evaluate
+    if blob_url and blob_url.startswith("blob:"):
+        try:
+            _JS = 'async (blobUrl) => { try { const r = await fetch(blobUrl); const ab = await r.arrayBuffer(); const u8 = new Uint8Array(ab); let s = String.fromCharCode.apply(null, Array.from(u8)); return btoa(s); } catch(e) { return String(); } }'
+            _b64_data = page.evaluate(_JS, blob_url)
+            if _b64_data and len(_b64_data) > 100:
+                _png = _b64.b64decode(_b64_data + "==")
+                if _png[:4] == _PNG and len(_png) > 200:
+                    log(f"    PNG from blob eval: {len(_png)}b")
+                    return _png
+        except Exception as _be:
+            log(f"    blob eval err: {_be}")
+
+    # 2. Wait for on_response file or window interceptor
     for _old in _gl.glob(_cap_glob_pat):
         try:
             if _t2.time() - _os2.path.getmtime(_old) > 5:
@@ -159,46 +189,48 @@ def blob_to_png(page, blob_url):
         except:
             pass
 
-    # Wait up to 6 seconds for on_response to write a fresh PNG
-    for _w in range(12):
+    for _w in range(10):
         _t2.sleep(0.5)
         for _fp in _gl.glob(_cap_glob_pat):
             try:
                 if _t2.time() - _os2.path.getmtime(_fp) < 8:
                     with open(_fp, "rb") as _fcap:
                         _data = _fcap.read()
-                    if _data and _data[:4] == b"\x89PNG" and len(_data) > 200:
-                        log(f"    PNG from on_response file: {len(_data)}b ({_os2.path.basename(_fp)})")
+                    if _data and _data[:4] == _PNG and len(_data) > 200:
+                        log(f"    PNG from file: {len(_data)}b")
                         return _data
             except:
                 pass
-
-        # Also check window.__captchaPNG from createObjectURL interceptor
         try:
-            _r = page.evaluate(
-                "(function(){return {b64:window.__captchaPNG||'',size:window.__captchaPNGSize||0};})()"
-            )
-            if _r and _r.get('size', 0) > 200:
-                _png_bytes = _b64.b64decode(_r['b64'] + '==')
-                log(f"    PNG from window interceptor: {_r['size']}b")
-                return _png_bytes
+            _wj = "(function(){return {b64:window.__captchaPNG||'',size:window.__captchaPNGSize||0};})()"
+            _r = page.evaluate(_wj)
+            if _r and _r.get("size", 0) > 200:
+                _pbytes = _b64.b64decode(_r["b64"] + "==")
+                if _pbytes[:4] == _PNG:
+                    log(f"    PNG from window interceptor: {_r[chr(115)+chr(105)+chr(122)+chr(101)]}b")
+                    return _pbytes
         except:
             pass
 
-    # Last resort: full dialog screenshot for OCR
+    # 3. Dialog screenshot crop (top 45%)
     try:
-        dlg_loc = page.locator('[role="dialog"]').first
-        if dlg_loc.count() > 0:
-            dlg_png = dlg_loc.screenshot(timeout=3000)
-            if dlg_png and len(dlg_png) > 3000:
-                log(f"    dialog screenshot fallback: {len(dlg_png)}b")
-                return dlg_png
+        _dlg = page.locator("[role=" + chr(34) + "dialog" + chr(34) + "]").first
+        if _dlg.count() > 0:
+            _dpng = _dlg.screenshot(timeout=3000)
+            if _dpng and len(_dpng) > 3000:
+                from PIL import Image; import io as _io2
+                _dimg = Image.open(_io2.BytesIO(_dpng))
+                _dw, _dh = _dimg.size
+                _crop = _dimg.crop((0, 0, _dw, int(_dh * 0.45)))
+                _cbuf = _io2.BytesIO()
+                _crop.save(_cbuf, "PNG")
+                log(f"    dialog screenshot fallback: {len(_dpng)}b -> crop {_crop.size}")
+                return _cbuf.getvalue()
     except Exception as _e:
         log(f"    dialog fallback err: {_e}")
 
     log("    blob_to_png: no PNG found")
     return None
-
 
 CLICK_CLAIM_BTN_JS = """
 (function() {
@@ -480,9 +512,9 @@ def solve_one(email, pw, port):
             except Exception as _re:
                 log(f"    ROUTE captcha err: {_re}")
                 route.continue_()
-        page.route("**/api/account/captcha**", _handle_captcha_route)
-
         page = ctx.new_page()
+
+        page.route("**/api/account/captcha**", _handle_captcha_route)
         result = "failed"
 
 

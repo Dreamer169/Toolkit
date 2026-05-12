@@ -119,7 +119,7 @@ async function runOnce() {
     logger.warn({ _regBusy, elapsedMin: Math.floor((Date.now() - _regBusyTs) / 60000) }, "[live-verify] regBusy 超过15min未归零，自动清零");
     _regBusy = 0;
   }
-  if (_regBusy > 0) { logger.info({ _regBusy }, "[live-verify] 注册中，跳过本轮"); return; }
+  if (_regBusy >= 3) { logger.info({ _regBusy }, "[live-verify] 注册繁忙(>=3)，跳过本轮"); return; }
   _running = true;
   const stats = { total: 0, clicked: 0, skipped: 0, failed: 0, ok: 0 };
   try {
@@ -198,6 +198,7 @@ async function runOnce() {
         // v9.30 Fix: replitRows used for reverse UPDATE only; no longer blocks scanning
         // 拉取 verify 邮件 (未读, 主题含 verify/confirm/Replit)
         let msgs: Array<{id:string;subject:string;receivedDateTime?:string}> = [];
+        let _readVerify: Array<{id:string;subject:string;receivedDateTime?:string;isRead?:boolean}> = [];
         try {
           const listResp = await microsoftFetch(
             `https://graph.microsoft.com/v1.0/me/messages?$top=20&$orderby=receivedDateTime%20desc&$select=id,subject,receivedDateTime,isRead`,
@@ -205,18 +206,26 @@ async function runOnce() {
             _proxy  // v8.86 Bug K: 与 refreshToken 同代理, 维持出向 IP 一致
           );
           const list = await listResp.json() as { value?: Array<{id:string;subject:string;receivedDateTime?:string;isRead?:boolean}> };
-          msgs = (list.value || [])
-            .filter(m => !m.isRead)
-            .filter(m => {
-              const s = (m.subject || '').toLowerCase();
-              return s.includes('verify') || s.includes('confirm') || s.includes('replit');
-            });
+          // v9.31d: 同时获取已读+未读, 区分处理
+          const _allVerify = (list.value || []).filter(m => {
+            const s = (m.subject || '').toLowerCase();
+            return s.includes('verify') || s.includes('confirm') || s.includes('replit');
+          });
+          _readVerify = _allVerify.filter(m => m.isRead);
+          msgs = _allVerify.filter(m => !m.isRead);
         } catch (e) {
           logger.warn({email: acc.email, err: String(e)}, "[live-verify] 拉取邮件失败");
           stats.skipped++;
           return;
         }
-        if (msgs.length === 0) { stats.ok++; return; }
+        // v9.31d: 验证邮件已读(用户手动点击/其他流程) → 打 replit_used 退出扫描
+        if (msgs.length === 0) {
+          if (_readVerify.length > 0) {
+            try { await tagAccount(acc.id, "replit_used"); } catch (_) {}
+            logger.info({ email: acc.email, readCount: _readVerify.length }, "[live-verify] 验证邮件已读 → 自动标 replit_used");
+          }
+          stats.ok++; return;
+        }
         // 处理每封 verify 邮件; 成功 click → 反向 UPDATE replit 行
         for (const m of msgs) {
           if (isRecentlyHandled(m.id)) continue;
@@ -249,7 +258,7 @@ async function runOnce() {
     };
 
     // 并发执行，最多 5 个账号同时处理
-    const CONCURRENCY = 2;
+    const CONCURRENCY = _regBusy > 0 ? 3 : 8; // v9.31c: 8并发(空闲)/3并发(注册中)
     for (let i = 0; i < rows.length; i += CONCURRENCY) {
       if (!_enabled) { logger.info("[live-verify] 检测到关闭信号，提前结束本轮"); break; }
       const chunk = rows.slice(i, i + CONCURRENCY);

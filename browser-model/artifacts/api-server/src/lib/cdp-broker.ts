@@ -907,6 +907,7 @@ export class CdpSession {
 
   async start(opts: SessionOpts) {
     const browser = await getBrowser();
+    if (this.closed) return; // WS closed before Chromium was ready
     this.viewport = { w: opts.width, h: opts.height };
 
     // ── Session persistence: load saved Cookie/Storage from disk ──────────
@@ -968,6 +969,7 @@ export class CdpSession {
       permissions: ["geolocation", "clipboard-read", "clipboard-write", "notifications"],
       ...((_storageState !== undefined) ? { storageState: _storageState } : {}),
     });
+    if (this.closed) { await this.ctx.close().catch(()=>{}); this.ctx = null; return; }
     // inject per-session fingerprint seed BEFORE stealth script so Canvas/Audio RNG is stable
     await this.ctx.addInitScript(`window.__bmFpSeed = ${this.fpSeed};`);
     await this.ctx.addInitScript({ content: STEALTH_INIT });
@@ -993,7 +995,9 @@ export class CdpSession {
     });
 
     this.page = await this.ctx.newPage();
+    if (this.closed) { await this.ctx.close().catch(()=>{}); this.ctx = null; this.page = null; return; }
     this.cdp = await this.ctx.newCDPSession(this.page);
+    if (this.closed) { await this.ctx.close().catch(()=>{}); this.ctx = null; this.page = null; this.cdp = null; return; }
 
     // 监听导航变化 → 推给前端更新地址栏
     // 主帧 document 响应状态码追踪 —— CF 第一次返回 403 + JS 挑战，挑战通过后
