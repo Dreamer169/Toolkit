@@ -260,6 +260,12 @@ export interface SyncStatus {
   errors: string[];
 }
 
+export interface RecordingStatus {
+  active:     boolean;
+  eventCount: number;
+  maxEvents:  number;
+}
+
 /** Entry stored for each follower tab page (secondary tab opened via context.on("page")). */
 interface FollowerTabEntry {
   page: Page;
@@ -717,8 +723,57 @@ export class CdpSynchronizer {
   }
 
   private _record(type: string, payload?: Record<string, unknown>): void {
-    this.recentEvents.push({ type, at: Date.now(), payload });
+    const now = Date.now();
+    this.recentEvents.push({ type, at: now, payload });
     if (this.recentEvents.length > 200) this.recentEvents.splice(0, 100);
+    // Recording buffer (active only when startRecording() called)
+    if (this._recActive) {
+      if (!this._recFilter.length || this._recFilter.includes(type)) {
+        const delayMs = this._recLastTs ? now - this._recLastTs : 0;
+        this._recLastTs = now;
+        this._recBuf.push({ type, ts: now, delayMs, payload });
+        if (this._recBuf.length > this._recMax) this._recBuf.splice(0, Math.ceil(this._recMax * 0.2));
+      }
+    }
+  }
+
+  // ── Public recording API (called by routes/sync.ts) ──────────────────────
+
+  startRecording(opts: { maxEvents?: number; filterTypes?: string[]; clearFirst?: boolean } = {}): RecordingStatus {
+    if (opts.clearFirst !== false) this._recBuf = [];
+    this._recActive = true;
+    this._recMax    = opts.maxEvents ?? 5000;
+    this._recFilter = opts.filterTypes ?? [];
+    this._recLastTs = Date.now();
+    logger.info({ max: this._recMax, filter: this._recFilter }, "[sync] recording started");
+    return this._recStatus();
+  }
+
+  stopRecording(): RecordingStatus {
+    this._recActive = false;
+    logger.info({ events: this._recBuf.length }, "[sync] recording stopped");
+    return this._recStatus();
+  }
+
+  getRecording(opts: { types?: string[]; maxEvents?: number; asReplay?: boolean } = {}): {
+    recording: RecordingStatus; events: Array<Record<string, unknown>>;
+  } {
+    let evts = this._recBuf.slice();
+    if (opts.types?.length) evts = evts.filter(e => opts.types!.includes(e.type));
+    if (typeof opts.maxEvents === "number") evts = evts.slice(-opts.maxEvents);
+    const events: Array<Record<string, unknown>> = opts.asReplay
+      ? evts.map(({ ts: _ts, ...rest }) => rest as Record<string, unknown>)
+      : evts as unknown as Array<Record<string, unknown>>;
+    return { recording: this._recStatus(), events };
+  }
+
+  clearRecording(): RecordingStatus {
+    this._recBuf = [];
+    return this._recStatus();
+  }
+
+  private _recStatus(): RecordingStatus {
+    return { active: this._recActive, eventCount: this._recBuf.length, maxEvents: this._recMax };
   }
 
   private _addError(msg: string): void {
