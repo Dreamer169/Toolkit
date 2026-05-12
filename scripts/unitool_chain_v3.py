@@ -1008,7 +1008,7 @@ def run_inline_verify(email: str, password: str, refresh_token: str, max_wait: i
             "grant_type":    "refresh_token",
             "client_id":     CLIENT_ID,
             "refresh_token": refresh_token,
-            "scope":         "https://graph.microsoft.com/Mail.Read offline_access https://outlook.office.com/IMAP.AccessAsUser.All",
+            "scope":         "https://graph.microsoft.com/Mail.Read offline_access",
         }).encode()
         _req = urllib.request.Request(
             "https://login.microsoftonline.com/common/oauth2/v2.0/token",
@@ -1018,6 +1018,10 @@ def run_inline_verify(email: str, password: str, refresh_token: str, max_wait: i
         _resp = _jj.loads(urllib.request.urlopen(_req, timeout=20).read())
         access_token = _resp.get("access_token", "")
         log(f"[inline_verify] Graph token len={len(access_token)}")
+    except urllib.error.HTTPError as _he:
+        _err_raw = _he.read().decode(errors="replace")
+        log(f"[inline_verify] token fail HTTP {_he.code}: {_err_raw[:200]}")
+        return ""
     except Exception as e:
         log(f"[inline_verify] token fail: {e}"); return ""
 
@@ -1033,8 +1037,8 @@ def run_inline_verify(email: str, password: str, refresh_token: str, max_wait: i
             try:
                 _filter = "from/emailAddress/address%20eq%20%27no-reply%40unitool.ai%27"
                 _url = (f"https://graph.microsoft.com/v1.0/me/mailFolders/"
-                        f"{folder}/messages?={_filter}"
-                        f"&=10&=subject,body,receivedDateTime")
+                        f"{folder}/messages?$filter={_filter}"
+                        f"&$top=10&$select=subject,body,receivedDateTime")
                 _rq = urllib.request.Request(_url, headers=headers)
                 import json as _jj2
                 msgs = _jj2.loads(urllib.request.urlopen(_rq, timeout=15).read()).get("value", [])

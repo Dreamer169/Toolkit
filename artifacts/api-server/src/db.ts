@@ -17,6 +17,10 @@ function getPool(): Pool {
         password: decodeURIComponent(url.password),
         ssl: isLocal ? false : { rejectUnauthorized: false },
         max: 10,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 10000,
+        keepAlive: true,
+        keepAliveInitialDelayMillis: 10000,
       });
       p.on("error", () => { pool = null; });
       pool = p;
@@ -25,6 +29,10 @@ function getPool(): Pool {
         connectionString: dbUrl,
         ssl: dbUrl.includes("localhost") ? false : { rejectUnauthorized: false },
         max: 10,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 10000,
+        keepAlive: true,
+        keepAliveInitialDelayMillis: 10000,
       });
       p.on("error", () => { pool = null; });
       pool = p;

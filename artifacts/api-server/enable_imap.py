@@ -1,27 +1,16 @@
 #!/usr/bin/env python3
 """
-enable_imap.py — 为 Outlook 账号开启 IMAP 访问
-================================================
-v1.0 — 处理微软完整安全验证流程:
-  Step 0: 用 cookies_json 复用已登录 session（或从头 email/password 登录）
-  Step 1: 导航到 IMAP 设置页 outlook.live.com/mail/0/options/mail/popimap
-  Step 2: 处理密码重新验证弹窗 (Microsoft Security Check)
-  Step 3: 处理"添加备用邮箱"提示 → 创建 mail.tm 临时邮箱，填入提交
-  Step 4: 从 mail.tm 收件箱获取验证码 → 填入确认
-  Step 5: 开启 IMAP radio button → 保存设置
-  Step 6: 可选 — 更新 DB tags = imap_enabled
-
-用法:
-  python3 enable_imap.py --email foo@outlook.com --password secret
-  python3 enable_imap.py --account-id 42
-  python3 enable_imap.py --account-id 42 --proxy socks5://127.0.0.1:10851
-  python3 enable_imap.py --account-id 42 --headless false
+enable_imap.py v3
+Root-cause fixes:
+  1. VPS IP is blocked for fresh login (0x8004101A) - NEVER attempt fresh login
+  2. cookies_json is valid but no MSAL localStorage - skip SPA inbox check
+  3. Navigate DIRECTLY to IMAP settings URL with cookies injected
+  4. Wait up to 90s for MSAL silent refresh to complete
+  5. Handle reauth/proofs/security-code cycles on account.live.com
+  6. Classic OWA (/owa/) fallback if SPA fails
 """
 
 import argparse, json, os, re, sys, time
-from pathlib import Path
-
-# ─── MailTM helper (inline, no external import) ──────────────────────────────
 import secrets, string, urllib.request, urllib.error
 
 _MAILTM_BASE   = "https://api.mail.tm"
@@ -44,7 +33,6 @@ def _mt_req(method, path, data=None, token=None, timeout=20):
         return 0, {"error": str(exc)}
 
 def mailtm_create():
-    """创建 mail.tm 账号，返回 (address, password, token)"""
     chars = string.ascii_lowercase + string.digits
     for attempt in range(4):
         login   = "".join(secrets.choice(chars) for _ in range(14))
@@ -56,19 +44,15 @@ def mailtm_create():
             return address, pw, tbody.get("token", "")
         if code == 429 and attempt < 3:
             wait = 25 * (attempt + 1)
-            log(f"  [mail.tm] 429 rate-limit, {wait}s 后重试 (attempt {attempt+1}/4)")
+            log(f"  [mail.tm] 429, retry in {wait}s")
             time.sleep(wait)
         else:
-            raise RuntimeError(f"mail.tm 创建失败 {code}: {body}")
+            raise RuntimeError(f"mail.tm create failed {code}: {body}")
 
 def mailtm_poll_code(token: str, timeout=240):
-    """
-    轮询 mail.tm 收件箱，提取第一个 4~8 位数字验证码。
-    关键词: 'microsoft', 'security', 'code', 'verify', 'account'
-    """
     deadline = time.time() + timeout
     seen: set = set()
-    log(f"  [mail.tm] 轮询验证码 (最多 {timeout}s)…")
+    log(f"  [mail.tm] polling code (max {timeout}s)...")
     while time.time() < deadline:
         code, body = _mt_req("GET", "/messages", token=token)
         if code == 200:
@@ -78,62 +62,72 @@ def mailtm_poll_code(token: str, timeout=240):
                     continue
                 subj  = msg.get("subject", "").lower()
                 intro = msg.get("intro", "").lower()
-                kws   = ("microsoft", "security", "code", "verify", "account", "confirmation", "备用")
+                kws   = ("microsoft", "security", "code", "verify", "account", "confirmation")
                 if not any(k in subj or k in intro for k in kws):
                     seen.add(mid)
                     continue
                 c2, full = _mt_req("GET", f"/messages/{mid}", token=token)
                 if c2 == 200:
                     html = full.get("html", full.get("text", "")) or ""
-                    # 优先匹配单行数字块（不含更长序列，避免匹配电话号）
                     m = re.search(r'\b(\d{4,8})\b', re.sub(r'\s+', ' ', html))
                     if m:
-                        log(f"  [mail.tm] ✅ 收到邮件 «{msg.get('subject','')[:50]}» 验证码={m.group(1)}")
+                        log(f"  [mail.tm] code={m.group(1)} from: {msg.get('subject','')[:50]}")
                         return m.group(1)
                 seen.add(mid)
         time.sleep(8)
-    log("  [mail.tm] ❌ 超时，未收到验证码")
+    log("  [mail.tm] timeout - no code")
     return None
 
 
-# ─── 日志 ─────────────────────────────────────────────────────────────────────
 def log(msg: str):
     print(msg, flush=True)
 
 
-
-
-# ─── XrayRelay proxy helper (identical pattern to outlook_retoken.py) ─────────
-def _setup_xray_proxy(exit_ip: str = "", manual_proxy: str = "") -> tuple[str, object]:
+def _setup_proxy(exit_ip: str = "", manual_proxy: str = "") -> tuple:
     """
-    Setup proxy using XrayRelay (CF VLESS), same as retoken.py.
-    Returns (proxy_url, xray_relay_instance_or_None).
-    严禁直连 — 必须走代理。
+    Pick a working SOCKS5 proxy.
+    Priority: manual_proxy > XrayRelay(exit_ip) > static socks5 ports.
+    NOTE: XrayRelay is used as first choice but static ports are tried on failure.
     """
     if manual_proxy:
-        log(f"  [proxy] 使用手动代理: {manual_proxy}")
+        log(f"  [proxy] manual: {manual_proxy}")
         return manual_proxy, None
 
+    import socket
+    # Try static ss-in ports first (real ISP exit, best for auth pages)
+    STATIC_PORTS = [10851, 10853, 10857, 10855, 10859]
     xray_inst = None
+
+    # Try XrayRelay if exit_ip given
     if exit_ip:
         try:
             from xray_relay import XrayRelay as _XR
             xray_inst = _XR(exit_ip)
             if xray_inst.start(timeout=8.0):
                 url = xray_inst.socks5_url
-                log(f"  [proxy] 🌐 XrayRelay exit_ip={exit_ip} → {url}")
+                log(f"  [proxy] XrayRelay exit_ip={exit_ip} -> {url}")
                 return url, xray_inst
             else:
-                log(f"  [proxy] ⚠ XrayRelay({exit_ip}) 启动失败，尝试 CF pool…")
+                log(f"  [proxy] XrayRelay({exit_ip}) start failed, trying static ports")
                 xray_inst = None
         except Exception as e:
-            log(f"  [proxy] ⚠ XrayRelay 异常: {e}，尝试 CF pool…")
+            log(f"  [proxy] XrayRelay error: {e}, trying static ports")
             xray_inst = None
 
-    # CF pool fallback（无 exit_ip 或 XrayRelay 失败）
+    # Try static ports
+    for port in STATIC_PORTS:
+        try:
+            s = socket.create_connection(("127.0.0.1", port), timeout=2)
+            s.close()
+            log(f"  [proxy] using static port {port}")
+            return f"socks5://127.0.0.1:{port}", None
+        except Exception:
+            continue
+
+    # CF pool fallback
     try:
-        import random as _rand, json as _j
-        _ps = _j.load(open('/tmp/cf_pool_state.json'))
+        import random as _rand
+        _ps = json.load(open('/tmp/cf_pool_state.json'))
         _avail = [x['ip'] for x in _ps.get('available', []) if isinstance(x, dict) and x.get('ip')]
         if _avail:
             _ip = _rand.choice(_avail[:20])
@@ -141,31 +135,14 @@ def _setup_xray_proxy(exit_ip: str = "", manual_proxy: str = "") -> tuple[str, o
             xray_inst = _XR(_ip)
             if xray_inst.start(timeout=8.0):
                 url = xray_inst.socks5_url
-                log(f"  [proxy] 🌐 CF pool fallback IP={_ip} → {url}")
+                log(f"  [proxy] CF pool fallback IP={_ip} -> {url}")
                 return url, xray_inst
-            else:
-                log("  [proxy] ❌ CF pool XrayRelay 启动失败")
-                xray_inst = None
-        else:
-            log("  [proxy] ❌ CF pool 为空")
     except Exception as e:
-        log(f"  [proxy] ❌ CF pool fallback 异常: {e}")
+        log(f"  [proxy] CF pool error: {e}")
 
-    raise RuntimeError("❌ 所有代理均失败，严禁直连，中止。请检查 XrayRelay / CF pool 状态。")
+    raise RuntimeError("All proxies failed")
 
 
-def _is_error_page(page) -> bool:
-    """Check if page is an error/proxy-failure page."""
-    try:
-        txt = page.evaluate("()=>document.body?.innerText?.slice(0,300)||''") or ""
-        url = page.url or ""
-        return ("ERR_PROXY" in txt or "No internet" in txt or
-                "ERR_NETWORK" in txt or "ERR_CONNECTION" in txt or
-                "chrome-error://" in url)
-    except Exception:
-        return False
-
-# ─── DB helpers ───────────────────────────────────────────────────────────────
 _DB_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@localhost/toolkit")
 
 def db_get_account(account_id: int) -> dict:
@@ -180,39 +157,32 @@ def db_get_account(account_id: int) -> dict:
         )
         row = cur.fetchone()
         if not row:
-            raise RuntimeError(f"账号 id={account_id} 不存在或不是 outlook 平台")
+            raise RuntimeError(f"account id={account_id} not found")
         return dict(row)
     finally:
         conn.close()
 
 def db_tag_imap_enabled(account_id: int):
-    """将 imap_enabled 写入 tags 字段"""
     import psycopg2
     try:
         conn = psycopg2.connect(_DB_URL)
         cur  = conn.cursor()
-        # tags 是 text[]；用 array_append+distinct 幂等添加
         cur.execute("""
             UPDATE accounts
-               SET tags = (
-                     SELECT ARRAY(SELECT DISTINCT unnest(array_append(COALESCE(tags,'{}'), 'imap_enabled')))
-                   ),
+               SET tags = (SELECT ARRAY(SELECT DISTINCT unnest(array_append(COALESCE(tags,'{}'), 'imap_enabled')))),
                    updated_at = now()
              WHERE id = %s
         """, (account_id,))
         conn.commit()
         conn.close()
-        log(f"  [db] ✅ 账号 {account_id} 已写入 tag: imap_enabled")
+        log(f"  [db] account {account_id} tagged: imap_enabled")
     except Exception as e:
-        log(f"  [db] ⚠ 写 tag 失败: {e}")
+        log(f"  [db] tag write failed: {e}")
 
 
-# ─── 浏览器 launch (同步 patchright) ─────────────────────────────────────────
 def launch_browser(proxy: str = "", headless: bool = True):
     from patchright.sync_api import sync_playwright
     import subprocess as _sp
-
-    # 释放 page cache（同 PatchrightController.launch）
     try:
         _sp.run(["sync"], check=False, timeout=3)
         with open("/proc/sys/vm/drop_caches", "w") as _d:
@@ -253,22 +223,33 @@ def launch_browser(proxy: str = "", headless: bool = True):
     return p, b
 
 
-# ─── 主流程 ───────────────────────────────────────────────────────────────────
-IMAP_URL  = "https://outlook.live.com/mail/0/options/mail/popimap"
-INBOX_URL = "https://outlook.live.com/mail/0/inbox"
+IMAP_URL   = "https://outlook.live.com/mail/0/options/mail/popimap"
+INBOX_URL  = "https://outlook.live.com/mail/0/inbox"
+CLASSIC_IMAP_URL = "https://outlook.live.com/owa/?path=/options/mail/popIMAPAccessEnabled"
 
-def _screenshot(page, tag: str, email: str):
-    safe = email.split("@")[0].replace("/", "_")
-    path = f"/tmp/enable_imap_{tag}_{safe}.png"
+
+def _ss(page, tag: str, label: str):
+    safe = label.replace("/","_").replace("@","_at_")
+    path = f"/tmp/imap3_{tag}_{safe}.png"
     try:
         page.screenshot(path=path)
-        log(f"  [screenshot] {path}")
+        log(f"  [ss] {path}")
     except Exception:
         pass
 
+def _txt(page) -> str:
+    try:
+        return (page.evaluate("()=>document.body?.innerText?.slice(0,1000)||''") or "").lower()
+    except Exception:
+        return ""
+
+def _url(page) -> str:
+    try:
+        return page.url or ""
+    except Exception:
+        return ""
 
 def _react_fill(page, selector: str, value: str):
-    """React-safe 填值：native setter + input/change events"""
     page.evaluate("""([sel, val]) => {
         const inp = document.querySelector(sel);
         if (!inp) return;
@@ -278,9 +259,7 @@ def _react_fill(page, selector: str, value: str):
         inp.dispatchEvent(new Event('change', {bubbles:true}));
     }""", [selector, value])
 
-
-def _click_primary(page, extra_sels: list[str] | None = None, timeout=3000) -> bool:
-    """点击 MS 表单主按钮（Next / Continue / Submit）"""
+def _click_primary(page, extra_sels=None, timeout=3000) -> bool:
     sels = [
         'button[data-testid="primaryButton"]',
         'input[id="idSIButton9"]',
@@ -296,55 +275,99 @@ def _click_primary(page, extra_sels: list[str] | None = None, timeout=3000) -> b
             loc = page.locator(s).first
             if loc.is_visible(timeout=timeout):
                 loc.click()
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(1800)
+                return True
+        except Exception:
+            continue
+    return False
+
+def _skip_interrupts(page) -> bool:
+    for sel in [
+        'button:has-text("Skip for now")', 'button:has-text("Maybe later")',
+        'button:has-text("Not now")',       'button:has-text("Skip")',
+        'a:has-text("Skip for now")',       'a:has-text("Maybe later")',
+        'input[type="submit"][value="No"]', 'button:has-text("No")',
+        '[data-testid="secondaryButton"]',  '#idBtn_Back',
+    ]:
+        try:
+            loc = page.locator(sel).first
+            if loc.is_visible(timeout=1000):
+                loc.click()
+                page.wait_for_timeout(1500)
+                log(f"  [skip] {sel}")
                 return True
         except Exception:
             continue
     return False
 
 
-def _handle_password_rechallenge(page, email: str, password: str) -> bool:
+def _wait_for_msal_complete(page, timeout_s=90) -> bool:
     """
-    Step 2: 微软要求在进入安全设置前重新验证密码。
-    可能形态:
-      A. 弹窗 popup（新页面）
-      B. 内联 dialog（同页面中 password input 变可见）
-      C. 重定向到 login.live.com（密码页）
-    返回 True 表示已处理（或无需处理）。
+    Wait for MSAL silent-refresh redirect to complete.
+    MSAL is done when:
+    - URL no longer contains msalAuthRedirect
+    - OR gear icon becomes visible
+    Returns True if gear visible, False if just timeout/url-change
     """
-    log("  [reauth] 检查密码重验证提示…")
-    page.wait_for_timeout(2500)
+    _gear_sel = '#owaSettingsBtn_container,[aria-label="Settings"],[aria-label="Settings, try new Outlook"]'
+    deadline = time.time() + timeout_s
+    log(f"  [msal] waiting up to {timeout_s}s for MSAL to complete...")
+    while time.time() < deadline:
+        page.wait_for_timeout(2000)
+        u = _url(page)
+        # Check gear visible
+        try:
+            if page.locator(_gear_sel).first.is_visible(timeout=500):
+                log(f"  [msal] gear visible, MSAL complete")
+                return True
+        except Exception:
+            pass
+        # Check MSAL redirect done
+        if "msalAuthRedirect" not in u:
+            log(f"  [msal] msalAuthRedirect gone, url={u[:80]}")
+            return False
+        # Check for error page
+        txt = _txt(page)
+        if "something went wrong" in txt and "440" in txt:
+            log(f"  [msal] Error 440 detected, MSAL failed")
+            return False
+    log(f"  [msal] timeout after {timeout_s}s")
+    return False
 
-    # 等待最多 12s，看有无 password input 出现
+
+def _handle_reauth(page, email: str, password: str) -> bool:
+    """Handle password re-challenge on account.live.com/reauth or login pages."""
+    u = _url(page)
+    txt = _txt(page)
+    is_reauth = any(x in u for x in (
+        "account.live.com/reauth", "account.microsoft.com/reauth",
+        "login.live.com", "login.microsoftonline.com"))
+    has_pw_hint = any(k in txt for k in (
+        "password", "sign in again", "verify your", "confirm your", "enter your"))
+
+    if not is_reauth and not has_pw_hint:
+        return True
+
+    log(f"  [reauth] password re-challenge detected (url={u[:60]})")
     _pw_sel = 'input[type="password"], input[name="passwd"]'
     _pw_visible = False
     try:
-        page.wait_for_selector(_pw_sel, timeout=12000)
+        page.wait_for_selector(_pw_sel, timeout=8000)
         _pw_visible = True
     except Exception:
         pass
 
     if not _pw_visible:
-        # 检查页面是否含 "sign in" / "verify" / "password" 字样（可能是静态文字提示）
-        txt = ""
+        # Maybe needs email first
+        _em_sel = 'input[name="loginfmt"], input[type="email"]'
         try:
-            txt = page.evaluate("()=>document.body.innerText.toLowerCase()") or ""
+            if page.locator(_em_sel).first.is_visible(timeout=3000):
+                _react_fill(page, 'input[name="loginfmt"]', email)
+                page.wait_for_timeout(500)
+                _click_primary(page)
+                page.wait_for_timeout(3000)
         except Exception:
             pass
-        if not any(k in txt for k in ("password", "sign in", "verify your", "confirm your")):
-            log("  [reauth] 无密码重验证，跳过")
-            return True
-        # 尝试点击 "Sign in" button 触发密码框
-        for btn_sel in ['button:has-text("Sign in")', 'a:has-text("Sign in")',
-                        'button:has-text("Verify")', 'button:has-text("Confirm")']:
-            try:
-                b = page.locator(btn_sel).first
-                if b.is_visible(timeout=2000):
-                    b.click()
-                    page.wait_for_timeout(3000)
-                    break
-            except Exception:
-                continue
         try:
             page.wait_for_selector(_pw_sel, timeout=10000)
             _pw_visible = True
@@ -352,203 +375,109 @@ def _handle_password_rechallenge(page, email: str, password: str) -> bool:
             pass
 
     if not _pw_visible:
-        log("  [reauth] 密码框始终未出现，继续")
+        log(f"  [reauth] pw box never appeared, continuing")
         return True
 
-    # 填写 email（有些流程会先要求 email）
-    _em_sel = 'input[type="email"], input[name="loginfmt"]'
     try:
-        em = page.locator(_em_sel).first
-        if em.is_visible(timeout=2000):
-            _react_fill(page, 'input[name="loginfmt"],input[type="email"]', email)
-            page.wait_for_timeout(500)
-            _click_primary(page)
-            page.wait_for_timeout(2000)
-            # 等密码框
-            try:
-                page.wait_for_selector(_pw_sel, timeout=8000)
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # 填密码
-    try:
-        pw = page.locator(_pw_sel).first
-        if pw.is_visible(timeout=5000):
-            pw.fill(password)
-            page.wait_for_timeout(500)
-            _click_primary(page)
-            page.wait_for_timeout(4000)
-            log("  [reauth] ✅ 密码已提交")
-            return True
+        page.locator(_pw_sel).first.fill(password)
+        page.wait_for_timeout(500)
+        _click_primary(page)
+        page.wait_for_timeout(5000)
+        log("  [reauth] password submitted")
     except Exception as e:
-        log(f"  [reauth] ⚠ 填密码异常: {e}")
+        log(f"  [reauth] error: {e}")
 
-    return False
+    for _ in range(3):
+        if not _skip_interrupts(page):
+            break
+        page.wait_for_timeout(1500)
 
-
-def _handle_skip_interrupts(page) -> bool:
-    """跳过 passkey/stay-signed-in/recovery 打断页"""
-    clicked = False
-    for sel in [
-        'button:has-text("Skip for now")', 'button:has-text("Maybe later")',
-        'button:has-text("Not now")',       'button:has-text("Skip")',
-        'a:has-text("Skip for now")',       'a:has-text("Maybe later")',
-        'button:has-text("跳过")',           'button:has-text("稍后")',
-        'a:has-text("跳过")',
-        'input[type="submit"][value="No"]', 'button:has-text("No")',
-        '[data-testid="secondaryButton"]',  '#idBtn_Back',
-    ]:
-        try:
-            loc = page.locator(sel).first
-            if loc.is_visible(timeout=1200):
-                loc.click()
-                page.wait_for_timeout(1500)
-                clicked = True
-                log(f"  [skip-interrupt] clicked: {sel}")
-                break
-        except Exception:
-            continue
-    return clicked
+    log(f"  [reauth] done, url={_url(page)[:80]}")
+    return True
 
 
-def _handle_add_backup_email(page, email: str) -> tuple[bool, str, str]:
-    """
-    Step 3: 微软要求添加备用邮箱。
-    检测条件:
-      - 页面含 "alternate email" / "backup email" / "recovery email" / "security info" 字样
-      - 或有 input[type=email] 让用户填写备用邮箱
-    流程:
-      1. 创建 mail.tm 临时邮箱
-      2. 填入 input 框 → 提交
-      3. 返回 (已处理, mailtm_addr, mailtm_token)
-    """
-    log("  [backup-email] 检查是否需要添加备用邮箱…")
-    page.wait_for_timeout(2000)
-
-    txt = ""
-    try:
-        txt = page.evaluate("()=>document.body.innerText.toLowerCase()") or ""
-    except Exception:
-        pass
+def _handle_backup_email(page) -> tuple:
+    """Handle add backup email on account.live.com/proofs/add"""
+    u = _url(page)
+    txt = _txt(page)
 
     BACKUP_KWS = (
         "alternate email", "backup email", "recovery email",
         "security info", "add email", "add a backup",
-        "add another email", "备用邮箱", "恢复邮箱", "备用电子邮件",
-        "keep your account secure", "protect your account",
-        "add a way to", "proof up",
+        "add another email", "keep your account secure",
+        "protect your account", "add a way to", "proof up",
+        "add your email",
     )
-    if not any(k in txt for k in BACKUP_KWS):
-        log("  [backup-email] 无备用邮箱提示，跳过")
+    is_proof_page = any(x in u for x in ("account.live.com/proofs", "account.microsoft.com/proofs"))
+    has_kw = any(k in txt for k in BACKUP_KWS)
+
+    if not is_proof_page and not has_kw:
         return False, "", ""
 
-    log("  [backup-email] 检测到备用邮箱要求，创建 mail.tm 临时邮箱…")
+    log(f"  [backup] creating mail.tm...")
     try:
         mt_addr, mt_pw, mt_token = mailtm_create()
     except Exception as e:
-        log(f"  [backup-email] ❌ mail.tm 创建失败: {e}")
+        log(f"  [backup] mail.tm failed: {e}")
         return False, "", ""
-    log(f"  [backup-email] mail.tm: {mt_addr}")
+    log(f"  [backup] addr: {mt_addr}")
 
-    # 找 email input 并填入
     _em_filled = False
-    # 先找明确的 alternate/backup email input
     for sel in [
-        'input[name*="Email" i][type="email"]',
-        'input[name*="email" i][type="email"]',
-        'input[placeholder*="email" i]',
-        'input[placeholder*="Email" i]',
-        'input[type="email"]',
-        'input[name="ProofConfirmation"]',
-        'input[name="EmailAddress"]',
+        'input[name="EmailAddress"]', 'input[name="ProofConfirmation"]',
+        'input[name*="Email"][type="email"]', 'input[name*="email"][type="email"]',
+        'input[placeholder*="email" i]', 'input[type="email"]',
     ]:
         try:
             loc = page.locator(sel).first
             if loc.is_visible(timeout=2000):
                 loc.fill(mt_addr)
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(400)
                 _em_filled = True
-                log(f"  [backup-email] 填入 {mt_addr} → {sel}")
+                log(f"  [backup] filled -> {sel}")
                 break
         except Exception:
             continue
 
     if not _em_filled:
-        # JS fallback: 找第一个可见 email-type input（排除已有值的）
         _em_filled = page.evaluate("""(addr) => {
-            var inputs = Array.from(document.querySelectorAll('input[type="email"],input[type="text"]'));
-            for (var inp of inputs) {
-                var style = window.getComputedStyle(inp);
-                if (style.display === 'none' || style.visibility === 'hidden') continue;
-                var ph = (inp.placeholder || '').toLowerCase();
-                var nm = (inp.name || '').toLowerCase();
+            for (var inp of document.querySelectorAll('input[type="email"],input[type="text"]')) {
+                var st = window.getComputedStyle(inp);
+                if (st.display==='none'||st.visibility==='hidden') continue;
                 if (!inp.value) {
-                    var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
-                    setter.call(inp, addr);
-                    inp.dispatchEvent(new Event('input',  {bubbles:true}));
-                    inp.dispatchEvent(new Event('change', {bubbles:true}));
+                    var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+                    s.call(inp,addr);
+                    inp.dispatchEvent(new Event('input',{bubbles:true}));
+                    inp.dispatchEvent(new Event('change',{bubbles:true}));
                     return true;
                 }
             }
             return false;
         }""", mt_addr)
-        if _em_filled:
-            log(f"  [backup-email] JS 填入 {mt_addr}")
 
-    if not _em_filled:
-        log("  [backup-email] ⚠ 未找到 email input，尝试继续")
-
-    page.wait_for_timeout(800)
-
-    # 提交
-    _submitted = _click_primary(page, [
-        'button:has-text("Send code")',
-        'button:has-text("Add")',
-        'button:has-text("Save")',
-        'button:has-text("Continue")',
-        'input[value*="Send"]',
-        'input[value*="Add"]',
+    page.wait_for_timeout(600)
+    _click_primary(page, [
+        'button:has-text("Send code")', 'button:has-text("Add")',
+        'button:has-text("Continue")', 'button:has-text("Next")',
+        'input[value*="Send"]', 'input[value*="Add"]',
     ])
-    if _submitted:
-        log("  [backup-email] ✅ 备用邮箱提交成功，等待验证码…")
-    else:
-        log("  [backup-email] ⚠ 未找到提交按钮，按 Enter 尝试")
-        try:
-            page.keyboard.press("Enter")
-        except Exception:
-            pass
-
     page.wait_for_timeout(3000)
     return True, mt_addr, mt_token
 
 
 def _handle_security_code(page, mt_token: str) -> bool:
-    """
-    Step 4: 从 mail.tm 收件箱获取验证码，填入表单并提交。
-    """
     if not mt_token:
-        log("  [security-code] 无 mail.tm token，跳过")
         return False
-
-    log("  [security-code] 等待 mail.tm 收件…")
     code = mailtm_poll_code(mt_token, timeout=240)
     if not code:
-        log("  [security-code] ❌ 未收到验证码")
+        log("  [code] no code received")
         return False
 
-    log(f"  [security-code] 获得验证码: {code}，填入表单…")
-
-    # 找验证码 input
+    log(f"  [code] code={code}")
     _code_filled = False
     for sel in [
-        'input[name*="Code" i]',
-        'input[name*="code" i]',
-        'input[name*="otp" i]',
-        'input[name*="Otp" i]',
-        'input[placeholder*="code" i]',
-        'input[placeholder*="Code" i]',
+        'input[name*="Code" i]', 'input[name*="code" i]',
+        'input[name*="otp" i]', 'input[placeholder*="code" i]',
         'input[type="number"]',
         'input[type="text"][maxlength="6"]',
         'input[type="text"][maxlength="7"]',
@@ -561,230 +490,182 @@ def _handle_security_code(page, mt_token: str) -> bool:
                 loc.fill(code)
                 page.wait_for_timeout(400)
                 _code_filled = True
-                log(f"  [security-code] 填入 {code} → {sel}")
+                log(f"  [code] filled -> {sel}")
                 break
         except Exception:
             continue
 
     if not _code_filled:
-        # JS fallback
-        page.evaluate("""(code) => {
-            var inputs = Array.from(document.querySelectorAll('input'));
-            for (var inp of inputs) {
-                var style = window.getComputedStyle(inp);
-                if (style.display === 'none' || style.visibility === 'hidden') continue;
-                var maxl = parseInt(inp.getAttribute('maxlength') || '99');
-                if (maxl >= 4 && maxl <= 9 && !inp.value) {
-                    var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
-                    setter.call(inp, code);
-                    inp.dispatchEvent(new Event('input',  {bubbles:true}));
-                    inp.dispatchEvent(new Event('change', {bubbles:true}));
+        page.evaluate("""(c) => {
+            for (var inp of document.querySelectorAll('input')) {
+                var st=window.getComputedStyle(inp);
+                if(st.display==='none'||st.visibility==='hidden') continue;
+                var ml=parseInt(inp.getAttribute('maxlength')||'99');
+                if(ml>=4&&ml<=9&&!inp.value){
+                    var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+                    s.call(inp,c);
+                    inp.dispatchEvent(new Event('input',{bubbles:true}));
+                    inp.dispatchEvent(new Event('change',{bubbles:true}));
                     return;
                 }
             }
         }""", code)
-        log(f"  [security-code] JS 填入验证码")
 
     page.wait_for_timeout(500)
-
-    # 提交
     _click_primary(page, [
-        'button:has-text("Verify")',
-        'button:has-text("Confirm")',
-        'button:has-text("Submit")',
-        'input[value*="Verify"]',
-        'input[value*="Confirm"]',
+        'button:has-text("Verify")', 'button:has-text("Confirm")',
+        'button:has-text("Submit")', 'button:has-text("Next")',
     ])
-    page.wait_for_timeout(4000)
-    log("  [security-code] ✅ 验证码已提交")
+    page.wait_for_timeout(5000)
+    log(f"  [code] submitted, url={_url(page)[:80]}")
     return True
 
 
-def _navigate_to_imap_settings(page, email: str) -> bool:
-    """
-    Step 1 + SPA 热路由到 IMAP 设置页。
-    Path A: inbox warmup → SPA-hot goto popimap URL
-    Path B: gear-click → Mail → Forwarding/IMAP
-    """
-    _gear_sel = '#owaSettingsBtn_container, [aria-label="Settings"], [aria-label="设置"]'
-
-    # Path A ─ SPA 热路由
-    log("  [nav] Path A: inbox warmup → SPA-hot goto IMAP URL")
+def _has_imap_content(page, timeout_ms=12000) -> bool:
     try:
-        if "outlook.live.com/mail" not in (page.url or ""):
-            page.goto(INBOX_URL, timeout=40000, wait_until="domcontentloaded")
-        # 等 gear 可见（SPA 完整加载）
-        try:
-            page.wait_for_selector(_gear_sel, timeout=30000)
-            log("  [nav] SPA ready (gear visible)")
-        except Exception:
-            log(f"  [nav] ⚠ gear 未出现 30s, url={page.url[:80]}")
-        # SPA 热路由到 IMAP 设置
-        try:
-            page.goto(IMAP_URL, timeout=25000, wait_until="domcontentloaded")
-        except Exception as e:
-            log(f"  [nav] goto 超时(ok): {e}")
-        page.wait_for_timeout(2500)
-    except Exception as e:
-        log(f"  [nav] Path A 异常: {e}")
-
-    # 检查是否到达 IMAP 设置页
-    def _has_imap_content(timeout_ms=10000) -> bool:
-        try:
-            page.wait_for_selector(
-                '[data-testid*="imap" i], [aria-label*="IMAP" i], '
-                'input[type="radio"], [role="radio"], [role="switch"]',
-                timeout=timeout_ms,
-            )
-            return True
-        except Exception:
-            pass
-        try:
-            page.wait_for_function(
-                "() => document.body.innerText.toLowerCase().indexOf('imap') >= 0",
-                timeout=timeout_ms,
-            )
-            return True
-        except Exception:
-            pass
-        return False
-
-    if _has_imap_content(8000):
-        log("  [nav] ✅ Path A 已到 IMAP 设置页")
+        page.wait_for_selector(
+            '[data-testid*="imap" i],[aria-label*="IMAP" i],'
+            'input[type="radio"],[role="radio"],[role="switch"]',
+            timeout=timeout_ms)
         return True
-
-    # Path B ─ gear-click
-    log("  [nav] Path B: gear-click → Mail → Forwarding+IMAP")
-    if "outlook.live.com/mail" not in (page.url or ""):
-        try:
-            page.goto(INBOX_URL, timeout=40000, wait_until="domcontentloaded")
-        except Exception:
-            pass
-    try:
-        page.wait_for_selector(_gear_sel, timeout=25000)
     except Exception:
-        page.wait_for_timeout(8000)
-
-    # B2: click gear
-    _gear_clicked = False
-    for gs in ['#owaSettingsBtn_container', '[aria-label="Settings"]', '[aria-label="设置"]',
-               '[title="Settings"]', 'button[aria-label*="etting"]']:
-        try:
-            g = page.locator(gs).first
-            if g.is_visible(timeout=3000):
-                g.click()
-                page.wait_for_timeout(2500)
-                _gear_clicked = True
-                log(f"  [nav] gear clicked: {gs}")
-                break
-        except Exception:
-            continue
-    if not _gear_clicked:
-        log("  [nav] ❌ gear 未找到")
-        return False
-
-    # B3: Mail nav
-    page.evaluate("""() => {
-        var byLabel = document.querySelector('[aria-label="Mail"][role="option"],[aria-label="Mail"][role="tab"],[aria-label="邮件"]');
-        if (byLabel) { byLabel.click(); return; }
-        var els = Array.from(document.querySelectorAll(
-            'button,[role="option"],[role="menuitem"],[role="tab"],[role="treeitem"],li>a,nav a,a'));
-        for (var el of els) {
-            var t = el.textContent.trim();
-            if (t === "Mail" || t === "邮件") { el.click(); return; }
-        }
-    }""")
-    page.wait_for_timeout(2500)
-
-    # B4: Forwarding/IMAP sub-item
-    page.evaluate("""() => {
-        var els = Array.from(document.querySelectorAll(
-            'button,[role="option"],[role="menuitem"],[role="tab"],[role="treeitem"],li>a,nav a,a,li'));
-        for (var el of els) {
-            var t = (el.textContent || "").toLowerCase();
-            if (t.indexOf("forward") >= 0 || t.indexOf("转发") >= 0 ||
-                (t.indexOf("imap") >= 0 && t.indexOf("pop") >= 0)) {
-                var ce = (el.tagName === "LI") ? (el.querySelector("button,a") || el) : el;
-                ce.click(); return;
-            }
-        }
-    }""")
-    page.wait_for_timeout(3000)
-
-    if _has_imap_content(8000):
-        log("  [nav] ✅ Path B 已到 IMAP 设置页")
+        pass
+    try:
+        page.wait_for_function(
+            "() => document.body && document.body.innerText.toLowerCase().indexOf('imap') >= 0",
+            timeout=timeout_ms)
         return True
-
-    log("  [nav] ⚠ Path B 后仍未检测到 IMAP 内容")
+    except Exception:
+        pass
     return False
 
 
-def _toggle_imap_enable(page) -> str:
-    """
-    Step 5a: 找 IMAP radio/switch 并开启。
-    返回 'already-on' / 'clicked:...' / 'not-found'
-    """
-    res = page.evaluate("""() => {
-        // S1: radio/checkbox/switch 附近含 imap 文字
-        var inputs = Array.from(document.querySelectorAll(
+def _nav_to_imap(page) -> bool:
+    """Navigate to IMAP settings page. Returns True if on IMAP page."""
+    log("  [nav] navigating to IMAP settings URL directly...")
+    try:
+        page.goto(IMAP_URL, timeout=30000, wait_until="domcontentloaded")
+    except Exception as e:
+        log(f"  [nav] goto timeout (ok): {e}")
+    page.wait_for_timeout(2000)
+
+    u = _url(page)
+    log(f"  [nav] url after goto: {u[:100]}")
+
+    # If MSAL redirect appeared, wait it out
+    if "msalAuthRedirect" in u:
+        _wait_for_msal_complete(page, timeout_s=90)
+        page.wait_for_timeout(2000)
+        u = _url(page)
+        log(f"  [nav] url after MSAL wait: {u[:100]}")
+
+    # Check if on IMAP page
+    if _has_imap_content(page, 8000):
+        log("  [nav] on IMAP settings page")
+        return True
+
+    # If not on IMAP page but not on a redirect page, try gear-click path
+    _gear_sel = '#owaSettingsBtn_container,[aria-label="Settings"],[aria-label="Settings, try new Outlook"]'
+    _gear_visible = False
+    try:
+        _gear_visible = page.locator(_gear_sel).first.is_visible(timeout=5000)
+    except Exception:
+        pass
+
+    if _gear_visible:
+        log("  [nav] gear visible, trying SPA hot-navigate to IMAP URL")
+        try:
+            page.goto(IMAP_URL, timeout=25000, wait_until="domcontentloaded")
+        except Exception as e:
+            log(f"  [nav] SPA goto timeout: {e}")
+        page.wait_for_timeout(3000)
+        if _has_imap_content(page, 8000):
+            log("  [nav] on IMAP page via SPA")
+            return True
+
+        # Gear click path
+        for gs in ['#owaSettingsBtn_container','[aria-label="Settings"]',
+                   '[aria-label="Settings, try new Outlook"]']:
+            try:
+                g = page.locator(gs).first
+                if g.is_visible(timeout=2000):
+                    g.click()
+                    page.wait_for_timeout(2500)
+                    break
+            except Exception:
+                continue
+        page.evaluate("""() => {
+            for(var el of document.querySelectorAll('button,[role="option"],[role="menuitem"],[role="treeitem"],li>a,a')){
+                var t=el.textContent.trim();if(t==="Mail"||t==="Email"){el.click();return;}
+            }
+        }""")
+        page.wait_for_timeout(2000)
+        page.evaluate("""() => {
+            for(var el of document.querySelectorAll('button,[role="option"],[role="menuitem"],[role="treeitem"],li>a,a,li')){
+                var t=(el.textContent||"").toLowerCase();
+                if(t.indexOf("forward")>=0||(t.indexOf("imap")>=0&&t.indexOf("pop")>=0)){
+                    (el.tagName==="LI"?(el.querySelector("button,a")||el):el).click();return;
+                }
+            }
+        }""")
+        page.wait_for_timeout(3000)
+        if _has_imap_content(page, 8000):
+            log("  [nav] on IMAP page via gear-click")
+            return True
+
+    log(f"  [nav] NOT on IMAP page, url={_url(page)[:80]}, txt={_txt(page)[:150]}")
+    return False
+
+
+def _toggle_imap(page) -> str:
+    return page.evaluate("""() => {
+        var inputs=Array.from(document.querySelectorAll(
             'input[type="radio"],input[type="checkbox"],[role="radio"],[role="switch"],[role="checkbox"]'));
-        for (var el of inputs) {
-            var par = el.closest('li') || el.closest('label') || el.closest('div') || el.parentElement;
-            var txt = (par ? par.textContent : "").toLowerCase();
-            if (txt.indexOf("imap") < 0) continue;
-            var chk = el.getAttribute("aria-checked") || (el.checked !== undefined ? String(el.checked) : "false");
-            if (chk === "true" || el.checked) return "already-on";
-            el.click(); return "radio-clicked:" + (el.id || el.name || el.value || "?");
+        for(var el of inputs){
+            var par=el.closest('li')||el.closest('label')||el.closest('div')||el.parentElement;
+            var txt=(par?par.textContent:"").toLowerCase();
+            if(txt.indexOf("imap")<0) continue;
+            var chk=el.getAttribute("aria-checked")||(el.checked!==undefined?String(el.checked):"false");
+            if(chk==="true"||el.checked) return "already-on";
+            el.click(); return "radio-clicked:"+(el.id||el.name||el.value||"?");
         }
-        // S2: label 文字 "Enable IMAP"
-        for (var lbl of Array.from(document.querySelectorAll("label"))) {
-            var lt = lbl.textContent.toLowerCase();
-            if (lt.indexOf("enable imap") >= 0 || lt.indexOf("启用 imap") >= 0) {
-                var inp = lbl.control || document.getElementById(lbl.htmlFor);
-                if (inp) { inp.click(); return "label-enable-inp-clicked"; }
-                lbl.click(); return "label-clicked";
+        for(var lbl of Array.from(document.querySelectorAll("label"))){
+            var lt=lbl.textContent.toLowerCase();
+            if(lt.indexOf("enable imap")>=0){
+                var inp=lbl.control||document.getElementById(lbl.htmlFor);
+                if(inp){inp.click();return "label-inp";}
+                lbl.click();return "label";
             }
         }
-        // S3: aria-label 含 IMAP
-        var byAttr = Array.from(document.querySelectorAll('[aria-label*="IMAP" i],[data-testid*="imap" i]'));
-        for (var el of byAttr) {
-            var chk = el.getAttribute("aria-checked") || (el.checked !== undefined ? String(el.checked) : "false");
-            if (chk === "true" || el.checked) return "attr-already-on";
-            el.click(); return "attr-clicked:" + el.getAttribute("aria-label");
+        var byAttr=Array.from(document.querySelectorAll('[aria-label*="IMAP" i],[data-testid*="imap" i]'));
+        for(var el of byAttr){
+            var chk=el.getAttribute("aria-checked")||(el.checked!==undefined?String(el.checked):"false");
+            if(chk==="true"||el.checked) return "attr-already-on";
+            el.click();return "attr-clicked:"+el.getAttribute("aria-label");
         }
-        // S4: 任意未选中 switch
-        var switches = Array.from(document.querySelectorAll('[role="switch"]'));
-        for (var sw of switches) {
-            if (sw.getAttribute("aria-checked") !== "true") {
-                sw.click(); return "switch-clicked";
-            } else { return "switch-already-on"; }
+        var sw=Array.from(document.querySelectorAll('[role="switch"]'));
+        for(var s of sw){
+            if(s.getAttribute("aria-checked")!=="true"){s.click();return "switch-clicked";}
+            return "switch-already-on";
         }
         return "not-found";
     }""")
-    return res
-
 
 def _save_settings(page) -> bool:
-    for sel in [
-        'button:has-text("Save")', 'button:has-text("保存")',
-        'button[type="submit"]', 'input[type="submit"]',
-        'button[aria-label*="Save"]', 'input[value="Save"]',
-    ]:
+    for sel in ['button:has-text("Save")','button[type="submit"]','input[type="submit"]','input[value="Save"]']:
         try:
             loc = page.locator(sel).first
             if loc.is_visible(timeout=1500):
                 loc.click()
                 page.wait_for_timeout(2000)
-                log(f"  [save] saved via {sel}")
+                log(f"  [save] via {sel}")
                 return True
         except Exception:
             continue
-    # JS fallback
     try:
         page.evaluate("""() => {
-            Array.from(document.querySelectorAll("button,input[type=submit]")).forEach(b => {
-                var t = b.textContent.trim();
-                if (/^(Save|保存)$/i.test(t) || b.value === 'Save') b.click();
+            Array.from(document.querySelectorAll("button,input[type=submit]")).forEach(b=>{
+                if(/^Save$/i.test(b.textContent.trim())||b.value==='Save') b.click();
             });
         }""")
         page.wait_for_timeout(1500)
@@ -794,237 +675,216 @@ def _save_settings(page) -> bool:
     return False
 
 
-# ─── 主函数 ───────────────────────────────────────────────────────────────────
-def enable_imap(
-    email: str,
-    password: str,
-    account_id: int | None = None,
-    cookies_json: str = "",
-    fingerprint_json: str = "",
-    proxy: str = "",
-    headless: bool = True,
-    xray_relay_inst=None,
-) -> bool:
-    safe = email.split("@")[0]
+def enable_imap(email, password, account_id=None,
+                cookies_json="", fingerprint_json="",
+                proxy="", headless=True, xray_relay_inst=None) -> bool:
+    label = email.split("@")[0]
     log(f"\n{'='*60}")
-    log(f"[enable-imap] 开始处理: {email} (id={account_id})")
+    log(f"[enable-imap] v3 start: {email} (id={account_id})")
 
     p, browser = launch_browser(proxy=proxy, headless=headless)
     try:
-        # ── 准备 context ────────────────────────────────────────────────────
-        ctx_kwargs = dict(locale="en-US", timezone_id="America/Los_Angeles",
-                          user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+        ctx_kw = dict(
+            locale="en-US", timezone_id="America/Los_Angeles",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
         if fingerprint_json:
             try:
                 fp = json.loads(fingerprint_json)
-                for k in ("user_agent", "locale", "timezone_id", "viewport", "screen"):
+                for k in ("user_agent","locale","timezone_id","viewport","screen"):
                     if fp.get(k):
-                        ctx_kwargs[k] = fp[k]
+                        ctx_kw[k] = fp[k]
             except Exception:
                 pass
-        context = browser.new_context(**ctx_kwargs)
-        if cookies_json:
+
+        ctx = browser.new_context(**ctx_kw)
+        page = ctx.new_page()
+
+        # ── Step 0: Inject cookies ──────────────────────────────────────────
+        _cookies_injected = 0
+        if cookies_json and cookies_json.strip():
             try:
                 state = json.loads(cookies_json)
                 if isinstance(state, dict) and state.get("cookies"):
-                    context.add_cookies(state["cookies"])
-                    log(f"  [ctx] 已注入 {len(state['cookies'])} 个 cookies")
+                    ctx.add_cookies(state["cookies"])
+                    _cookies_injected = len(state["cookies"])
+                    log(f"  [ctx] injected {_cookies_injected} cookies")
             except Exception as e:
-                log(f"  [ctx] ⚠ cookies 解析失败: {e}")
-        page = context.new_page()
+                log(f"  [ctx] cookies parse error: {e}")
 
-        # ── Step 0: 确保已登录 ──────────────────────────────────────────────
-        log("  [step0] 检查 Outlook 登录状态…")
-        try:
-            page.goto(INBOX_URL, timeout=45000, wait_until="domcontentloaded")
-        except Exception as e:
-            log(f"  [step0] goto inbox 超时(ok): {e}")
-        page.wait_for_timeout(3000)
-
-        # 检查是否需要从头登录
-        cur_url = page.url or ""
-        need_login = ("login" in cur_url or "passport" in cur_url
-                      or "microsoft.com/devicelogin" in cur_url
-                      or "live.com/login" in cur_url
-                      or "account.microsoft.com/account" in cur_url)
-        if not need_login:
-            # 看有无邮箱 input（表示 session 已过期跳转到登录页）
-            try:
-                _em_inp = page.locator('input[name="loginfmt"],input[type="email"]').first
-                if _em_inp.is_visible(timeout=3000):
-                    need_login = True
-            except Exception:
-                pass
-        if not need_login:
-            # 检查是否真的在 inbox（gear 可见）
-            # 若 URL 含 msalAuthRedirect，最多额外等 30s 让 MSAL 静默刷新完成
-            cur_url2 = page.url or ""
-            if "msalAuthRedirect" in cur_url2:
-                log("  [step0] 检测到 msalAuthRedirect，等待 MSAL 刷新 (30s)…")
-                for _ in range(15):
-                    page.wait_for_timeout(2000)
-                    try:
-                        _g2 = page.locator('#owaSettingsBtn_container,[aria-label="Settings"],[aria-label="设置"]').first
-                        if _g2.is_visible(timeout=500):
-                            break
-                    except Exception:
-                        pass
-            try:
-                _gear = page.locator('#owaSettingsBtn_container,[aria-label="Settings"],[aria-label="设置"]').first
-                if not _gear.is_visible(timeout=12000):
-                    need_login = True
-            except Exception:
-                need_login = True
-
-        if need_login:
-            if not password:
-                log("  [step0] ❌ 需要密码登录但未提供 password，中止")
-                return False
-            log("  [step0] Session 无效，执行 email/password 登录…")
-            # 清空所有 cookies —— 旧 cookies 会触发 MSAL 自动重定向，阻止登录页出现
-            try:
-                context.clear_cookies()
-                log("  [step0] 已清空 cookies，避免 MSAL 重定向干扰")
-            except Exception as _ce:
-                log(f"  [step0] ⚠ clear cookies: {_ce}")
-
-            # 尝试多个登录入口
-            _login_urls = [
-                "https://login.live.com/login.srf?wa=wsignin1.0",
-                "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?client_id=9ba1a5c7-f17a-4de9-a1f1-6178c8d51223&scope=openid+profile+email&response_type=code&redirect_uri=https%3A%2F%2Foutlook.live.com%2F&prompt=login",
-                "https://outlook.live.com/owa/?nlp=1",
-            ]
-            _login_ok = False
-            for _lu in _login_urls:
-                try:
-                    page.goto(_lu, timeout=30000, wait_until="domcontentloaded")
-                except Exception:
-                    pass
-                page.wait_for_timeout(3000)
-                _cur = page.url or ""
-                log(f"  [step0] 登录页 URL: {_cur[:80]}")
-                try:
-                    _e = page.locator('input[name="loginfmt"],input[type="email"]').first
-                    if _e.is_visible(timeout=3000):
-                        _login_ok = True
-                        break
-                except Exception:
-                    pass
-            if not _login_ok:
-                log("  [step0] ⚠ 所有登录入口均未找到 email 输入框，仍尝试…")
-
-            # email
-            try:
-                _ei = page.locator('input[name="loginfmt"],input[type="email"]').first
-                _ei.wait_for(timeout=25000)
-                _react_fill(page, 'input[name="loginfmt"],input[type="email"]', email)
-                page.wait_for_timeout(700)
-                _click_primary(page)
-                page.wait_for_timeout(4000)
-                log("  [step0] ✅ email 已填")
-            except Exception as e:
-                log(f"  [step0] ⚠ 填 email 异常: {e}")
-            # password
-            try:
-                _pw = page.locator('input[type="password"],input[name="passwd"]').first
-                _pw.wait_for(timeout=20000)
-                _pw.fill(password)
-                page.wait_for_timeout(700)
-                _click_primary(page)
-                page.wait_for_timeout(6000)
-                log("  [step0] ✅ password 已提交")
-            except Exception as e:
-                log(f"  [step0] ⚠ 填 password 异常: {e}")
-            # 跳过打断页
-            for _ in range(4):
-                if _handle_skip_interrupts(page):
-                    page.wait_for_timeout(2000)
-            # 等待 inbox 加载
-            log("  [step0] 等待 inbox 加载…")
-            try:
-                page.wait_for_url("**/mail/**", timeout=20000)
-            except Exception:
-                pass
-            page.wait_for_timeout(3000)
-            log(f"  [step0] 登录后 URL: {(page.url or '')[:100]}")
-
-        _screenshot(page, "00_after_login", email)
-
-        # ── Step 1: 导航到 IMAP 设置页 ─────────────────────────────────────
-        log("  [step1] 导航到 IMAP 设置…")
-        _navigate_to_imap_settings(page, email)
-        _screenshot(page, "01_after_nav", email)
-
-        # ── Step 2: 密码重验证 ─────────────────────────────────────────────
-        _handle_password_rechallenge(page, email, password)
-        _screenshot(page, "02_after_reauth", email)
-
-        # 跳过可能出现的打断页
-        for _ in range(2):
-            if _handle_skip_interrupts(page):
-                page.wait_for_timeout(1500)
-
-        # ── Step 3: 添加备用邮箱 ───────────────────────────────────────────
-        _added_backup, mt_addr, mt_token = _handle_add_backup_email(page, email)
-        _screenshot(page, "03_after_backup", email)
-
-        # ── Step 4: 验证码 ─────────────────────────────────────────────────
-        if _added_backup:
-            _handle_security_code(page, mt_token)
-            _screenshot(page, "04_after_code", email)
-            # 跳过更多打断页（passkey 等）
-            for _ in range(3):
-                if _handle_skip_interrupts(page):
-                    page.wait_for_timeout(1500)
-
-        # ── Step 5: 再次导航到 IMAP 设置（可能被重定向走了）──────────────
-        cur_url2 = page.url or ""
-        _on_imap = ("popimap" in cur_url2 or "imap" in (page.evaluate("()=>document.body.innerText.toLowerCase()") or ""))
-        if not _on_imap:
-            log("  [step5] 重新导航到 IMAP 设置页…")
-            _navigate_to_imap_settings(page, email)
-            _screenshot(page, "05_re_nav", email)
-
-        # ── Step 5a: 开启 IMAP toggle ──────────────────────────────────────
-        page.wait_for_timeout(2000)
-        res = _toggle_imap_enable(page)
-        log(f"  [step5] IMAP toggle 结果: {res}")
-        _screenshot(page, "05_after_toggle", email)
-
-        if res == "not-found":
-            # 再等 5s 看看内容是否延迟加载
-            page.wait_for_timeout(5000)
-            res = _toggle_imap_enable(page)
-            log(f"  [step5] IMAP toggle 二次结果: {res}")
-            _screenshot(page, "05b_after_toggle2", email)
-
-        if res == "not-found":
-            log("  [step5] ❌ 未找到 IMAP toggle")
-            # dump page text for debug
-            try:
-                bt = page.evaluate("()=>document.body.innerText.slice(0,600)")
-                log(f"  [step5] 页面文字: {bt[:400]}")
-            except Exception:
-                pass
+        if not _cookies_injected:
+            log("  [ctx] NO cookies available - cannot proceed (fresh login blocked on VPS)")
             return False
 
-        # ── Step 5b: Save ──────────────────────────────────────────────────
+        # ── Step 1: Navigate directly to IMAP settings URL ─────────────────
+        # KEY FIX: Do NOT check inbox first. Go straight to IMAP settings.
+        # Cookies make the auth work; MSAL will silently refresh in the SPA.
+        log("  [step1] navigating DIRECTLY to IMAP settings URL (skip inbox check)...")
+
+        _on_imap = _nav_to_imap(page)
+        _ss(page, "01_nav", label)
+        u = _url(page)
+        log(f"  [step1] url={u[:100]}, on_imap={_on_imap}")
+
+        # ── Step 2-4: Handle security cycles ───────────────────────────────
+        for _cycle in range(5):
+            u = _url(page)
+            txt = _txt(page)
+            log(f"  [cycle {_cycle}] url={u[:100]}")
+
+            _is_reauth = any(x in u for x in (
+                "account.live.com/reauth", "account.microsoft.com/reauth",
+                "login.live.com", "login.microsoftonline.com"))
+            _is_proofs = any(x in u for x in (
+                "account.live.com/proofs", "account.microsoft.com/proofs"))
+            _is_error440 = "something went wrong" in txt and ("440" in txt or "startupdata" in txt)
+            _is_imap = "popimap" in u or ("imap" in txt and "settings" in u)
+
+            if _is_imap and not _is_reauth and not _is_proofs:
+                log(f"  [cycle {_cycle}] on IMAP page, proceeding to toggle")
+                break
+
+            if _is_error440:
+                log(f"  [cycle {_cycle}] Error 440 SPA boot failure, trying classic OWA...")
+                # Try classic OWA path
+                try:
+                    page.goto(CLASSIC_IMAP_URL, timeout=30000, wait_until="domcontentloaded")
+                    page.wait_for_timeout(5000)
+                    u2 = _url(page)
+                    log(f"  [cycle {_cycle}] classic OWA url: {u2[:80]}")
+                    if "msalAuthRedirect" in u2:
+                        _wait_for_msal_complete(page, 60)
+                    if _has_imap_content(page, 8000):
+                        log(f"  [cycle {_cycle}] classic OWA: on IMAP page")
+                        break
+                    # Try direct IMAP URL one more time after some wait
+                    page.wait_for_timeout(3000)
+                    _nav_to_imap(page)
+                    _ss(page, f"c{_cycle}_after440", label)
+                    if _has_imap_content(page, 5000):
+                        break
+                except Exception as e:
+                    log(f"  [cycle {_cycle}] classic OWA error: {e}")
+                # If still error 440, try waiting longer for MSAL
+                log(f"  [cycle {_cycle}] waiting additional 30s and retrying...")
+                page.wait_for_timeout(30000)
+                _nav_to_imap(page)
+                _ss(page, f"c{_cycle}_after_wait", label)
+                if _has_imap_content(page, 5000):
+                    break
+                continue
+
+            if _is_reauth:
+                log(f"  [cycle {_cycle}] reauth page")
+                if not password:
+                    log(f"  [cycle {_cycle}] no password for reauth, cannot proceed")
+                    return False
+                _handle_reauth(page, email, password)
+                _ss(page, f"c{_cycle}_reauth", label)
+                for _ in range(3):
+                    if not _skip_interrupts(page):
+                        break
+                    page.wait_for_timeout(1500)
+                # Re-navigate to IMAP after reauth
+                log(f"  [cycle {_cycle}] re-navigating to IMAP after reauth...")
+                _nav_to_imap(page)
+                _ss(page, f"c{_cycle}_renav", label)
+                continue
+
+            if _is_proofs:
+                log(f"  [cycle {_cycle}] proofs page")
+                _added, mt_addr, mt_token = _handle_backup_email(page)
+                _ss(page, f"c{_cycle}_backup", label)
+                if _added:
+                    _handle_security_code(page, mt_token)
+                    _ss(page, f"c{_cycle}_code", label)
+                for _ in range(3):
+                    if not _skip_interrupts(page):
+                        break
+                    page.wait_for_timeout(1500)
+                log(f"  [cycle {_cycle}] re-navigating to IMAP after proofs...")
+                _nav_to_imap(page)
+                _ss(page, f"c{_cycle}_renav", label)
+                continue
+
+            # Text-based detections
+            if any(k in txt for k in ("password", "sign in again", "verify your identity", "re-enter")):
+                log(f"  [cycle {_cycle}] pw hint in text")
+                if not password:
+                    log(f"  [cycle {_cycle}] no password, cannot proceed")
+                    return False
+                _handle_reauth(page, email, password)
+                _ss(page, f"c{_cycle}_pw_txt", label)
+                _nav_to_imap(page)
+                _ss(page, f"c{_cycle}_renav_pw", label)
+                continue
+
+            BACKUP_KWS = (
+                "alternate email","backup email","recovery email","security info",
+                "add email","add a backup","keep your account secure",
+                "protect your account","add a way to","proof up",
+            )
+            if any(k in txt for k in BACKUP_KWS):
+                log(f"  [cycle {_cycle}] backup email hint")
+                _added, mt_addr, mt_token = _handle_backup_email(page)
+                _ss(page, f"c{_cycle}_backup_txt", label)
+                if _added:
+                    _handle_security_code(page, mt_token)
+                    _ss(page, f"c{_cycle}_code_txt", label)
+                for _ in range(3):
+                    if not _skip_interrupts(page):
+                        break
+                    page.wait_for_timeout(1500)
+                _nav_to_imap(page)
+                _ss(page, f"c{_cycle}_renav_bkp", label)
+                continue
+
+            # msalAuthRedirect still present - wait more
+            if "msalAuthRedirect" in u:
+                log(f"  [cycle {_cycle}] still in MSAL redirect, waiting 30s more...")
+                page.wait_for_timeout(30000)
+                _nav_to_imap(page)
+                _ss(page, f"c{_cycle}_msal_wait", label)
+                continue
+
+            # Nothing blocking, break
+            log(f"  [cycle {_cycle}] no special page detected, breaking")
+            break
+
+        _ss(page, "05_pre_toggle", label)
+
+        # ── Step 5: Toggle IMAP ─────────────────────────────────────────────
+        page.wait_for_timeout(2000)
+        res = _toggle_imap(page)
+        log(f"  [toggle] result: {res}")
+        _ss(page, "06_toggle", label)
+
+        if res == "not-found":
+            page.wait_for_timeout(5000)
+            res = _toggle_imap(page)
+            log(f"  [toggle] retry: {res}")
+            _ss(page, "06b_toggle2", label)
+
+        if res == "not-found":
+            log(f"  [toggle] NOT FOUND")
+            log(f"  [toggle] url={_url(page)[:100]}")
+            txt_dump = _txt(page)
+            log(f"  [toggle] page text: {txt_dump[:500]}")
+            return False
+
         if "already" not in res:
             page.wait_for_timeout(800)
             _save_settings(page)
-        _screenshot(page, "06_after_save", email)
+        _ss(page, "07_save", label)
 
-        log(f"  [enable-imap] ✅ 成功！IMAP 已开启 ({res})")
-
-        # ── Step 6: 写 DB tag ──────────────────────────────────────────────
+        log(f"  [enable-imap] SUCCESS ({res})")
         if account_id:
             db_tag_imap_enabled(account_id)
-
         return True
 
     except Exception as e:
         import traceback
-        log(f"  [enable-imap] ❌ 异常: {e}")
+        log(f"  [enable-imap] EXCEPTION: {e}")
         log(traceback.format_exc())
         return False
     finally:
@@ -1044,21 +904,18 @@ def enable_imap(
                 pass
 
 
-# ─── CLI ──────────────────────────────────────────────────────────────────────
 def main():
-    ap = argparse.ArgumentParser(description="为 Outlook 账号开启 IMAP")
-    ap.add_argument("--email",      default="",  help="Outlook 邮箱")
-    ap.add_argument("--password",   default="",  help="密码")
-    ap.add_argument("--account-id", type=int, default=0, help="从 DB 读取账号 (优先)")
-    ap.add_argument("--proxy",      default="",  help="代理 socks5://127.0.0.1:10851")
-    ap.add_argument("--headless",   default="true", help="true/false")
+    ap = argparse.ArgumentParser(description="Enable IMAP for Outlook v3")
+    ap.add_argument("--email",      default="")
+    ap.add_argument("--password",   default="")
+    ap.add_argument("--account-id", type=int, default=0)
+    ap.add_argument("--proxy",      default="")
+    ap.add_argument("--headless",   default="true")
     args = ap.parse_args()
 
-    headless = args.headless.lower() not in ("false", "0", "no")
-
+    headless = args.headless.lower() not in ("false","0","no")
     email, password, acc_id = args.email, args.password, args.account_id
-    cookies_json = ""
-    fingerprint_json = ""
+    cookies_json = fingerprint_json = ""
     acc: dict = {}
 
     if acc_id:
@@ -1067,32 +924,26 @@ def main():
         password      = acc.get("password") or ""
         cookies_json  = (acc.get("cookies_json") or "").strip()
         fingerprint_json = (acc.get("fingerprint_json") or "").strip()
-        log(f"[cli] 从 DB 读取账号: id={acc_id} email={email} "
-             f"(DB proxy_port={acc.get('proxy_port')} ignored – ephemeral)")
+        log(f"[cli] DB account: id={acc_id} email={email}")
 
     if not email:
-        ap.error("必须提供 --email 或 --account-id")
+        ap.error("must provide --email or --account-id")
 
-    # 严禁直连 — 必须走 XrayRelay (CF VLESS) 代理，与 retoken.py 完全一致
     xray_relay_inst = None
     exit_ip = (acc.get("exit_ip") or "") if acc_id else ""
     try:
-        proxy_url, xray_relay_inst = _setup_xray_proxy(
-            exit_ip=exit_ip,
-            manual_proxy=args.proxy,
-        )
+        proxy_url, xray_relay_inst = _setup_proxy(
+            exit_ip=exit_ip, manual_proxy=args.proxy)
         if not args.proxy:
             args.proxy = proxy_url
     except RuntimeError as e:
-        log(f"[cli] ❌ {e}")
+        log(f"[cli] {e}")
         sys.exit(2)
 
     ok = enable_imap(
         email=email, password=password, account_id=acc_id or None,
         cookies_json=cookies_json, fingerprint_json=fingerprint_json,
-        proxy=args.proxy, headless=headless,
-        xray_relay_inst=xray_relay_inst,
-    )
+        proxy=args.proxy, headless=headless, xray_relay_inst=xray_relay_inst)
     sys.exit(0 if ok else 1)
 
 
