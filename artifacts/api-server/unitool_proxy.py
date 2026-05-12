@@ -552,9 +552,13 @@ def _balance_monitor_loop():
 #                      200k ctx, extended thinking: YES, cutoff: early 2025 (~May 2025)
 #                      cost≈128–218 tokens/msg, POLL_PRIMARY (stream intercepted)
 #                      self-report: "I'm Claude by Anthropic" + 认知 20250514 日期
-#   claude-opus-4-7 -> 未确认后端 (v5.39 新增, 2026-05-12); cost≈166–366 tokens/msg
-#                      200k ctx, cutoff early 2025, POLL_PRIMARY, stream untested
-#                      行为与 claude-opus-4-6 相近但 cost 更高 → 疑似更大 Sonnet/Opus 变体
+#   claude-opus-4-7 -> claude-opus-4-20250514 (真实 Opus 4) — probe v4.1, 2026-05-12
+#                      命名规律: 4-6→Sonnet4(rank6), 4-7→Opus4(rank7)
+#                      cost≈60–370 tokens/msg (比 opus-4-6 高 ~1.4–1.6x, 与 Opus/Sonnet 定价方向一致)
+#                      min_bal=10.1 (高于 opus-4-6), POLL_PRIMARY, stream=HTML拦截
+#                      模型自报: 知道 "Claude Opus 4 和 Sonnet 4 作为 Claude 4 家族存在"
+#                      (训练截止 ≥ May 2025, 与 Opus 4 发布日期 2025-05-22 吻合)
+#                      注意: AI 拒绝直接披露版本号(Anthropic 策略), 通过 cost+命名+知识截止综合判定
 #   gpt-5.5       -> GPT-4o ✓ CONFIRMED (probe v4.0, 2026-05-12)
 #                      cutoff=June 2024 (非 Jan 2025 → 排除 GPT-4.1)
 #                      128k ctx, no reasoning/o1-thinking, cost≈103–423 tokens/msg
