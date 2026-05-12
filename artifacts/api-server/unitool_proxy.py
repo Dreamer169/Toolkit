@@ -547,13 +547,21 @@ def _balance_monitor_loop():
 #   claude-sonnet -> Claude 3.5 Sonnet
 #   claude-sonnet-4-5 -> Claude 3.5/3.7 Sonnet (backend rotates between versions)
 #   claude-sonnet-4-6 -> Claude 3.5/3.7 Sonnet (rotates; stream intercepted v5.38)
-#   claude-opus-4-6 -> claude-sonnet-4-20250514 (!!!) — unitool routes Opus label to
-#                      Sonnet 4 backend; confirmed by identity probe (cost=13 direct reply)
-#                      200k ctx, extended thinking: yes, cutoff: early 2025
-#   gpt-5.5       -> GPT-4o or GPT-4.1 (128k ctx, June 2024 cutoff, no o1-reasoning)
-#                    identity/stream probes fail (internal stream ended unexpectedly)
-#                    but cutoff+context narrow to GPT-4o/4.1 family, NOT real GPT-5
-#   gpt-5/gpt-5.4/gpt5.2 -> refused to reveal ("unknown"/"unavailable")
+#   claude-opus-4-6 -> claude-sonnet-4-20250514 ✓ CONFIRMED (probe v4.0, 2026-05-12)
+#                      unitool 将 Opus 标签路由到 Sonnet 4 后端
+#                      200k ctx, extended thinking: YES, cutoff: early 2025 (~May 2025)
+#                      cost≈128–218 tokens/msg, POLL_PRIMARY (stream intercepted)
+#                      self-report: "I'm Claude by Anthropic" + 认知 20250514 日期
+#   claude-opus-4-7 -> 未确认后端 (v5.39 新增, 2026-05-12); cost≈166–366 tokens/msg
+#                      200k ctx, cutoff early 2025, POLL_PRIMARY, stream untested
+#                      行为与 claude-opus-4-6 相近但 cost 更高 → 疑似更大 Sonnet/Opus 变体
+#   gpt-5.5       -> GPT-4o ✓ CONFIRMED (probe v4.0, 2026-05-12)
+#                      cutoff=June 2024 (非 Jan 2025 → 排除 GPT-4.1)
+#                      128k ctx, no reasoning/o1-thinking, cost≈103–423 tokens/msg
+#                      stream: SSE via proxy OK; unitool native=POLL_PRIMARY
+#                      self-report: cutoff June 2024, reasoning NOT exposed
+#   gpt-5.5 vs GPT-4.1 判定依据: GPT-4.1 cutoff=Jan 2025; gpt-5.5 自报 June 2024 → GPT-4o
+#   gpt-5/gpt-5.4/gpt5.2 -> refused to reveal (unknown/unavailable)
 #   o-series: broken (TypeError/no-choices/no endpoints) at unitool backend
 #   grok/gemini: work via paginatedMessages poll; model identity not revealed by AI
 NATIVE_SERVICES = {
