@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.37
+unitool.ai → OpenAI 兼容反代 v5.39
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -568,7 +568,13 @@ NATIVE_SERVICES = {
     "grok",
     # Claude
     "claude-sonnet", "claude-sonnet-4-5", "claude-sonnet-4-6",
-    "claude-opus", "claude-opus-4-6", "claude-haiku",
+    "claude-opus", "claude-opus-4-6",
+    "claude-opus-4-7",  # v5.39: added 2026-05-12 (active=1, min_bal=10.1)
+    "claude-haiku",
+    # Perplexity (v5.39: confirmed active=1, 2026-05-12)
+    "perplexity-sonar",             # Perplexity Sonar            min_bal=1
+    "perplexity-sonar-pro",         # Perplexity Sonar Pro        min_bal=1
+    "perplexity-sonar-pro-search",  # Perplexity Sonar Pro Search min_bal=3
 }
 
 # 需要 reasoning_effort 的服务
@@ -605,6 +611,9 @@ POLL_PRIMARY_SERVICES = {
     "gemini-3.1-pro", "gemini-3-pro",
     # v5.35: gpt-5.4 stream intermittently empty; poll reliable
     "gpt-5.4",
+    # v5.39: claude-opus-4-7 + perplexity (poll safe default; stream untested)
+    "claude-opus-4-7",
+    "perplexity-sonar", "perplexity-sonar-pro", "perplexity-sonar-pro-search",
 }
 _STREAM_INTERCEPT_RU = "помогаю только"  # Russian restriction marker
 
@@ -719,6 +728,12 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
     "gpt-4-5":      ["gpt-4-1", "gpt-5", "gpt-5.5"],
     # grok (v5.30: HTTP 500 from unitool; add non-grok fallback)
     "grok":         ["gpt-5.5", "gpt-5", "gpt5.2"],
+    # v5.39: claude-opus-4-7
+    "claude-opus-4-7":             ["claude-opus-4-6", "claude-opus", "claude-sonnet-4-6", "claude-sonnet"],
+    # v5.39: perplexity (status=updating in maintenance; fallback to GPT)
+    "perplexity-sonar":            ["perplexity-sonar-pro", "gpt-5.5", "gpt-5"],
+    "perplexity-sonar-pro":        ["perplexity-sonar", "gpt-5.5", "gpt-5"],
+    "perplexity-sonar-pro-search": ["perplexity-sonar-pro", "perplexity-sonar", "gpt-5.5"],
 }
 
 # v5.30: Services confirmed completely broken at unitool API level.
@@ -765,7 +780,7 @@ MODEL_ALIASES = {
     "chatgpt-5.5": "gpt-5.5", "chatgpt-5.5-turbo": "gpt-5.5", "chatgpt": "gpt-5.5",
     "claude-opus": "claude-opus", "claude-opus-4": "claude-opus",
     "claude-opus-4-5": "claude-opus-4-6", "claude-opus-4.5": "claude-opus-4-6",
-    "claude-opus-4.6": "claude-opus-4-6", "claude-opus-4-latest": "claude-opus-4-6",
+    "claude-opus-4.6": "claude-opus-4-6", "claude-opus-4-latest": "claude-opus-4-7",  # v5.39: latest
     "claude-opus-latest": "claude-opus-4-6",
     "claude-3-opus": "claude-sonnet", "claude-3-opus-20240229": "claude-sonnet",
     "claude": "claude-sonnet", "claude-sonnet-4": "claude-sonnet",
@@ -787,6 +802,16 @@ MODEL_ALIASES = {
     "gemini-1.5-pro": "gemini-3.1-pro", "gemini-1.5-flash": "gemini-3.1-pro",
     "grok-3": "grok", "grok-3-fast": "grok", "grok-3-mini": "grok",
     "grok-2": "grok", "grok-beta": "grok",
+    # v5.39: claude-opus-4-7 aliases
+    "claude-opus-4.7": "claude-opus-4-7",
+    # v5.39: Perplexity aliases
+    "perplexity": "perplexity-sonar",
+    "pplx": "perplexity-sonar", "pplx-7b": "perplexity-sonar",
+    "sonar": "perplexity-sonar", "perplexity-sonar-online": "perplexity-sonar",
+    "sonar-pro": "perplexity-sonar-pro", "pplx-70b": "perplexity-sonar-pro",
+    "sonar-search": "perplexity-sonar-pro-search",
+    "perplexity-search": "perplexity-sonar-pro-search",
+    "perplexity-pro-search": "perplexity-sonar-pro-search",
     "deepseek": "gpt-5.5", "deepseek-r1": "gpt-5.5", "deepseek-v3": "gpt-5.5",
     "deepseek-chat": "gpt-5.5",
 }
@@ -817,8 +842,9 @@ def _resolve_model(model: str) -> tuple[str, bool, bool]:
     m = model.lower()
     if "claude" in m:   return "claude-sonnet", reduced, no_thinking
     if "gemini" in m:   return "gemini-3.1-pro", reduced, no_thinking
-    if "grok" in m:     return "grok",           reduced, no_thinking
-    if "deepseek" in m: return "gpt-5.5",        reduced, no_thinking
+    if "grok" in m:         return "grok",              reduced, no_thinking
+    if "perplexity" in m:   return "perplexity-sonar",  reduced, no_thinking
+    if "deepseek" in m:     return "gpt-5.5",           reduced, no_thinking
     if "dall" in m or ("image" in m and "gpt" in m): return "gpt-image", reduced, no_thinking
     if "midjourney" in m: return "midjourney", reduced, no_thinking
     if "suno" in m or "music-gen" in m: return "suno", reduced, no_thinking
@@ -1961,9 +1987,9 @@ def _startup_resi_health_check():
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.38] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.39] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.38] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.39] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
@@ -1973,8 +1999,8 @@ if __name__ == "__main__":
     except (KeyboardInterrupt, SystemExit):
         pass  # PM2 SIGINT during startup — skip check, continue
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.38] balance monitor started", flush=True)
-    print("[unitool-proxy v5.38] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc|GrokReasoningStrip|GeminiMaintenance|GrokFallback|OSeriesFallback|NanoReasoning|SvcErrFallback|ImmediateFallback|OSeriesChainFix|ClaudeOpusFallback: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking|NoModelFallback|ClaudeOpusErrFix|SvcDeadCache24h|SvcStatusAPI|ProbeConfirmed2026-05-08|PollPrimaryGpt4o|RobustCookie2026-05-09", flush=True)
+    print("[unitool-proxy v5.39] balance monitor started", flush=True)
+    print("[unitool-proxy v5.39] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc|GrokReasoningStrip|GeminiMaintenance|GrokFallback|OSeriesFallback|NanoReasoning|SvcErrFallback|ImmediateFallback|OSeriesChainFix|ClaudeOpusFallback: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking|NoModelFallback|ClaudeOpusErrFix|SvcDeadCache24h|SvcStatusAPI|ProbeConfirmed2026-05-08|PollPrimaryGpt4o|RobustCookie2026-05-09|Perplexity3Svcs|ClaudeOpus47|ProbeConfirmed2026-05-12|Perplexity3Svcs|ClaudeOpus47|ProbeConfirmed2026-05-12", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()

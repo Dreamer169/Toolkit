@@ -50,3 +50,36 @@ Outlook accounts (platform=outlook, status=active, has refresh_token+password)
 → inline_verify reads confirmation email via Graph API (graph-only scope)
 → SSID added to proxy pool (pool ~1400+)
 → verify_rescue picks up any verify_pending stragglers
+
+## v5.39 Probe Results (2026-05-12)
+
+### API Endpoints Confirmed
+-  → JSON  ✅
+-  → full service list ✅
+-  → sub-services (NOT ) ✅
+-  POST → creates chat ✅
+-  POST → sends message ✅
+-  GET → poll for reply ✅
+-  → balance () ✅
+-  → **404** (removed endpoint)
+-  → **404** (removed endpoint)
+-  (path param) → **404** (use )
+
+### New Services (v5.39 additions)
+| Service | Title | Status | min_bal |
+|---------|-------|--------|---------|
+|  | Claude Opus 4.7 | active=1, POLL_PRIMARY | 10.1 |
+|  | Perplexity Sonar | active=1, POLL_PRIMARY, maintenance | 1 |
+|  | Perplexity Sonar Pro | active=1, POLL_PRIMARY, maintenance | 1 |
+|  | Perplexity Sonar Pro Search | active=1, POLL_PRIMARY, maintenance | 3 |
+
+### perplexity Status
+All 3 perplexity services return  indefinitely (>60s) in probe.
+Likely under backend maintenance. FALLBACK_CHAINS → / on timeout.
+
+### claude-opus-4-7 Status
+Chat creation works (200). Message → .
+High-balance service like other claude-opus family. POLL_PRIMARY, fallback → claude-opus-4-6.
+
+### Perplexity Aliases Added
+, , , , , , etc.
