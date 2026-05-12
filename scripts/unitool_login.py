@@ -211,51 +211,19 @@ async def _wait_natural_token(tab, label="", field="cf-turnstile-response",
     return ""
 
 
-async def _bypass_turnstile(tab, label="", timeout=35) -> bool:
+async def _bypass_turnstile(tab, label="", timeout=55) -> bool:
     """
-    Turnstile bypass v4 — Invisible mode first, Managed checkbox as fallback.
+    Turnstile bypass v4c — Invisible mode only (Managed removed).
 
-    Invisible Turnstile (unitool current mode):
-      CF auto-solves based on browser fingerprint → token appears in hidden input.
-      We just wait for it; no user interaction or span.cb-i click needed.
-
-    Managed Turnstile (old checkbox mode):
-      Requires pydoll._bypass_cloudflare to click span.cb-i in shadow DOM.
-      Used only as fallback if token doesn't appear within ~22s.
-
-    Steps:
-      1. Inject postMessage listener (idempotent)
-      2. Wait for natural token (invisible mode, up to 22s)
-      3. If no token: try pydoll managed bypass (checkbox)
-      4. Final wait 8s
+    unitool.ai uses Invisible Turnstile: CF evaluates browser fingerprint silently.
+    No span.cb-i checkbox. Token appears in input[name=cf-turnstile-response] ~33s
+    after page load. Just wait for it.
     """
     await _inject_pm_hook(tab)
-
-    # Phase 1: wait for natural/invisible token
-    tok = await _wait_natural_token(tab, label=label, max_wait=22)
+    tok = await _wait_natural_token(tab, label=label, max_wait=timeout)
     if tok:
         return True
-
-    # Phase 2: managed bypass fallback (checkbox / span.cb-i)
-    for attempt in range(2):
-        try:
-            await tab._bypass_cloudflare({}, time_to_wait_captcha=8)
-            _log(f"    [{label}] managed bypass OK (attempt {attempt+1})")
-        except Exception as e:
-            em = str(e)
-            if any(k in em for k in ("cb-i", "shadow root", "Timed out")):
-                _log(f"    [{label}] managed N/A (invisible mode): {em[:60]}")
-                break
-            _log(f"    [{label}] managed err {attempt+1}: {em[:80]}")
-            await asyncio.sleep(2)
-
-    # Phase 3: final wait using existing helper
-    for i in range(8):
-        await asyncio.sleep(1)
-        n = await _tok_len(tab)                 # uses existing helper
-        if n > 20:
-            _log(f"    [{label}] late token at +{i+1}s len={n}")
-            return True
+    _log(f"    [{label}] timeout {timeout}s — no token")
     return False
 
 
