@@ -1366,6 +1366,105 @@ router.get("/tools/outlook/imap-idle/events", async (req, res) => {
   }
 });
 
+
+// ── POST /tools/outlook/enable-imap ─────────────────────────────────────────
+// 为单个/批量 Outlook 账号开启 IMAP 访问（处理微软全流程安全验证）
+// Body: { account_id?: number, email?: string, password?: string, proxy?: string, headless?: boolean }
+router.post('/tools/outlook/enable-imap', async (req, res) => {
+  try {
+    const {
+      account_id,
+      email,
+      password = '',
+      proxy = '',
+      headless = true,
+    } = req.body as {
+      account_id?: number;
+      email?: string;
+      password?: string;
+      proxy?: string;
+      headless?: boolean;
+    };
+
+    if (!account_id && !email) {
+      res.status(400).json({ success: false, error: '必须提供 account_id 或 email' });
+      return;
+    }
+
+    const { spawn } = await import('child_process');
+    const scriptPath = new URL('../enable_imap.py', import.meta.url).pathname;
+    const args: string[] = [];
+    if (account_id) {
+      args.push('--account-id', String(account_id));
+    } else {
+      args.push('--email', email ?? '', '--password', password ?? '');
+    }
+    if (proxy) args.push('--proxy', proxy);
+    args.push('--headless', headless ? 'true' : 'false');
+
+    const logPath = `/tmp/enable_imap_${account_id ?? (email ?? 'x').split('@')[0]}.log`;
+    const { openSync } = await import('fs');
+    const logFd = openSync(logPath, 'a');
+
+    const child = spawn('python3', [scriptPath, ...args], {
+      env: { ...(process.env as Record<string, string>), PYTHONUNBUFFERED: '1' },
+      stdio: ['ignore', logFd, logFd],
+    });
+
+    await new Promise<void>((resolve) => {
+      child.on('close', resolve);
+      setTimeout(resolve, 300_000); // 5 min max
+    });
+
+    const { readFileSync } = await import('fs');
+    let log = '';
+    try { log = readFileSync(logPath, 'utf8').slice(-6000); } catch { /* ok */ }
+    const success = child.exitCode === 0;
+    res.json({ success, exitCode: child.exitCode, log });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+// ── POST /tools/outlook/enable-imap/batch ────────────────────────────────────
+// 批量开启 IMAP（逐个顺序处理，返回每个账号的结果）
+router.post('/tools/outlook/enable-imap/batch', async (req, res) => {
+  try {
+    const { ids = [], proxy = '', headless = true } = req.body as {
+      ids?: number[];
+      proxy?: string;
+      headless?: boolean;
+    };
+    if (!ids.length) {
+      res.status(400).json({ success: false, error: '必须提供 ids 数组' });
+      return;
+    }
+
+    import('psycopg2' as never).catch(() => {/* ok */});
+    const { spawn } = await import('child_process');
+    const scriptPath = new URL('../enable_imap.py', import.meta.url).pathname;
+    const results: Array<{ account_id: number; success: boolean; exitCode: number | null }> = [];
+
+    for (const aid of ids) {
+      const args = ['--account-id', String(aid), '--headless', headless ? 'true' : 'false'];
+      if (proxy) args.push('--proxy', proxy);
+      const child = spawn('python3', [scriptPath, ...args], {
+        env: { ...(process.env as Record<string, string>), PYTHONUNBUFFERED: '1' },
+        stdio: 'inherit',
+      });
+      const code = await new Promise<number | null>((resolve) => {
+        child.on('close', (c) => resolve(c));
+        setTimeout(() => { child.kill('SIGTERM'); resolve(null); }, 300_000);
+      });
+      results.push({ account_id: aid, success: code === 0, exitCode: code });
+    }
+
+    res.json({ success: true, results });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
 // ── Outlook 注册：后台任务 + 轮询 ─────────────────────────
 // 避免代理/浏览器 12s 断连问题，改为异步任务模式
 
