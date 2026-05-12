@@ -157,19 +157,6 @@ export default function MailCenter() {
   const [reauthManualLogFile, setReauthManualLogFile] = useState("");
   const [reauthManualDone, setReauthManualDone] = useState(false);
   const reauthManualLogRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // ── CSV 导入/导出 ──────────────────────────────────────────────────────────
-  const [csvImporting, setCsvImporting] = useState(false);
-  const [csvMsg, setCsvMsg] = useState("");
-  // ── 批量扫码视图 ──────────────────────────────────────────────────────────
-  const [scanMode, setScanMode] = useState(false);
-  const [scanBusy, setScanBusy] = useState(false);
-  const [scanResults, setScanResults] = useState<Array<{
-    accountId: number; email: string;
-    messages: Array<{ id: string; subject: string; from: string; receivedAt: string; preview: string; code: string }>;
-    error?: string;
-  }>>([]);
-  const [scanStats, setScanStats] = useState<{ total: number; codesFound: number; scanned: number } | null>(null);
-  const [scanCodeOnly, setScanCodeOnly] = useState(true);
   // IMAP IDLE daemon state
   const [idleDaemonRunning, setIdleDaemonRunning] = useState(false);
   const [idleDaemonBusy,    setIdleDaemonBusy]    = useState(false);
@@ -649,45 +636,6 @@ export default function MailCenter() {
     }
   };
 
-  // ── CSV 导出 ─────────────────────────────────────────────────────────────
-  const exportCsv = () => {
-    window.open(`${API}/tools/outlook/export-csv`, "_blank");
-  };
-
-  // ── CSV 导入 ─────────────────────────────────────────────────────────────
-  const importCsv = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setCsvImporting(true); setCsvMsg("");
-    const text = await file.text();
-    const d = await fetch(`${API}/tools/outlook/import-csv`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ csv: text }),
-    }).then(r => r.json()).catch(() => ({ success: false, error: "网络错误" }));
-    setCsvImporting(false);
-    if (d.success) {
-      setCsvMsg(`✅ 导入完成：新增 ${d.inserted} / 更新 ${d.updated} / 跳过 ${d.skipped}`);
-      loadAccounts();
-    } else {
-      setCsvMsg("❌ " + (d.error ?? "未知错误"));
-    }
-    e.target.value = "";
-  };
-
-  // ── 批量扫码 ─────────────────────────────────────────────────────────────
-  const runBatchScan = async () => {
-    setScanBusy(true); setScanResults([]); setScanStats(null);
-    const d = await fetch(`${API}/tools/outlook/batch-scan-inbox`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ limit: 5, codeOnly: scanCodeOnly }),
-    }).then(r => r.json()).catch(() => ({ success: false, error: "网络错误" }));
-    setScanBusy(false);
-    if (d.success) {
-      setScanResults(d.results ?? []);
-      setScanStats({ total: d.total, codesFound: d.codesFound, scanned: d.scanned });
-    }
-  };
-
   const sendMessage = async () => {
     if (!selAccount || !composeTo.trim() || !composeSubject.trim()) return;
     setSendBusy(true); setSendResult(null);
@@ -902,13 +850,19 @@ export default function MailCenter() {
           </div>
           <div className="flex gap-1.5">
             <button
-              onClick={handleAutoCheck}
-              disabled={checkBusy || accounts.length === 0}
+              onClick={verifyAll}
+              disabled={verifying || accounts.length === 0}
               className="flex-1 py-1.5 bg-blue-600/60 hover:bg-blue-600/80 disabled:opacity-50 rounded text-xs text-white font-medium transition-colors"
-              title="用 Graph API 检测账号状态（取代 ROPC 验证）"
             >
-              {checkBusy ? "检测中…" : "🔍 检测账号状态"}
+              {verifying ? "验证中…" : "🔍 批量验证"}
             </button>
+            {verifyResults.length > 0 && (
+              <button
+                onClick={() => setVerifyResults([])}
+                className="px-2 py-1.5 bg-[#21262d] hover:bg-[#30363d] rounded text-xs text-gray-400 transition-colors"
+                title="清除验证结果"
+              >✕</button>
+            )}
           </div>
           {/* 一键清洗风控账号 */}
           <button
@@ -934,38 +888,28 @@ export default function MailCenter() {
               </button>
             </div>
           )}
-                {/* CSV 导入/导出 */}
-          <div className="flex gap-1.5">
-            <button
-              onClick={exportCsv}
-              className="flex-1 py-1.5 bg-[#21262d] hover:bg-[#30363d] rounded text-xs text-gray-300 font-medium transition-colors"
-              title="将所有 Outlook 账号导出为 CSV 文件"
-            >📤 导出 CSV</button>
-            <label className="flex-1 py-1.5 bg-[#21262d] hover:bg-[#30363d] rounded text-xs text-gray-300 font-medium transition-colors text-center cursor-pointer"
-              title="从 CSV 文件批量导入账号（支持 email,password,token,refresh_token,status,tags 列）"
-            >
-              {csvImporting ? "导入中…" : "📥 导入 CSV"}
-              <input type="file" accept=".csv,text/csv" className="hidden" onChange={importCsv} disabled={csvImporting} />
-            </label>
-          </div>
-          {csvMsg && <p className={`text-[10px] px-1 ${csvMsg.startsWith("✅") ? "text-emerald-400" : "text-red-400"}`}>{csvMsg}</p>}
-          {/* 实时验证状态栏 */}
+                {/* 实时验证状态栏 */}
       {liveVerify && (
-        <div className="flex items-center gap-2 py-1 text-xs">
+        <div className="flex items-center gap-3 px-3 py-1.5 text-xs">
           <span className={`font-semibold ${liveVerify.enabled ? 'text-emerald-400' : 'text-gray-500'}`}>
             {liveVerify.enabled ? '🟢 实时验证：开启' : '⚫ 实时验证：关闭'}
           </span>
           {liveVerify.lastRun && (
-            <span className="text-gray-600 truncate">
-              {new Date(liveVerify.lastRun).toLocaleTimeString('zh-CN')} · ✅{liveVerify.lastStats.clicked} ✗{liveVerify.lastStats.failed}
+            <span className="text-gray-500">
+              上次扫描：{new Date(liveVerify.lastRun).toLocaleTimeString('zh-CN')} &nbsp;
+              ✅ {liveVerify.lastStats.clicked} 已点击 / 失败 {liveVerify.lastStats.failed} / 跳过 {liveVerify.lastStats.skipped}
             </span>
           )}
           <button
             onClick={toggleLiveVerify}
             disabled={liveVerifyBusy}
-            className={`ml-auto shrink-0 px-2 py-0.5 rounded text-xs font-medium transition-colors ${liveVerify.enabled ? 'bg-red-900/40 hover:bg-red-800/60 text-red-300' : 'bg-emerald-900/40 hover:bg-emerald-800/60 text-emerald-300'} disabled:opacity-50`}
+            className={`ml-auto px-3 py-1 rounded text-xs font-medium transition-colors ${
+              liveVerify.enabled
+                ? 'bg-red-900/40 hover:bg-red-800/60 text-red-300'
+                : 'bg-emerald-900/40 hover:bg-emerald-800/60 text-emerald-300'
+            } disabled:opacity-50`}
           >
-            {liveVerifyBusy ? '…' : liveVerify.enabled ? '暂停' : '开启'}
+            {liveVerifyBusy ? '处理中…' : liveVerify.enabled ? '暂停自动验证' : '开启自动验证'}
           </button>
         </div>
       )}
@@ -1246,8 +1190,8 @@ export default function MailCenter() {
 
       {/* ─── 中列：邮件列表 ─────────────────────────────────────────── */}
       <section className="w-72 shrink-0 border-r border-[#21262d] flex flex-col bg-[#0d1117]">
-        <div className="px-2 pt-2 pb-1 border-b border-[#21262d] flex gap-1 flex-wrap items-center">
-          {!scanMode && FOLDERS.map(f => (
+        <div className="px-2 pt-2 pb-1 border-b border-[#21262d] flex gap-1 flex-wrap">
+          {FOLDERS.map(f => (
             <button key={f.id} onClick={() => changeFolder(f.id)}
               className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
                 folder === f.id
@@ -1257,15 +1201,6 @@ export default function MailCenter() {
               {f.label}
             </button>
           ))}
-          <button
-            onClick={() => { setScanMode(s => !s); if (!scanMode) runBatchScan(); }}
-            className={`ml-auto text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
-              scanMode
-                ? "bg-amber-600/20 border-amber-500/50 text-amber-300"
-                : "border-transparent text-gray-500 hover:text-gray-300 hover:border-[#30363d]"
-            }`}
-            title="扫码模式：同时从所有账号收件箱提取验证码"
-          >🔍 扫码</button>
         </div>
         <div className="px-2 py-2 border-b border-[#21262d] flex gap-1">
           <input
@@ -1292,69 +1227,6 @@ export default function MailCenter() {
             {showCompose ? "✕" : "✉"}
           </button>
         </div>
-        {/* ── 扫码视图（MailPilot batch-get-mails + code_extractor）── */}
-        {scanMode && (
-          <div className="flex-1 overflow-y-auto flex flex-col bg-[#0d1117]">
-            {/* 控制栏 */}
-            <div className="px-2 py-1.5 border-b border-[#21262d] flex items-center gap-2 shrink-0">
-              <label className="flex items-center gap-1 text-[10px] text-gray-400 cursor-pointer select-none">
-                <input type="checkbox" checked={scanCodeOnly} onChange={e => setScanCodeOnly(e.target.checked)} className="w-3 h-3 accent-amber-400" />
-                仅含验证码
-              </label>
-              <button
-                onClick={runBatchScan}
-                disabled={scanBusy}
-                className="ml-auto px-2 py-0.5 bg-amber-600/30 hover:bg-amber-600/50 border border-amber-500/40 rounded text-[10px] text-amber-300 disabled:opacity-50 transition-colors"
-              >
-                {scanBusy ? "扫描中…" : "🔄 重新扫描"}
-              </button>
-            </div>
-            {/* 统计栏 */}
-            {scanStats && (
-              <div className="px-2 py-1 text-[10px] text-gray-500 border-b border-[#21262d] shrink-0">
-                扫描 {scanStats.scanned} 个账号 · 共 {scanStats.total} 封邮件 · 含验证码 <span className="text-amber-400 font-semibold">{scanStats.codesFound}</span> 封
-              </div>
-            )}
-            {scanBusy && (
-              <div className="flex items-center justify-center py-8 text-xs text-gray-500">
-                <svg className="w-4 h-4 animate-spin mr-2" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>
-                正在扫描所有账号收件箱…
-              </div>
-            )}
-            {!scanBusy && scanResults.map(r => (
-              <div key={r.accountId} className="border-b border-[#21262d]">
-                {/* 账号标题 */}
-                <div className="px-2 py-1 bg-[#161b22] flex items-center gap-1.5">
-                  <span className="text-[10px] font-semibold text-gray-300 truncate flex-1">{r.email}</span>
-                  {r.error && <span className="text-[10px] text-red-400 truncate">{r.error}</span>}
-                  {!r.error && <span className="text-[10px] text-gray-600">{r.messages.length} 封</span>}
-                </div>
-                {/* 邮件条目 */}
-                {r.messages.map((m, i) => (
-                  <div key={i} className="px-2 py-1.5 hover:bg-[#161b22] border-t border-[#21262d]/50 group">
-                    <div className="flex items-start gap-1.5">
-                      {m.code && (
-                        <button
-                          onClick={() => { navigator.clipboard.writeText(m.code); }}
-                          className="shrink-0 px-1.5 py-0.5 bg-amber-500/20 hover:bg-amber-500/40 border border-amber-500/40 rounded text-[11px] font-mono font-bold text-amber-300 transition-colors"
-                          title="点击复制验证码"
-                        >{m.code}</button>
-                      )}
-                      <div className="flex-1 min-w-0">
-                        <p className="text-[10px] text-gray-300 truncate">{m.subject || "(无主题)"}</p>
-                        <p className="text-[10px] text-gray-600 truncate">{m.from} · {m.receivedAt ? new Date(m.receivedAt).toLocaleString("zh-CN", { month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" }) : ""}</p>
-                      </div>
-                    </div>
-                    {m.preview && <p className="text-[10px] text-gray-600 mt-0.5 line-clamp-2">{m.preview}</p>}
-                  </div>
-                ))}
-                {!r.error && r.messages.length === 0 && (
-                  <p className="px-2 py-1.5 text-[10px] text-gray-700">{scanCodeOnly ? "无含验证码邮件" : "收件箱为空"}</p>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
         {/* ── 批量按主题删除栏 ── */}
         {selAccount && (
           <div className="px-2 py-1.5 border-b border-[#21262d] flex gap-1 items-center bg-[#0d1117]">
@@ -1715,23 +1587,13 @@ export default function MailCenter() {
                 2. 逐个复制「用户码」粘贴到授权页，并用对应账号密码登录<br/>
                 3. 后台每 4 秒自动检测，授权完成后自动存储 token 并显示 ✓
               </p>
-              <div className="mt-2 flex items-center gap-2 flex-wrap">
-                <a
-                  href={batchOAuth.accounts.find(a => a.status === "pending")?.verificationUri ?? "https://microsoft.com/devicelogin"}
-                  target="_blank" rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-xs text-white font-medium transition-colors"
-                >
-                  🌐 打开微软授权页面
-                </a>
-                <button
-                  onClick={() => startAutoComplete()}
-                  disabled={autoCompleteBusy}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 bg-violet-700/60 hover:bg-violet-700/80 disabled:opacity-50 rounded text-xs text-white font-medium transition-colors"
-                  title="用浏览器自动化完成设备码输入（无需手动操作）"
-                >
-                  {autoCompleteBusy ? "自动完成中…" : "🤖 自动完成授权"}
-                </button>
-              </div>
+              <a
+                href={batchOAuth.accounts.find(a => a.status === "pending")?.verificationUri ?? "https://microsoft.com/devicelogin"}
+                target="_blank" rel="noopener noreferrer"
+                className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-xs text-white font-medium transition-colors"
+              >
+                🌐 打开微软授权页面
+              </a>
             </div>
 
             {/* 账号列表 */}

@@ -61,7 +61,7 @@ function portToProxy(port: number): string {
 
 // Outlook OAuth (Thunderbird client_id)
 const OUTLOOK_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
-const OUTLOOK_SCOPE     = "offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read https://graph.microsoft.com/IMAP.AccessAsUser.All https://graph.microsoft.com/SMTP.Send";
+const OUTLOOK_SCOPE     = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access https://outlook.office.com/IMAP.AccessAsUser.All";
 // CF-banned port cooldown: port → timestamp when cooldown expires (5 min)
 const cfBannedUntil = new Map<number, number>();
 // Dead ports: ERR_CONNECTION_CLOSED → skip for 10 min
@@ -793,31 +793,13 @@ async function verifyOutlookInbox(
         scope: OUTLOOK_SCOPE,
       }).toString(),
     });
-    let td = await tr.json() as {
+    const td = await tr.json() as {
       access_token?: string; refresh_token?: string;
       error?: string; error_description?: string;
     };
-    // ── luoianun 方案：/common 失败时回退到 login.live.com/oauth20_token.srf ──
-    if (!td.access_token) {
-      log(`    [inbox] id=${acc.id} /common 端点失败(${td.error ?? "?"}) → 尝试 login.live.com 端点`);
-      try {
-        const tr2 = await microsoftFetch("https://login.live.com/oauth20_token.srf", {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({
-            grant_type: "refresh_token",
-            client_id: OUTLOOK_CLIENT_ID,
-            refresh_token: rt,
-            scope: "wl.imap wl.offline_access",
-          }).toString(),
-        });
-        const td2 = await tr2.json() as { access_token?: string; refresh_token?: string; error?: string; error_description?: string };
-        if (td2.access_token) { td = td2; log(`    [inbox] id=${acc.id} login.live.com 端点成功`); }
-      } catch { /* 两个端点都失败，继续走失败分支 */ }
-    }
     if (!td.access_token) {
       const errMsg = (td.error_description ?? td.error ?? "刷新失败").slice(0, 120);
-      log(`    [inbox✗] id=${acc.id} 双端点token刷新均失败: ${errMsg} → 标token_invalid`);
+      log(`    [inbox✗] id=${acc.id} token刷新失败: ${errMsg} → 标token_invalid`);
       await dbE(
         "UPDATE accounts SET tags = (SELECT NULLIF(array_to_string(ARRAY(SELECT DISTINCT trim(t) FROM unnest(string_to_array(COALESCE(tags,'') || ',token_invalid', ',')) AS t WHERE trim(t) <> ''), ','), ''), status='suspended', updated_at=NOW() WHERE id=$1",
         [acc.id]
@@ -1763,7 +1745,7 @@ router.post("/replit/retry-verify", async (_req, res) => {
               grant_type: "refresh_token",
               client_id: "9e5f94bc-e8a4-4e73-b8be-63364c29d753",
               refresh_token: outlook.refresh_token,
-              scope: "offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read https://graph.microsoft.com/IMAP.AccessAsUser.All https://graph.microsoft.com/SMTP.Send",
+              scope: "https://graph.microsoft.com/Mail.Read offline_access",
             }).toString(),
           });
           const td = await tr.json() as { access_token?: string; refresh_token?: string };

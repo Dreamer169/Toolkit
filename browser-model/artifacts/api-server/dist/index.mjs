@@ -62258,6 +62258,7 @@ var CdpSession = class {
   }
   async start(opts) {
     const browser = await getBrowser2();
+    if (this.closed) return;
     this.viewport = { w: opts.width, h: opts.height };
     let _storageState;
     if (this.sessionId) {
@@ -62309,6 +62310,12 @@ var CdpSession = class {
       permissions: ["geolocation", "clipboard-read", "clipboard-write", "notifications"],
       ..._storageState !== void 0 ? { storageState: _storageState } : {}
     });
+    if (this.closed) {
+      await this.ctx.close().catch(() => {
+      });
+      this.ctx = null;
+      return;
+    }
     await this.ctx.addInitScript(`window.__bmFpSeed = ${this.fpSeed};`);
     await this.ctx.addInitScript({ content: STEALTH_INIT2 });
     await this.ctx.route("**/*", async (route, request) => {
@@ -62335,7 +62342,22 @@ var CdpSession = class {
       }
     });
     this.page = await this.ctx.newPage();
+    if (this.closed) {
+      await this.ctx.close().catch(() => {
+      });
+      this.ctx = null;
+      this.page = null;
+      return;
+    }
     this.cdp = await this.ctx.newCDPSession(this.page);
+    if (this.closed) {
+      await this.ctx.close().catch(() => {
+      });
+      this.ctx = null;
+      this.page = null;
+      this.cdp = null;
+      return;
+    }
     this.page.on("response", (r) => {
       try {
         if (!this.page || r.frame() !== this.page.mainFrame()) return;
@@ -63185,8 +63207,46 @@ var CdpSynchronizer = class {
     }
   }
   _record(type, payload) {
-    this.recentEvents.push({ type, at: Date.now(), payload });
+    const now = Date.now();
+    this.recentEvents.push({ type, at: now, payload });
     if (this.recentEvents.length > 200) this.recentEvents.splice(0, 100);
+    if (this._recActive) {
+      if (!this._recFilter.length || this._recFilter.includes(type)) {
+        const delayMs = this._recLastTs ? now - this._recLastTs : 0;
+        this._recLastTs = now;
+        this._recBuf.push({ type, ts: now, delayMs, payload });
+        if (this._recBuf.length > this._recMax) this._recBuf.splice(0, Math.ceil(this._recMax * 0.2));
+      }
+    }
+  }
+  // ── Public recording API (called by routes/sync.ts) ──────────────────────
+  startRecording(opts = {}) {
+    if (opts.clearFirst !== false) this._recBuf = [];
+    this._recActive = true;
+    this._recMax = opts.maxEvents ?? 5e3;
+    this._recFilter = opts.filterTypes ?? [];
+    this._recLastTs = Date.now();
+    logger.info({ max: this._recMax, filter: this._recFilter }, "[sync] recording started");
+    return this._recStatus();
+  }
+  stopRecording() {
+    this._recActive = false;
+    logger.info({ events: this._recBuf.length }, "[sync] recording stopped");
+    return this._recStatus();
+  }
+  getRecording(opts = {}) {
+    let evts = this._recBuf.slice();
+    if (opts.types?.length) evts = evts.filter((e) => opts.types.includes(e.type));
+    if (typeof opts.maxEvents === "number") evts = evts.slice(-opts.maxEvents);
+    const events = opts.asReplay ? evts.map(({ ts: _ts, ...rest }) => rest) : evts;
+    return { recording: this._recStatus(), events };
+  }
+  clearRecording() {
+    this._recBuf = [];
+    return this._recStatus();
+  }
+  _recStatus() {
+    return { active: this._recActive, eventCount: this._recBuf.length, maxEvents: this._recMax };
   }
   _addError(msg) {
     logger.warn({ msg }, "[sync] dispatch error");
@@ -63251,6 +63311,42 @@ router5.post("/browser/sync/replay", async (req, res) => {
     }
     const result = await synchronizer.replay(events, { sessionIds, includeMaster });
     res.json({ ok: true, ...result });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e.message ?? e) });
+  }
+});
+router5.post("/browser/sync/recording/start", (req, res) => {
+  try {
+    const { maxEvents, filterTypes, clearFirst } = req.body;
+    const status = synchronizer.startRecording({ maxEvents, filterTypes, clearFirst });
+    res.json({ ok: true, recording: status });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e.message ?? e) });
+  }
+});
+router5.post("/browser/sync/recording/stop", (req, res) => {
+  try {
+    const status = synchronizer.stopRecording();
+    res.json({ ok: true, recording: status });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e.message ?? e) });
+  }
+});
+router5.get("/browser/sync/recording", (req, res) => {
+  try {
+    const types = req.query.types ? String(req.query.types).split(",").map((s) => s.trim()).filter(Boolean) : void 0;
+    const maxEvents = req.query.maxEvents ? parseInt(String(req.query.maxEvents), 10) : void 0;
+    const asReplay = req.query.asReplay === "true" || req.query.asReplay === "1";
+    const result = synchronizer.getRecording({ types, maxEvents, asReplay });
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e.message ?? e) });
+  }
+});
+router5.delete("/browser/sync/recording", (req, res) => {
+  try {
+    const status = synchronizer.clearRecording();
+    res.json({ ok: true, recording: status });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e.message ?? e) });
   }

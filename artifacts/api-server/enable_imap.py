@@ -103,24 +103,59 @@ def log(msg: str):
 
 
 
-# ─── RESI proxy helper ────────────────────────────────────────────────────────
-_RESI_PORTS = [10851, 10853, 10854, 10855, 10857, 10859]
+# ─── XrayRelay proxy helper (identical pattern to outlook_retoken.py) ─────────
+def _setup_xray_proxy(exit_ip: str = "", manual_proxy: str = "") -> tuple[str, object]:
+    """
+    Setup proxy using XrayRelay (CF VLESS), same as retoken.py.
+    Returns (proxy_url, xray_relay_instance_or_None).
+    严禁直连 — 必须走代理。
+    """
+    if manual_proxy:
+        log(f"  [proxy] 使用手动代理: {manual_proxy}")
+        return manual_proxy, None
 
-def _pick_resi_proxy() -> str:
-    """Pick first reachable RESI SOCKS5 proxy port."""
-    import socket
-    for port in _RESI_PORTS:
+    xray_inst = None
+    if exit_ip:
         try:
-            s = socket.create_connection(("127.0.0.1", port), timeout=2)
-            s.close()
-            return f"socks5://127.0.0.1:{port}"
-        except Exception:
-            continue
-    log("  [proxy] ⚠ 所有 RESI 端口不通，使用直连")
-    return ""
+            from xray_relay import XrayRelay as _XR
+            xray_inst = _XR(exit_ip)
+            if xray_inst.start(timeout=8.0):
+                url = xray_inst.socks5_url
+                log(f"  [proxy] 🌐 XrayRelay exit_ip={exit_ip} → {url}")
+                return url, xray_inst
+            else:
+                log(f"  [proxy] ⚠ XrayRelay({exit_ip}) 启动失败，尝试 CF pool…")
+                xray_inst = None
+        except Exception as e:
+            log(f"  [proxy] ⚠ XrayRelay 异常: {e}，尝试 CF pool…")
+            xray_inst = None
+
+    # CF pool fallback（无 exit_ip 或 XrayRelay 失败）
+    try:
+        import random as _rand, json as _j
+        _ps = _j.load(open('/tmp/cf_pool_state.json'))
+        _avail = [x['ip'] for x in _ps.get('available', []) if isinstance(x, dict) and x.get('ip')]
+        if _avail:
+            _ip = _rand.choice(_avail[:20])
+            from xray_relay import XrayRelay as _XR
+            xray_inst = _XR(_ip)
+            if xray_inst.start(timeout=8.0):
+                url = xray_inst.socks5_url
+                log(f"  [proxy] 🌐 CF pool fallback IP={_ip} → {url}")
+                return url, xray_inst
+            else:
+                log("  [proxy] ❌ CF pool XrayRelay 启动失败")
+                xray_inst = None
+        else:
+            log("  [proxy] ❌ CF pool 为空")
+    except Exception as e:
+        log(f"  [proxy] ❌ CF pool fallback 异常: {e}")
+
+    raise RuntimeError("❌ 所有代理均失败，严禁直连，中止。请检查 XrayRelay / CF pool 状态。")
+
 
 def _is_error_page(page) -> bool:
-    """Check if page is an error/no-internet page due to proxy failure."""
+    """Check if page is an error/proxy-failure page."""
     try:
         txt = page.evaluate("()=>document.body?.innerText?.slice(0,300)||''") or ""
         url = page.url or ""
@@ -768,6 +803,7 @@ def enable_imap(
     fingerprint_json: str = "",
     proxy: str = "",
     headless: bool = True,
+    xray_relay_inst=None,
 ) -> bool:
     safe = email.split("@")[0]
     log(f"\n{'='*60}")
@@ -821,9 +857,21 @@ def enable_imap(
                 pass
         if not need_login:
             # 检查是否真的在 inbox（gear 可见）
+            # 若 URL 含 msalAuthRedirect，最多额外等 30s 让 MSAL 静默刷新完成
+            cur_url2 = page.url or ""
+            if "msalAuthRedirect" in cur_url2:
+                log("  [step0] 检测到 msalAuthRedirect，等待 MSAL 刷新 (30s)…")
+                for _ in range(15):
+                    page.wait_for_timeout(2000)
+                    try:
+                        _g2 = page.locator('#owaSettingsBtn_container,[aria-label="Settings"],[aria-label="设置"]').first
+                        if _g2.is_visible(timeout=500):
+                            break
+                    except Exception:
+                        pass
             try:
                 _gear = page.locator('#owaSettingsBtn_container,[aria-label="Settings"],[aria-label="设置"]').first
-                if not _gear.is_visible(timeout=8000):
+                if not _gear.is_visible(timeout=12000):
                     need_login = True
             except Exception:
                 need_login = True
@@ -833,37 +881,72 @@ def enable_imap(
                 log("  [step0] ❌ 需要密码登录但未提供 password，中止")
                 return False
             log("  [step0] Session 无效，执行 email/password 登录…")
-            # 导航到 login 页
+            # 清空所有 cookies —— 旧 cookies 会触发 MSAL 自动重定向，阻止登录页出现
             try:
-                page.goto("https://login.live.com/login.srf?wa=wsignin1.0", timeout=30000, wait_until="domcontentloaded")
-            except Exception:
-                pass
-            page.wait_for_timeout(2000)
+                context.clear_cookies()
+                log("  [step0] 已清空 cookies，避免 MSAL 重定向干扰")
+            except Exception as _ce:
+                log(f"  [step0] ⚠ clear cookies: {_ce}")
+
+            # 尝试多个登录入口
+            _login_urls = [
+                "https://login.live.com/login.srf?wa=wsignin1.0",
+                "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?client_id=9ba1a5c7-f17a-4de9-a1f1-6178c8d51223&scope=openid+profile+email&response_type=code&redirect_uri=https%3A%2F%2Foutlook.live.com%2F&prompt=login",
+                "https://outlook.live.com/owa/?nlp=1",
+            ]
+            _login_ok = False
+            for _lu in _login_urls:
+                try:
+                    page.goto(_lu, timeout=30000, wait_until="domcontentloaded")
+                except Exception:
+                    pass
+                page.wait_for_timeout(3000)
+                _cur = page.url or ""
+                log(f"  [step0] 登录页 URL: {_cur[:80]}")
+                try:
+                    _e = page.locator('input[name="loginfmt"],input[type="email"]').first
+                    if _e.is_visible(timeout=3000):
+                        _login_ok = True
+                        break
+                except Exception:
+                    pass
+            if not _login_ok:
+                log("  [step0] ⚠ 所有登录入口均未找到 email 输入框，仍尝试…")
+
             # email
             try:
                 _ei = page.locator('input[name="loginfmt"],input[type="email"]').first
-                _ei.wait_for(timeout=10000)
+                _ei.wait_for(timeout=25000)
                 _react_fill(page, 'input[name="loginfmt"],input[type="email"]', email)
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(700)
                 _click_primary(page)
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(4000)
+                log("  [step0] ✅ email 已填")
             except Exception as e:
                 log(f"  [step0] ⚠ 填 email 异常: {e}")
             # password
             try:
                 _pw = page.locator('input[type="password"],input[name="passwd"]').first
-                _pw.wait_for(timeout=10000)
+                _pw.wait_for(timeout=20000)
                 _pw.fill(password)
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(700)
                 _click_primary(page)
-                page.wait_for_timeout(5000)
+                page.wait_for_timeout(6000)
+                log("  [step0] ✅ password 已提交")
             except Exception as e:
                 log(f"  [step0] ⚠ 填 password 异常: {e}")
             # 跳过打断页
-            for _ in range(3):
+            for _ in range(4):
                 if _handle_skip_interrupts(page):
-                    page.wait_for_timeout(1500)
-            log("  [step0] 登录流程完成")
+                    page.wait_for_timeout(2000)
+            # 等待 inbox 加载
+            log("  [step0] 等待 inbox 加载…")
+            try:
+                page.wait_for_url("**/mail/**", timeout=20000)
+            except Exception:
+                pass
+            page.wait_for_timeout(3000)
+            log(f"  [step0] 登录后 URL: {(page.url or '')[:100]}")
 
         _screenshot(page, "00_after_login", email)
 
@@ -953,6 +1036,12 @@ def enable_imap(
             p.stop()
         except Exception:
             pass
+        if xray_relay_inst:
+            try:
+                xray_relay_inst.stop()
+                log("  [proxy] XrayRelay stopped")
+            except Exception:
+                pass
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
@@ -970,6 +1059,7 @@ def main():
     email, password, acc_id = args.email, args.password, args.account_id
     cookies_json = ""
     fingerprint_json = ""
+    acc: dict = {}
 
     if acc_id:
         acc = db_get_account(acc_id)
@@ -980,19 +1070,28 @@ def main():
         log(f"[cli] 从 DB 读取账号: id={acc_id} email={email} "
              f"(DB proxy_port={acc.get('proxy_port')} ignored – ephemeral)")
 
-    # DB proxy_port 是临时 XrayRelay 端口，跨 session 必然失效；改用 RESI
-    if not args.proxy:
-        args.proxy = _pick_resi_proxy()
-        if args.proxy:
-            log(f"[cli] 自动选择 RESI 代理: {args.proxy}")
-
     if not email:
         ap.error("必须提供 --email 或 --account-id")
+
+    # 严禁直连 — 必须走 XrayRelay (CF VLESS) 代理，与 retoken.py 完全一致
+    xray_relay_inst = None
+    exit_ip = (acc.get("exit_ip") or "") if acc_id else ""
+    try:
+        proxy_url, xray_relay_inst = _setup_xray_proxy(
+            exit_ip=exit_ip,
+            manual_proxy=args.proxy,
+        )
+        if not args.proxy:
+            args.proxy = proxy_url
+    except RuntimeError as e:
+        log(f"[cli] ❌ {e}")
+        sys.exit(2)
 
     ok = enable_imap(
         email=email, password=password, account_id=acc_id or None,
         cookies_json=cookies_json, fingerprint_json=fingerprint_json,
         proxy=args.proxy, headless=headless,
+        xray_relay_inst=xray_relay_inst,
     )
     sys.exit(0 if ok else 1)
 
