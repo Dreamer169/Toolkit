@@ -515,42 +515,11 @@ async def _pydoll_register(
         except Exception as _pmje:
             log(f"  [{label}] postMessage hook warn: {_pmje}")
 
-        # Wait for CF iframe OR token (whichever comes first)
-        # render=explicit: iframe is created dynamically after JS bundle loads.
-        # invisible mode: token may appear even before iframe is visible.
+        # Invisible Turnstile: CF evaluates browser fingerprint silently.
+        # No iframe, no span.cb-i (unitool.ai switched Managed→Invisible).
+        # Token appears in input[name=cf-turnstile-response] after ~30-35s.
+        # Skip the old 25s iframe-wait — poll for natural token directly.
         t0 = time.time()
-        for i in range(25):
-            await asyncio.sleep(1)
-            # Check token first (invisible mode populates without needing iframe click)
-            try:
-                n_tok = await _tok_len(tab)
-            except Exception:
-                n_tok = 0
-            if n_tok > 20:
-                log(f"  [{label}] early token at {i+1}s len={n_tok} (invisible auto-solved)")
-                return True
-            # Check iframe (any CF challenge URL)
-            try:
-                n_iframe = int(_s(await tab.execute_script(
-                    "document.querySelectorAll('iframe[src*=\'cloudflare\']').length",
-                    return_by_value=True)) or 0)
-            except Exception:
-                n_iframe = 0
-            if n_iframe > 0:
-                log(f"  [{label}] CF iframe ready at {i+1}s (n={n_iframe})")
-                break
-            if i % 5 == 4:
-                # Diagnose: list all iframes
-                try:
-                    all_fr = _s(await tab.execute_script(
-                        "JSON.stringify(Array.from(document.querySelectorAll('iframe')).map(f=>f.src.slice(0,60)))",
-                        return_by_value=True))
-                except Exception:
-                    all_fr = "?"
-                log(f"  [{label}] [{i+1}s] waiting CF iframe (n={n_iframe}) all={all_fr[:120]}")
-
-        t0 = time.time()
-        _managed_tried = False
         _reloaded = False
 
         while time.time() - t0 < timeout:
@@ -565,7 +534,7 @@ async def _pydoll_register(
                 log(f"  [{label}] token ready (natural) at {elapsed:.0f}s len={n}")
                 return True
 
-            # postMessage-captured token
+            # postMessage-captured token (edge-case fallback)
             try:
                 pm_tok = _s(await tab.execute_script(
                     "window.__cf_captured_token||''", return_by_value=True))
@@ -575,22 +544,10 @@ async def _pydoll_register(
                 log(f"  [{label}] token via postMessage at {elapsed:.0f}s len={len(pm_tok)}")
                 return True
 
-            # 30s: managed bypass fallback (checkbox/span.cb-i)
-            if elapsed > 30 and not _managed_tried:
-                _managed_tried = True
-                log(f"  [{label}] 30s no token → managed bypass attempt...")
-                try:
-                    await tab._bypass_cloudflare({}, time_to_wait_captcha=10)
-                    log(f"  [{label}] managed bypass returned")
-                except Exception as e:
-                    em = str(e)
-                    if any(k in em for k in ("cb-i", "shadow root", "Timed out")):
-                        log(f"  [{label}] managed N/A (invisible): {em[:60]}")
-                    else:
-                        log(f"  [{label}] managed err: {em[:80]}")
-                await asyncio.sleep(3)
-                continue
+            if int(elapsed) % 10 == 9:
+                log(f"  [{label}] [{elapsed:.0f}s] waiting invisible Turnstile token...")
 
+            await asyncio.sleep(1)
             # 60s: reload once
             if elapsed > 60 and not _reloaded:
                 _reloaded = True
