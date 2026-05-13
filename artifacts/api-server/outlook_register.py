@@ -363,14 +363,14 @@ class BaseController:
             if not captcha_ok:
                 return False, "验证码处理失败", email
 
-            # ── v9.41 CAPTCHA-content-clear wait ─────────────────────────────
-            # handle_captcha early-detection fires when px-captcha container clears,
-            # but the Arkose outer frame may still be on-screen showing CAPTCHA.
-            # Poll until CAPTCHA text is gone OR page navigates away (max 120s, 2s poll).
+            # ── v9.60 CAPTCHA-content-clear wait (重构: 120s空转→45s+两次完整重试) ──
+            # 原 v9.41/v9.42 问题: handle_captcha 乐观返回 True 但 Arkose 已重置挑战,
+            # 之后只在 30s 做一次弱 Patch-H(找 #px-captcha 不存在) 就空转到 120s.
+            # 修复: 上限改为 45s, 在 14s 和 28s 各做一次完整 handle_captcha() 重试.
             _cap_text_cleared = False
             _CAPTCHA_HINTS = ("let's prove you're human", "prove you're human", "press and hold the button")
-            _cap_reattempt_done = False
-            for _cc_i in range(60):
+            _cap_retry_count = 0
+            for _cc_i in range(23):  # 23x2s = 46s
                 try:
                     _cur_url = page.url or ""
                     if "signup.live.com" not in _cur_url:
@@ -384,40 +384,28 @@ class BaseController:
                         break
                     if not any(h in _cc_body for h in _CAPTCHA_HINTS):
                         _cap_text_cleared = True
-                        print(f"[register] [captcha-clear] CAPTCHA content cleared after {_cc_i*2}s", flush=True)
+                        print(f"[register] [captcha-clear] CAPTCHA cleared after {_cc_i*2}s", flush=True)
                         break
-                    # ── v9.42 Patch H: re-attempt press-and-hold at 30s if CAPTCHA still showing ──
-                    # Arkose resets the challenge after the first press-hold clears px-captcha.
-                    # At 30s we try one more a11y-click + press-hold cycle before the 120s timeout.
-                    if _cc_i == 15 and not _cap_reattempt_done:
-                        _cap_reattempt_done = True
-                        print("[register] [captcha-clear] v9.42 Patch-H: CAPTCHA at 30s, retrying px-captcha via frames", flush=True)
+                    # v9.60: 全流程 handle_captcha 重试 (14s 和 28s 各一次)
+                    # 原 Patch-H 只找 #px-captcha 按住, Arkose 重置后已消失 → 无效
+                    if _cc_i in (7, 14) and _cap_retry_count < 2:
+                        _cap_retry_count += 1
+                        print(f"[register] [captcha-clear] v9.60 全流程重试#{_cap_retry_count} at {_cc_i*2}s", flush=True)
                         try:
-                            import random as _rnd_h
-                            _h_done = False
-                            for _hfr in page.frames:
-                                try:
-                                    _px_b = _hfr.locator("#px-captcha").first.bounding_box(timeout=2000)
-                                    if _px_b and _px_b.get("width", 0) > 0:
-                                        _phx = _px_b["x"] + _px_b["width"] / 2 + _rnd_h.randint(-8, 8)
-                                        _phy = _px_b["y"] + _px_b["height"] / 2 + _rnd_h.randint(-4, 4)
-                                        print(f"[register] [captcha-clear] Patch-H: found #px-captcha hold PAGE=({_phx:.0f},{_phy:.0f})", flush=True)
-                                        _hld = PatchrightController._human_press_hold(page, _phx, _phy, 4400, 5300)
-                                        print(f"[register] [captcha-clear] Patch-H: held {_hld/1000:.1f}s", flush=True)
-                                        _h_done = True
-                                        break
-                                except Exception:
-                                    pass
-                            if not _h_done:
-                                print("[register] [captcha-clear] Patch-H: no #px-captcha found", flush=True)
-                        except Exception as _patch_h_err:
-                            print(f"[register] [captcha-clear] Patch-H err (ignored): {_patch_h_err}", flush=True)
-                    # -- end Patch H
+                            _retry_ok = self.handle_captcha(page, blob_container)
+                            print(f"[register] [captcha-clear] 重试#{_cap_retry_count} -> {_retry_ok}", flush=True)
+                            _ur2 = page.url or ""
+                            if "signup.live.com" not in _ur2:
+                                _cap_text_cleared = True
+                                print(f"[register] [captcha-clear] 重试后跳离 -> {_ur2[:80]}", flush=True)
+                                break
+                        except Exception as _rte:
+                            print(f"[register] [captcha-clear] 重试#{_cap_retry_count} 异常: {_rte}", flush=True)
                     if _cc_i % 5 == 0:
-                        print(f"[register] [captcha-clear] waiting {_cc_i*2}s for CAPTCHA to clear", flush=True)
+                        print(f"[register] [captcha-clear] {_cc_i*2}s elapsed (retries={_cap_retry_count})", flush=True)
                     page.wait_for_timeout(2000)
                 except Exception as _cce:
-                    print(f"[register] [captcha-clear] poll error (ignored): {_cce}", flush=True)
+                    print(f"[register] [captcha-clear] poll error: {_cce}", flush=True)
                     _cap_text_cleared = True
                     break
             if not _cap_text_cleared:
@@ -425,8 +413,8 @@ class BaseController:
                     page.screenshot(path=f"/tmp/outlook_captcha_stuck_{email}.png")
                 except Exception:
                     pass
-                print("[register] CAPTCHA content not cleared after 120s", flush=True)
-                return False, "验证码处理失败(CAPTCHA内容120s未消失)", email
+                print(f"[register] CAPTCHA not cleared after 45s (retries={_cap_retry_count})", flush=True)
+                return False, "验证码处理失败(CAPTCHA内容45s未消失)", email
 
             # ── Post-CAPTCHA: detect phone-verification / stall page ──────────
             # MS sometimes shows a phone-number entry page after CAPTCHA instead
