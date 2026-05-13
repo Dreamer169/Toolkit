@@ -105,12 +105,9 @@ def _setup_proxy(exit_ip: str = "", manual_proxy: str = "") -> tuple:
     import socket
     xray_inst = None
 
-    ISP_STATIC_PORTS = [
-        10857, 10859, 10853, 10855, 10851,
-        10870, 10871, 10872, 10873, 10874, 10875,
-        10876, 10877, 10878, 10879, 10880,
-        10910, 10911, 10912, 10913, 10914, 10915, 10916,
-    ]
+    # xray_relay.py: real ISP exit = ss-in-1/3/5/9 (proxy:false)
+    # 10857=ss-in-7 is CF-proxied → excluded; 10820-10829=in-socks CF → excluded
+    ISP_STATIC_PORTS = [10851, 10853, 10855, 10859]
 
     if exit_ip:
         try:
@@ -196,11 +193,10 @@ def db_tag_imap_enabled(account_id: int):
 def _find_isp_proxy() -> str:
     """Find first available ISP static port (real IP, not CF). Used for login.live.com."""
     import socket
-    ISP_PORTS = [
-        10857, 10859, 10853, 10855, 10851,
-        10870, 10871, 10872, 10873, 10874, 10875,
-        10876, 10877, 10878, 10879, 10880,
-    ]
+    # xray_relay.py: real ISP exit (ss-in-1/3/5/9 = proxy:false)
+    # 10851=Italy 10853=Turkey 10855=Russia 10859=HK
+    # 10857 is ss-in-7 (CF-proxied, proxy:true) — excluded
+    ISP_PORTS = [10851, 10853, 10855, 10859]
     for port in ISP_PORTS:
         try:
             s = socket.create_connection(("127.0.0.1", port), timeout=1)
@@ -444,13 +440,22 @@ def _do_fresh_login(page, ctx, email: str, password: str,
         page.wait_for_timeout(3000)
         cur = _url(page)
         log(f"  [login] landed: {cur[:90]}")
-        # Check for the "technical problems" error page (386 bytes, no form)
+        # Only skip real error pages — NOT 0-byte SPA (React not yet mounted).
+        # Mirrors auto_device_code._pick_residential_proxy / outlook_register.py pattern:
+        #   0b       → SPA still loading, fall through to 60s email-input wait
+        #   1-800b + error keyword → genuine error page, skip to next URL
         try:
             _blen = page.evaluate("()=>document.body?.innerHTML?.length||0")
-            if _blen < 800:
+            if _blen == 0:
+                log(f"  [login] body=0 (SPA loading), waiting for form...")
+            elif _blen < 800:
                 _btxt = page.evaluate("()=>document.body?.innerText?.slice(0,200)||''")
-                log(f"  [login] ⚠ tiny page ({_blen}b): {_btxt[:150]}")
-                continue  # try next URL
+                _ERR_KW = ("technical problem", "unauthorized_client", "unable to complete",
+                           "does not exist", "not enabled")
+                if any(kw in _btxt.lower() for kw in _ERR_KW):
+                    log(f"  [login] ⚠ error page ({_blen}b): {_btxt[:150]}")
+                    continue  # skip to next URL
+                log(f"  [login] small body ({_blen}b), falling through to form wait...")
         except Exception:
             pass
         # v4.1: wait up to 60s for email input (proxy latency through VLESS)
