@@ -197,13 +197,15 @@ def search_verify_email(token):
             for m in d.get("value", []):
                 s   = (m.get("subject", "") or "").lower()
                 snd = (m.get("from", {}).get("emailAddress", {}).get("address", "") or "").lower()
-                if ("replit.com" in snd) or ("verify" in s) or ("confirm" in s) or ("replit" in s):
+                # Fix: 只匹配 sender 来自 replit.com 或 subject 含 replit，避免误匹配其他服务
+                if ("replit.com" in snd) or ("@replit.com" in snd) or ("replit" in s):
                     print(f"[click_verify] 找到验证邮件 (recent-list/{folder}): {m.get('subject','')} from={snd}", flush=True)
                     return m["id"]
         except Exception as e:
             print(f"[click_verify] recent-list {folder} 失败: {e}", flush=True)
     # 回退：旧 $search 路径 (索引化邮件 >5min)
-    for subj_kw in ("verify", "confirm", "replit", "reseek", "activate"):
+    # Fix: 只搜 replit/reseek，去掉 verify/confirm/activate 避免命中其他服务验证邮件
+    for subj_kw in ("replit", "reseek"):
         try:
             url = (f"https://graph.microsoft.com/v1.0/me/messages"
                    f"?$search=%22subject:{subj_kw}%22"
@@ -213,7 +215,8 @@ def search_verify_email(token):
                 d = json.loads(r.read())
             for m in d.get("value", []):
                 s = m.get("subject", "").lower()
-                if any(k in s for k in ("verify", "confirm", "activat", "replit", "reseek")):
+                if any(k in s for k in ("replit", "reseek")):
+
                     print(f"[click_verify] 找到验证邮件 ($search): {m['subject']}", flush=True)
                     return m["id"]
         except Exception as e:
