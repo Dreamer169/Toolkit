@@ -163,9 +163,16 @@ def _atexit_handler():
                     and "unitool_already" not in new_tags
                     and "unitool_verify_pending" not in new_tags):
                 new_tags = (new_tags + ",unitool_reg_retry").strip(",")
+            import random as _rand
+            # abuse_mode = 微软永久封禁，注册无意义，直接跳过 reg_retry
+            if "abuse_mode" in new_tags and "unitool_reg_retry" in new_tags:
+                new_tags = re.sub(r",?unitool_reg_retry", "", new_tags).strip(",")
+                log(f"[atexit] abuse_mode账号跳过reg_retry id={_account_id}")
+            # 随机 30-60 分钟后重试（updated_at 设为未来时间，SQL 检查 updated_at < NOW()）
+            _retry_min = _rand.randint(30, 60)
             cur.execute(
-                "UPDATE accounts SET tags=%s, updated_at=NOW() WHERE id=%s",
-                (new_tags, _account_id))
+                "UPDATE accounts SET tags=%s, updated_at=NOW() + INTERVAL '%s minutes' WHERE id=%s",
+                (new_tags, _retry_min, _account_id))
             conn.commit()
             log(f"[atexit] id={_account_id} → {new_tags}")
         conn.close()
@@ -195,9 +202,9 @@ def db_get_fresh_account():
           AND LENGTH(COALESCE(password,'')) >= 8
           AND (tags IS NULL OR (
                tags NOT LIKE '%%unitool_registered%%'
-           AND (tags NOT LIKE '%%unitool_fail%%' OR updated_at < NOW() - INTERVAL '4 hours')
+           AND (tags NOT LIKE '%%unitool_fail%%' OR updated_at < NOW())
            AND tags NOT LIKE '%%unitool_already%%'
-           AND (tags NOT LIKE '%%unitool_reg_retry%%' OR updated_at < NOW() - INTERVAL '4 hours')
+           AND (tags NOT LIKE '%%unitool_reg_retry%%' OR updated_at < NOW())
            AND tags NOT LIKE '%%unitool_processing%%'
            AND tags NOT LIKE '%%unitool_already%%'
            AND tags NOT LIKE '%%unitool_rescue_dead%%'
@@ -219,9 +226,9 @@ def db_count_fresh():
           AND LENGTH(COALESCE(password,'')) >= 8
           AND (tags IS NULL OR (
                tags NOT LIKE '%%unitool_registered%%'
-           AND (tags NOT LIKE '%%unitool_fail%%' OR updated_at < NOW() - INTERVAL '4 hours')
+           AND (tags NOT LIKE '%%unitool_fail%%' OR updated_at < NOW())
            AND tags NOT LIKE '%%unitool_already%%'
-           AND (tags NOT LIKE '%%unitool_reg_retry%%' OR updated_at < NOW() - INTERVAL '4 hours')
+           AND (tags NOT LIKE '%%unitool_reg_retry%%' OR updated_at < NOW())
            AND tags NOT LIKE '%%unitool_processing%%'
            AND tags NOT LIKE '%%unitool_already%%'
            AND tags NOT LIKE '%%unitool_rescue_dead%%'
@@ -287,7 +294,14 @@ def db_mark_fail(account_id, reason=""):
                     else "unitool_verify_pending" if fail_tag == "unitool_verify_pending"
                     else "unitool_reg_retry")
     note_line = "\n" + _note_prefix + "_fail=" + reason[:120] + " at=" + ts
-    cur.execute("UPDATE accounts SET tags=%s, notes=COALESCE(notes,'') || %s, updated_at=NOW() WHERE id=%s",
+    import random as _rand2
+    if "unitool_reg_retry" in new_tags and "abuse_mode" in new_tags:
+        # abuse_mode 账号永不重试注册
+        new_tags = re.sub(r",?unitool_reg_retry", "", new_tags).strip(",")
+        log(f"[db_mark_fail] abuse_mode跳过reg_retry id={account_id}")
+    _retry_sql = ("NOW() + INTERVAL '%d minutes'" % _rand2.randint(30, 60)
+                  if "unitool_reg_retry" in new_tags else "NOW()")
+    cur.execute(f"UPDATE accounts SET tags=%s, notes=COALESCE(notes,'') || %s, updated_at={_retry_sql} WHERE id=%s",
                 (new_tags, note_line, account_id))
     conn.commit(); conn.close()
     log(f"[db_mark_fail] id={account_id} → {new_tags} reason={reason[:60]}")
