@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.39
+unitool.ai → OpenAI 兼容反代 v5.40
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -539,14 +539,14 @@ def _balance_monitor_loop():
         time.sleep(60)
 
 # ─── 服务/模型映射（v5.11: 从 API 实探更新，新增 gpt-5）─────────────────────
-# v5.38 probe backend identity (AI self-report, probe v3.0, 2026-05-09):
-#   gpt-4o        -> GPT-4o (AI self-report confirmed)
-#   gpt-4o-mini   -> ChatGPT-3.5 / ChatGPT-4.0 (rotates)
-#   gpt-4-1       -> GPT-4o (SAME backend as gpt-4o! both self-report GPT-4o)
-#   gpt5.1        -> GPT-4.1 (AI self-report confirmed)
-#   claude-sonnet -> Claude 3.5 Sonnet
-#   claude-sonnet-4-5 -> Claude 3.5/3.7 Sonnet (backend rotates between versions)
-#   claude-sonnet-4-6 -> Claude 3.5/3.7 Sonnet (rotates; stream intercepted v5.38)
+# probe v6.2 backend identity summary (2026-05-13) — complete final map:
+#   gpt-4o        -> gpt-4o-2024-11-20        (Replit model_returned; self-report unreliable)
+#   gpt-4o-mini   -> gpt-4o-mini-2024-07-18   (Replit model_returned; self-report unreliable)
+#   gpt-4-1       -> gpt-4.1-2025-04-14       (Replit model_returned; unitool self-report ≠ truth)
+#   gpt5.1        -> gpt-5.1-2025-11-13       ✓ cutoff Oct 2024 exact match
+#   claude-sonnet     -> claude-3-5-sonnet-20240620  (Claude 3.5 Sonnet, cutoff Apr 2024)
+#   claude-sonnet-4-5 -> claude-3-5-sonnet-20241022  (Claude 3.5 Sonnet v2, cutoff Apr 2024)
+#   claude-sonnet-4-6 -> claude-sonnet-4-6 (Claude 4 Sonnet, early 2025 cutoff)
 #   claude-opus-4-6 -> claude-opus-4-6 (真实 Anthropic Opus 4 变体) ✓ CONFIRMED (probe v5.0, 2026-05-13)
 #                      Replit AI integration 直接返回 model=claude-opus-4-6; 回答逐字匹配
 #                      旧注释 "claude-sonnet-4-20250514" 是开发者错误标注，实为 Opus 系列直透传
