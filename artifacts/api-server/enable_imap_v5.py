@@ -192,22 +192,27 @@ def db_get_account(account_id: int) -> dict:
         conn.close()
 
 def db_tag_imap_enabled(account_id: int):
-    """Tag account with imap_enabled AND pop_enabled (both enabled together)."""
+    """Tag account with imap_enabled AND pop_enabled (both enabled together).
+    v9.37 Fix10: use string-based tag update (not array_cat which may fail on text-type tags).
+    """
     import psycopg2
     try:
         conn = psycopg2.connect(_DB_URL)
         cur  = conn.cursor()
-        cur.execute("""
-            UPDATE accounts
-               SET tags = (SELECT ARRAY(SELECT DISTINCT unnest(
-                           array_cat(COALESCE(tags,'{}'),
-                                     ARRAY['imap_enabled','pop_enabled'])))),
-                   updated_at = now()
-             WHERE id = %s
-        """, (account_id,))
+        # Read current tags (stored as comma-separated TEXT, not array)
+        cur.execute("SELECT tags FROM accounts WHERE id=%s", (account_id,))
+        row = cur.fetchone()
+        existing_tags = set(t.strip() for t in (row[0] or "").split(",") if t.strip()) if row else set()
+        existing_tags.add("imap_enabled")
+        existing_tags.add("pop_enabled")
+        new_tags_str = ",".join(sorted(existing_tags))
+        cur.execute(
+            "UPDATE accounts SET tags=%s, updated_at=now() WHERE id=%s",
+            (new_tags_str, account_id),
+        )
         conn.commit()
         conn.close()
-        log(f"  [db] account {account_id} tagged: imap_enabled + pop_enabled")
+        log(f"  [db] account {account_id} tagged: {new_tags_str}")
     except Exception as e:
         log(f"  [db] tag write failed: {e}")
 
@@ -806,28 +811,185 @@ def _handle_fwd_signin(page, email: str, password: str) -> bool:
 
     if _popup_pages:
         popup = _popup_pages[0]
-        log(f"  [fwd-signin] handling popup auth: {_url(popup)[:80]}")
-        # Wait for popup to load
+        log(f"  [fwd-signin] popup detected, waiting for navigation from about:blank...")
+        # v9.37 Fix8: wait for popup to navigate AWAY from about:blank
+        # The popup starts at about:blank and then navigates to the real auth URL.
+        # Old code handled it at about:blank before it loaded, so no auth was done.
+        _nav_deadline = _time.time() + 12.0
+        while _time.time() < _nav_deadline:
+            popup_url_now = _url(popup)
+            if popup_url_now and popup_url_now != "about:blank":
+                break
+            page.wait_for_timeout(500)
+        popup_url = _url(popup)
+        log(f"  [fwd-signin] popup url after wait: {popup_url[:100]}")
+        # Try to load state
         try:
-            popup.wait_for_load_state("domcontentloaded", timeout=10000)
+            popup.wait_for_load_state("domcontentloaded", timeout=8000)
         except Exception:
             pass
         popup_url = _url(popup)
-        log(f"  [fwd-signin] popup url: {popup_url[:100]}")
-        # Handle auth in popup (email/password entry)
-        if any(x in popup_url for x in ("login.live.com", "login.microsoftonline.com", "account.live.com", "outlook.live.com")):
+        log(f"  [fwd-signin] popup url (loaded): {popup_url[:100]}")
+        # Handle auth in popup
+        _POPUP_AUTH_DOMAINS = (
+            "login.live.com", "login.microsoftonline.com",
+            "account.live.com", "outlook.live.com",
+            "login.windows.net", "microsoftonline.com",
+        )
+        if any(x in popup_url for x in _POPUP_AUTH_DOMAINS):
+            log("  [fwd-signin] auth popup — handling reauth...")
             _handle_reauth(popup, email, password)
-            popup.wait_for_timeout(3000)
-            for _ in range(4):
-                if not _skip_interrupts(popup):
+            popup.wait_for_timeout(2000)
+            # ── v9.37 Fix11: skip proofs/Add + wait for OAuth callback ────────
+            # After password submit, Microsoft may show proofs/Add (backup verify).
+            # Must skip it (click "Not now"/"Skip") so the popup completes the
+            # OAuth flow and fires the callback to the main page.
+            # Also handle account.live.com/proofs/* and other interrupt pages.
+            _PROOFS_SKIP_SELS = [
+                'a:has-text("Not now")',            # proofs/Add "Not now" link
+                'a:has-text("Skip for now")',
+                'button:has-text("Not now")',
+                'button:has-text("Skip for now")',
+                'button:has-text("Maybe later")',
+                'button:has-text("Skip")',
+                'input[type="submit"][value="No"]',
+                'button:has-text("No")',
+                '#idBtn_Back',
+                '[data-testid="secondaryButton"]',
+                'a[href*="proofs/Skip"]',           # direct skip link
+            ]
+            _popup_skip_rounds = 0
+            _popup_mt_token = ""   # v9.37 Fix13: store mail.tm token from first _handle_proofs call
+            _popup_mt_addr  = ""
+            while _popup_skip_rounds < 10:
+                _popup_skip_rounds += 1
+                popup_u = _url(popup)
+                # v9.37 Fix12: extract domain only (not full URL) to avoid
+                # matching "login.live.com" in redirect query parameters.
+                # e.g. proofs/Add?...&ru=https://login.live.com/... would
+                # falsely match if we checked the full URL string.
+                try:
+                    _popup_domain = popup_u.replace("https://","").replace("http://","").split("/")[0].split("?")[0].lower()
+                except Exception:
+                    _popup_domain = popup_u.lower()
+                _is_verify_page = "verify" in popup_u.lower() or "Verify" in popup_u
+                _is_add_page    = ("proofs/Add" in popup_u or "proofs/add" in popup_u.lower()) and not _is_verify_page
+                log(f"  [fwd-signin] popup skip round {_popup_skip_rounds}: domain={_popup_domain} add={_is_add_page} verify={_is_verify_page} url={popup_u[:60]}")
+                # Check if popup is on Outlook callback URL (OAuth done)
+                if _popup_domain == "outlook.live.com" or popup_u == "" or popup_u == "about:blank":
+                    log("  [fwd-signin] popup on Outlook/blank — OAuth done")
                     break
-                popup.wait_for_timeout(1000)
-            log(f"  [fwd-signin] popup after auth: {_url(popup)[:80]}")
-            try:
-                popup.close()
-            except Exception:
-                pass
-        page.wait_for_timeout(5000)
+                # Check if popup closed itself
+                try:
+                    if popup.is_closed():
+                        log("  [fwd-signin] popup closed itself — OAuth done")
+                        break
+                except Exception:
+                    break
+                # Detect page type by domain only
+                _LOGIN_DOMAINS = ("login.live.com", "login.microsoftonline.com", "login.windows.net")
+                _PROOFS_DOMAINS_SET = ("account.live.com", "account.microsoft.com")
+                _is_login = _popup_domain in _LOGIN_DOMAINS
+                _is_proofs = _popup_domain in _PROOFS_DOMAINS_SET and ("proofs" in popup_u or "security" in popup_u)
+                # Try skipping interrupt pages (button/link) first
+                _skipped = False
+                for sel in _PROOFS_SKIP_SELS:
+                    try:
+                        loc = popup.locator(sel).first
+                        if loc.is_visible(timeout=800):
+                            loc.click()
+                            log(f"  [fwd-signin] popup: skipped via {sel}")
+                            popup.wait_for_timeout(2000)
+                            _skipped = True
+                            break
+                    except Exception:
+                        continue
+                if _skipped:
+                    continue
+                if _is_proofs and _is_verify_page and _popup_mt_token:
+                    # v9.37 Fix13: on proofs/Verify with stored token — enter verification code
+                    log(f"  [fwd-signin] proofs/Verify — entering code from mail.tm {_popup_mt_addr}...")
+                    try:
+                        _code_ok = _handle_security_code(popup, _popup_mt_token)
+                        log(f"  [fwd-signin] security code result: {_code_ok}")
+                    except Exception as _ce:
+                        log(f"  [fwd-signin] security code error: {_ce}")
+                    popup.wait_for_timeout(5000)
+                elif _is_proofs and _is_add_page:
+                    # On proofs/Add — try JS click "Not now"/"Cancel" first
+                    _js_skipped = popup.evaluate("""() => {
+                        var kws = ['not now', 'skip', 'maybe later', 'cancel', 'no thanks'];
+                        for (var el of document.querySelectorAll('a,button,[role="button"]')) {
+                            var t = el.textContent.trim().toLowerCase();
+                            if (kws.some(function(k){return t===k||t.indexOf(k)>=0;})) {
+                                el.click();
+                                return 'js-skip:' + el.textContent.trim().slice(0,30);
+                            }
+                        }
+                        return 'not-found';
+                    }""")
+                    log(f"  [fwd-signin] proofs/Add JS skip: {_js_skipped}")
+                    if _js_skipped == "not-found":
+                        # Mandatory — add backup email and store token for verification
+                        if not _popup_mt_token:
+                            log("  [fwd-signin] calling _handle_proofs on popup (first time)...")
+                            try:
+                                _ph_ok, _ph_addr, _ph_token = _handle_proofs(popup)
+                                if _ph_ok and _ph_token:
+                                    _popup_mt_addr  = _ph_addr
+                                    _popup_mt_token = _ph_token
+                                    log(f"  [fwd-signin] _handle_proofs ok, token stored: {_ph_addr}")
+                                else:
+                                    log(f"  [fwd-signin] _handle_proofs: ok={_ph_ok} no token")
+                            except Exception as _pe:
+                                log(f"  [fwd-signin] _handle_proofs error: {_pe}")
+                        else:
+                            log("  [fwd-signin] already called _handle_proofs — waiting for Verify page...")
+                    popup.wait_for_timeout(3000)
+                elif _is_proofs:
+                    # Generic proofs page — try JS skip then wait
+                    _js_skipped2 = popup.evaluate("""() => {
+                        var kws = ['not now', 'skip', 'maybe later', 'cancel', 'no thanks'];
+                        for (var el of document.querySelectorAll('a,button,[role="button"]')) {
+                            var t = el.textContent.trim().toLowerCase();
+                            if (kws.some(function(k){return t===k||t.indexOf(k)>=0;})) {
+                                el.click();
+                                return 'js-skip:' + el.textContent.trim().slice(0,30);
+                            }
+                        }
+                        return 'not-found';
+                    }""")
+                    log(f"  [fwd-signin] generic proofs JS skip: {_js_skipped2}")
+                    if _popup_mt_token and _is_verify_page:
+                        try:
+                            _handle_security_code(popup, _popup_mt_token)
+                        except Exception:
+                            pass
+                    popup.wait_for_timeout(3000)
+                elif _is_login:
+                    # Genuinely on a login page — may need another auth step
+                    log("  [fwd-signin] popup back on login page — re-reauthing...")
+                    _handle_reauth(popup, email, password)
+                    popup.wait_for_timeout(2000)
+                else:
+                    # Unknown page — wait and check next round
+                    log(f"  [fwd-signin] popup on unknown domain '{_popup_domain}' — waiting...")
+                    popup.wait_for_timeout(3000)
+            _popup_final_url = _url(popup)
+            log(f"  [fwd-signin] popup after auth+skip: {_popup_final_url[:100]}")
+        elif popup_url == "about:blank" or not popup_url:
+            log("  [fwd-signin] popup still at about:blank — may be blocked or already closed")
+        else:
+            log(f"  [fwd-signin] popup at unexpected URL: {popup_url[:80]}")
+        # Wait for main page to update after popup completes OAuth
+        log("  [fwd-signin] waiting 8s for main page to receive OAuth callback...")
+        page.wait_for_timeout(8000)
+        try:
+            popup.close()
+            log("  [fwd-signin] popup closed")
+        except Exception:
+            pass
+        page.wait_for_timeout(3000)
     else:
         # No popup — URL-based handling
         page.wait_for_timeout(3000)
@@ -1483,24 +1645,30 @@ def _toggle_imap(page) -> str:
                 lbl.click(); return "label";
             }
         }
-        // ── Strategy 3: aria-label with IMAP + exclude nav elements ─────────
-        // CRITICAL: filter out navigation menu items (buttons/links/options).
-        // The left panel "Forwarding and IMAP" item is a button — must be excluded.
-        var NAV_ROLES = ["button", "link", "option", "menuitem", "treeitem", "tab", "menubar", "menu"];
+        // ── Strategy 3: aria-label with IMAP — STRICT: only real toggle elements ────
+        // CRITICAL: [aria-label*="IMAP" i] can match container divs like
+        // "MailForwarding and IMAPis loaded" which are NOT toggle controls.
+        // Fix: only accept elements that are actual toggle inputs:
+        //   - input[type="radio"|"checkbox"] — native toggle
+        //   - [role="radio"|"switch"|"checkbox"] — ARIA toggle
+        //   - elements with aria-checked attribute — toggle state indicator
+        // This EXCLUDES: buttons, divs, sections, spans, nav items, containers.
+        var TOGGLE_TAGS = ["INPUT", "SELECT"];
+        var TOGGLE_ROLES = ["radio", "switch", "checkbox"];
         var byAttr = Array.from(document.querySelectorAll('[aria-label*="IMAP" i],[data-testid*="imap" i]'));
         for (var el of byAttr) {
-            var role = (el.getAttribute("role") || el.tagName.toLowerCase()).toLowerCase();
-            // Skip navigation/menu elements
-            if (NAV_ROLES.indexOf(role) >= 0) continue;
-            // Also skip plain BUTTON elements in nav context
-            if (el.tagName === "BUTTON") {
-                // Only accept a button if it has aria-checked (= toggle button)
-                if (!el.hasAttribute("aria-checked")) continue;
-            }
+            var role = (el.getAttribute("role") || "").toLowerCase();
+            var tag = el.tagName;
+            var hasAriaChecked = el.hasAttribute("aria-checked");
+            // ONLY accept if it's a genuine toggle control
+            var isInput = (tag === "INPUT" && (el.type === "radio" || el.type === "checkbox" || el.type === "range"));
+            var isAriaToggle = TOGGLE_ROLES.indexOf(role) >= 0;
+            var hasToggleState = hasAriaChecked;
+            if (!isInput && !isAriaToggle && !hasToggleState) continue;
             var chk = el.getAttribute("aria-checked") || (el.checked !== undefined ? String(el.checked) : "false");
             if (chk === "true" || el.checked) return "attr-already-on";
             el.click();
-            return "attr-clicked:" + el.getAttribute("aria-label");
+            return "attr-clicked-strict:" + el.getAttribute("aria-label");
         }
         // ── Strategy 4: any visible [role="switch"] ──────────────────────────
         var sw = Array.from(document.querySelectorAll('[role="switch"]'));
