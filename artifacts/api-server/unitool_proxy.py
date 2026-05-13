@@ -614,7 +614,7 @@ NATIVE_SERVICES = {
     "gpt-5", "gpt-5.5", "gpt-5.4", "gpt-5-nano",
     "gpt5.1", "gpt5.2",
     "gpt-4o", "gpt-4o-mini", "gpt-4-1", "gpt-4-5",  # v5.30: gpt-4-5 back (active=1 confirmed 2026-05-08)
-    "gpt-o1", "gpt-o1-mini", "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini",
+    # REMOVED (IMMEDIATE_FALLBACK): gpt-o1, gpt-o1-mini, gpt-o3, gpt-o3-mini, gpt-o3-pro, gpt-o4-mini
     # Gemini
     "gemini-3.1-pro", "gemini-3-pro",
     # xAI
@@ -623,10 +623,10 @@ NATIVE_SERVICES = {
     "claude-sonnet",     # -> claude-3-5-sonnet-20240620 (Claude 3.5 Sonnet, cutoff Apr 2024) ✓
     "claude-sonnet-4-5", # -> claude-3-5-sonnet-20241022 (Claude 3.5 Sonnet v2, cutoff Apr 2024) ✓
     "claude-sonnet-4-6", # -> claude-sonnet-4-6 (Claude 4, early 2025 cutoff, newer) ✓
-    "claude-opus",       # ❌ IMMEDIATE_FALLBACK: 400 max_tokens > 32000
+    # REMOVED (IMMEDIATE_FALLBACK): claude-opus
     "claude-opus-4-6",   # -> claude-opus-4-6 ✓ CONFIRMED (Replit model_returned exact match)
-    "claude-opus-4-7",   # -> claude-opus-4-7 ✓ CONFIRMED (v5.39, 2026-05-12)
-    "claude-haiku",      # ❌ IMMEDIATE_FALLBACK: 404 route broken
+    # REMOVED (IMMEDIATE_FALLBACK): claude-opus-4-7
+    # REMOVED (IMMEDIATE_FALLBACK): claude-haiku
     # Perplexity (v5.39: confirmed active=1, 2026-05-12)
     "perplexity-sonar",             # Perplexity Sonar            min_bal=1
     "perplexity-sonar-pro",         # Perplexity Sonar Pro        min_bal=1
