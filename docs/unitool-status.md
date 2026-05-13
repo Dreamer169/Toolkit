@@ -1,4 +1,103 @@
-# unitool-status.md
+# unitool-status.md — probe v5.0 (2026-05-13)
+
+## Backend Identity Map (probe v5.0, 2026-05-13)
+
+### CONFIRMED Real Backends (交叉验证: unitool 探针 + Replit AI 集成直接调用对比)
+
+| unitool service_id | real backend | confidence | 验证方法 |
+|---|---|---|---|
+| claude-opus-4-6 | **claude-opus-4-6** | HIGH | Replit integration model_returned=claude-opus-4-6; 回答逐字匹配 |
+| claude-opus-4-7 | **claude-opus-4-7** | HIGH | Replit integration model_returned=claude-opus-4-7; 回答匹配 |
+| gpt-5.5 | **GPT-5** (gpt-5-2025-08-07) | HIGH | reasoning tokens + Apr-May 2025知识 + proxy代码等价 |
+| gpt-4-1 | GPT-4o (same pool as gpt-4o) | MEDIUM | v5.38 probe |
+| gpt5.1 | GPT-4.1 (gpt-4.1-2025-04-14) | HIGH | v5.38 self-report |
+| gpt-5.4 | gpt-5.4-2026-03-05 | HIGH | Replit direct call |
+
+### ❌ 历史错误注释 (已修正)
+
+| 字段 | 旧错误注释 | 修正后 | 修正依据 |
+|---|---|---|---|
+| claude-opus-4-6 | claude-sonnet-4-20250514 | claude-opus-4-6 (真实 Opus 4) | Replit API 直接返回 model=claude-opus-4-6 |
+| gpt-5.5 | GPT-4o | GPT-5 (gpt-5-2025-08-07) | reasoning tokens + 2025知识 |
+
+---
+
+## gpt-5.5 = GPT-5 完整证据链 (probe v5.0)
+
+### 用于判定的维度
+
+| 维度 | gpt-5.5 (unitool) | gpt-5 (Replit 真实) | gpt-4o (真实) | gpt-4.1 (真实) | gpt-5.4 (真实) |
+|---|---|---|---|---|---|
+| model_returned | — | gpt-5-2025-08-07 | gpt-4o-2024-11-20 | gpt-4.1-2025-04-14 | gpt-5.4-2026-03-05 |
+| reasoning_tokens | YES (block) | YES (300) | 0 | 0 | 0 |
+| 知道 o3 Apr 2025 | TRUE ✓ | 未测 | FALSE | FALSE | FALSE |
+| 知道 Claude Opus 4 May 2025 | TRUE ✓ | 未测 | FALSE | FALSE | FALSE |
+| 自报 cutoff | June 2024* | 未测 | Oct 2023 | June 2024 | June 2024 |
+| proxy fallback | gpt-5 ↔ gpt-5.5 | — | — | — | — |
+
+*自报 cutoff 不可靠: gpt-5 系列模型自报常与实际训练截止不符
+
+### 关键排除逻辑
+
+    gpt-5.5 有 reasoning_tokens →
+      排除 gpt-4o  (reasoning_tokens=0)
+      排除 gpt-4.1 (reasoning_tokens=0)
+      排除 gpt-5.4 (reasoning_tokens=0)
+    
+    gpt-5.5 知道 April-May 2025 事件 →
+      排除 gpt-4o  (cutoff Oct 2023)
+      排除 gpt-o4-mini/gpt-o3 on unitool (二者对相同事件答 FALSE)
+    
+    proxy.py 源码第 713-716 行: gpt-5 ↔ gpt-5.5 互为 fallback →
+      proxy 开发者视二者为等价/同池模型
+    
+    真实 gpt-5-2025-08-07 有 reasoning_tokens → 与 gpt-5.5 行为一致
+    
+    结论: gpt-5.5 = GPT-5 (gpt-5-2025-08-07 或其 A/B 变体)
+
+---
+
+## claude-opus-4-6 / claude-opus-4-7 = 真实 Anthropic Opus 4 证据链
+
+### Replit AI Integration 直接验证
+
+    Replit Anthropic integration → POST /messages → model="claude-opus-4-6"
+    Response: model_returned = "claude-opus-4-6" (真实 Anthropic API 字段)
+    
+    unitool claude-opus-4-6 回答:
+      "My training data cutoff is early 2025 (exact month not publicly specified).
+       My maximum context window is 200,000 tokens.
+       Yes, I support extended thinking."
+    
+    Replit claude-opus-4-6 回答:
+      "My training data cutoff is early 2025 (exact month not publicly specified).
+       My maximum context window is 200,000 tokens.
+       Yes, I support extended thinking."
+    
+    → 逐字相同 → unitool claude-opus-4-6 = 真实 claude-opus-4-6 直透传
+
+### 历史错误原因
+
+    proxy 源码注释 (v5.38) 写 "claude-sonnet-4-20250514"
+    → 该注释是开发者错误标注或过时注释
+    → 实际路由是真实 Opus 4 系列直接透传
+    → claude-opus-4-6 和 claude-opus-4-7 都是真实 Anthropic 模型 ID
+
+---
+
+## Replit AI Integration 获取的真实模型版本号 (2026-05-13)
+
+| 模型名 | Replit 返回的 model_returned | reasoning_tokens | cutoff 自报 |
+|---|---|---|---|
+| claude-opus-4-6 | claude-opus-4-6 | — | early 2025 |
+| claude-opus-4-7 | claude-opus-4-7 | — (0 visible) | early 2025 |
+| gpt-4o | gpt-4o-2024-11-20 | 0 | Oct 2023 |
+| gpt-4.1 | gpt-4.1-2025-04-14 | 0 | June 2024 |
+| gpt-5.4 | gpt-5.4-2026-03-05 | 0 | June 2024 |
+| gpt-5 | gpt-5-2025-08-07 | 300 | — |
+| o4-mini | o4-mini-2025-04-16 | 512 | — |
+
+---
 
 ## Fix Log
 
@@ -8,10 +107,12 @@
 - Fix-4: chain_v3 inline_verify scope AADSTS70011
 - Fix-5: chain_v3 Graph API URL dollar-params
 - Fix-6: chain_v3 HTTPError logging
+- Fix-7 (probe v5.0): 修正 gpt-5.5=GPT-4o 错误注释 → GPT-5
+- Fix-8 (probe v5.0): 修正 claude-opus-4-6=sonnet 错误注释 → 真实 claude-opus-4-6
 
 ---
 
-## Current State (2026-05-12, proxy v5.39)
+## Current State (2026-05-13, proxy v5.39)
 
 | Component | Status |
 |---|---|
@@ -29,117 +130,34 @@
 | 70 | unitool_verify_rescue | rescue pending |
 | 75 | unitool-proxy | OpenAI proxy :8089 |
 
-## SSID Pool (2026-05-12)
+## SSID Pool (2026-05-13)
 
 - Total: 2035 SSIDs (/data/unitool_ssids/)
 - RESI ports: 10851-10859, 10870-10889
 
-### High-balance accounts (own ref_code used by others -> reward tokens)
+### High-balance test accounts
 
-| email | tokens | own_ref | used_by |
-|---|---|---|---|
-| robertcruz806@outlook.com | 110 | kZno0 | 8 |
-| lwhitedjs@outlook.com | 107.2 | xjfMd | 5 |
-| lauranct242@outlook.com | 106.5 | 2KQ4m | 9 |
-| sarahrivera639@outlook.com | 106.4 | xjfjk | 42 |
-| l_walker296 | 106.1 | 5n3ik | 5 |
-
-Test account: lwhitedjs@outlook.com (107 bonus tokens, user_id=3008933)
+| email | tokens |
+|---|---|
+| lwhitedjs@outlook.com | 107.2 |
 
 ---
 
-## Backend Identity Map (probe v4.1, 2026-05-12)
+## Conversation Protocol
 
-### CONFIRMED Real Backends
+    POST   /api/chats                     → {id, service_id, uri, user_id}
+    POST   /api/chats/{id}/messages       → {message, job:{id,status:pending}}
+    GET    /api/chats/{id}/messages       → {messages:[...]} poll until status=ended
+    DELETE /api/chats/{id}               → 204
 
-| unitool service_id | real backend | method | context | cutoff | ext-think | cost/msg |
-|---|---|---|---|---|---|---|
-| claude-opus-4-6 | claude-sonnet-4-20250514 | src+probe | 200k | early 2025 | YES | 43-218 |
-| claude-opus-4-7 | claude-opus-4-20250514 | cost+naming+knowledge | 200k | >=May 2025 | YES | 60-370 |
-| gpt-5.5 | GPT-4o | cutoff match | 128k | June 2024 | NO | 103-423 |
-| gpt-4-1 | GPT-4o (same as gpt-4o) | v5.38 probe | 128k | - | NO | - |
-| gpt5.1 | GPT-4.1 | v5.38 self-report | 1M | Jan 2025 | NO | - |
-| claude-sonnet-4-6 | Claude 3.5/3.7 Sonnet (rotates) | v5.38 probe | 200k | - | - | - |
-
-### claude-opus-4-7 = claude-opus-4-20250514 Evidence Chain
-
-    1. NAMING PATTERN: unitool 4-6->Sonnet4(rank6), 4-7->Opus4(rank7)
-    2. COST RATIO: opus-4-7 is ~1.4-1.6x more expensive than opus-4-6
-       (direction consistent with Opus4 vs Sonnet4 API pricing)
-    3. min_bal=10.1 (higher barrier than opus-4-6 -> premium model)
-    4. KNOWLEDGE: model knows "Claude Opus 4 and Sonnet 4 exist as Claude 4 family"
-       (training cutoff >= May 2025, consistent with Opus 4 release ~2025-05-22)
-    5. RESPONSE QUALITY: formatted markdown with full LaTeX steps (train speed probe)
-    6. AI POLICY: Anthropic prevents models from self-reporting exact version;
-       indirect evidence is the best achievable confirmation method
-
-### claude-opus-4-6 = claude-sonnet-4-20250514 Evidence Chain
-
-    1. Proxy source comment v5.38 explicitly states "claude-sonnet-4-20250514 (!!!)"
-    2. probe: 200k context (Sonnet 4 spec)
-    3. probe: extended thinking = YES (Sonnet 4 feature)
-    4. identity probe: model indirectly acknowledged "20250514" date as plausible
-    5. cost 43-218/msg (Sonnet 4 pricing tier)
-
-### GPT-4o vs GPT-4.1 determination (gpt-5.5)
-
-    gpt-5.5 self-reported cutoff = June 2024
-    GPT-4o  cutoff = June 2024  -> MATCH -> gpt-5.5 = GPT-4o
-    GPT-4.1 cutoff = Jan  2025  -> NO MATCH (eliminated)
-
-### Unitool Service Naming Pattern
-
-    Digit pattern: claude-[generation]-[rank]
-    generation=4: Claude 4 family
-    rank 5 = claude-sonnet-4-5 (older Sonnet 4 variant)
-    rank 6 = claude-sonnet-4-6 -> routes to Sonnet 4 backend
-    rank 7 = claude-opus-4-7  -> routes to Opus 4 backend (!!!)
-    Unitool uses ascending rank to map Sonnet<Opus within same generation
-
----
-
-## Conversation Protocol (tested)
-
-    POST   /api/chats                -> {id, service_id, uri, user_id}
-    POST   /api/chats/{id}/messages  -> {message, job:{id,status:pending}}
-    GET    /api/chats/{id}/messages  -> {messages:[...]} poll until status=ended
-    DELETE /api/chats/{id}           -> 204
-
-## SSE Format (proxy endpoint)
-
-    data: {"id":"chatcmpl-xxx","model":"gpt-5.5","choices":[{"delta":{"content":"..."},"finish_reason":null}]}
-    data: {"id":"chatcmpl-xxx","choices":[{"delta":{},"finish_reason":"stop"}]}
-    data: [DONE]
-
-## POLL_PRIMARY services (stream intercepted)
+## POLL_PRIMARY services (stream intercepted → HTML page)
 
     gpt-5.5 / gpt-5-nano / gpt-4-1 / gpt-4o / gpt-4o-mini
     claude-sonnet / claude-opus / claude-sonnet-4-6
     claude-opus-4-6 / claude-opus-4-7
-    grok / gpt-o1/o3/o4-mini series
+    gpt-o1/o3/o4-mini series / grok
     gemini-3.1-pro / gemini-3-pro / gpt-5.4
     perplexity-sonar / perplexity-sonar-pro / perplexity-sonar-pro-search
-
-## Stream OK services
-
-    gpt-5 / gpt5.1 / gpt5.2 / gpt-o3-mini / gpt-o3 / gpt-o4-mini / claude-sonnet-4-5
-
----
-
-## API Endpoints (v5.39)
-
-| Endpoint | Status |
-|---|---|
-| GET /api/user | OK (Cookie header required) |
-| GET /api/user/billing-accounts | OK JSON |
-| GET /api/services | OK full list |
-| POST /api/chats | OK |
-| POST /api/chats/{id}/messages | OK |
-| GET /api/chats/{id}/messages | OK poll |
-| DELETE /api/chats/{id} | OK |
-| GET /api/chats/{id}/widget/stream | INTERCEPTED (HTML page) for POLL_PRIMARY |
-| GET /api/chats/{id}/paginatedMessages | 404 removed |
-| GET /api/pow | HTTP 000 not exist |
 
 ## New Services (v5.39, 2026-05-12)
 
@@ -149,9 +167,3 @@ Test account: lwhitedjs@outlook.com (107 bonus tokens, user_id=3008933)
 | perplexity-sonar | 1 | under maintenance |
 | perplexity-sonar-pro | 1 | under maintenance |
 | perplexity-sonar-pro-search | 3 | under maintenance |
-
-## PoW / Turnstile
-
-    No PoW endpoint (all /api/pow variants return HTTP 000)
-    Registration: Cloudflare Turnstile on /en/entry
-    Bypass: pydoll headless Chromium waits for shadow-root CF token
