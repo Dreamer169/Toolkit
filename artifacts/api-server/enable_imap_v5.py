@@ -895,7 +895,7 @@ def _nav_to_imap_direct(page) -> str:
             log(f"  [nav] state={state}, url={_url(page)[:100]}")
             return state
 
-        # Gear click → Mail → Sync Email / POP and IMAP
+        # Gear click → Mail → Forwarding and IMAP
         log("  [nav] gear-click menu navigation...")
         for gs in ['#owaSettingsBtn_container', '[aria-label="Settings"]',
                    '[aria-label="Settings, try new Outlook"]']:
@@ -904,31 +904,103 @@ def _nav_to_imap_direct(page) -> str:
                 if g.is_visible(timeout=2000):
                     g.click()
                     page.wait_for_timeout(2500)
+                    log(f"  [nav] gear clicked: {gs}")
                     break
             except Exception:
                 continue
-        # Click "Mail" in settings menu
-        page.evaluate("""() => {
-            for (var el of document.querySelectorAll(
-                    'button,[role="option"],[role="menuitem"],[role="treeitem"],li>a,a')) {
-                var t = el.textContent.trim();
-                if (t === "Mail" || t === "Email") { el.click(); return; }
-            }
-        }""")
-        page.wait_for_timeout(2000)
-        # Click "Sync Email" / "Forwarding" / "POP and IMAP" section
-        page.evaluate("""() => {
-            for (var el of document.querySelectorAll(
-                    'button,[role="option"],[role="menuitem"],[role="treeitem"],li>a,a,li')) {
-                var t = (el.textContent || "").toLowerCase();
-                if (t.indexOf("forward") >= 0 || t.indexOf("sync email") >= 0 ||
-                    (t.indexOf("imap") >= 0 && t.indexOf("pop") >= 0)) {
-                    (el.tagName === "LI" ? (el.querySelector("button,a") || el) : el).click();
-                    return;
+
+        # Click "Mail" in settings menu — use inner_text() not textContent to avoid
+        # matching parent containers whose nested children include "Mail"
+        _mail_clicked = False
+        for _ml_sel in [
+            'button:has-text("Mail")', '[role="menuitem"]:has-text("Mail")',
+            '[role="option"]:has-text("Mail")', '[role="treeitem"]:has-text("Mail")',
+        ]:
+            try:
+                _ml = page.locator(_ml_sel).first
+                if _ml.is_visible(timeout=2000):
+                    _ml_txt = _ml.inner_text().strip().lower()
+                    if _ml_txt in ("mail", "email"):
+                        _ml.click()
+                        _mail_clicked = True
+                        log(f"  [nav] Mail clicked via locator: {_ml_sel}")
+                        page.wait_for_timeout(2000)
+                        break
+            except Exception:
+                continue
+
+        if not _mail_clicked:
+            # JS fallback: match direct text nodes only (not nested textContent)
+            page.evaluate("""() => {
+                function directText(el) {
+                    return Array.from(el.childNodes)
+                        .filter(function(n) { return n.nodeType === 3; })
+                        .map(function(n) { return n.textContent.trim(); })
+                        .join('').trim();
                 }
-            }
-        }""")
+                var sels = 'button,[role="option"],[role="menuitem"],[role="treeitem"],li>a,a';
+                for (var el of document.querySelectorAll(sels)) {
+                    var t = directText(el);
+                    if (t === 'Mail' || t === 'Email') { el.click(); return; }
+                }
+            }""")
+            page.wait_for_timeout(2000)
+            log("  [nav] Mail clicked via JS fallback")
+
+        # ── BUG FIX: Click "Forwarding and IMAP" to enter the sub-page ──────
+        # Root cause: Settings panel opens, Mail section expands, and
+        # "Forwarding and IMAP" appears in the sidebar — but the old code never
+        # clicked it. Old JS used el.textContent (which includes ALL nested
+        # children), so parent containers matched before the actual menu item.
+        # Fix: use Playwright get_by_text(exact=True) then JS with direct text nodes.
+        _fwd_clicked = False
+        _fwd_labels = [
+            "Forwarding and IMAP", "POP and IMAP", "Sync Email",
+            "Forwarding", "POP / IMAP", "Email sync",
+        ]
+        for _lbl in _fwd_labels:
+            try:
+                _loc = page.get_by_text(_lbl, exact=True).first
+                if _loc.is_visible(timeout=3000):
+                    _loc.click()
+                    _fwd_clicked = True
+                    log(f"  [nav] ✅ clicked '{_lbl}' via get_by_text(exact)")
+                    break
+            except Exception:
+                continue
+
+        if not _fwd_clicked:
+            # JS fallback: compare direct text nodes only (not nested textContent)
+            _fwd_result = page.evaluate("""() => {
+                function directText(el) {
+                    return Array.from(el.childNodes)
+                        .filter(function(n) { return n.nodeType === 3; })
+                        .map(function(n) { return n.textContent.trim(); })
+                        .join('').trim().toLowerCase();
+                }
+                var sels = 'button,[role="option"],[role="menuitem"],[role="treeitem"],li>a,a,span';
+                var kws = ['forwarding and imap', 'pop and imap', 'sync email',
+                           'forwarding', 'pop / imap', 'email sync'];
+                for (var el of document.querySelectorAll(sels)) {
+                    var t = directText(el);
+                    if (!t) continue;
+                    for (var i = 0; i < kws.length; i++) {
+                        if (t === kws[i] || t.indexOf(kws[i]) === 0) {
+                            el.click();
+                            return 'clicked:' + t;
+                        }
+                    }
+                }
+                return 'not-found';
+            }""")
+            log(f"  [nav] JS fallback forwarding click: {_fwd_result}")
+            _fwd_clicked = (_fwd_result != 'not-found')
+
+        # Wait for IMAP sub-page to fully render after clicking "Forwarding and IMAP"
         page.wait_for_timeout(3000)
+        _u2 = _url(page)
+        log(f"  [nav] after forwarding click, url={_u2[:100]}, fwd_clicked={_fwd_clicked}")
+
         if _has_imap_content(page, 8000):
             log("  [nav] ✅ IMAP content via gear-click menu")
             state = _page_state(page)
