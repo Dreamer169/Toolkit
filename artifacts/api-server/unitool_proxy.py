@@ -579,6 +579,17 @@ def _balance_monitor_loop():
 #     - 自报 "June 2024 cutoff" 是模型自报不准确 (常见于 GPT-5 系列)
 #     - 旧注释 "GPT-4o" 是基于自报 cutoff 的错误推断，已修正
 #   gpt-5/gpt-5.4/gpt5.2 -> refused to reveal (unknown/unavailable)
+#   --- Claude Sonnet 系列 (probe v6.2, 2026-05-13) ---
+#   claude-sonnet      -> claude-3-5-sonnet-20240620 (Claude 3.5 Sonnet, cutoff Apr 2024) ✓
+#   claude-sonnet-4-5  -> claude-3-5-sonnet-20241022 (Claude 3.5 Sonnet v2, cutoff Apr 2024) ✓
+#   claude-sonnet-4-6  -> claude-sonnet-4-6 (Claude 4 Sonnet, early 2025 cutoff) ✓
+#   perplexity-sonar/sonar-pro -> claude-sonnet-4-6 + llmlayer.ai web search (⚠ 非真实Perplexity)
+#                       cutoff reliable=Aug 2025, training_data=Jan 2026
+#   --- GPT-4 系列真实版本 (Replit model_returned, 2026-05-13) ---
+#   gpt-4o      -> gpt-4o-2024-11-20      (self-report: GPT-4-turbo Aug2023 — 不准确)
+#   gpt-4o-mini -> gpt-4o-mini-2024-07-18 (self-report: GPT-3.5 Oct2021 — 不准确)
+#   gpt-4-1     -> gpt-4.1-2025-04-14     (self-report: GPT-4 June2023 — 不准确)
+#   NOTE: 所有 GPT-4x 的 self-report cutoff 均不准确，以 model_returned 版本日期为准
 #   o-series: broken (TypeError/no-choices/no endpoints) at unitool backend
 #   grok/gemini/perplexity: work via paginatedMessages poll
 #   --- Gemini ---
@@ -608,11 +619,14 @@ NATIVE_SERVICES = {
     "gemini-3.1-pro", "gemini-3-pro",
     # xAI
     "grok",
-    # Claude
-    "claude-sonnet", "claude-sonnet-4-5", "claude-sonnet-4-6",
-    "claude-opus", "claude-opus-4-6",
-    "claude-opus-4-7",  # v5.39: added 2026-05-12 (active=1, min_bal=10.1)
-    "claude-haiku",
+    # Claude (probe v6.2 backend identity)
+    "claude-sonnet",     # -> claude-3-5-sonnet-20240620 (Claude 3.5 Sonnet, cutoff Apr 2024) ✓
+    "claude-sonnet-4-5", # -> claude-3-5-sonnet-20241022 (Claude 3.5 Sonnet v2, cutoff Apr 2024) ✓
+    "claude-sonnet-4-6", # -> claude-sonnet-4-6 (Claude 4, early 2025 cutoff, newer) ✓
+    "claude-opus",       # ❌ IMMEDIATE_FALLBACK: 400 max_tokens > 32000
+    "claude-opus-4-6",   # -> claude-opus-4-6 ✓ CONFIRMED (Replit model_returned exact match)
+    "claude-opus-4-7",   # -> claude-opus-4-7 ✓ CONFIRMED (v5.39, 2026-05-12)
+    "claude-haiku",      # ❌ IMMEDIATE_FALLBACK: 404 route broken
     # Perplexity (v5.39: confirmed active=1, 2026-05-12)
     "perplexity-sonar",             # Perplexity Sonar            min_bal=1
     "perplexity-sonar-pro",         # Perplexity Sonar Pro        min_bal=1
@@ -808,10 +822,14 @@ MODEL_ALIASES = {
     "gemini-2.5-pro": "gemini-3.1-pro", "gemini-2.5-flash": "gemini-3.1-pro",
     "gemini-2.0-pro": "gemini-3.1-pro", "gemini-2.0-flash": "gemini-3.1-pro",
     "gemini-1.5-pro": "gemini-3.1-pro", "gemini-1.5-flash": "gemini-3.1-pro",
-    "grok-3": "grok", "grok-3-fast": "grok", "grok-3-mini": "grok",
+    "grok-3": "grok", "grok-3-fast": "grok", "grok-3-mini": "grok",  # all route to grok-4-0709 at unitool
     "grok-2": "grok", "grok-beta": "grok",
     # v5.39: claude-opus-4-7 aliases
     "claude-opus-4.7": "claude-opus-4-7",
+    # v5.40: web-search Claude aliases (perplexity-sonar/pro = claude-sonnet-4-6 + llmlayer.ai search)
+    "claude-sonnet-4-6-search": "perplexity-sonar",   # Claude Sonnet 4.6 + web search
+    "claude-sonnet-4-6-web":    "perplexity-sonar",   # alias
+    "claude-web":               "perplexity-sonar",   # generic web-search Claude
     # v5.39: Perplexity aliases
     "perplexity": "perplexity-sonar",
     "pplx": "perplexity-sonar", "pplx-7b": "perplexity-sonar",
