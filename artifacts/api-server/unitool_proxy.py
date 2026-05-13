@@ -580,7 +580,9 @@ def _balance_monitor_loop():
 #     - 旧注释 "GPT-4o" 是基于自报 cutoff 的错误推断，已修正
 #   gpt-5/gpt-5.4/gpt5.2 -> refused to reveal (unknown/unavailable)
 #   o-series: broken (TypeError/no-choices/no endpoints) at unitool backend
-#   grok/gemini: work via paginatedMessages poll; model identity not revealed by AI
+#   grok/gemini: work via paginatedMessages poll
+#   gemini-3-pro   -> gemini-3.1-pro-preview (Gemini 3.1 Pro) ✓ CONFIRMED: 自报"Gemini 3.1 Pro", has_realtime_search=true
+#   gemini-3.1-pro -> gemini-3.1-pro-preview (同一后端)       ✓ CONFIRMED: 自报"Gemini 3.1 Pro", proxy等价路由
 NATIVE_SERVICES = {
     # ChatGPT（实探 /api/services?parent_id=chatgpt 确认，含 minimum_balance）
     "gpt-5", "gpt-5.5", "gpt-5.4", "gpt-5-nano",
