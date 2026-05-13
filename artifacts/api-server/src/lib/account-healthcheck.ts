@@ -31,6 +31,36 @@ function pickResidentialProxy(): string {
 let _running    = false;
 let _intervalId: ReturnType<typeof setInterval> | null = null;
 
+// ── 前置企业账号检测（GetCredentialType IfExistsResult=5 → AAD/enterprise）─
+// 在 autoOAuth 之前调用，避免浪费 patchright/设备码资源重试必然失败的企业账号
+async function checkIsEnterprise(email: string): Promise<boolean> {
+  try {
+    const r = await microsoftFetch("https://login.microsoftonline.com/common/GetCredentialType", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0",
+        "Origin": "https://login.microsoftonline.com",
+      },
+      body: JSON.stringify({
+        username: email,
+        isOtherIdpSupported: true,
+        checkPhones: false,
+        isRemoteNGCSupported: false,
+        isCookieBannerShown: false,
+        isFidoSupported: false,
+        originalRequest: "",
+        flowToken: "",
+      }),
+    });
+    const data = await r.json() as { IfExistsResult?: number };
+    // IfExistsResult=5 → 重定向到其他 IdP（AAD / 企业账号），consumer OAuth 无效
+    return data.IfExistsResult === 5;
+  } catch {
+    return false; // 探测失败时保守处理，继续正常 OAuth 流程
+  }
+}
+
 // ── 获取设备码 ─────────────────────────────────────────────────────────────
 async function getDeviceCode(email: string, proxy?: string | null): Promise<{
   deviceCode: string; userCode: string; verificationUri: string;
@@ -221,6 +251,20 @@ async function runCheck() {
       logger.info({ count: needsOAuth.length }, "[healthcheck] 发现需要补授权的账号");
 
       for (const acc of needsOAuth) {
+        // ── 前置企业检测：GetCredentialType=5 → 直接打标，跳过 patchright ──
+        const isEnt = await checkIsEnterprise(acc.email);
+        if (isEnt) {
+          await execute(
+            `UPDATE accounts SET status='needs_oauth',
+               tags=(SELECT NULLIF(string_agg(DISTINCT tag,','),'')
+                     FROM unnest(string_to_array(COALESCE(tags,'')||',enterprise_account',',')) AS tag
+                     WHERE tag<>''),
+               updated_at=NOW() WHERE id=$1`,
+            [acc.id]
+          );
+          logger.warn({ email: acc.email }, "[healthcheck] GetCredentialType=5(enterprise), 跳过 OAuth 直接打标 enterprise_account");
+          continue;
+        }
         // 标记为 pending，防止并发重复处理
         await execute(
           "UPDATE accounts SET status='needs_oauth_pending', updated_at=NOW() WHERE id=$1",
@@ -279,6 +323,20 @@ async function runCheck() {
     if (manualRetryRows.length > 0) {
       logger.info({ count: manualRetryRows.length }, "[healthcheck] 发现可重试的 needs_oauth_manual 账号");
       for (const acc of manualRetryRows) {
+        // ── 前置企业检测：GetCredentialType=5 → 直接打标，跳过 patchright ──
+        const isEnt2 = await checkIsEnterprise(acc.email);
+        if (isEnt2) {
+          await execute(
+            `UPDATE accounts SET status='needs_oauth',
+               tags=(SELECT NULLIF(string_agg(DISTINCT tag,','),'')
+                     FROM unnest(string_to_array(COALESCE(tags,'')||',enterprise_account',',')) AS tag
+                     WHERE tag<>''),
+               updated_at=NOW() WHERE id=$1`,
+            [acc.id]
+          );
+          logger.warn({ email: acc.email }, "[healthcheck] 1b GetCredentialType=5(enterprise), 跳过重试直接打标 enterprise_account");
+          continue;
+        }
         await execute("UPDATE accounts SET status='needs_oauth_pending', updated_at=NOW() WHERE id=$1", [acc.id]);
         const { ok, reason: _reason2 } = await autoOAuth(acc);
         if (ok) {
