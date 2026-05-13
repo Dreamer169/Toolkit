@@ -5486,10 +5486,10 @@ router.get("/tools/accounts/auto-fix-status", async (_req, res) => {
   try {
     const [pending, waiting] = await Promise.all([
       query<{ id: number; email: string }>(
-        "SELECT id, email FROM accounts WHERE platform=outlook AND status=needs_oauth_pending ORDER BY updated_at DESC"
+        "SELECT id, email FROM accounts WHERE platform='outlook' AND status='needs_oauth_pending' ORDER BY updated_at DESC"
       ),
       query<{ id: number; email: string }>(
-        "SELECT id, email FROM accounts WHERE platform=outlook AND status=needs_oauth AND COALESCE(tags,) NOT LIKE %needs_oauth_manual% ORDER BY updated_at DESC"
+        "SELECT id, email FROM accounts WHERE platform='outlook' AND status='needs_oauth' AND COALESCE(tags,'') NOT LIKE '%needs_oauth_manual%' ORDER BY updated_at DESC"
       ),
     ]);
     res.json({
