@@ -5313,9 +5313,11 @@ async function runAutoCheck(): Promise<void> {
   try {
     const accounts = await query<{
       id: number; email: string;
-      token: string | null; refresh_token: string | null; tags: string | null;
+      token: string | null; refresh_token: string | null; tags: string | null; status: string;
     }>(
-      "SELECT id,email,token,refresh_token,tags FROM accounts WHERE platform='outlook' AND status='active' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' ORDER BY updated_at ASC"
+      // auto-repair: 除 active 账号外，同时纳入 suspended+token_invalid 且仍有 refresh_token 的账号
+      // （accounts.ts inbox 路径在 refresh 失败时设了 status='suspended'，否则这些账号永远被跳过）
+      `SELECT id,email,token,refresh_token,tags,status FROM accounts WHERE platform='outlook' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' AND (status='active' OR (status='suspended' AND COALESCE(tags,'') LIKE '%token_invalid%' AND COALESCE(refresh_token,'') <> '')) ORDER BY updated_at ASC`
     );
     // 立即把 total 写入全局 stats，让 status 接口实时可见
     _autoCheckLastStats = { total: accounts.length, checked: 0, valid: 0, needsAuth: 0, banned: 0, skipped: 0, finishedAt: null };
@@ -5352,8 +5354,9 @@ async function runAutoCheck(): Promise<void> {
             continue;
           }
           accessToken = td.access_token;
+          // refresh_token 有效 → token 已刷新成功，同时恢复 status=active（修复 accounts.ts 路径将 token_invalid 账号挂起的问题）
           await execute(
-            "UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
+            "UPDATE accounts SET token=$1, refresh_token=$2, status='active', updated_at=NOW() WHERE id=$3",
             [accessToken, td.refresh_token ?? acc.refresh_token, acc.id]
           );
         } catch { skipped++; continue; }
@@ -5367,8 +5370,8 @@ async function runAutoCheck(): Promise<void> {
           const gd = await gr.json() as { error?: { code?: string } };
           if (gr.ok) {
             valid++;
-            // clear stale bad tags on successful re-verify
-            await execute(`UPDATE accounts SET tags=(SELECT NULLIF(array_to_string(ARRAY(SELECT DISTINCT trim(t) FROM unnest(string_to_array(COALESCE(tags,''),',')) AS t WHERE trim(t)<>'' AND trim(t)<>'token_invalid' AND trim(t)<>'needs_oauth_manual'),','),'')) WHERE id=$1`,[acc.id]);
+            // clear stale bad tags + 恢复 status=active（Graph 收件箱已验通 → 账号完全健康）
+            await execute(`UPDATE accounts SET status='active', tags=(SELECT NULLIF(array_to_string(ARRAY(SELECT DISTINCT trim(t) FROM unnest(string_to_array(COALESCE(tags,''),',')) AS t WHERE trim(t)<>'' AND trim(t)<>'token_invalid' AND trim(t)<>'needs_oauth_manual'),','),'')) WHERE id=$1`,[acc.id]);
             await addTag(acc.id, "inbox_verified");
           } else {
             const code = gd.error?.code ?? "";

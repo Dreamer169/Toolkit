@@ -77346,7 +77346,9 @@ async function runAutoCheck() {
   let checked = 0, valid = 0, needsAuth = 0, banned = 0, skipped = 0;
   try {
     const accounts = await query(
-      "SELECT id,email,token,refresh_token,tags FROM accounts WHERE platform='outlook' AND status='active' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' ORDER BY updated_at ASC"
+      // auto-repair: 除 active 账号外，同时纳入 suspended+token_invalid 且仍有 refresh_token 的账号
+      // （accounts.ts inbox 路径在 refresh 失败时设了 status='suspended'，否则这些账号永远被跳过）
+      `SELECT id,email,token,refresh_token,tags,status FROM accounts WHERE platform='outlook' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' AND (status='active' OR (status='suspended' AND COALESCE(tags,'') LIKE '%token_invalid%' AND COALESCE(refresh_token,'') <> '')) ORDER BY updated_at ASC`
     );
     _autoCheckLastStats = { total: accounts.length, checked: 0, valid: 0, needsAuth: 0, banned: 0, skipped: 0, finishedAt: null };
     logger.info({ total: accounts.length }, "[auto-check] \u5F00\u59CB\u68C0\u6D4B\u5168\u90E8 active \u8D26\u53F7");
@@ -77397,7 +77399,7 @@ async function runAutoCheck() {
           }
           accessToken = td.access_token;
           await execute(
-            "UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3",
+            "UPDATE accounts SET token=$1, refresh_token=$2, status='active', updated_at=NOW() WHERE id=$3",
             [accessToken, td.refresh_token ?? acc.refresh_token, acc.id]
           );
         } catch {
@@ -77414,7 +77416,7 @@ async function runAutoCheck() {
           const gd = await gr.json();
           if (gr.ok) {
             valid++;
-            await execute(`UPDATE accounts SET tags=(SELECT NULLIF(array_to_string(ARRAY(SELECT DISTINCT trim(t) FROM unnest(string_to_array(COALESCE(tags,''),',')) AS t WHERE trim(t)<>'' AND trim(t)<>'token_invalid' AND trim(t)<>'needs_oauth_manual'),','),'')) WHERE id=$1`, [acc.id]);
+            await execute(`UPDATE accounts SET status='active', tags=(SELECT NULLIF(array_to_string(ARRAY(SELECT DISTINCT trim(t) FROM unnest(string_to_array(COALESCE(tags,''),',')) AS t WHERE trim(t)<>'' AND trim(t)<>'token_invalid' AND trim(t)<>'needs_oauth_manual'),','),'')) WHERE id=$1`, [acc.id]);
             await addTag(acc.id, "inbox_verified");
           } else {
             const code = gd.error?.code ?? "";
