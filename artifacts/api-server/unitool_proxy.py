@@ -654,7 +654,7 @@ FREE_SERVICES = {"gpt-4o-mini", "gpt-5-nano"}  # minimum_balance=0，余额耗�
 # _send_and_collect_core skips widget/stream for POLL_PRIMARY_SERVICES;
 # _STREAM_INTERCEPT_RU is a safety net for any unlisted intercepted services.
 POLL_PRIMARY_SERVICES = {
-    "gpt-5.5", "gpt-5-nano", "gpt-4-1",
+    "gpt-5", "gpt-5.5", "gpt-5-nano", "gpt-4-1",  # gpt-5 stream broken 2026-05-13; poll reliable (same backend as gpt-5.5)
     "gpt-4o", "gpt-4o-mini",  # v5.38: confirmed stream-intercepted 2026-05-09
     "claude-sonnet", "claude-opus",
     "claude-sonnet-4-6",  # v5.38: confirmed stream-intercepted 2026-05-09
@@ -667,8 +667,8 @@ POLL_PRIMARY_SERVICES = {
     "gemini-3.1-pro", "gemini-3-pro",
     # v5.35: gpt-5.4 stream intermittently empty; poll reliable
     "gpt-5.4",
-    # v5.39: claude-opus-4-7 + perplexity (poll safe default; stream untested)
-    "claude-opus-4-7",
+    # v5.39: perplexity (poll safe default; stream untested)
+    # claude-opus-4-7 moved to IMMEDIATE_FALLBACK (v5.40: consistently timeouts >90s)
     "perplexity-sonar", "perplexity-sonar-pro", "perplexity-sonar-pro-search",
 }
 _STREAM_INTERCEPT_RU = "помогаю только"  # Russian restriction marker
@@ -770,6 +770,7 @@ IMMEDIATE_FALLBACK_SERVICES: set[str] = {
     "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini",
     # permanently dead (400 Unsupported / API-level breaks):
     "gpt-5-nano",  # 400 "Reasoning is mandatory" — hangs even with reasoning_effort
+    "claude-opus-4-7",  # v5.40 2026-05-13: consistently >90s timeout; use claude-opus-4-6
     "claude-opus", # 400 max_tokens: 32768 > 32000 — unitool ignores chat_settings.max_tokens (confirmed 2026-05-08)
     "gpt-4-5",     # 400 Unsupported service (confirmed dead 2026-05-08)
     "claude-haiku",  # 404 not_found "model: claude-3-5-haiku-20241022" (probe confirmed 2026-05-08); model route broken at unitool
@@ -795,14 +796,16 @@ MODEL_ALIASES = {
     "gpt-4o-mini-2024-07-18": "gpt-4o-mini", "gpt-4o-mini-search": "gpt-4o-mini",
     "gpt-3.5-turbo": "gpt-4o-mini", "gpt-3.5-turbo-0613": "gpt-4o-mini",
     "gpt-3.5-turbo-16k": "gpt-4o-mini", "text-davinci-003": "gpt-4o-mini",
-    "o1": "gpt-o1", "o1-mini": "gpt-o1-mini", "o1-pro": "gpt-o1",
-    "o1-preview": "gpt-o1", "o3": "gpt-o3", "o3-mini": "gpt-o3-mini",
-    "o4-mini": "gpt-o4-mini", "o4": "gpt-o3-pro",
-    "gpt-5-turbo": "gpt-5", "chatgpt-5": "gpt-5", "chatgpt-5-turbo": "gpt-5",
+    # v5.40: o-series unitool endpoints permanently broken → reroute to best working alternative
+    # gpt-5.5 = gpt-5-2025-08-07 (has reasoning_tokens, best available replacement)
+    o1: gpt-5.5, o1-mini: gpt-5.5, o1-pro: gpt-5.5,
+    o1-preview: gpt-5.5, o3: gpt-5.5, o3-mini: gpt-5.5,
+    o4-mini: gpt-5.4, o4: gpt-5.5,
+    "gpt-5-turbo": "gpt-5.5", "chatgpt-5": "gpt-5.5", "chatgpt-5-turbo": "gpt-5.5",  # v5.40: gpt-5 stream broken; gpt-5.5 same backend + reliable poll
     "chatgpt-5.5": "gpt-5.5", "chatgpt-5.5-turbo": "gpt-5.5", "chatgpt": "gpt-5.5",
-    "claude-opus": "claude-opus", "claude-opus-4": "claude-opus",
+    "claude-opus": "claude-opus-4-6", "claude-opus-4": "claude-opus-4-6",  # v5.40: claude-opus broken; redirect to working 4-6
     "claude-opus-4-5": "claude-opus-4-6", "claude-opus-4.5": "claude-opus-4-6",
-    "claude-opus-4.6": "claude-opus-4-6", "claude-opus-4-latest": "claude-opus-4-7",  # v5.39: latest
+    "claude-opus-4.6": "claude-opus-4-6", "claude-opus-4-latest": "claude-opus-4-6",  # v5.40: 4-7 broken → 4-6
     "claude-opus-latest": "claude-opus-4-6",
     "claude-3-opus": "claude-sonnet", "claude-3-opus-20240229": "claude-sonnet",
     "claude": "claude-sonnet", "claude-sonnet-4": "claude-sonnet",
@@ -1685,6 +1688,8 @@ def _do_chat(model: str, messages: list, ssid_override: str | None,
             "claude-opus":"400 max_tokens: 32768 > 32000 — unitool ignores chat_settings.max_tokens",
             "gpt-4-5":    "400 Unsupported service (permanently dead at unitool)",
             "claude-haiku": "404 not_found model:claude-3-5-haiku-20241022 — route broken at unitool (probe confirmed 2026-05-08)",
+            "claude-opus-4-7": "consistently times out >90s (probe 2026-05-13); use claude-opus-4-6",
+            "claude-opus-4-7": "consistently times out >90s at unitool (probe 2026-05-13); use claude-opus-4-6",
 
         }
         reason = _reasons.get(primary_id, "confirmed permanently broken at unitool API level")
