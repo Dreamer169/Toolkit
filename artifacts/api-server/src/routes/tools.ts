@@ -3391,7 +3391,7 @@ router.get("/tools/outlook/accounts", async (req, res) => {
     const statusCounts = {
       active:    sc["active"]    ?? 0,
       suspended: sc["suspended"] ?? 0,
-      needs_oauth_auto: (sc["needs_oauth"] ?? 0),  // 近似，不扣 manual
+      needs_oauth_auto: 0,  // 见下方独立查询，排除 enterprise_account
       noauth:    0,  // 需要单独查（token+refresh_token 均空）
     };
     // noauth 单独统计：只计真正可修复的（排除 abuse_mode/not_found/wrong_password）
@@ -3400,10 +3400,20 @@ router.get("/tools/outlook/accounts", async (req, res) => {
          AND COALESCE(token,'')='' AND COALESCE(refresh_token,'')=''
          AND status NOT IN ('suspended','wrong_password')
          AND COALESCE(tags,'') NOT LIKE '%abuse_mode%'
-         AND COALESCE(tags,'') NOT LIKE '%not_found%'`,
+         AND COALESCE(tags,'') NOT LIKE '%not_found%'
+         AND COALESCE(tags,'') NOT LIKE '%enterprise_account%'`,
       search ? [params[0]] : []
     );
     statusCounts.noauth = parseInt(noauthRes[0]?.cnt ?? "0");
+    // needs_oauth_auto: 真正可自动修复（排除 enterprise_account 和 needs_oauth_manual）
+    const needsOAuthAutoRes = await query<{ cnt: string }>(
+      `SELECT COUNT(*)::text AS cnt FROM accounts WHERE ${baseWhere}
+         AND status = 'needs_oauth'
+         AND COALESCE(tags,'') NOT LIKE '%enterprise_account%'
+         AND COALESCE(tags,'') NOT LIKE '%needs_oauth_manual%'`,
+      search ? [params[0]] : []
+    );
+    statusCounts.needs_oauth_auto = parseInt(needsOAuthAutoRes[0]?.cnt ?? "0");
 
     const rowParams = [...params, limit, offset];
     const rows = await query<{
