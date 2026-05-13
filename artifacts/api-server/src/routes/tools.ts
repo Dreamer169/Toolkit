@@ -1723,14 +1723,14 @@ router.post("/tools/outlook/register", async (req, res) => {
                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
                    ON CONFLICT (platform, email) DO UPDATE SET
                      password=EXCLUDED.password, status=EXCLUDED.status,
-                     token=COALESCE(NULLIF(EXCLUDED.token,), accounts.token),
-                     refresh_token=COALESCE(NULLIF(EXCLUDED.refresh_token,), accounts.refresh_token),
-                     cookies_json=COALESCE(NULLIF(EXCLUDED.cookies_json,), accounts.cookies_json),
-                     fingerprint_json=COALESCE(NULLIF(EXCLUDED.fingerprint_json,), accounts.fingerprint_json),
-                     user_agent=COALESCE(NULLIF(EXCLUDED.user_agent,), accounts.user_agent),
-                     exit_ip=COALESCE(NULLIF(EXCLUDED.exit_ip,), accounts.exit_ip),
+                     token=COALESCE(NULLIF(EXCLUDED.token,''), accounts.token),
+                     refresh_token=COALESCE(NULLIF(EXCLUDED.refresh_token,''), accounts.refresh_token),
+                     cookies_json=COALESCE(NULLIF(EXCLUDED.cookies_json,''), accounts.cookies_json),
+                     fingerprint_json=COALESCE(NULLIF(EXCLUDED.fingerprint_json,''), accounts.fingerprint_json),
+                     user_agent=COALESCE(NULLIF(EXCLUDED.user_agent,''), accounts.user_agent),
+                     exit_ip=COALESCE(NULLIF(EXCLUDED.exit_ip,''), accounts.exit_ip),
                      proxy_port=COALESCE(NULLIF(EXCLUDED.proxy_port,0), accounts.proxy_port),
-                     proxy_formatted=COALESCE(NULLIF(EXCLUDED.proxy_formatted,), accounts.proxy_formatted),
+                     proxy_formatted=COALESCE(NULLIF(EXCLUDED.proxy_formatted,''), accounts.proxy_formatted),
                      updated_at=NOW()
                    RETURNING id`,
                   ["outlook", em, String(r.password ?? ""), "active",
