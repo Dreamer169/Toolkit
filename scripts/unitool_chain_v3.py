@@ -1323,6 +1323,39 @@ def main():
         except Exception as e:
             log(f"[ref] track referral err: {e}")
 
+    # ── Step 7d: ref_master ref_code 用满 MAX_REF_SLOTS → 升入高余额池 ────────────────
+    if ref_master_id:
+        try:
+            _hb_conn = db_connect(); _hb_cur = _hb_conn.cursor()
+            _hb_cur.execute("SELECT notes, tags FROM accounts WHERE id=%s", (ref_master_id,))
+            _hb_row = _hb_cur.fetchone()
+            _hb_notes = (_hb_row[0] or "") if _hb_row else ""
+            _hb_tags  = (_hb_row[1] or "") if _hb_row else ""
+            _hb_count = len(re.findall(r"ref_registered=", _hb_notes))
+            if _hb_count >= MAX_REF_SLOTS and "unitool_high_balance" not in _hb_tags:
+                _new_hb_tags = (_hb_tags.rstrip(",") + ",unitool_high_balance").strip(",")
+                _hb_cur.execute(
+                    "UPDATE accounts SET tags=%s, updated_at=NOW() WHERE id=%s",
+                    (_new_hb_tags, ref_master_id))
+                _hb_conn.commit()
+                log(f"[ref] 🎉 ref_master({ref_master_email}) "
+                    f"ref×{_hb_count}/{MAX_REF_SLOTS} → unitool_high_balance 高余额池")
+                try:
+                    _hb_req_data = json.dumps({"email": ref_master_email}).encode()
+                    _hb_req = urllib.request.Request(
+                        f"http://localhost:{PROXY_PORT}/mark-high-balance",
+                        data=_hb_req_data,
+                        headers={"Content-Type": "application/json"})
+                    urllib.request.urlopen(_hb_req, timeout=3)
+                except Exception:
+                    pass
+            else:
+                log(f"[ref] ref_master({ref_master_email}) ref_used={_hb_count}/{MAX_REF_SLOTS} "
+                    f"high_balance={'yes' if 'unitool_high_balance' in _hb_tags else 'no'}")
+            _hb_conn.close()
+        except Exception as _hb_e:
+            log(f"[ref] high_balance check err: {_hb_e}")
+
     log(f"\n{'='*60}")
     log(f"=== chain_v3 完成 email={email} ssid_len={len(ssid)} ref_new={new_ref_code} ===")
 

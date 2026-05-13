@@ -256,9 +256,33 @@ def _save_to_file(label: str, ssid: str):
     except Exception as e:
         print(f"[FILE] save error: {e}", flush=True)
 
+def _db_get_high_balance_ssids() -> set:
+    """返回所有 unitool_high_balance 账号的 SSID 集合，用于优先调度。"""
+    try:
+        conn = psycopg2.connect(DB_URL)
+        cur  = conn.cursor()
+        cur.execute("""
+            SELECT us.ssid FROM unitool_ssids us
+            JOIN accounts a ON LOWER(TRIM(a.email)) = LOWER(TRIM(us.source_email))
+            WHERE us.is_valid = true
+              AND us.ssid IS NOT NULL AND LENGTH(us.ssid) > 50
+              AND a.tags LIKE '%%unitool_high_balance%%'
+        """)
+        result = {r[0] for r in cur.fetchall()}
+        conn.close()
+        if result:
+            print(f"[HB] {len(result)} high_balance SSIDs loaded", flush=True)
+        return result
+    except Exception as e:
+        print(f"[HB] query error: {e}", flush=True)
+        return set()
+
+
 def _rebuild_pool():
     global _pool, _pool_mtime
     _pool_mtime = time.time()
+    # v5.40: load high_balance SSID set for priority scheduling
+    _hb_ssids = _db_get_high_balance_ssids()
     sources: dict[str, str] = {}
     for (label, ssid) in _scan_files():
         if ssid not in sources:
@@ -293,10 +317,13 @@ def _rebuild_pool():
                 continue
             seen.add(ssid)
             if ssid in existing:
-                new_pool.append(existing[ssid])
+                entry = existing[ssid]
+                entry["high_balance"] = ssid in _hb_ssids  # v5.40: refresh on every rebuild
+                new_pool.append(entry)
             else:
-                new_pool.append(_make_entry(ssid, label))
-                print(f"[POOL] loaded {label} ssid={ssid[:16]}...", flush=True)
+                new_pool.append(_make_entry(ssid, label, high_balance=ssid in _hb_ssids))
+                _hb_marker = " [HIGH_BAL]" if ssid in _hb_ssids else ""
+                print(f"[POOL] loaded {label}{_hb_marker} ssid={ssid[:16]}...", flush=True)
         for e in _pool:
             if e["ssid"] not in seen and e["dead_until"] > time.time():
                 new_pool.append(e)
@@ -332,7 +359,7 @@ def _label_to_email(label: str) -> str:
             return label[:-len(sfx)] + domain
     return label
 
-def _make_entry(ssid: str, label: str, email: str = "") -> dict:
+def _make_entry(ssid: str, label: str, email: str = "", high_balance: bool = False) -> dict:
     # v5.11: 新增 _last_released（空闲最长优先）和 _conn_errors（连续错误计数）
     return {"ssid": ssid, "label": label,
             "_email": email or _label_to_email(label),
@@ -342,7 +369,8 @@ def _make_entry(ssid: str, label: str, email: str = "") -> dict:
             "_active": 0,
             "_last_released": 0.0,   # v5.11: 最近一次释放时间戳（空闲最长优先用）
             "_conn_errors": 0,      # v5.11: consecutive conn reset counter
-            "_empty_streak": 0}    # v5.13: consecutive empty response counter
+            "_empty_streak": 0,     # v5.13: consecutive empty response counter
+            "high_balance": high_balance}  # v5.40: True = ref_code用满10次，优先调度
 
 
 def _mark_dead(ssid: str, secs: int = 600, reason: str = ""):
@@ -430,6 +458,8 @@ def _bg_relogin(label: str):
 def _add_ssid_to_pool(label: str, ssid: str):
     _save_to_file(label, ssid)
     _save_to_db(label, ssid)
+    # v5.40: check if this account is high_balance
+    _new_hb = ssid in _db_get_high_balance_ssids()
     with _lock:
         same_label = next((e for e in _pool if e["label"] == label), None)
         same_ssid  = next((e for e in _pool if e["ssid"] == ssid), None)
@@ -439,10 +469,13 @@ def _add_ssid_to_pool(label: str, ssid: str):
             same_label["dead_reason"] = ""
             same_label["_relogin_pending"] = False
             same_label["_conn_errors"] = 0
-            print(f"[POOL] updated {label} ssid={ssid[:16]}...", flush=True)
+            same_label["high_balance"] = _new_hb
+            _hb_m = " [HIGH_BAL]" if _new_hb else ""
+            print(f"[POOL] updated {label}{_hb_m} ssid={ssid[:16]}...", flush=True)
         elif not same_ssid:
-            _pool.append(_make_entry(ssid, label))
-            print(f"[POOL] added {label} ssid={ssid[:16]}...", flush=True)
+            _pool.append(_make_entry(ssid, label, high_balance=_new_hb))
+            _hb_m = " [HIGH_BAL]" if _new_hb else ""
+            print(f"[POOL] added {label}{_hb_m} ssid={ssid[:16]}...", flush=True)
 
 # ─── 余额监控 ────────────────────────────────────────────────────────────────
 def _hdrs(ssid: str) -> dict:
@@ -1021,21 +1054,28 @@ def _get_rpm():
 
 
 def _pick_entry(entries: list) -> dict:
-    """v5.11: 空闲最长优先（对标 DS AccountPool.get_account idle-longest-first）。
-    选取 _last_released 最小（最久未使用）的 SSID，最大化冷却间隔。
-    Bug fix v5.11.1: 初始 _last_released 全为 0 时加随机扰动，避免所有请求
-    集中打第一个 entry（round-robin 退化问题）。"""
+    """v5.40: 高余额账号优先 + 空闲最长优先。
+    1. 优先从 high_balance=True 的账号中选（ref_code被用满10次，余额最高）
+    2. 无高余额可用时降级到普通账号
+    3. 每层内按 idle-longest-first（_last_released 最小）选取"""
     import random
     if len(entries) == 1:
         return entries[0]
-    # 为 _last_released=0 的条目（从未使用）加微小随机扰动，保证均匀分散
+
+    # v5.40: 高余额优先（refs×10=最高 token 奖励）
+    high_bal = [e for e in entries if e.get("high_balance")]
+    pool = high_bal if high_bal else entries
+
+    if len(pool) == 1:
+        return pool[0]
+
+    # 空闲最长优先（_last_released 最小）+ 未使用时随机扰动
     def _sort_key(e):
         ts = e.get("_last_released", 0.0)
         if ts == 0.0:
-            # 从未使用的 entry 等价排序，用随机数打散，避免永远选第一个
             return -random.random()
         return ts
-    return min(entries, key=_sort_key)
+    return min(pool, key=_sort_key)
 
 # ─── v5.11: paginatedMessages 辅助 ──────────────────────────────────────────
 _CONN_RESET_ERRS = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
@@ -1656,7 +1696,9 @@ def _do_chat(model: str, messages: list, ssid_override: str | None,
         _reload_pool_if_needed()
         with _lock:
             live    = [e for e in _pool if e["dead_until"] <= time.time()]
-            entries = live or _pool[:]
+            # v5.40: 优先高余额账号，无则降级到全部存活账号
+            live_hb = [e for e in live if e.get("high_balance")]
+            entries = live_hb if live_hb else (live or _pool[:])
 
     if not entries:
         raise Exception("ssid pool empty — please login first")
