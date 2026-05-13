@@ -78973,6 +78973,22 @@ router3.get("/data/unitool-stats", async (req, res) => {
          AND updated_at > NOW()-INTERVAL '24 hours'
        GROUP BY 1 ORDER BY 2 DESC`
     );
+    let hbAccounts = 0, hbSsids = 0;
+    try {
+      const hbRow = await queryOne(
+        `SELECT
+          COUNT(DISTINCT a.id) as hb_accounts,
+          COUNT(us.ssid)       as hb_ssids
+         FROM accounts a
+         LEFT JOIN unitool_ssids us
+           ON LOWER(TRIM(a.email)) = LOWER(TRIM(us.source_email))
+           AND us.is_valid = true AND LENGTH(us.ssid) > 50
+         WHERE a.tags LIKE '%unitool_high_balance%'`
+      );
+      hbAccounts = Number(hbRow?.hb_accounts ?? 0);
+      hbSsids = Number(hbRow?.hb_ssids ?? 0);
+    } catch {
+    }
     res.json({
       success: true,
       outlook: {
@@ -78984,6 +79000,7 @@ router3.get("/data/unitool-stats", async (req, res) => {
       },
       ref: { master: refMasterEmail, ref_code: currentRefCode, used: currentRefUsed, limit: 10, pool_total: refPoolTotal, pool_available: refPoolAvailable, pool_exhausted: refPoolExhausted, total_slots: refTotalSlots },
       pool: pool2,
+      high_balance: { accounts: hbAccounts, ssids: hbSsids },
       recent: recent.map((r) => {
         const m2 = r.notes?.match(/unitool_ssid=([a-f0-9]+)/);
         const ssidLen = ssidLenMap[r.email] ?? (m2?.[1]?.length ?? 0);

@@ -46,6 +46,7 @@ interface UnitoolStats {
   chain:        { status: string; last_run: string; brief: string };
   fail_reasons: { reason: string; count: number }[];
   token?:       { total_regular: number; total_bonus: number; total_all: number; zero_regular: number; zero_accounts: number; cached_accounts: number };
+  high_balance?: { accounts: number; ssids: number };
   ts:           string;
 }
 
@@ -158,12 +159,12 @@ function StatsPanel() {
             <div className="bg-[#0d1117] border border-[#30363d] rounded-lg p-3 text-center">
               <div className="text-2xl font-bold text-emerald-400">{ol?.registered ?? 0}</div>
               <div className="text-xs text-gray-400 mt-1">Unitool 已注册</div>
-              <div className="text-xs text-gray-600">ssid 已入池</div>
+              <div className="text-xs text-gray-600">完成注册流程</div>
             </div>
             <div className="bg-[#0d1117] border border-[#30363d] rounded-lg p-3 text-center">
               <div className="text-2xl font-bold text-emerald-400">{uStats.pool.live}</div>
               <div className="text-xs text-gray-400 mt-1">反代池 live</div>
-              <div className="text-xs text-gray-600">共 {uStats.pool.total} 个 ssid</div>
+              <div className="text-xs text-gray-600">池总量 {uStats.pool.total}（含历史文件）</div>
             </div>
             <div className="bg-[#0d1117] border border-[#30363d] rounded-lg p-3 text-center">
               <div className={`text-2xl font-bold ${uStats.ref.pool_available === 0 ? "text-red-400" : "text-emerald-400"}`}>
@@ -254,6 +255,24 @@ function StatsPanel() {
 
           {/* ref_code + chain_v3 状态 + proxy pool */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {/* 高余额池 small badge — shown inside proxy pool area above ref */}
+            {uStats.high_balance && (
+              <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">
+                <h3 className="text-sm font-semibold text-gray-300 mb-3">⭐ 高余额池（ref×10）</h3>
+                <div className="space-y-2">
+                  <div className="flex justify-between text-xs">
+                    <span className="text-gray-500">高余额账号数</span>
+                    <span className="text-amber-400 font-bold">{uStats.high_balance.accounts}</span>
+                  </div>
+                  <div className="flex justify-between text-xs">
+                    <span className="text-gray-500">高余额 SSID 入池数</span>
+                    <span className="text-amber-400 font-bold">{uStats.high_balance.ssids}</span>
+                  </div>
+                  <div className="text-xs text-gray-600 mt-1">ref_code 被用满 10 次即升入此池，调度时优先选取</div>
+                </div>
+              </div>
+            )}
+
             {/* ref_code 码池详情 */}
             <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">
               <h3 className="text-sm font-semibold text-gray-300 mb-3">ref 码池状态</h3>

@@ -1210,6 +1210,23 @@ router.get("/data/unitool-stats", async (req, res) => {
        GROUP BY 1 ORDER BY 2 DESC`
     );
 
+    // 7. high_balance 账号统计
+    let hbAccounts = 0, hbSsids = 0;
+    try {
+      const hbRow = await queryOne<{ hb_accounts: string; hb_ssids: string }>(
+        `SELECT
+          COUNT(DISTINCT a.id) as hb_accounts,
+          COUNT(us.ssid)       as hb_ssids
+         FROM accounts a
+         LEFT JOIN unitool_ssids us
+           ON LOWER(TRIM(a.email)) = LOWER(TRIM(us.source_email))
+           AND us.is_valid = true AND LENGTH(us.ssid) > 50
+         WHERE a.tags LIKE '%unitool_high_balance%'`
+      );
+      hbAccounts = Number(hbRow?.hb_accounts ?? 0);
+      hbSsids    = Number(hbRow?.hb_ssids    ?? 0);
+    } catch {}
+
     res.json({
       success: true,
       outlook: {
@@ -1221,6 +1238,7 @@ router.get("/data/unitool-stats", async (req, res) => {
       },
       ref: { master: refMasterEmail, ref_code: currentRefCode, used: currentRefUsed, limit: 10, pool_total: refPoolTotal, pool_available: refPoolAvailable, pool_exhausted: refPoolExhausted, total_slots: refTotalSlots },
       pool,
+      high_balance: { accounts: hbAccounts, ssids: hbSsids },
       recent: recent.map(r => {
         const m2 = r.notes?.match(/unitool_ssid=([a-f0-9]+)/);
         // 优先从 unitool_ssids 表取 ssid_len（权威），回退 notes regex
