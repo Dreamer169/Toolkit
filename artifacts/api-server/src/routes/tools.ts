@@ -5310,7 +5310,6 @@ async function runAutoCheck(): Promise<void> {
     );
   };
   let checked = 0, valid = 0, needsAuth = 0, banned = 0, skipped = 0;
-  const retokenIds: number[] = [];  // 普通 token 过期账号，扫完后统一后台 retoken
   try {
     const accounts = await query<{
       id: number; email: string;
@@ -5331,7 +5330,7 @@ async function runAutoCheck(): Promise<void> {
         checked++;
         if (!acc.refresh_token || acc.refresh_token.length < 20) {
           needsAuth++; await addTag(acc.id, "needs_oauth_manual");
-          retokenIds.push(acc.id);  // 无 RT，后台 retoken 尝试用密码重新授权
+          // 无 RT → healthcheck 每5分钟会自动 device code 补授权（无需额外 spawn）
           continue;
         }
         let accessToken = "";
@@ -5353,7 +5352,14 @@ async function runAutoCheck(): Promise<void> {
             const isAbuse = errCode === "invalid_grant" &&
               (errDesc.includes("AADSTS70000") || errDesc.includes("service abuse"));
             if (isAbuse) { banned++; await addTag(acc.id, "abuse_mode", "suspended"); }
-            else          { needsAuth++; await addTag(acc.id, "token_invalid"); retokenIds.push(acc.id);  /* 普通 RT 过期 → 后台 retoken 自动修复 */ }
+            else {
+              needsAuth++;
+              // 普通 RT 过期：清空失效凭据 + 设 needs_oauth → healthcheck 5min 内自动 device code 重授权
+              await execute(
+                "UPDATE accounts SET token=NULL, refresh_token=NULL, status='needs_oauth', tags=(SELECT NULLIF(array_to_string(ARRAY(SELECT DISTINCT trim(t) FROM unnest(string_to_array(COALESCE(tags,'')||',token_invalid',',')) AS t WHERE trim(t)<>''),','),'')) WHERE id=$1",
+                [acc.id]
+              );
+            }
             continue;
           }
           accessToken = td.access_token;
@@ -5388,32 +5394,6 @@ async function runAutoCheck(): Promise<void> {
       const total = _autoCheckLastStats.total;
       _autoCheckLastStats = { total, checked, valid, needsAuth, banned, skipped, stoppedEarly: _autoCheckStopped, finishedAt: null };
       logger.info({ batch: Math.floor(i / BATCH) + 1, batchSize: batch.length, checked, valid, needsAuth, banned, skipped, stopped: _autoCheckStopped }, "[auto-check] 批次完成");
-    }
-    // ── 自动后台修复：普通 token 过期账号 → spawn outlook_retoken.py ────────────
-    if (retokenIds.length > 0) {
-      try {
-        const { spawn: _spawn } = await import("child_process");
-        const _path  = await import("path");
-        const _fs    = await import("fs");
-        const _script = _path.resolve(__dirname, "../outlook_retoken.py");
-        const _log   = `/tmp/auto_check_retoken_${Date.now()}.log`;
-        const _fd    = _fs.openSync(_log, "w");
-        const _child = _spawn(
-          "python3", [_script, "--ids", retokenIds.join(","), "--headless", "true"],
-          {
-            env: { ...(process.env as Record<string, string>),
-              PLAYWRIGHT_BROWSERS_PATH: "/data/cache/ms-playwright",
-              DISPLAY: process.env.DISPLAY || ":99",
-              PYTHONUNBUFFERED: "1" },
-            stdio: ["ignore", _fd, _fd],
-            detached: true,
-          }
-        );
-        _child.unref();
-        logger.info({ retokenIds, logPath: _log }, "[auto-check] 普通 token 过期账号已转入后台 retoken 自动修复");
-      } catch (_e) {
-        logger.warn({ err: String(_e) }, "[auto-check] 启动后台 retoken 失败");
-      }
     }
   } catch (e: unknown) {
     logger.error({ err: String(e) }, "[auto-check] 检测出错");

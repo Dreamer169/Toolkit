@@ -77344,7 +77344,6 @@ async function runAutoCheck() {
     );
   };
   let checked = 0, valid = 0, needsAuth = 0, banned = 0, skipped = 0;
-  const retokenIds = [];
   try {
     const accounts = await query(
       // auto-repair: 除 active 账号外，同时纳入 suspended+token_invalid 且仍有 refresh_token 的账号
@@ -77365,7 +77364,6 @@ async function runAutoCheck() {
         if (!acc.refresh_token || acc.refresh_token.length < 20) {
           needsAuth++;
           await addTag(acc.id, "needs_oauth_manual");
-          retokenIds.push(acc.id);
           continue;
         }
         let accessToken = "";
@@ -77395,8 +77393,10 @@ async function runAutoCheck() {
               await addTag(acc.id, "abuse_mode", "suspended");
             } else {
               needsAuth++;
-              await addTag(acc.id, "token_invalid");
-              retokenIds.push(acc.id);
+              await execute(
+                "UPDATE accounts SET token=NULL, refresh_token=NULL, status='needs_oauth', tags=(SELECT NULLIF(array_to_string(ARRAY(SELECT DISTINCT trim(t) FROM unnest(string_to_array(COALESCE(tags,'')||',token_invalid',',')) AS t WHERE trim(t)<>''),','),'')) WHERE id=$1",
+                [acc.id]
+              );
             }
             continue;
           }
@@ -77439,34 +77439,6 @@ async function runAutoCheck() {
       const total = _autoCheckLastStats.total;
       _autoCheckLastStats = { total, checked, valid, needsAuth, banned, skipped, stoppedEarly: _autoCheckStopped, finishedAt: null };
       logger.info({ batch: Math.floor(i / BATCH) + 1, batchSize: batch.length, checked, valid, needsAuth, banned, skipped, stopped: _autoCheckStopped }, "[auto-check] \u6279\u6B21\u5B8C\u6210");
-    }
-    if (retokenIds.length > 0) {
-      try {
-        const { spawn: _spawn } = await import("child_process");
-        const _path = await import("path");
-        const _fs = await import("fs");
-        const _script = _path.resolve(__dirname, "../outlook_retoken.py");
-        const _log = `/tmp/auto_check_retoken_${Date.now()}.log`;
-        const _fd = _fs.openSync(_log, "w");
-        const _child = _spawn(
-          "python3",
-          [_script, "--ids", retokenIds.join(","), "--headless", "true"],
-          {
-            env: {
-              ...process.env,
-              PLAYWRIGHT_BROWSERS_PATH: "/data/cache/ms-playwright",
-              DISPLAY: process.env.DISPLAY || ":99",
-              PYTHONUNBUFFERED: "1"
-            },
-            stdio: ["ignore", _fd, _fd],
-            detached: true
-          }
-        );
-        _child.unref();
-        logger.info({ retokenIds, logPath: _log }, "[auto-check] \u666E\u901A token \u8FC7\u671F\u8D26\u53F7\u5DF2\u8F6C\u5165\u540E\u53F0 retoken \u81EA\u52A8\u4FEE\u590D");
-      } catch (_e) {
-        logger.warn({ err: String(_e) }, "[auto-check] \u542F\u52A8\u540E\u53F0 retoken \u5931\u8D25");
-      }
     }
   } catch (e) {
     logger.error({ err: String(e) }, "[auto-check] \u68C0\u6D4B\u51FA\u9519");
