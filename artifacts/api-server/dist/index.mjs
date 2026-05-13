@@ -72006,18 +72006,21 @@ async function runOnce() {
         }
         let msgs = [];
         let _readVerify = [];
+        const _isReplitEmail = (m) => {
+          const sender = (m.from?.emailAddress?.address ?? "").toLowerCase();
+          const subj = (m.subject ?? "").toLowerCase();
+          return sender.includes("replit.com") || subj.includes("replit") && (subj.includes("verify") || subj.includes("confirm"));
+        };
         try {
           const listResp = await microsoftFetch(
-            `https://graph.microsoft.com/v1.0/me/messages?$top=20&$orderby=receivedDateTime%20desc&$select=id,subject,receivedDateTime,isRead`,
+            // v9.36: add `from` to $select so sender can be checked
+            `https://graph.microsoft.com/v1.0/me/messages?$top=20&$orderby=receivedDateTime%20desc&$select=id,subject,receivedDateTime,isRead,from`,
             { headers: { Authorization: `Bearer ${accessToken}` } },
             _proxy
             // v8.86 Bug K: 与 refreshToken 同代理, 维持出向 IP 一致
           );
           const list = await listResp.json();
-          const _allVerify = (list.value || []).filter((m) => {
-            const s = (m.subject || "").toLowerCase();
-            return s.includes("verify") || s.includes("confirm") || s.includes("replit");
-          });
+          const _allVerify = (list.value || []).filter(_isReplitEmail);
           _readVerify = _allVerify.filter((m) => m.isRead);
           msgs = _allVerify.filter((m) => !m.isRead);
         } catch (e) {
@@ -72027,11 +72030,15 @@ async function runOnce() {
         }
         if (msgs.length === 0) {
           if (_readVerify.length > 0) {
+            const firstSender = _readVerify[0].from?.emailAddress?.address ?? "(unknown)";
             try {
               await tagAccount(acc.id, "replit_used");
             } catch (_) {
             }
-            logger2.info({ email: acc.email, readCount: _readVerify.length }, "[live-verify] \u9A8C\u8BC1\u90AE\u4EF6\u5DF2\u8BFB \u2192 \u81EA\u52A8\u6807 replit_used");
+            logger2.info(
+              { email: acc.email, readCount: _readVerify.length, sender: firstSender },
+              "[live-verify] Replit \u9A8C\u8BC1\u90AE\u4EF6\u5DF2\u8BFB \u2192 \u81EA\u52A8\u6807 replit_used"
+            );
           }
           stats.ok++;
           return;
@@ -77361,6 +77368,13 @@ router2.post("/tools/outlook/auto-check", async (req, res) => {
   } catch (e) {
     res.status(500).json({ success: false, error: String(e) });
   }
+});
+router2.get("/tools/outlook/auto-check/status", (_req, res) => {
+  res.json({
+    success: true,
+    running: _autoCheckRunning,
+    stats: _autoCheckLastStats
+  });
 });
 router2.get("/tools/outlook/export-csv", async (_req, res) => {
   try {
