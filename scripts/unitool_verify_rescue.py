@@ -451,7 +451,8 @@ def _click_replit_verify_firebase(verify_url):
         from pydoll.browser import Chrome
         from pydoll.browser.options import ChromiumOptions
         _opt = ChromiumOptions()
-        _opt.headless = False   # xvfb DISPLAY=:99 提供虚拟屏幕
+        _opt.headless = False   # xvfb DISPLAY=:102 提供虚拟屏幕
+        _opt.start_timeout = 45  # 并发Chrome时启动慢，默认10s不够
         _chrome = None
         for _p in ["/data/cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
                    "/root/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",

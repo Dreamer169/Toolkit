@@ -289,6 +289,7 @@ async def login_one(email: str, password: str, headless: bool = True,
             headless = False
             _log(f"  [display] headless=False (DISPLAY={display})")
     opt.headless = headless
+    opt.start_timeout = 45  # 并发Chrome时启动慢，默认10s不够
     if CHROME: opt.binary_location = CHROME
     # FIX: 使用 resi_pool.pick_sticky(email) 与注册/验证步骤保持同一 IP
     try:
