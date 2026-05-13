@@ -827,10 +827,10 @@ def _handle_fwd_signin(page, email: str, password: str) -> bool:
     if not _signin_clicked:
         _js = page.evaluate("""() => {
             var kws = ['sign in', 'signin'];
-            for (var el of document.querySelectorAll('button,a,[role="button"]')) {
+            for (var el of document.querySelectorAll('button,a,[role="button"],span[tabindex],div[tabindex]')) {
                 var t = el.textContent.trim().toLowerCase();
                 for (var k of kws) {
-                    if (t === k) { el.click(); return 'js:' + el.tagName + '/' + el.textContent.trim(); }
+                    if (t.indexOf(k) >= 0 && t.length < 40) { el.click(); return 'js:' + el.tagName + '/' + el.textContent.trim().slice(0,30); }
                 }
             }
             return 'not-found';
@@ -957,12 +957,19 @@ def _handle_fwd_signin(page, email: str, password: str) -> bool:
                         log(f"  [fwd-signin] security code result: {_code_ok}")
                     except Exception as _ce:
                         log(f"  [fwd-signin] security code error: {_ce}")
+                        # v13: popup closed after code submit = OAuth done
+                        try: _ce_closed = popup.is_closed()
+                        except Exception: _ce_closed = True
+                        if _ce_closed:
+                            log("  [fwd-signin] popup closed post-code — OAuth done")
+                            _code_ok = True
                     if _code_ok:
                         _code_submitted = True
                         # Wait up to 15s for popup to navigate away from proofs/Verify
                         log("  [fwd-signin] code OK — waiting 15s for popup nav away...")
                         for _nw in range(5):
-                            popup.wait_for_timeout(3000)
+                            try: popup.wait_for_timeout(3000)
+                            except Exception: break  # v13: popup closed
                             _pu = _url(popup)
                             try: _pc = popup.is_closed()
                             except Exception: _pc = True
@@ -975,7 +982,8 @@ def _handle_fwd_signin(page, email: str, password: str) -> bool:
                         log("  [fwd-signin] breaking skip-round loop after code submission")
                         break  # Exit while loop — code submitted, OAuth completing
                     else:
-                        popup.wait_for_timeout(5000)
+                        try: popup.wait_for_timeout(5000)
+                        except Exception: pass
                 elif _is_proofs and _is_add_page:
                     # On proofs/Add — try JS click "Not now"/"Cancel" first
                     _js_skipped = popup.evaluate("""() => {
@@ -1000,6 +1008,20 @@ def _handle_fwd_signin(page, email: str, password: str) -> bool:
                                     _popup_mt_addr  = _ph_addr
                                     _popup_mt_token = _ph_token
                                     log(f"  [fwd-signin] _handle_proofs ok, token stored: {_ph_addr}")
+                                    # v13: wait up to 39s for popup to navigate to proofs/Verify URL
+                                    log("  [fwd-signin] v13: waiting for popup Verify URL...")
+                                    for _vw in range(13):
+                                        popup.wait_for_timeout(3000)
+                                        try: _pc2 = popup.is_closed()
+                                        except Exception: _pc2 = True
+                                        if _pc2:
+                                            log("  [fwd-signin] popup closed while waiting Verify")
+                                            break
+                                        _pu2 = _url(popup)
+                                        if "verify" in _pu2.lower():
+                                            log(f"  [fwd-signin] popup on Verify ({(_vw+1)*3}s): {_pu2[:65]}")
+                                            break
+                                        log(f"  [fwd-signin] popup at {_pu2[:55]} ({(_vw+1)*3}s)")
                                 else:
                                     log(f"  [fwd-signin] _handle_proofs: ok={_ph_ok} no token")
                             except Exception as _pe:
@@ -1318,7 +1340,12 @@ def _handle_security_code(page, mt_token: str) -> bool:
         'input[value*="Verify"]',
         'input[value*="Confirm"]',
     ])
-    page.wait_for_timeout(5000)
+    # v13: popup may close itself right after code submit (OAuth done) — catch TargetClosedError
+    try:
+        page.wait_for_timeout(5000)
+    except Exception as _tce:
+        log(f"  [code] popup closed after Verify click (OAuth done): {str(_tce)[:60]}")
+        return True
     # Take screenshot after Verify click
     try: page.screenshot(path="/tmp/popup_02_after_verify.png")
     except Exception: pass
@@ -2173,6 +2200,12 @@ def enable_imap(email, password, account_id=None,
             try:
                 page.reload(wait_until="domcontentloaded", timeout=20000)
                 page.wait_for_timeout(5000)
+                # v13: if reload landed on inbox (not IMAP settings), re-navigate
+                _r1u = _url(page)
+                if "options/mail" not in _r1u and "popimap" not in _r1u:
+                    log(f"  [fwd-panel] v13: reload on {_r1u[:55]}, re-nav to IMAP")
+                    _nav_to_imap_direct(page)
+                    page.wait_for_timeout(3000)
                 _click_fwd_imap_menu(page)
                 page.wait_for_timeout(4000)
             except Exception as _re:
@@ -2199,6 +2232,12 @@ def enable_imap(email, password, account_id=None,
                 try:
                     page.reload(wait_until="domcontentloaded", timeout=20000)
                     page.wait_for_timeout(5000)
+                    # v13: re-navigate if 2nd reload landed on inbox
+                    _r2u = _url(page)
+                    if "options/mail" not in _r2u and "popimap" not in _r2u:
+                        log(f"  [fwd-panel] v13: 2nd reload {_r2u[:55]}, re-nav")
+                        _nav_to_imap_direct(page)
+                        page.wait_for_timeout(3000)
                     _click_fwd_imap_menu(page)
                     page.wait_for_timeout(5000)
                 except Exception as _re:
