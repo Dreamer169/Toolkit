@@ -4017,6 +4017,24 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
       return false;
     };
 
+    // ── 辅助：成功收信后清除历史脏标签（token_invalid / needs_oauth_manual / abuse_mode）──
+    // graphOk=true 时额外清 abuse_mode（Graph 200 = 微软未封号，旧误判可安全清除）
+    const clearStaleTags = async (graphOk = false): Promise<void> => {
+      try {
+        const stripList = graphOk
+          ? ["token_invalid", "needs_oauth_manual", "abuse_mode"]
+          : ["token_invalid", "needs_oauth_manual"];
+        const conditions = stripList.map(t => `AND trim(t)<>'${t}'`).join(" ");
+        await execute(
+          `UPDATE accounts SET tags=(SELECT NULLIF(array_to_string(ARRAY(
+             SELECT DISTINCT trim(t) FROM unnest(string_to_array(COALESCE(tags,''),',')) AS t
+             WHERE trim(t)<>'' ${conditions}
+           ),','),'')) WHERE id=$1`,
+          [accountId]
+        );
+      } catch { /* 清标签失败不中断主流程 */ }
+    };
+
     // 有 accessToken → Graph API
     if (accessToken) {
       // "全部邮件"：直接走全局 /me/messages，跨所有文件夹（含垃圾邮件、归档等）
@@ -4027,6 +4045,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
           if (acc.status === "suspended") {
             try { await execute("UPDATE accounts SET status='active', updated_at=NOW() WHERE id=$1", [accountId]); } catch {}
           }
+          await clearStaleTags(true);
           if (allRes.messages.length > 0) { try { await addAccountTags(accountId, ["inbox_verified"]); } catch {} }
           res.json({ success: true, messages: allRes.messages, count: allRes.messages.length, email: acc.email, via: "graph_all" });
           return;
@@ -4044,6 +4063,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
         if (acc.status === "suspended") {
           try { await execute("UPDATE accounts SET status='active', updated_at=NOW() WHERE id=$1", [accountId]); } catch {}
         }
+        await clearStaleTags(true);
         if (primary.messages.length > 0 || mailFolder !== "inbox") {
           if (primary.messages.length > 0) { try { await addAccountTags(accountId, ["inbox_verified"]); } catch {} }
           res.json({ success: true, messages: primary.messages, count: primary.messages.length, email: acc.email, via: "graph" });
@@ -4053,6 +4073,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
         // 只查 mailFolders/inbox 会误显示为"空邮箱"。
         const globalResult = await fetchGraphMessages(accessToken, mailFolder, limit, search, true, acctProxy);
         if (globalResult.ok && globalResult.messages.length > 0) {
+          await clearStaleTags(true);
           try { await addAccountTags(accountId, ["inbox_verified"]); } catch {}
           res.json({ success: true, messages: globalResult.messages, count: globalResult.messages.length, email: acc.email, via: "graph_all", folderFallback: true });
           return;
@@ -4075,6 +4096,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
         if (acc.status === "suspended") {
           try { await execute("UPDATE accounts SET status='active', updated_at=NOW() WHERE id=$1", [accountId]); } catch {}
         }
+        await clearStaleTags(false);
         if ((xoauthResult.messages as unknown[]).length > 0) { try { await addAccountTags(accountId, ["inbox_verified"]); } catch {} }
         res.json({ success: true, messages: xoauthResult.messages, count: (xoauthResult.messages as unknown[]).length, email: acc.email, via: "imap_xoauth2" });
         return;
@@ -4097,6 +4119,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
           if (liveTd.access_token) {
             const liveImapResult = await fetchViaImap(acc.email, acc.password ?? "", mailFolder, limit, search ?? "", liveTd.access_token, acctProxy);
             if (liveImapResult.success) {
+              await clearStaleTags(false);
               if ((liveImapResult.messages as unknown[]).length > 0) { try { await addAccountTags(accountId, ["inbox_verified"]); } catch {} }
               if (liveTd.refresh_token) { try { await execute("UPDATE accounts SET token=$1, refresh_token=$2, updated_at=NOW() WHERE id=$3", [liveTd.access_token, liveTd.refresh_token, accountId]); } catch {} }
               res.json({ success: true, messages: liveImapResult.messages, count: (liveImapResult.messages as unknown[]).length, email: acc.email, via: "imap_xoauth2_live" });
@@ -4124,6 +4147,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
     }
     const imapResult = await fetchViaImap(acc.email, acc.password, mailFolder, limit, search ?? "", undefined, acctProxy);
     if (imapResult.success) {
+      await clearStaleTags(false);
       if ((imapResult.messages as unknown[]).length > 0) { try { await addAccountTags(accountId, ["inbox_verified"]); } catch {} }
       res.json({ success: true, messages: imapResult.messages, count: (imapResult.messages as unknown[]).length, email: acc.email, via: "imap" });
     } else {

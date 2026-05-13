@@ -76041,6 +76041,20 @@ router2.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
       }
       return false;
     };
+    const clearStaleTags = async (graphOk = false) => {
+      try {
+        const stripList = graphOk ? ["token_invalid", "needs_oauth_manual", "abuse_mode"] : ["token_invalid", "needs_oauth_manual"];
+        const conditions = stripList.map((t) => `AND trim(t)<>'${t}'`).join(" ");
+        await execute2(
+          `UPDATE accounts SET tags=(SELECT NULLIF(array_to_string(ARRAY(
+             SELECT DISTINCT trim(t) FROM unnest(string_to_array(COALESCE(tags,''),',')) AS t
+             WHERE trim(t)<>'' ${conditions}
+           ),','),'')) WHERE id=$1`,
+          [accountId]
+        );
+      } catch {
+      }
+    };
     if (accessToken) {
       if (isAllFolder) {
         const allRes = await fetchGraphMessages(accessToken, mailFolder, limit, search, true, acctProxy);
@@ -76051,6 +76065,7 @@ router2.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
             } catch {
             }
           }
+          await clearStaleTags(true);
           if (allRes.messages.length > 0) {
             try {
               await addAccountTags(accountId, ["inbox_verified"]);
@@ -76074,6 +76089,7 @@ router2.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
           } catch {
           }
         }
+        await clearStaleTags(true);
         if (primary.messages.length > 0 || mailFolder !== "inbox") {
           if (primary.messages.length > 0) {
             try {
@@ -76086,6 +76102,7 @@ router2.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
         }
         const globalResult = await fetchGraphMessages(accessToken, mailFolder, limit, search, true, acctProxy);
         if (globalResult.ok && globalResult.messages.length > 0) {
+          await clearStaleTags(true);
           try {
             await addAccountTags(accountId, ["inbox_verified"]);
           } catch {
@@ -76107,6 +76124,7 @@ router2.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
           } catch {
           }
         }
+        await clearStaleTags(false);
         if (xoauthResult.messages.length > 0) {
           try {
             await addAccountTags(accountId, ["inbox_verified"]);
@@ -76133,6 +76151,7 @@ router2.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
           if (liveTd.access_token) {
             const liveImapResult = await fetchViaImap(acc.email, acc.password ?? "", mailFolder, limit, search ?? "", liveTd.access_token, acctProxy);
             if (liveImapResult.success) {
+              await clearStaleTags(false);
               if (liveImapResult.messages.length > 0) {
                 try {
                   await addAccountTags(accountId, ["inbox_verified"]);
@@ -76172,6 +76191,7 @@ router2.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
     }
     const imapResult = await fetchViaImap(acc.email, acc.password, mailFolder, limit, search ?? "", void 0, acctProxy);
     if (imapResult.success) {
+      await clearStaleTags(false);
       if (imapResult.messages.length > 0) {
         try {
           await addAccountTags(accountId, ["inbox_verified"]);
