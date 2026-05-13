@@ -82,12 +82,12 @@ async function pollForToken(deviceCode: string, proxy?: string | null, maxAttemp
 }
 
 // ── 单账号全自动 OAuth ─────────────────────────────────────────────────────
-async function autoOAuth(acc: { id: number; email: string; password: string }): Promise<boolean> {
+async function autoOAuth(acc: { id: number; email: string; password: string }): Promise<{ ok: boolean; reason?: string }> {
   logger.info({ email: acc.email }, "[healthcheck] 开始自动补授权");
 
   const proxy = pickResidentialProxy(); // v9.29: residential proxy for microsoft.com/link
   const dc = await getDeviceCode(acc.email, proxy);
-  if (!dc) return false;
+  if (!dc) return { ok: false, reason: 'no_device_code' };
 
   logger.info({ email: acc.email, userCode: dc.userCode }, "[healthcheck] 设备码已获取，启动 patchright");
 
@@ -107,7 +107,7 @@ async function autoOAuth(acc: { id: number; email: string; password: string }): 
     const _memAvailMB = Math.floor(_memAvailKB / 1024);
     if (_memAvailMB < 600) {
       logger.warn({ email: acc.email, memAvailMB: _memAvailMB }, "[healthcheck] 内存不足(<600MB)，跳过 patchright，待内存恢复后重试");
-      return false;
+      return { ok: false, reason: "low_memory" };
     }
     logger.info({ email: acc.email, memAvailMB: _memAvailMB }, "[healthcheck] 内存充足，启动 patchright");
   } catch { /* /proc/meminfo not available, proceed anyway */ }
@@ -146,7 +146,7 @@ async function autoOAuth(acc: { id: number; email: string; password: string }): 
   if (autoResult.status !== "done") {
     logger.warn({ email: acc.email, status: autoResult.status, msg: autoResult.msg },
       "[healthcheck] patchright 授权失败");
-    return false;
+    return { ok: false, reason: autoResult.msg ?? autoResult.status };
   }
 
   logger.info({ email: acc.email }, "[healthcheck] 浏览器授权完成，轮询 token");
@@ -154,7 +154,7 @@ async function autoOAuth(acc: { id: number; email: string; password: string }): 
   const tokens = await pollForToken(dc.deviceCode, proxy);
   if (!tokens) {
     logger.warn({ email: acc.email }, "[healthcheck] token 轮询超时");
-    return false;
+    return { ok: false, reason: "token_poll_timeout" };
   }
 
   const { execute } = await import("../db.js");
@@ -163,7 +163,7 @@ async function autoOAuth(acc: { id: number; email: string; password: string }): 
     [tokens.accessToken, tokens.refreshToken, acc.id]
   );
   logger.info({ email: acc.email }, "[healthcheck] 自动补授权成功，token 已入库");
-  return true;
+  return { ok: true };
 }
 
 // ── 主扫描逻辑 ────────────────────────────────────────────────────────────
@@ -211,6 +211,7 @@ async function runCheck() {
          AND password IS NOT NULL AND password != ''
          AND COALESCE(tags, '') NOT LIKE '%abuse_mode%'
          AND COALESCE(tags, '') NOT LIKE '%needs_oauth_manual%'
+         AND COALESCE(tags, '') NOT LIKE '%enterprise_account%'
        ORDER BY created_at ASC
        LIMIT 5`,  // 每轮处理5个（原3个）；suspended 提升 + DB 状态即为断点，重启自动续跑
       []
@@ -225,22 +226,37 @@ async function runCheck() {
           "UPDATE accounts SET status='needs_oauth_pending', updated_at=NOW() WHERE id=$1",
           [acc.id]
         );
-        const ok = await autoOAuth(acc);
+        const { ok, reason } = await autoOAuth(acc);
         if (!ok) {
-          // 补授权失败 → 标记为需要手动处理（不再自动重试，避免无限循环）
-          await execute(
-            `UPDATE accounts
-             SET status = 'needs_oauth',
-                 tags   = (
-                   SELECT NULLIF(string_agg(DISTINCT tag, ','), '')
-                   FROM unnest(string_to_array(COALESCE(tags,'') || ',needs_oauth_manual', ',')) AS tag
-                   WHERE tag <> ''
-                 ),
-                 updated_at = NOW()
-             WHERE id = $1`,
-            [acc.id]
-          );
-          logger.warn({ email: acc.email }, "[healthcheck] 自动补授权失败，已标记 needs_oauth_manual");
+          if (reason === "code_invalid_or_expired") {
+            // 企业/AAD 账号——consumer device code 对其无效，打标永不再用此流程重试
+            await execute(
+              `UPDATE accounts
+               SET status = 'needs_oauth',
+                   tags   = (SELECT NULLIF(string_agg(DISTINCT tag, ','), '')
+                             FROM unnest(string_to_array(COALESCE(tags,'') || ',enterprise_account', ',')) AS tag
+                             WHERE tag <> ''),
+                   updated_at = NOW()
+               WHERE id = $1`,
+              [acc.id]
+            );
+            logger.warn({ email: acc.email }, "[healthcheck] 企业/AAD 账号，consumer OAuth 无效，已标记 enterprise_account");
+          } else {
+            // 补授权失败 → 标记为需要手动处理（不再自动重试，避免无限循环）
+            await execute(
+              `UPDATE accounts
+               SET status = 'needs_oauth',
+                   tags   = (
+                     SELECT NULLIF(string_agg(DISTINCT tag, ','), '')
+                     FROM unnest(string_to_array(COALESCE(tags,'') || ',needs_oauth_manual', ',')) AS tag
+                     WHERE tag <> ''
+                   ),
+                   updated_at = NOW()
+               WHERE id = $1`,
+              [acc.id]
+            );
+            logger.warn({ email: acc.email }, "[healthcheck] 自动补授权失败，已标记 needs_oauth_manual");
+          }
         }
       }
     }
@@ -253,6 +269,7 @@ async function runCheck() {
          AND status NOT IN ('suspended', 'done', 'needs_oauth_pending')
          AND COALESCE(tags, '') LIKE '%needs_oauth_manual%'
          AND COALESCE(tags, '') NOT LIKE '%abuse_mode%'
+         AND COALESCE(tags, '') NOT LIKE '%enterprise_account%'
          AND password IS NOT NULL AND password != ''
          AND updated_at < NOW() - INTERVAL '1 hour'
        ORDER BY updated_at ASC
@@ -263,7 +280,7 @@ async function runCheck() {
       logger.info({ count: manualRetryRows.length }, "[healthcheck] 发现可重试的 needs_oauth_manual 账号");
       for (const acc of manualRetryRows) {
         await execute("UPDATE accounts SET status='needs_oauth_pending', updated_at=NOW() WHERE id=$1", [acc.id]);
-        const ok = await autoOAuth(acc);
+        const { ok, reason: _reason2 } = await autoOAuth(acc);
         if (ok) {
           // 清除 needs_oauth_manual 标签
           await execute(
