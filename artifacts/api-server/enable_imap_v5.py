@@ -97,6 +97,27 @@ def _is_isp_port(port: int) -> bool:
     return port not in _CF_INSOCKS_PORTS
 
 
+def _probe_socks5(port: int, timeout: float = 2.5) -> bool:
+    """Real SOCKS5 handshake probe: verifies port actually proxies, not just listens.
+    Mirrors xray_relay._is_port_alive(). TCP-connect alone misses dead xray routes.
+    """
+    import socket as _sk
+    try:
+        s = _sk.socket()
+        s.settimeout(timeout)
+        s.connect(("127.0.0.1", port))
+        s.sendall(b"\x05\x01\x00")  # SOCKS5 no-auth greeting
+        if s.recv(2) != b"\x05\x00":  # expect "version=5, method=no-auth"
+            s.close(); return False
+        # CONNECT to 1.1.1.1:443 to verify outbound routing
+        s.sendall(b"\x05\x01\x00\x01\x01\x01\x01\x01\x01\xbb")
+        r = s.recv(10)
+        s.close()
+        return len(r) >= 2 and r[1] == 0x00
+    except Exception:
+        return False
+
+
 def _setup_proxy(exit_ip: str = "", manual_proxy: str = "") -> tuple:
     if manual_proxy:
         log(f"  [proxy] manual: {manual_proxy}")
@@ -127,13 +148,9 @@ def _setup_proxy(exit_ip: str = "", manual_proxy: str = "") -> tuple:
             xray_inst = None
 
     for port in ISP_STATIC_PORTS:
-        try:
-            s = socket.create_connection(("127.0.0.1", port), timeout=2)
-            s.close()
+        if _probe_socks5(port):
             log(f"  [proxy] ISP static port {port}")
             return f"socks5://127.0.0.1:{port}", None
-        except Exception:
-            continue
 
     try:
         import random as _rand
@@ -175,19 +192,22 @@ def db_get_account(account_id: int) -> dict:
         conn.close()
 
 def db_tag_imap_enabled(account_id: int):
+    """Tag account with imap_enabled AND pop_enabled (both enabled together)."""
     import psycopg2
     try:
         conn = psycopg2.connect(_DB_URL)
         cur  = conn.cursor()
         cur.execute("""
             UPDATE accounts
-               SET tags = (SELECT ARRAY(SELECT DISTINCT unnest(array_append(COALESCE(tags,'{}'), 'imap_enabled')))),
+               SET tags = (SELECT ARRAY(SELECT DISTINCT unnest(
+                           array_cat(COALESCE(tags,'{}'),
+                                     ARRAY['imap_enabled','pop_enabled'])))),
                    updated_at = now()
              WHERE id = %s
         """, (account_id,))
         conn.commit()
         conn.close()
-        log(f"  [db] account {account_id} tagged: imap_enabled")
+        log(f"  [db] account {account_id} tagged: imap_enabled + pop_enabled")
     except Exception as e:
         log(f"  [db] tag write failed: {e}")
 
@@ -199,12 +219,8 @@ def _find_isp_proxy() -> str:
     # then ss-in ISP direct (Italy/Turkey/Russia/HK, proxy:false)
     ISP_PORTS = [10910, 10911, 10912, 10914, 10851, 10853, 10855, 10859]
     for port in ISP_PORTS:
-        try:
-            s = socket.create_connection(("127.0.0.1", port), timeout=1)
-            s.close()
+        if _probe_socks5(port):
             return f"socks5://127.0.0.1:{port}"
-        except Exception:
-            continue
     return ""
 
 
@@ -414,6 +430,36 @@ def _do_fresh_login(page, ctx, email: str, password: str,
     except Exception:
         pass
 
+    # ── ISP proxy context switch (mirrors outlook_register.py residential fallback) ──
+    # When main browser proxy is CF VLESS (exit_ip flow), the Microsoft React SPA
+    # at login.microsoftonline.com cannot render (JS bundles stall through CF).
+    # Fix: open a NEW context with ISP/tp-in proxy for the login step,
+    # then restore cookies into the main context for subsequent Outlook navigation.
+    _login_ctx  = ctx    # will be replaced if isp_proxy is different
+    _login_page = page
+    _isp_ctx_created = False
+    if isp_proxy and isp_proxy != getattr(ctx, "_proxy_server", isp_proxy):
+        try:
+            _isp_browser = page.context.browser
+            _login_ctx = _isp_browser.new_context(
+                proxy={"server": isp_proxy},
+                locale="en-US",
+                timezone_id="America/Los_Angeles",
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+            )
+            _login_page = _login_ctx.new_page()
+            _isp_ctx_created = True
+            log(f"  [login] ISP context created: {isp_proxy} (CF VLESS fallback)")
+        except Exception as _ice:
+            log(f"  [login] ISP ctx failed ({_ice}), using main ctx")
+            _login_ctx = ctx
+            _login_page = page
+            _isp_ctx_created = False
+
     # Login URL priority (same as v4 which confirmed working):
     #   1. outlook.live.com/mail/0/?prompt=login → OAuth redirect with Outlook client_id
     #      This is the CORRECT entry point; login.live.com/login.srf?wa=wsignin1.0
@@ -435,22 +481,22 @@ def _do_fresh_login(page, ctx, email: str, password: str,
     for _lu in _login_urls:
         log(f"  [login] trying: {_lu[:80]}")
         try:
-            page.goto(_lu, timeout=45000, wait_until="domcontentloaded")
+            _login_page.goto(_lu, timeout=45000, wait_until="domcontentloaded")
         except Exception as _ge:
             log(f"  [login] goto (ok): {str(_ge)[:60]}")
-        page.wait_for_timeout(3000)
-        cur = _url(page)
+        _login_page.wait_for_timeout(3000)
+        cur = _url(_login_page)
         log(f"  [login] landed: {cur[:90]}")
         # Only skip real error pages — NOT 0-byte SPA (React not yet mounted).
         # Mirrors auto_device_code._pick_residential_proxy / outlook_register.py pattern:
         #   0b       → SPA still loading, fall through to 60s email-input wait
         #   1-800b + error keyword → genuine error page, skip to next URL
         try:
-            _blen = page.evaluate("()=>document.body?.innerHTML?.length||0")
+            _blen = _login_page.evaluate("()=>document.body?.innerHTML?.length||0")
             if _blen == 0:
                 log(f"  [login] body=0 (SPA loading), waiting for form...")
             elif _blen < 800:
-                _btxt = page.evaluate("()=>document.body?.innerText?.slice(0,200)||''")
+                _btxt = _login_page.evaluate("()=>document.body?.innerText?.slice(0,200)||''")
                 _ERR_KW = ("technical problem", "unauthorized_client", "unable to complete",
                            "does not exist", "not enabled")
                 if any(kw in _btxt.lower() for kw in _ERR_KW):
@@ -461,7 +507,7 @@ def _do_fresh_login(page, ctx, email: str, password: str,
             pass
         # v4.1: wait up to 60s for email input (proxy latency through VLESS)
         try:
-            _ei = page.locator(_email_input_sel).first
+            _ei = _login_page.locator(_email_input_sel).first
             if _ei.is_visible(timeout=60000):
                 _login_form_found = True
                 log(f"  [login] ✅ email input found at: {cur[:80]}")
@@ -472,21 +518,21 @@ def _do_fresh_login(page, ctx, email: str, password: str,
 
     if not _login_form_found:
         log("  [login] ⚠ email input not found on any login URL — proceeding anyway")
-        _ss(page, "login_no_input", email.split("@")[0])
+        _ss(_login_page, "login_no_input", email.split("@")[0])
 
     # Fill email via react_fill (sets value + fires React synthetic events)
-    _react_fill(page, 'input[name="loginfmt"]', email)
+    _react_fill(_login_page, 'input[name="loginfmt"]', email)
     log("  [login] email filled")
 
-    page.wait_for_timeout(400)
-    _click_primary(page)
-    page.wait_for_timeout(4000)
-    log(f"  [login] email submitted, url={_url(page)[:80]}")
+    _login_page.wait_for_timeout(400)
+    _click_primary(_login_page)
+    _login_page.wait_for_timeout(4000)
+    log(f"  [login] email submitted, url={_url(_login_page)[:80]}")
 
     # Wait specifically for PASSWORD field (not just any input — email input may linger in DOM)
     _pw_visible = False
     try:
-        _pw_loc = page.locator('input[name="passwd"],input[type="password"]').first
+        _pw_loc = _login_page.locator('input[name="passwd"],input[type="password"]').first
         _pw_loc.wait_for(state="visible", timeout=25000)
         _pw_visible = True
         log("  [login] ✅ password field visible")
@@ -497,58 +543,86 @@ def _do_fresh_login(page, ctx, email: str, password: str,
     if _pw_visible:
         try:
             _pw_loc.fill(password)
-            page.wait_for_timeout(300)
+            _login_page.wait_for_timeout(300)
         except Exception:
-            _react_fill(page, 'input[name="passwd"]', password)
+            _react_fill(_login_page, 'input[name="passwd"]', password)
     else:
-        _react_fill(page, 'input[name="passwd"]', password)
+        _react_fill(_login_page, 'input[name="passwd"]', password)
         log("  [login] password filled via react_fill (blind)")
 
-    page.wait_for_timeout(400)
-    _click_primary(page)
-    page.wait_for_timeout(4000)
-    log(f"  [login] password submitted, url={_url(page)[:80]}")
+    _login_page.wait_for_timeout(400)
+    _click_primary(_login_page)
+    _login_page.wait_for_timeout(4000)
+    log(f"  [login] password submitted, url={_url(_login_page)[:80]}")
 
     # Skip Stay-signed-in? / MFA prompts (same as v4)
     for _ in range(8):
-        if not _skip_interrupts(page):
+        if not _skip_interrupts(_login_page):
             break
-        page.wait_for_timeout(2000)
+        _login_page.wait_for_timeout(2000)
 
     # Wait for redirect to outlook.live.com/mail (v4 proven approach)
     try:
-        page.wait_for_url("**/mail/**", timeout=45000)
-        log(f"  [login] ✅ redirected to mail, url={_url(page)[:80]}")
+        _login_page.wait_for_url("**/mail/**", timeout=45000)
+        log(f"  [login] ✅ redirected to mail, url={_url(_login_page)[:80]}")
     except Exception:
-        log(f"  [login] wait_for_url timeout, cur={_url(page)[:80]}")
-    page.wait_for_timeout(3000)
+        log(f"  [login] wait_for_url timeout, cur={_url(_login_page)[:80]}")
+    _login_page.wait_for_timeout(3000)
 
     # Handle msalAuthRedirect if present (v4 approach)
     for _mw in range(3):
-        _fu = _url(page)
+        _fu = _url(_login_page)
         if "msalAuthRedirect" in _fu:
             log(f"  [login] msalAuthRedirect detected (pass {_mw+1}), waiting for MSAL...")
-            _wait_for_msal_complete(page, timeout_s=90)
-            page.wait_for_timeout(3000)
+            _wait_for_msal_complete(_login_page, timeout_s=90)
+            _login_page.wait_for_timeout(3000)
         else:
             break
 
     # Wait for networkidle (SPA MSAL initialization)
     try:
-        page.wait_for_load_state("networkidle", timeout=20000)
+        _login_page.wait_for_load_state("networkidle", timeout=20000)
     except Exception:
         pass
-    page.wait_for_timeout(2000)
+    _login_page.wait_for_timeout(2000)
+
+    # ── Cookie restore: if ISP context was used, copy cookies to main context ──
+    # Mirrors outlook_register.py: _saved_state = page.context.storage_state() +
+    # _res_ctx.add_cookies(...) pattern — ensures Outlook SPA nav uses CF exit_ip
+    # while login was done through ISP proxy for MS React SPA rendering.
+    if _isp_ctx_created:
+        try:
+            _state = _login_ctx.storage_state()
+            _cookies = _state.get("cookies", [])
+            if _cookies:
+                ctx.add_cookies(_cookies)
+                log(f"  [login] ISP ctx: restored {len(_cookies)} cookies to main ctx")
+            # Navigate the main page to outlook mail (it has the ISP session cookies now)
+            try:
+                page.goto("https://outlook.live.com/mail/0/", timeout=30000, wait_until="domcontentloaded")
+                page.wait_for_timeout(5000)
+                log(f"  [login] main ctx navigated to mail: {_url(page)[:80]}")
+            except Exception as _ne:
+                log(f"  [login] main ctx nav: {str(_ne)[:60]}")
+        except Exception as _cre:
+            log(f"  [login] cookie restore failed: {_cre}")
+        finally:
+            try: _login_ctx.close()
+            except Exception: pass
+        # Use main page for gear check
+        _check_page = page
+    else:
+        _check_page = _login_page
 
     # Confirm gear (MSAL + SPA fully loaded)
-    gear_ok = _wait_for_gear(page, timeout_s=30)
-    final_url = _url(page)
+    gear_ok = _wait_for_gear(_check_page, timeout_s=30)
+    final_url = _url(_check_page)
     log(f"  [login] final url={final_url[:100]} gear={gear_ok}")
 
     if not gear_ok and "outlook.live.com/mail" in final_url:
         log("  [login] on mail but no gear — waiting 15s more...")
-        page.wait_for_timeout(15000)
-        gear_ok = _wait_for_gear(page, timeout_s=20)
+        _check_page.wait_for_timeout(15000)
+        gear_ok = _wait_for_gear(_check_page, timeout_s=20)
 
     # CRITICAL: check startswith to avoid matching "outlook.live.com" in login.live.com scope params
     success = final_url.startswith("https://outlook.live.com/mail") or (
@@ -1110,6 +1184,49 @@ def _toggle_imap(page) -> str:
     }""")
 
 
+def _toggle_pop(page) -> str:
+    """Enable POP access on the Outlook POP/IMAP settings page.
+    Returns: 'already-on' | 'radio-clicked:X' | 'attr-clicked:X' | 'not-found'
+    Outlook POP settings sit on the same /popimap page as IMAP.
+    Radio layout: 'Enable POP for all messages' / 'Disable POP'
+    """
+    return page.evaluate("""() => {
+        // Try radio/checkbox inputs whose parent mentions 'pop'
+        var inputs = Array.from(document.querySelectorAll(
+            'input[type="radio"],input[type="checkbox"],[role="radio"],[role="switch"],[role="checkbox"]'));
+        for (var el of inputs) {
+            var par = el.closest('li') || el.closest('label') || el.closest('div') || el.parentElement;
+            var txt = (par ? par.textContent : '').toLowerCase();
+            // must mention POP but NOT be the 'disable pop' option
+            if (txt.indexOf('pop') < 0) continue;
+            if (txt.indexOf('disable pop') >= 0 || txt.indexOf('disable') >= 0) continue;
+            var chk = el.getAttribute('aria-checked') || (el.checked !== undefined ? String(el.checked) : 'false');
+            if (chk === 'true' || el.checked) return 'pop-already-on';
+            el.click();
+            return 'pop-radio:' + (el.id || el.name || el.value || '?');
+        }
+        // Try aria-label with POP
+        var byAttr = Array.from(document.querySelectorAll('[aria-label*="POP" i],[data-testid*="pop" i]'));
+        for (var el of byAttr) {
+            if ((el.getAttribute('aria-label') || '').toLowerCase().indexOf('disable') >= 0) continue;
+            var chk = el.getAttribute('aria-checked') || (el.checked !== undefined ? String(el.checked) : 'false');
+            if (chk === 'true' || el.checked) return 'pop-attr-already-on';
+            el.click();
+            return 'pop-attr:' + el.getAttribute('aria-label');
+        }
+        // Label containing 'enable pop'
+        for (var lbl of Array.from(document.querySelectorAll('label'))) {
+            var lt = lbl.textContent.toLowerCase();
+            if (lt.indexOf('enable pop') >= 0 || (lt.indexOf('pop') >= 0 && lt.indexOf('disable') < 0)) {
+                var inp = lbl.control || document.getElementById(lbl.htmlFor);
+                if (inp && !inp.checked) { inp.click(); return 'pop-label'; }
+                if (inp && inp.checked) return 'pop-already-on';
+            }
+        }
+        return 'not-found';
+    }""")
+
+
 def _save_settings(page) -> bool:
     for sel in [
         'button:has-text("Save")',
@@ -1146,9 +1263,17 @@ def enable_imap(email, password, account_id=None,
     log(f"\n{'='*60}")
     log(f"[enable-imap] v5 start: {email} (id={account_id})")
 
-    # v5: Use the proxy as-is (CF IP works fine for Outlook login — confirmed by registration flow).
-    # Root cause of prior failures was wrong login URL, NOT the proxy type.
-    _effective_proxy = proxy
+    # v5.1: Prefer ISP/tp-in proxy for the ENTIRE session (login + settings navigation).
+    # CF VLESS (XrayRelay force_dynamic) works for login.live.com but stalls the
+    # Outlook SPA lazy-loads that render the IMAP/POP settings panel content.
+    # ISP/tp-in ports (10910-10914, 10851+) fully render all SPA resources.
+    # XrayRelay is only needed for registration IP consistency — not for IMAP/POP enabling.
+    _session_isp = _find_isp_proxy()
+    if _session_isp and _session_isp != proxy:
+        _effective_proxy = _session_isp
+        log(f"  [proxy] ISP override (CF→ISP): {_effective_proxy} (main={proxy[:40]})")
+    else:
+        _effective_proxy = proxy
 
     log(f"  [proxy] effective proxy: {_effective_proxy}")
     p, browser = launch_browser(proxy=_effective_proxy, headless=headless)
@@ -1184,10 +1309,10 @@ def enable_imap(email, password, account_id=None,
         # ── Step 0: Fresh login ──────────────────────────────────────────────
         # v5 KEY: Always fresh login. Cookies alone cannot pass IMAP security checks.
         # Microsoft enforces re-authentication when navigating to IMAP settings.
-        # If main proxy is CF VLESS (slow JS on login.live.com), find ISP port as hint.
-        _isp_proxy = _find_isp_proxy()
-        log(f"  [step0] fresh login (proxy={proxy[:40]}, isp_hint={_isp_proxy})...")
-        _login_ok = _do_fresh_login(page, ctx, email, password, isp_proxy=_isp_proxy)
+        # v5.1: Browser already uses ISP proxy (_effective_proxy above), so
+        # isp_proxy hint = _effective_proxy (no separate context switch needed).
+        log(f"  [step0] fresh login (proxy={_effective_proxy[:40]})...")
+        _login_ok = _do_fresh_login(page, ctx, email, password, isp_proxy=_effective_proxy)
         _ss(page, "00_after_login", label)
         log(f"  [step0] login_ok={_login_ok}, url={_url(page)[:100]}")
 
@@ -1338,29 +1463,45 @@ def enable_imap(email, password, account_id=None,
         # ── Step N+2: Toggle IMAP on ─────────────────────────────────────────
         page.wait_for_timeout(2000)
         res = _toggle_imap(page)
-        log(f"  [toggle] result: {res}")
-        _ss(page, "06_toggle", label)
+        log(f"  [imap-toggle] result: {res}")
+        _ss(page, "06_toggle_imap", label)
 
         if res == "not-found":
             page.wait_for_timeout(5000)
             res = _toggle_imap(page)
-            log(f"  [toggle] retry: {res}")
-            _ss(page, "06b_toggle2", label)
+            log(f"  [imap-toggle] retry: {res}")
+            _ss(page, "06b_toggle_imap2", label)
 
         if res == "not-found":
-            log("  [toggle] ❌ IMAP toggle not found")
-            log(f"  [toggle] url={_url(page)[:100]}")
-            log(f"  [toggle] text={_txt(page)[:500]}")
+            log("  [imap-toggle] ❌ IMAP toggle not found")
+            log(f"  [imap-toggle] url={_url(page)[:100]}")
+            log(f"  [imap-toggle] text={_txt(page)[:500]}")
             return False
 
-        if "already" not in res:
+        # ── Step N+3: Toggle POP on (same /popimap page) ─────────────────────
+        # POP and IMAP settings coexist on the same Outlook settings page.
+        # Enable POP for all messages alongside IMAP.
+        page.wait_for_timeout(600)
+        pop_res = _toggle_pop(page)
+        log(f"  [pop-toggle] result: {pop_res}")
+        _ss(page, "06c_toggle_pop", label)
+
+        if pop_res == "not-found":
+            page.wait_for_timeout(3000)
+            pop_res = _toggle_pop(page)
+            log(f"  [pop-toggle] retry: {pop_res}")
+
+        # ── Step N+4: Save once for both IMAP + POP ──────────────────────────
+        _imap_changed = "already" not in res
+        _pop_changed  = "already" not in pop_res
+        if _imap_changed or _pop_changed:
             page.wait_for_timeout(800)
             _save_settings(page)
         _ss(page, "07_save", label)
 
-        log(f"  [enable-imap] ✅ SUCCESS ({res})")
+        log(f"  [enable-imap+pop] ✅ SUCCESS imap={res} pop={pop_res}")
         if account_id:
-            db_tag_imap_enabled(account_id)
+            db_tag_imap_enabled(account_id)  # tags both imap_enabled + pop_enabled
         return True
 
     except Exception as e:
