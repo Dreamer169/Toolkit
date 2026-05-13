@@ -2,7 +2,7 @@
 
 > 最后更新：2026-05-13  
 > 负责文件：`/data/Toolkit/artifacts/api-server/enable_imap_v5.py`  
-> GitHub fork：`Dreamer169/Toolkit`（`ghp_<TOKEN_REDACTED>`）
+> GitHub fork：`Dreamer169/Toolkit`（`YOUR_GITHUB_PAT_HERE`）
 
 ---
 
