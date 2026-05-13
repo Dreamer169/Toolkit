@@ -78646,6 +78646,13 @@ router3.get("/data/stats", async (req, res) => {
     const byPlatform = await query(
       `SELECT platform, COUNT(*) as count FROM accounts GROUP BY platform ORDER BY count DESC`
     );
+    const unitoolStat = await queryOne(
+      `SELECT
+         COUNT(*) FILTER (WHERE tags LIKE '%unitool_registered%') AS registered,
+         COUNT(*) FILTER (WHERE tags LIKE '%unitool_verify_pending%') AS pending,
+         COUNT(*) FILTER (WHERE tags LIKE '%unitool_fail%') AS fail
+       FROM accounts WHERE platform='outlook'`
+    );
     const [sqliteAccountCount, sqliteEmailCount, sqliteProfileCount] = await Promise.all([
       sqliteQuery("SELECT COUNT(*) as cnt FROM ai_accounts").then((r) => Number(r[0]?.cnt ?? 0)),
       Promise.resolve(0),
@@ -78666,7 +78673,12 @@ router3.get("/data/stats", async (req, res) => {
       emails: { total: Number(tempEmails?.total ?? 0) + sqliteEmailCount },
       long_term: { total: Number(longTermEmails?.total ?? 0) },
       proxies: { idle: Number(proxyStat?.idle ?? 0), active: Number(proxyStat?.active ?? 0), banned: Number(proxyStat?.banned ?? 0) },
-      byPlatform: mergedByPlatform
+      byPlatform: mergedByPlatform,
+      unitool: {
+        registered: Number(unitoolStat?.registered ?? 0),
+        pending: Number(unitoolStat?.pending ?? 0),
+        fail: Number(unitoolStat?.fail ?? 0)
+      }
     });
   } catch (e) {
     res.status(500).json({ success: false, error: String(e) });
