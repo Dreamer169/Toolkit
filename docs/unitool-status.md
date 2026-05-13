@@ -107,3 +107,41 @@
 | api-server | v0 :8081 OK |
 | unitool_chain_v3 | inline_verify fix OK |
 | unitool_verify_rescue | Working OK |
+
+---
+
+## Perplexity & Grok 系列比对结果 (probe v6.2, 2026-05-13)
+
+### ⚠ 重大发现：Perplexity Sonar/Pro 实为 Claude + llmlayer.ai
+
+| unitool 服务 | 真实后端 | 匹配依据 |
+|---|---|---|
+| perplexity-sonar | **claude-sonnet-4-6 + llmlayer.ai web search** | 多次自报"Claude 4, claude-sonnet-4-6"; llmlayer.ai provider 名直接泄露 |
+| perplexity-sonar-pro | **claude-sonnet-4-6 + llmlayer.ai web search** | 与 sonar 完全相同: cutoff reliable=Aug2025, training=Jan2026 |
+| perplexity-sonar-pro-search | **真实 Perplexity AI** | 自报"Perplexity AI"; 知道 GPT-5 Aug7 2025, Claude Opus4 May22 2025 |
+
+**llmlayer.ai** = "Web Infrastructure For AI Agents" — 为 LLM 添加网页搜索的第三方服务。
+unitool 通过 llmlayer.ai 给 claude-sonnet-4-6 套上搜索层，包装成 "Perplexity Sonar/Pro" 出售。
+这就是俄语 "Источники"（Sources）出现在 Perplexity 回复里的原因。
+
+#### Claude Sonnet 4.6 参数（来自 perplexity-sonar/sonar-pro 自报）
+- reliable knowledge cutoff: **August 2025**
+- training data cutoff: **January 2026**
+
+### Grok 身份确认
+
+| unitool 服务 | 真实后端 | 版本字符串 | 匹配依据 |
+|---|---|---|---|
+| grok | **grok-4-0709** (Grok 4) | grok-4-0709 | 自报版本字符串; 发布日期 July 2025; 知道 Grok3 Dec2024 + Grok3-Heavy Feb2025 |
+
+- Grok 4 特性: continuously updated + web browsing (无固定 cutoff)
+- 之前 JSON 格式探针显示 "grok-beta / Oct 2023" 为搜索结果污染导致的假报告
+
+### 探针方法注意事项
+
+| 探针方式 | 可靠性 | 问题 |
+|---|---|---|
+| JSON 格式问题 | ❌ 低 | 搜索结果包含模型名称词汇，污染自报（perplexity-sonar 说 gpt-4o-search-preview, sonar-pro 说 gpt-4o-mini via llmlayer） |
+| 自然语言直接问 | ✓ 高 | 两次以上一致的结果可信 |
+| 错误信息泄露 | ✓✓ 最高 | 模型名直接在 API 错误响应中出现（gpt-5-2025-08-07, gpt-5-nano-2025-08-07） |
+
