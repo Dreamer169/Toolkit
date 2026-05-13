@@ -5709,4 +5709,103 @@ router.get("/tools/unitool/token-stats", async (req, res) => {
 });
 
 
+// ── 邮件池健康检测：批量 IMAP 验证 active Outlook 账号 ─────────────────────────
+const _EMAILS_DB = "/data/Toolkit/artifacts/api-server/data.db";
+
+function _sqliteExecEmails(sql: string, params: (string | number | null)[] = []): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { execFile: _ef } = (require as NodeRequire)("child_process") as typeof import("child_process");
+  return new Promise((resolve) => {
+    const script = "import sqlite3,json,sys\ndb=sqlite3.connect(sys.argv[1])\ndb.execute(sys.argv[2],json.loads(sys.argv[3]))\ndb.commit()\ndb.close()";
+    _ef("python3", ["-c", script, _EMAILS_DB, sql, JSON.stringify(params)], { timeout: 8000 }, () => resolve());
+  });
+}
+
+function _sqliteQueryEmails(sql: string, params: (string | number)[] = []): Promise<Record<string, unknown>[]> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { execFile: _ef } = (require as NodeRequire)("child_process") as typeof import("child_process");
+  return new Promise((resolve) => {
+    const script = "import sqlite3,json,sys\ndb=sqlite3.connect(sys.argv[1])\ndb.row_factory=sqlite3.Row\ncur=db.execute(sys.argv[2],json.loads(sys.argv[3]))\nrows=[dict(r) for r in cur.fetchall()]\ndb.close()\nprint(json.dumps(rows))";
+    _ef("python3", ["-c", script, _EMAILS_DB, sql, JSON.stringify(params)], { timeout: 10000 }, (err, stdout) => {
+      if (err) { console.error("[emails-pool-check] sqlite ERR:", String(err)); resolve([]); return; }
+      try { resolve(JSON.parse(stdout.trim())); } catch { resolve([]); }
+    });
+  });
+}
+
+let _emailsPoolCheckRunning = false;
+let _emailsPoolCheckStats: {
+  total: number; checked: number; valid: number; suspended: number; other: number; finishedAt: string | null; running: boolean;
+} = { total: 0, checked: 0, valid: 0, suspended: 0, other: 0, finishedAt: null, running: false };
+
+async function _runEmailsPoolCheck(batchConcurrency = 8): Promise<void> {
+  if (_emailsPoolCheckRunning) return;
+  _emailsPoolCheckRunning = true;
+  _emailsPoolCheckStats = { total: 0, checked: 0, valid: 0, suspended: 0, other: 0, finishedAt: null, running: true };
+  try {
+    const rows = await _sqliteQueryEmails(
+      "SELECT id, email, password FROM emails WHERE platform='outlook' AND status='active' ORDER BY last_checked_at ASC"
+    ) as Array<{ id: number; email: string; password: string }>;
+    _emailsPoolCheckStats.total = rows.length;
+    console.log("[emails-pool-check] 开始检测 active outlook total=", rows.length);
+    for (let i = 0; i < rows.length; i += batchConcurrency) {
+      const batch = rows.slice(i, i + batchConcurrency);
+      await Promise.all(batch.map(async (acc) => {
+        const now = new Date().toISOString();
+        try {
+          const result = await imapCheckLogin(acc.email, acc.password ?? "");
+          _emailsPoolCheckStats.checked++;
+          if (result.ok) {
+            _emailsPoolCheckStats.valid++;
+            await _sqliteExecEmails("UPDATE emails SET last_checked_at=? WHERE id=?", [now, acc.id]);
+          } else {
+            const errMsg = (result.error ?? "").toLowerCase();
+            const isBanned = /invalid.credentials|authentication.failed|incorrect.password|suspended|banned|account.lock|access.denied|disabled/i.test(errMsg);
+            if (isBanned) {
+              _emailsPoolCheckStats.suspended++;
+              await _sqliteExecEmails(
+                "UPDATE emails SET status='suspended', ban_reason=?, last_checked_at=?, updated_at=? WHERE id=?",
+                [(result.error ?? "imap_auth_failed").slice(0, 200), now, now, acc.id]
+              );
+            } else {
+              _emailsPoolCheckStats.other++;
+              await _sqliteExecEmails("UPDATE emails SET last_checked_at=? WHERE id=?", [now, acc.id]);
+            }
+          }
+        } catch (e: unknown) {
+          _emailsPoolCheckStats.other++;
+          console.warn("[emails-pool-check] 单账号异常", acc.email, String(e));
+        }
+      }));
+      if (i % (batchConcurrency * 10) === 0) {
+        console.log("[emails-pool-check] 进度 batch=", Math.floor(i / batchConcurrency) + 1, _emailsPoolCheckStats);
+      }
+      await new Promise(r => setTimeout(r, 300));
+    }
+  } catch (e: unknown) {
+    console.error("[emails-pool-check] 异常", String(e));
+  } finally {
+    _emailsPoolCheckRunning = false;
+    _emailsPoolCheckStats.running = false;
+    _emailsPoolCheckStats.finishedAt = new Date().toISOString();
+    console.log("[emails-pool-check] 完成", _emailsPoolCheckStats);
+  }
+}
+
+// POST /tools/outlook/emails-pool-check  — 启动后台检测
+router.post("/tools/outlook/emails-pool-check", (_req, res) => {
+  if (_emailsPoolCheckRunning) {
+    res.json({ success: true, started: false, running: true, stats: _emailsPoolCheckStats });
+    return;
+  }
+  _runEmailsPoolCheck().catch((e) => console.error("[emails-pool-check] uncaught", String(e)));
+  res.json({ success: true, started: true, message: "邮件池 IMAP 健康检测已在后台启动" });
+});
+
+// GET /tools/outlook/emails-pool-check/status  — 查询进度
+router.get("/tools/outlook/emails-pool-check/status", (_req, res) => {
+  res.json({ success: true, stats: _emailsPoolCheckStats });
+});
+
+
 export default router;
