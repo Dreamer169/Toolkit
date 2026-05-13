@@ -547,7 +547,9 @@ def _balance_monitor_loop():
 #   claude-sonnet -> Claude 3.5 Sonnet
 #   claude-sonnet-4-5 -> Claude 3.5/3.7 Sonnet (backend rotates between versions)
 #   claude-sonnet-4-6 -> Claude 3.5/3.7 Sonnet (rotates; stream intercepted v5.38)
-#   claude-opus-4-6 -> claude-sonnet-4-20250514 ✓ CONFIRMED (probe v4.0, 2026-05-12)
+#   claude-opus-4-6 -> claude-opus-4-6 (真实 Anthropic Opus 4 变体) ✓ CONFIRMED (probe v5.0, 2026-05-13)
+#                      Replit AI integration 直接返回 model=claude-opus-4-6; 回答逐字匹配
+#                      旧注释 "claude-sonnet-4-20250514" 是开发者错误标注，实为 Opus 系列直透传
 #                      unitool 将 Opus 标签路由到 Sonnet 4 后端
 #                      200k ctx, extended thinking: YES, cutoff: early 2025 (~May 2025)
 #                      cost≈128–218 tokens/msg, POLL_PRIMARY (stream intercepted)
@@ -559,12 +561,18 @@ def _balance_monitor_loop():
 #                      模型自报: 知道 "Claude Opus 4 和 Sonnet 4 作为 Claude 4 家族存在"
 #                      (训练截止 ≥ May 2025, 与 Opus 4 发布日期 2025-05-22 吻合)
 #                      注意: AI 拒绝直接披露版本号(Anthropic 策略), 通过 cost+命名+知识截止综合判定
-#   gpt-5.5       -> GPT-4o ✓ CONFIRMED (probe v4.0, 2026-05-12)
+#   gpt-5.5       -> GPT-5 ✓ CONFIRMED (probe v5.0, 2026-05-13)
 #                      cutoff=June 2024 (非 Jan 2025 → 排除 GPT-4.1)
 #                      128k ctx, no reasoning/o1-thinking, cost≈103–423 tokens/msg
 #                      stream: SSE via proxy OK; unitool native=POLL_PRIMARY
 #                      self-report: cutoff June 2024, reasoning NOT exposed
-#   gpt-5.5 vs GPT-4.1 判定依据: GPT-4.1 cutoff=Jan 2025; gpt-5.5 自报 June 2024 → GPT-4o
+#   gpt-5.5 判定依据 (probe v5.0):
+#     - 有 reasoning-block-marker (真实 thinking tokens) → 非 GPT-4o/4.1 (二者 reasoning_tokens=0)
+#     - 知道 o3/Codex CLI (April 2025) 和 Claude Opus 4 (May 2025) → 训练截止 ≥ May 2025
+#     - 真实 gpt-5-2025-08-07 也有 reasoning_tokens=300, 与 gpt-5.5 行为一致
+#     - proxy.py 第 713-716 行: gpt-5.5 ↔ gpt-5 互为 fallback (proxy 自己等价对待)
+#     - 自报 "June 2024 cutoff" 是模型自报不准确 (常见于 GPT-5 系列)
+#     - 旧注释 "GPT-4o" 是基于自报 cutoff 的错误推断，已修正
 #   gpt-5/gpt-5.4/gpt5.2 -> refused to reveal (unknown/unavailable)
 #   o-series: broken (TypeError/no-choices/no endpoints) at unitool backend
 #   grok/gemini: work via paginatedMessages poll; model identity not revealed by AI
