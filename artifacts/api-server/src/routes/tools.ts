@@ -3394,9 +3394,13 @@ router.get("/tools/outlook/accounts", async (req, res) => {
       needs_oauth_auto: (sc["needs_oauth"] ?? 0),  // 近似，不扣 manual
       noauth:    0,  // 需要单独查（token+refresh_token 均空）
     };
-    // noauth 单独统计
+    // noauth 单独统计：只计真正可修复的（排除 abuse_mode/not_found/wrong_password）
     const noauthRes = await query<{ cnt: string }>(
-      `SELECT COUNT(*)::text AS cnt FROM accounts WHERE ${baseWhere} AND COALESCE(token,'')='' AND COALESCE(refresh_token,'')=''`,
+      `SELECT COUNT(*)::text AS cnt FROM accounts WHERE ${baseWhere}
+         AND COALESCE(token,'')='' AND COALESCE(refresh_token,'')=''
+         AND status NOT IN ('suspended','wrong_password')
+         AND COALESCE(tags,'') NOT LIKE '%abuse_mode%'
+         AND COALESCE(tags,'') NOT LIKE '%not_found%'`,
       search ? [params[0]] : []
     );
     statusCounts.noauth = parseInt(noauthRes[0]?.cnt ?? "0");
