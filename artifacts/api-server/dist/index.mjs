@@ -73759,8 +73759,7 @@ router2.post("/tools/outlook/enable-imap", async (req, res) => {
       res.status(400).json({ success: false, error: "\u5FC5\u987B\u63D0\u4F9B account_id \u6216 email" });
       return;
     }
-    const { spawn: spawn6 } = await import("child_process");
-    const scriptPath = new URL("../enable_imap.py", import.meta.url).pathname;
+    const scriptPath = new URL("../enable_imap_v5.py", import.meta.url).pathname;
     const args = [];
     if (account_id) {
       args.push("--account-id", String(account_id));
@@ -73769,56 +73768,57 @@ router2.post("/tools/outlook/enable-imap", async (req, res) => {
     }
     if (proxy) args.push("--proxy", proxy);
     args.push("--headless", headless ? "true" : "false");
-    const logPath = `/tmp/enable_imap_${account_id ?? (email ?? "x").split("@")[0]}.log`;
-    const { openSync } = await import("fs");
-    const logFd = openSync(logPath, "a");
+    const label = account_id ? String(account_id) : (email ?? "x").split("@")[0];
+    const jobId = `imap5_${label}_${Date.now()}`;
+    const job = await jobQueue.create(jobId);
+    const { spawn: spawn6 } = await import("child_process");
     const child = spawn6("python3", [scriptPath, ...args], {
-      env: { ...process.env, PYTHONUNBUFFERED: "1" },
-      stdio: ["ignore", logFd, logFd]
+      env: { ...process.env, PYTHONUNBUFFERED: "1", DISPLAY: ":99" }
     });
-    await new Promise((resolve) => {
-      child.on("close", resolve);
-      setTimeout(resolve, 3e5);
-    });
-    const { readFileSync: readFileSync2 } = await import("fs");
-    let log = "";
-    try {
-      log = readFileSync2(logPath, "utf8").slice(-6e3);
-    } catch {
-    }
-    const success = child.exitCode === 0;
-    res.json({ success, exitCode: child.exitCode, log });
+    jobQueue.setChild(jobId, child);
+    child.stdout?.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => jobQueue.pushLog(jobId, { type: "log", message: l })));
+    child.stderr?.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => jobQueue.pushLog(jobId, { type: "log", message: "[err] " + l })));
+    child.on("close", (code) => jobQueue.finish(jobId, code ?? -1, code === 0 ? "done" : "failed"));
+    void job;
+    res.json({ success: true, jobId, message: "IMAP \u5F00\u542F\u4EFB\u52A1\u5DF2\u542F\u52A8\uFF0C\u8BF7\u8F6E\u8BE2 /api/tools/jobs/" + jobId });
   } catch (e) {
     res.status(500).json({ success: false, error: String(e) });
   }
 });
 router2.post("/tools/outlook/enable-imap/batch", async (req, res) => {
   try {
-    const { ids = [], proxy = "", headless = true } = req.body;
+    const { ids = [], proxy = "", headless = true, concurrency = 1 } = req.body;
     if (!ids.length) {
       res.status(400).json({ success: false, error: "\u5FC5\u987B\u63D0\u4F9B ids \u6570\u7EC4" });
       return;
     }
+    const scriptPath = new URL("../enable_imap_v5.py", import.meta.url).pathname;
     const { spawn: spawn6 } = await import("child_process");
-    const scriptPath = new URL("../enable_imap.py", import.meta.url).pathname;
-    const results = [];
-    for (const aid of ids) {
-      const args = ["--account-id", String(aid), "--headless", headless ? "true" : "false"];
-      if (proxy) args.push("--proxy", proxy);
-      const child = spawn6("python3", [scriptPath, ...args], {
-        env: { ...process.env, PYTHONUNBUFFERED: "1" },
-        stdio: "inherit"
-      });
-      const code = await new Promise((resolve) => {
-        child.on("close", (c) => resolve(c));
-        setTimeout(() => {
-          child.kill("SIGTERM");
-          resolve(null);
-        }, 3e5);
-      });
-      results.push({ account_id: aid, success: code === 0, exitCode: code });
+    const jobIds = [];
+    const batchSize = Math.max(1, Math.min(concurrency, 3));
+    for (let i = 0; i < ids.length; i += batchSize) {
+      const batch = ids.slice(i, i + batchSize);
+      await Promise.all(batch.map(async (aid) => {
+        const jobId = `imap5_${aid}_${Date.now()}`;
+        jobIds.push(jobId);
+        const job = await jobQueue.create(jobId);
+        void job;
+        const args = ["--account-id", String(aid), "--headless", headless ? "true" : "false"];
+        if (proxy) args.push("--proxy", proxy);
+        const child = spawn6("python3", [scriptPath, ...args], {
+          env: { ...process.env, PYTHONUNBUFFERED: "1", DISPLAY: ":99" }
+        });
+        jobQueue.setChild(jobId, child);
+        child.stdout?.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => jobQueue.pushLog(jobId, { type: "log", message: l })));
+        child.stderr?.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => jobQueue.pushLog(jobId, { type: "log", message: "[err] " + l })));
+        child.on("close", (code) => jobQueue.finish(jobId, code ?? -1, code === 0 ? "done" : "failed"));
+        await new Promise((resolve) => {
+          child.on("close", () => resolve());
+          setTimeout(resolve, 36e4);
+        });
+      }));
     }
-    res.json({ success: true, results });
+    res.json({ success: true, jobIds, total: ids.length, message: "\u6279\u91CF IMAP \u5F00\u542F\u5DF2\u542F\u52A8" });
   } catch (e) {
     res.status(500).json({ success: false, error: String(e) });
   }
@@ -74370,6 +74370,8 @@ router2.get("/tools/outlook/register/:jobId", async (req, res) => {
   });
 });
 function classifyToolJob(jobId) {
+  if (jobId.startsWith("fw_")) return { source: "tools", kind: "outlook_full_workflow", title: "Outlook \u5B8C\u6574\u5DE5\u4F5C\u6D41" };
+  if (jobId.startsWith("imap5_")) return { source: "tools", kind: "outlook_enable_imap", title: "Outlook IMAP\u5F00\u542F" };
   if (jobId.startsWith("reg_")) return { source: "tools", kind: "outlook_register", title: "Outlook \u6CE8\u518C" };
   if (jobId.startsWith("curhttp_")) return { source: "tools", kind: "cursor_http_register", title: "Cursor HTTP \u6CE8\u518C" };
   if (jobId.startsWith("cur_")) return { source: "tools", kind: "cursor_register", title: "Cursor \u6CE8\u518C" };
@@ -77583,6 +77585,98 @@ router2.post("/tools/outlook/batch-scan-inbox", async (req, res) => {
   } catch (e) {
     res.status(500).json({ success: false, error: String(e) });
   }
+});
+router2.post("/tools/outlook/full-workflow", async (req, res) => {
+  try {
+    const {
+      count = 1,
+      email = "",
+      password = "",
+      proxy = "",
+      headless = true,
+      skip_imap = false,
+      delay = 8,
+      output = ""
+    } = req.body;
+    const scriptPath = new URL("../outlook_full_workflow.py", import.meta.url).pathname;
+    const args = [
+      "--count",
+      String(Math.max(1, Math.min(count, 20))),
+      "--headless",
+      headless ? "true" : "false",
+      "--delay",
+      String(delay)
+    ];
+    if (email) args.push("--email", email);
+    if (password) args.push("--password", password);
+    if (proxy) args.push("--proxy", proxy);
+    if (skip_imap) args.push("--skip-imap");
+    if (output) args.push("--output", output);
+    const jobId = `fw_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const job = await jobQueue.create(jobId);
+    void job;
+    const { spawn: spawn6 } = await import("child_process");
+    const child = spawn6("python3", [scriptPath, ...args], {
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: "1",
+        DISPLAY: ":99",
+        DATABASE_URL: process.env.DATABASE_URL ?? "postgresql://postgres:postgres@localhost/toolkit"
+      },
+      cwd: new URL("..", import.meta.url).pathname
+    });
+    jobQueue.setChild(jobId, child);
+    child.stdout?.on("data", (d) => {
+      d.toString().split("\n").filter(Boolean).forEach((line) => {
+        jobQueue.pushLog(jobId, { type: "log", message: line });
+        try {
+          const parsed = JSON.parse(line);
+          if (Array.isArray(parsed)) {
+            for (const r of parsed) {
+              if (r.email && r.success) {
+                jobQueue.pushAccount(jobId, { email: r.email, password: r.password ?? "" });
+              }
+            }
+          }
+        } catch {
+        }
+      });
+    });
+    child.stderr?.on("data", (d) => d.toString().split("\n").filter(Boolean).forEach((l) => jobQueue.pushLog(jobId, { type: "log", message: "[err] " + l })));
+    child.on("close", (code) => jobQueue.finish(jobId, code ?? -1, code === 0 ? "done" : "failed"));
+    res.json({
+      success: true,
+      jobId,
+      message: `\u5B8C\u6574\u5DE5\u4F5C\u6D41\u5DF2\u542F\u52A8\uFF08count=${count}, skip_imap=${skip_imap}\uFF09\uFF0C\u8F6E\u8BE2 /api/tools/jobs/${jobId}`
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+router2.get("/tools/outlook/full-workflow/:jobId", async (req, res) => {
+  const job = await jobQueue.get(req.params.jobId);
+  if (!job) {
+    res.status(404).json({ success: false, error: "\u4EFB\u52A1\u4E0D\u5B58\u5728" });
+    return;
+  }
+  const since = Number(req.query.since ?? 0);
+  res.json({
+    success: true,
+    jobId: job.jobId,
+    status: job.status,
+    accounts: job.accounts,
+    logs: job.logs.slice(since),
+    nextSince: job.logs.length,
+    exitCode: job.exitCode
+  });
+});
+router2.delete("/tools/outlook/full-workflow/:jobId", (req, res) => {
+  const stopped = jobQueue.stop(req.params.jobId);
+  if (!stopped) {
+    res.status(404).json({ success: false });
+    return;
+  }
+  res.json({ success: true });
 });
 var tools_default = router2;
 

@@ -1368,7 +1368,7 @@ router.get("/tools/outlook/imap-idle/events", async (req, res) => {
 
 
 // ── POST /tools/outlook/enable-imap ─────────────────────────────────────────
-// 为单个/批量 Outlook 账号开启 IMAP 访问（处理微软全流程安全验证）
+// 为单个 Outlook 账号开启 IMAP+POP（enable_imap_v5.py，异步 jobQueue 模式）
 // Body: { account_id?: number, email?: string, password?: string, proxy?: string, headless?: boolean }
 router.post('/tools/outlook/enable-imap', async (req, res) => {
   try {
@@ -1391,8 +1391,7 @@ router.post('/tools/outlook/enable-imap', async (req, res) => {
       return;
     }
 
-    const { spawn } = await import('child_process');
-    const scriptPath = new URL('../enable_imap.py', import.meta.url).pathname;
+    const scriptPath = new URL('../enable_imap_v5.py', import.meta.url).pathname;
     const args: string[] = [];
     if (account_id) {
       args.push('--account-id', String(account_id));
@@ -1402,63 +1401,82 @@ router.post('/tools/outlook/enable-imap', async (req, res) => {
     if (proxy) args.push('--proxy', proxy);
     args.push('--headless', headless ? 'true' : 'false');
 
-    const logPath = `/tmp/enable_imap_${account_id ?? (email ?? 'x').split('@')[0]}.log`;
-    const { openSync } = await import('fs');
-    const logFd = openSync(logPath, 'a');
+    const label = account_id ? String(account_id) : (email ?? 'x').split('@')[0];
+    const jobId = `imap5_${label}_${Date.now()}`;
+    const job = await jobQueue.create(jobId);
 
+    const { spawn } = await import('child_process');
     const child = spawn('python3', [scriptPath, ...args], {
-      env: { ...(process.env as Record<string, string>), PYTHONUNBUFFERED: '1' },
-      stdio: ['ignore', logFd, logFd],
+      env: { ...(process.env as Record<string, string>), PYTHONUNBUFFERED: '1', DISPLAY: ':99' },
     });
+    jobQueue.setChild(jobId, child);
+    child.stdout?.on('data', (d: Buffer) =>
+      d.toString().split('\n').filter(Boolean).forEach((l: string) =>
+        jobQueue.pushLog(jobId, { type: 'log', message: l })));
+    child.stderr?.on('data', (d: Buffer) =>
+      d.toString().split('\n').filter(Boolean).forEach((l: string) =>
+        jobQueue.pushLog(jobId, { type: 'log', message: '[err] ' + l })));
+    child.on('close', (code: number | null) =>
+      jobQueue.finish(jobId, code ?? -1, code === 0 ? 'done' : 'failed'));
 
-    await new Promise<void>((resolve) => {
-      child.on('close', resolve);
-      setTimeout(resolve, 300_000); // 5 min max
-    });
-
-    const { readFileSync } = await import('fs');
-    let log = '';
-    try { log = readFileSync(logPath, 'utf8').slice(-6000); } catch { /* ok */ }
-    const success = child.exitCode === 0;
-    res.json({ success, exitCode: child.exitCode, log });
+    void job;
+    res.json({ success: true, jobId, message: 'IMAP 开启任务已启动，请轮询 /api/tools/jobs/' + jobId });
   } catch (e: unknown) {
     res.status(500).json({ success: false, error: String(e) });
   }
 });
 
 // ── POST /tools/outlook/enable-imap/batch ────────────────────────────────────
-// 批量开启 IMAP（逐个顺序处理，返回每个账号的结果）
+// 批量开启 IMAP+POP（enable_imap_v5.py，异步 jobQueue，每账号独立任务）
 router.post('/tools/outlook/enable-imap/batch', async (req, res) => {
   try {
-    const { ids = [], proxy = '', headless = true } = req.body as {
+    const { ids = [], proxy = '', headless = true, concurrency = 1 } = req.body as {
       ids?: number[];
       proxy?: string;
       headless?: boolean;
+      concurrency?: number;
     };
     if (!ids.length) {
       res.status(400).json({ success: false, error: '必须提供 ids 数组' });
       return;
     }
 
+    const scriptPath = new URL('../enable_imap_v5.py', import.meta.url).pathname;
     const { spawn } = await import('child_process');
-    const scriptPath = new URL('../enable_imap.py', import.meta.url).pathname;
-    const results: Array<{ account_id: number; success: boolean; exitCode: number | null }> = [];
+    const jobIds: string[] = [];
 
-    for (const aid of ids) {
-      const args = ['--account-id', String(aid), '--headless', headless ? 'true' : 'false'];
-      if (proxy) args.push('--proxy', proxy);
-      const child = spawn('python3', [scriptPath, ...args], {
-        env: { ...(process.env as Record<string, string>), PYTHONUNBUFFERED: '1' },
-        stdio: 'inherit',
-      });
-      const code = await new Promise<number | null>((resolve) => {
-        child.on('close', (c) => resolve(c));
-        setTimeout(() => { child.kill('SIGTERM'); resolve(null); }, 300_000);
-      });
-      results.push({ account_id: aid, success: code === 0, exitCode: code });
+    // 按 concurrency 分批并发（默认 1 = 串行，防止多浏览器抢代理）
+    const batchSize = Math.max(1, Math.min(concurrency, 3));
+    for (let i = 0; i < ids.length; i += batchSize) {
+      const batch = ids.slice(i, i + batchSize);
+      await Promise.all(batch.map(async (aid) => {
+        const jobId = `imap5_${aid}_${Date.now()}`;
+        jobIds.push(jobId);
+        const job = await jobQueue.create(jobId);
+        void job;
+        const args = ['--account-id', String(aid), '--headless', headless ? 'true' : 'false'];
+        if (proxy) args.push('--proxy', proxy);
+        const child = spawn('python3', [scriptPath, ...args], {
+          env: { ...(process.env as Record<string, string>), PYTHONUNBUFFERED: '1', DISPLAY: ':99' },
+        });
+        jobQueue.setChild(jobId, child);
+        child.stdout?.on('data', (d: Buffer) =>
+          d.toString().split('\n').filter(Boolean).forEach((l: string) =>
+            jobQueue.pushLog(jobId, { type: 'log', message: l })));
+        child.stderr?.on('data', (d: Buffer) =>
+          d.toString().split('\n').filter(Boolean).forEach((l: string) =>
+            jobQueue.pushLog(jobId, { type: 'log', message: '[err] ' + l })));
+        child.on('close', (code: number | null) =>
+          jobQueue.finish(jobId, code ?? -1, code === 0 ? 'done' : 'failed'));
+        // wait for this account to finish before next batch slot
+        await new Promise<void>((resolve) => {
+          child.on('close', () => resolve());
+          setTimeout(resolve, 360_000);
+        });
+      }));
     }
 
-    res.json({ success: true, results });
+    res.json({ success: true, jobIds, total: ids.length, message: '批量 IMAP 开启已启动' });
   } catch (e: unknown) {
     res.status(500).json({ success: false, error: String(e) });
   }
@@ -2091,6 +2109,8 @@ router.get("/tools/outlook/register/:jobId", async (req, res) => {
 
 // 列出所有任务（实时监控用）
 function classifyToolJob(jobId: string) {
+  if (jobId.startsWith("fw_"))     return { source: "tools", kind: "outlook_full_workflow", title: "Outlook 完整工作流" };
+  if (jobId.startsWith("imap5_")) return { source: "tools", kind: "outlook_enable_imap", title: "Outlook IMAP开启" };
   if (jobId.startsWith("reg_")) return { source: "tools", kind: "outlook_register", title: "Outlook 注册" };
   if (jobId.startsWith("curhttp_")) return { source: "tools", kind: "cursor_http_register", title: "Cursor HTTP 注册" };
   if (jobId.startsWith("cur_")) return { source: "tools", kind: "cursor_register", title: "Cursor 注册" };
@@ -5545,5 +5565,116 @@ router.post("/tools/outlook/batch-scan-inbox", async (req, res) => {
     res.status(500).json({ success: false, error: String(e) });
   }
 });
+
+// ── POST /tools/outlook/full-workflow ────────────────────────────────────────
+// 完整 Outlook 工作流：CF IP 注册 + OAuth + IMAP+POP 开启（IP一致性保证）
+// 注册阶段：CF VLESS tunnel（保证注册/OAuth同一IP）
+// IMAP阶段：ISP 端口（enable_imap_v5内部_find_isp_proxy自动选，MS SPA渲染需要）
+// Body: { count?, email?, password?, proxy?, headless?, skip_imap?, delay?, output? }
+router.post('/tools/outlook/full-workflow', async (req, res) => {
+  try {
+    const {
+      count = 1,
+      email = '',
+      password = '',
+      proxy = '',
+      headless = true,
+      skip_imap = false,
+      delay = 8,
+      output = '',
+    } = req.body as {
+      count?: number;
+      email?: string;
+      password?: string;
+      proxy?: string;
+      headless?: boolean;
+      skip_imap?: boolean;
+      delay?: number;
+      output?: string;
+    };
+
+    const scriptPath = new URL('../outlook_full_workflow.py', import.meta.url).pathname;
+    const args: string[] = [
+      '--count', String(Math.max(1, Math.min(count, 20))),
+      '--headless', headless ? 'true' : 'false',
+      '--delay', String(delay),
+    ];
+    if (email)     args.push('--email',    email);
+    if (password)  args.push('--password', password);
+    if (proxy)     args.push('--proxy',    proxy);
+    if (skip_imap) args.push('--skip-imap');
+    if (output)    args.push('--output',   output);
+
+    const jobId = `fw_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const job = await jobQueue.create(jobId);
+    void job;
+
+    const { spawn } = await import('child_process');
+    const child = spawn('python3', [scriptPath, ...args], {
+      env: {
+        ...(process.env as Record<string, string>),
+        PYTHONUNBUFFERED: '1',
+        DISPLAY: ':99',
+        DATABASE_URL: process.env.DATABASE_URL ?? 'postgresql://postgres:postgres@localhost/toolkit',
+      },
+      cwd: new URL('..', import.meta.url).pathname,
+    });
+    jobQueue.setChild(jobId, child);
+
+    child.stdout?.on('data', (d: Buffer) => {
+      d.toString().split('\n').filter(Boolean).forEach((line: string) => {
+        jobQueue.pushLog(jobId, { type: 'log', message: line });
+        // parse account from JSON summary line
+        try {
+          const parsed = JSON.parse(line) as Array<{ email?: string; password?: string; success?: boolean; imap_enabled?: boolean }>;
+          if (Array.isArray(parsed)) {
+            for (const r of parsed) {
+              if (r.email && r.success) {
+                jobQueue.pushAccount(jobId, { email: r.email, password: r.password ?? '' });
+              }
+            }
+          }
+        } catch { /* not JSON */ }
+      });
+    });
+    child.stderr?.on('data', (d: Buffer) =>
+      d.toString().split('\n').filter(Boolean).forEach((l: string) =>
+        jobQueue.pushLog(jobId, { type: 'log', message: '[err] ' + l })));
+    child.on('close', (code: number | null) =>
+      jobQueue.finish(jobId, code ?? -1, code === 0 ? 'done' : 'failed'));
+
+    res.json({
+      success: true,
+      jobId,
+      message: `完整工作流已启动（count=${count}, skip_imap=${skip_imap}），轮询 /api/tools/jobs/${jobId}`,
+    });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+// ── GET /tools/outlook/full-workflow/:jobId ───────────────────────────────────
+router.get('/tools/outlook/full-workflow/:jobId', async (req, res) => {
+  const job = await jobQueue.get(req.params.jobId);
+  if (!job) { res.status(404).json({ success: false, error: '任务不存在' }); return; }
+  const since = Number(req.query.since ?? 0);
+  res.json({
+    success: true,
+    jobId: job.jobId,
+    status: job.status,
+    accounts: job.accounts,
+    logs: job.logs.slice(since),
+    nextSince: job.logs.length,
+    exitCode: job.exitCode,
+  });
+});
+
+// ── DELETE /tools/outlook/full-workflow/:jobId ────────────────────────────────
+router.delete('/tools/outlook/full-workflow/:jobId', (req, res) => {
+  const stopped = jobQueue.stop(req.params.jobId);
+  if (!stopped) { res.status(404).json({ success: false }); return; }
+  res.json({ success: true });
+});
+
 
 export default router;

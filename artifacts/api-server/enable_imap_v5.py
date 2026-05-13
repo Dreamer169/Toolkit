@@ -721,6 +721,16 @@ def _page_state(page) -> str:
 
 
 
+def _has_signin_wall(page) -> bool:
+    """Return True if the IMAP panel is showing the Sign-in wall (not the toggle panel).
+    The Sign-in wall shows: 'Sign in and verify your account to forward your email
+    or sync to your devices.' — this means OAuth verification is required.
+    """
+    txt = _txt(page).lower()
+    WALL_KWS = ("sign in and verify", "verify your account to forward", "sync to your devices")
+    return any(k in txt for k in WALL_KWS)
+
+
 def _handle_fwd_signin(page, email: str, password: str) -> bool:
     """
     v9.37 FIX: Handle the 'Sign in' button inside the 'Forwarding and IMAP' settings panel.
@@ -1490,12 +1500,20 @@ def _has_imap_content(page, timeout_ms=10000) -> bool:
         "imap access", "enable imap", "pop and imap", "pop access",
         "imap settings", "pop/imap", "let devices and apps use imap",
         "pop access and forwarding",
+        # NOTE: "sign in and verify" etc deliberately EXCLUDED — those indicate
+        # the Sign-in WALL (IMAP not unlocked yet), not actual IMAP content.
+    )
+    # FIX-A: Sign-in wall keywords = IMAP NOT unlocked → return False explicitly
+    SIGNIN_WALL_KWS = (
         "sign in and verify", "verify your account to forward",
         "sync to your devices",
     )
     txt = _txt(page).lower()
-    if _still_on_outlook() and any(k in txt for k in IMAP_PANEL_KWS):
+    _has_wall = _still_on_outlook() and any(k in txt for k in SIGNIN_WALL_KWS)
+    _has_panel = _still_on_outlook() and any(k in txt for k in IMAP_PANEL_KWS)
+    if _has_panel and not _has_wall:
         return True
+    # Panel not yet visible (or wall blocking) — fall through to Level 3
 
     # ── Level 3: radio/switch with IMAP/POP context ────────────────────────
     # CRITICAL: only count radio/switch if IMAP or POP specific text is nearby.
@@ -1986,26 +2004,52 @@ def enable_imap(email, password, account_id=None,
         # Must click Sign in + handle login before IMAP/POP toggles appear.
         log("  [fwd-panel] checking for Sign in prompt...")
         _signin_handled = _handle_fwd_signin(page, email, password)
-        if _signin_handled:
-            log("  [fwd-panel] Sign in handled — waiting 8s for page to settle...")
-            page.wait_for_timeout(8000)
-            _ss(page, "05c_after_signin", label)
-            u_after = _url(page)
-            log(f"  [fwd-panel] post-signin url={u_after[:100]}")
-            # Skip any post-login prompts
-            for _ in range(4):
-                if not _skip_interrupts(page):
-                    break
-                page.wait_for_timeout(1500)
-            # Navigate back to IMAP settings if redirected away
-            if "options/mail" not in _url(page) and "popimap" not in _url(page):
-                log("  [fwd-panel] not on IMAP page after signin — re-navigating...")
-                state = _nav_to_imap_direct(page)
+        # FIX-D: retry sign-in loop — attempt signin up to 2 times if wall persists
+        _signin_attempts = 0
+        while _signin_handled or _signin_attempts == 0:
+            if _signin_handled:
+                log("  [fwd-panel] Sign in handled — waiting 10s for popup auth to complete...")
+                page.wait_for_timeout(10000)
+                _ss(page, "05c_after_signin", label)
+                u_after = _url(page)
+                log(f"  [fwd-panel] post-signin url={u_after[:100]}")
+                # Skip any post-login interrupts
+                for _ in range(5):
+                    if not _skip_interrupts(page):
+                        break
+                    page.wait_for_timeout(1500)
+
+            # FIX-C: Full page navigation to IMAP URL (not just menu re-click).
+            # This forces MS to re-evaluate auth state and show IMAP/POP toggles.
+            # Step 1: Navigate to inbox to clear settings state
+            try:
+                log("  [fwd-panel] FIX-C: navigating to inbox to refresh auth state...")
+                page.goto("https://outlook.live.com/mail/0/", wait_until="domcontentloaded", timeout=12000)
                 page.wait_for_timeout(3000)
-            # Try to open the IMAP panel (now unlocked)
+            except Exception as _e:
+                log(f"  [fwd-panel] inbox nav error: {_e}")
+            # Step 2: Navigate directly to IMAP settings URL
+            log("  [fwd-panel] FIX-C: navigating to IMAP settings URL...")
+            _nav_to_imap_direct(page)
+            page.wait_for_timeout(4000)
+            # Step 3: Click the Forwarding and IMAP menu item
             _click_fwd_imap_menu(page)
             page.wait_for_timeout(5000)
             _ss(page, "05d_imap_unlocked", label)
+
+            # Check if Sign-in wall is gone
+            if not _has_signin_wall(page):
+                log("  [fwd-panel] ✅ Sign-in wall gone — IMAP panel should be unlocked")
+                break
+            _signin_attempts += 1
+            if _signin_attempts >= 2:
+                log(f"  [fwd-panel] ❌ Sign-in wall persists after {_signin_attempts} attempts")
+                break
+            log(f"  [fwd-panel] Sign-in wall still present (attempt {_signin_attempts}) — retrying sign-in...")
+            _signin_handled = _handle_fwd_signin(page, email, password)
+            if not _signin_handled:
+                log("  [fwd-panel] no Sign in button found on retry — giving up")
+                break
 
         # ── Step N+1: Check IMAP content one more time ───────────────────────
         if not _has_imap_content(page, 8000):
@@ -2015,6 +2059,13 @@ def enable_imap(email, password, account_id=None,
             return False
 
         # ── Step N+2: Toggle IMAP on ─────────────────────────────────────────
+        # FIX-E: Guard — abort if Sign-in wall still visible (toggles won't exist)
+        if _has_signin_wall(page):
+            log("  [imap-toggle] ❌ Sign-in wall STILL present — cannot toggle IMAP")
+            log(f"  [imap-toggle] url={_url(page)[:100]}")
+            log(f"  [imap-toggle] text={_txt(page)[:300]}")
+            return False
+
         page.wait_for_timeout(2000)
         res = _toggle_imap(page)
         log(f"  [imap-toggle] result: {res}")
