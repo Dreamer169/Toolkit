@@ -297,6 +297,17 @@ async function runCheck() {
           if (_freshTags.includes("not_found")) {
             await execute("UPDATE accounts SET status='suspended', tags=CASE WHEN COALESCE(tags,'')='' THEN 'abuse_mode' WHEN tags NOT LIKE '%abuse_mode%' THEN tags||',abuse_mode' ELSE tags END, updated_at=NOW() WHERE id=$1", [acc.id]);
             logger.warn({ email: acc.email }, "[healthcheck] MS报告账号不存在(not_found)，已自动暂停，停止重试");
+          } else if (_reason2 === "code_invalid_or_expired") {
+            // 企业/AAD 账号在 needs_oauth_manual 重试路径中被发现——打标停止重试
+            await execute(
+              `UPDATE accounts SET status='needs_oauth',
+                 tags=(SELECT NULLIF(string_agg(DISTINCT tag,','),'')
+                       FROM unnest(string_to_array(COALESCE(tags,'')||',enterprise_account',',')) AS tag
+                       WHERE tag<>''),
+                 updated_at=NOW() WHERE id=$1`,
+              [acc.id]
+            );
+            logger.warn({ email: acc.email }, "[healthcheck] 重试时发现企业/AAD账号，已标记 enterprise_account");
           } else {
             await execute("UPDATE accounts SET status='needs_oauth', updated_at=NOW() WHERE id=$1", [acc.id]);
             logger.warn({ email: acc.email }, "[healthcheck] needs_oauth_manual 重试仍失败，1h后再试");
