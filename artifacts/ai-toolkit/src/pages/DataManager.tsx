@@ -171,7 +171,7 @@ function StatsPanel() {
                 {uStats.ref.pool_available ?? 0}<span className="text-base text-gray-600">/{uStats.ref.pool_total ?? 0}</span>
               </div>
               <div className="text-xs text-gray-400 mt-1">ref 码池可用</div>
-              <div className="text-xs text-gray-600">{uStats.ref.total_slots ?? 0} 个余额（每注册 -1）</div>
+              <div className="text-xs text-gray-600">{uStats.ref.total_slots ?? 0} 个剩余邀请名额</div>
             </div>
           </div>
 
@@ -298,7 +298,7 @@ function StatsPanel() {
                   </span>
                 </div>
                 <div className="flex justify-between text-xs">
-                  <span className="text-gray-500">余额（剩余邀请名额）</span>
+                  <span className="text-gray-500">剩余邀请名额</span>
                   <span className="text-amber-400 font-bold">{uStats.ref.total_slots ?? 0} 个</span>
                 </div>
                 
