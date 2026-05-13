@@ -798,9 +798,9 @@ MODEL_ALIASES = {
     "gpt-3.5-turbo-16k": "gpt-4o-mini", "text-davinci-003": "gpt-4o-mini",
     # v5.40: o-series unitool endpoints permanently broken → reroute to best working alternative
     # gpt-5.5 = gpt-5-2025-08-07 (has reasoning_tokens, best available replacement)
-    o1: gpt-5.5, o1-mini: gpt-5.5, o1-pro: gpt-5.5,
-    o1-preview: gpt-5.5, o3: gpt-5.5, o3-mini: gpt-5.5,
-    o4-mini: gpt-5.4, o4: gpt-5.5,
+    "o1": "gpt-5.5", "o1-mini": "gpt-5.5", "o1-pro": "gpt-5.5",
+    "o1-preview": "gpt-5.5", "o3": "gpt-5.5", "o3-mini": "gpt-5.5",
+    "o4-mini": "gpt-5.4", "o4": "gpt-5.5",
     "gpt-5-turbo": "gpt-5.5", "chatgpt-5": "gpt-5.5", "chatgpt-5-turbo": "gpt-5.5",  # v5.40: gpt-5 stream broken; gpt-5.5 same backend + reliable poll
     "chatgpt-5.5": "gpt-5.5", "chatgpt-5.5-turbo": "gpt-5.5", "chatgpt": "gpt-5.5",
     "claude-opus": "claude-opus-4-6", "claude-opus-4": "claude-opus-4-6",  # v5.40: claude-opus broken; redirect to working 4-6
