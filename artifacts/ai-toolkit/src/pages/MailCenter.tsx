@@ -122,9 +122,7 @@ export default function MailCenter() {
   const [accSearch, setAccSearch]       = useState("");
   const [checkBusy, setCheckBusy]       = useState(false);
   const [checkStopBusy, setCheckStopBusy] = useState(false);
-  const [recoverBusy, setRecoverBusy]       = useState(false);
-  const [recoverResult, setRecoverResult]   = useState<string | null>(null);
-  const [recoverProgress, setRecoverProgress] = useState<{ checked: number; total: number; recovered: number; confirmed: number } | null>(null);
+
   const [checkResult, setCheckResult]   = useState<string | null>(null);
   const [checkProgress, setCheckProgress] = useState<{ checked: number; total: number; valid: number; needsAuth: number; banned: number; skipped: number } | null>(null);
   const [busy, setBusy]                 = useState(false);
@@ -204,36 +202,6 @@ export default function MailCenter() {
   const [manualBusy, setManualBusy]         = useState(false);
   const [manualMsg, setManualMsg]           = useState("");
 
-  const handleRecover = async () => {
-    if (recoverBusy) return;
-    setRecoverBusy(true); setRecoverResult(null); setRecoverProgress(null);
-    try {
-      const r = await fetch("/api/tools/outlook/recover-suspended", { method: "POST" });
-      const d = await r.json() as { success: boolean; running?: boolean; stats?: { total: number } };
-      if (d.success) {
-        const totalN = d.stats?.total ?? 0;
-        setRecoverResult(`🔍 已启动，扫描 ${totalN} 个被封账号…`);
-        const poll = () => {
-          fetch("/api/tools/outlook/recover-suspended/status")
-            .then(r2 => r2.json())
-            .then((s: { running?: boolean; stats?: { checked: number; total: number; recovered: number; confirmed: number; skipped: number; finishedAt: string | null } }) => {
-              if (s.stats) setRecoverProgress({ checked: s.stats.checked, total: s.stats.total || totalN, recovered: s.stats.recovered, confirmed: s.stats.confirmed });
-              if (s.running) { setTimeout(poll, 3000); }
-              else {
-                const st = s.stats;
-                setRecoverResult(st ? `✅ 回收完成：恢复 ${st.recovered} 个 / 确认封禁 ${st.confirmed} 个 / 跳过 ${st.skipped} 个` : "✅ 完成");
-                setRecoverBusy(false);
-                loadAccounts();
-              }
-            })
-            .catch(() => { setRecoverBusy(false); });
-        };
-        setTimeout(poll, 2000);
-        return;
-      } else { setRecoverResult("❌ 启动失败"); }
-    } catch { setRecoverResult("❌ 请求出错"); }
-    setRecoverBusy(false);
-  };
 
   const handleStopCheck = async () => {
     if (checkStopBusy) return;
@@ -1174,40 +1142,13 @@ export default function MailCenter() {
           {/* 被封账号管理操作栏 */}
           {statusFilter === "suspended" && (
             <div className="px-2 py-1.5 border-b border-[#21262d] shrink-0 space-y-1">
-              <div className="flex gap-1">
-                <button
-                  onClick={handleRecover}
-                  disabled={recoverBusy}
-                  className="flex-1 py-1 bg-amber-900/40 hover:bg-amber-800/50 disabled:opacity-40 rounded text-[11px] text-amber-300 font-medium transition-colors"
-                >
-                  {recoverBusy
-                    ? <><svg className="inline w-3 h-3 animate-spin mr-1" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>扫描中…</>
-                    : "♻ 回收误判封禁"
-                  }
-                </button>
-                <button
-                  onClick={bulkDeleteSuspended}
-                  disabled={bulkDelBusy || accounts.filter(a => a.status === "suspended").length === 0}
-                  className="flex-1 py-1 bg-red-800/40 hover:bg-red-800/60 disabled:opacity-40 rounded text-[11px] text-red-300 font-medium transition-colors"
-                >
-                  {bulkDelBusy ? "删除中…" : `🗑 删除 ${accounts.filter(a => a.status === "suspended").length} 个`}
-                </button>
-              </div>
-              {recoverResult && (
-                <p className={`text-[10px] leading-tight ${recoverResult.startsWith("✅") ? "text-emerald-400" : recoverResult.startsWith("❌") ? "text-red-400" : "text-amber-400"}`}>
-                  {recoverResult}
-                </p>
-              )}
-              {recoverProgress && recoverProgress.total > 0 && (
-                <div>
-                  <div className="w-full bg-[#161b22] rounded-full h-1">
-                    <div className="bg-amber-500 h-1 rounded-full transition-all" style={{ width: Math.min(100, Math.round(recoverProgress.checked / recoverProgress.total * 100)) + "%" }} />
-                  </div>
-                  <p className="text-[9px] text-gray-500 mt-0.5">
-                    {recoverProgress.checked}/{recoverProgress.total} · 恢复 <span className="text-emerald-400">{recoverProgress.recovered}</span> · 确认封禁 <span className="text-red-400">{recoverProgress.confirmed}</span>
-                  </p>
-                </div>
-              )}
+              <button
+                onClick={bulkDeleteSuspended}
+                disabled={bulkDelBusy || accounts.filter(a => a.status === "suspended").length === 0}
+                className="w-full py-1 bg-red-800/50 hover:bg-red-800/70 disabled:opacity-40 rounded text-[11px] text-red-300 font-medium transition-colors"
+              >
+                {bulkDelBusy ? "删除中…" : `🗑 批量删除 ${accounts.filter(a => a.status === "suspended").length} 个被封账号`}
+              </button>
               {bulkDelResult && <p className="text-[10px] text-gray-400">{bulkDelResult}</p>}
             </div>
           )}
