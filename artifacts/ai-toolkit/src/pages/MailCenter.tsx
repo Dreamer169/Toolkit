@@ -140,7 +140,7 @@ export default function MailCenter() {
   const [verifying, setVerifying]         = useState(false);
   const [purging,   setPurging]           = useState(false);
   const [purgeStats, setPurgeStats]       = useState<{ valid: number; purged: number; kept: number } | null>(null);
-  const [statusFilter, setStatusFilter]   = useState<"all"|"active"|"suspended"|"noauth">("all");
+  const [statusFilter, setStatusFilter]   = useState<"all"|"active"|"suspended"|"noauth"|"autofix">("all");
   const [bulkDelBusy, setBulkDelBusy]     = useState(false);
   const [bulkDelResult, setBulkDelResult] = useState("");
   const [batchOAuth, setBatchOAuth]       = useState<BatchOAuthState | null>(null);
@@ -1127,6 +1127,7 @@ export default function MailCenter() {
               { key: "active",    label: "活跃",   count: accounts.filter(a => a.status === "active").length },
               { key: "suspended", label: "🔴 被封", count: accounts.filter(a => a.status === "suspended").length },
               { key: "noauth",    label: "⚠ 未授权", count: accounts.filter(a => !hasOAuth(a) && !hasImap(a)).length },
+              { key: "autofix",   label: "⏳ 自动修复", count: accounts.filter(a => a.status === "needs_oauth" && !a.tags?.includes("needs_oauth_manual")).length },
             ] as const).map(t => (
               <button key={t.key}
                 onClick={() => setStatusFilter(t.key)}
@@ -1169,7 +1170,7 @@ export default function MailCenter() {
             {accSearch && (
               <p className="text-[10px] text-gray-600 mt-0.5 px-0.5">
                 {accounts
-                  .filter(a => { if (statusFilter==="active") return a.status==="active"; if (statusFilter==="suspended") return a.status==="suspended"; if (statusFilter==="noauth") return !hasOAuth(a)&&!hasImap(a); return true; })
+                  .filter(a => { if (statusFilter==="active") return a.status==="active"; if (statusFilter==="suspended") return a.status==="suspended"; if (statusFilter==="noauth") return !hasOAuth(a)&&!hasImap(a); if (statusFilter==="autofix") return a.status==="needs_oauth"&&!a.tags?.includes("needs_oauth_manual"); return true; })
                   .filter(a => a.email.toLowerCase().includes(accSearch.toLowerCase())).length} / {accounts.length} 个
               </p>
             )}
@@ -1183,22 +1184,25 @@ export default function MailCenter() {
               if (statusFilter === "active")    return a.status === "active";
               if (statusFilter === "suspended") return a.status === "suspended";
               if (statusFilter === "noauth")    return !hasOAuth(a) && !hasImap(a);
+            if (statusFilter === "autofix")   return a.status === "needs_oauth" && !a.tags?.includes("needs_oauth_manual");
               return true;
             })
             .filter(a => !accSearch || a.email.toLowerCase().includes(accSearch.toLowerCase()))
           ).map((acc) => {
             const active       = selAccount?.id === acc.id;
             const isSuspended  = acc.status === "suspended";
-            const isNeedsOAuth = acc.status === "needs_oauth" || acc.status === "needs_oauth_pending";
+            const isNeedsOAuth   = acc.status === "needs_oauth" || acc.status === "needs_oauth_pending";
+            const isAutoPending  = acc.status === "needs_oauth" && !accTags.includes("needs_oauth_manual");  // healthcheck 将自动修复
+            const isOAuthPending = acc.status === "needs_oauth_pending";  // healthcheck 正在处理中
             const accTags      = tagsOf(acc);
             const isAbuse      = accTags.includes("abuse_mode");
             const isOAuth      = hasOAuth(acc) && !isSuspended;
             const isImap       = hasImap(acc) && !isSuspended;
             const noAccess     = !isOAuth && !isImap;
-            // dot color: suspended=red, needs_oauth=amber, oauth=green, imap=blue, none=amber
-            const dot      = isSuspended ? "bg-red-500" : isNeedsOAuth ? "bg-amber-400" : isOAuth ? "bg-emerald-400" : isImap ? "bg-blue-400" : "bg-amber-400";
-            const label    = isSuspended ? "已停用" : isNeedsOAuth ? "需授权" : isOAuth ? "OAuth" : isImap ? "IMAP" : "需授权";
-            const labelCls = isSuspended ? "text-red-500" : isNeedsOAuth ? "text-amber-500" : isOAuth ? "text-emerald-500" : isImap ? "text-blue-400" : "text-amber-500";
+            // dot color: suspended=red, auto-pending=sky(pulse), oauth-pending=amber(pulse), oauth=green, imap=blue, none=amber
+            const dot      = isSuspended ? "bg-red-500" : isOAuthPending ? "bg-sky-400 animate-pulse" : isAutoPending ? "bg-sky-400 animate-pulse" : isNeedsOAuth ? "bg-amber-400" : isOAuth ? "bg-emerald-400" : isImap ? "bg-blue-400" : "bg-amber-400";
+            const label    = isSuspended ? "已停用" : isOAuthPending ? "补授权中…" : isAutoPending ? "等待自动修复" : isNeedsOAuth ? "需授权" : isOAuth ? "OAuth" : isImap ? "IMAP" : "需授权";
+            const labelCls = isSuspended ? "text-red-500" : isOAuthPending ? "text-sky-400" : isAutoPending ? "text-sky-400" : isNeedsOAuth ? "text-amber-500" : isOAuth ? "text-emerald-500" : isImap ? "text-blue-400" : "text-amber-500";
             const vr = verifyStatus(acc.id);
             const vb = vr ? verifyBadge(vr.status) : null;
             const pwKey = `pw-${acc.id}`;
@@ -1271,6 +1275,18 @@ export default function MailCenter() {
                       onClick={e => { e.stopPropagation(); setConfirmDeleteId(null); }}
                       className="text-[10px] px-2 py-0.5 bg-[#30363d] hover:bg-[#3d444d] text-gray-300 rounded transition-colors"
                     >取消</button>
+                  </div>
+                )}
+                {isAutoPending && !isConfirmDel && (
+                  <div className="px-3 pb-1.5 flex items-center gap-1.5">
+                    <span className="text-[10px] text-sky-400 animate-pulse">⏳</span>
+                    <span className="text-[10px] text-sky-300">healthcheck 将自动补授权（约 5 分钟内）</span>
+                  </div>
+                )}
+                {isOAuthPending && !isConfirmDel && (
+                  <div className="px-3 pb-1.5 flex items-center gap-1.5">
+                    <span className="text-[10px] text-sky-400 animate-spin">🔄</span>
+                    <span className="text-[10px] text-sky-300 animate-pulse">正在自动补授权中…</span>
                   </div>
                 )}
                 {accTags.includes("needs_oauth_manual") && !isConfirmDel && (
