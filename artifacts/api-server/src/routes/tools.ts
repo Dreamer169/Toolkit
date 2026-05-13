@@ -3378,6 +3378,29 @@ router.get("/tools/outlook/accounts", async (req, res) => {
     );
     const total = parseInt(countRes[0]?.count ?? "0");
 
+    // 全量各状态真实 count（不受 limit/search 影响，始终基于 platform='outlook'）
+    const baseWhere = search
+      ? `platform='outlook' AND LOWER(email) LIKE $1`
+      : `platform='outlook'`;
+    const statusCountsRaw = await query<{ status: string; cnt: string }>(
+      `SELECT COALESCE(status,'active') AS status, COUNT(*)::text AS cnt FROM accounts WHERE ${baseWhere} GROUP BY status`,
+      search ? [params[0]] : []
+    );
+    const sc: Record<string, number> = {};
+    for (const row of statusCountsRaw) sc[row.status] = parseInt(row.cnt);
+    const statusCounts = {
+      active:    sc["active"]    ?? 0,
+      suspended: sc["suspended"] ?? 0,
+      needs_oauth_auto: (sc["needs_oauth"] ?? 0),  // 近似，不扣 manual
+      noauth:    0,  // 需要单独查（token+refresh_token 均空）
+    };
+    // noauth 单独统计
+    const noauthRes = await query<{ cnt: string }>(
+      `SELECT COUNT(*)::text AS cnt FROM accounts WHERE ${baseWhere} AND COALESCE(token,'')='' AND COALESCE(refresh_token,'')=''`,
+      search ? [params[0]] : []
+    );
+    statusCounts.noauth = parseInt(noauthRes[0]?.cnt ?? "0");
+
     const rowParams = [...params, limit, offset];
     const rows = await query<{
       id: number; email: string; password: string | null; token: string | null; refresh_token: string | null; tags: string | null;
@@ -3397,6 +3420,7 @@ router.get("/tools/outlook/accounts", async (req, res) => {
     res.json({
       success: true,
       total,
+      statusCounts,
       accounts: rows.map((row) => ({
         ...row,
         token: row.token ? "ok" : null,
