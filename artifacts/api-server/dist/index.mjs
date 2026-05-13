@@ -20488,27 +20488,27 @@ var require_router = __commonJS({
     var slice = Array.prototype.slice;
     var flatten = Array.prototype.flat;
     var methods = METHODS.map((method) => method.toLowerCase());
-    module.exports = Router13;
+    module.exports = Router14;
     module.exports.Route = Route;
-    function Router13(options) {
-      if (!(this instanceof Router13)) {
-        return new Router13(options);
+    function Router14(options) {
+      if (!(this instanceof Router14)) {
+        return new Router14(options);
       }
       const opts = options || {};
-      function router13(req, res, next) {
-        router13.handle(req, res, next);
+      function router14(req, res, next) {
+        router14.handle(req, res, next);
       }
-      Object.setPrototypeOf(router13, this);
-      router13.caseSensitive = opts.caseSensitive;
-      router13.mergeParams = opts.mergeParams;
-      router13.params = {};
-      router13.strict = opts.strict;
-      router13.stack = [];
-      return router13;
+      Object.setPrototypeOf(router14, this);
+      router14.caseSensitive = opts.caseSensitive;
+      router14.mergeParams = opts.mergeParams;
+      router14.params = {};
+      router14.strict = opts.strict;
+      router14.stack = [];
+      return router14;
     }
-    Router13.prototype = function() {
+    Router14.prototype = function() {
     };
-    Router13.prototype.param = function param2(name, fn) {
+    Router14.prototype.param = function param2(name, fn) {
       if (!name) {
         throw new TypeError("argument name is required");
       }
@@ -20528,7 +20528,7 @@ var require_router = __commonJS({
       params.push(fn);
       return this;
     };
-    Router13.prototype.handle = function handle(req, res, callback) {
+    Router14.prototype.handle = function handle(req, res, callback) {
       if (!callback) {
         throw new TypeError("argument callback is required");
       }
@@ -20655,7 +20655,7 @@ var require_router = __commonJS({
         }
       }
     };
-    Router13.prototype.use = function use(handler) {
+    Router14.prototype.use = function use(handler) {
       let offset = 0;
       let path8 = "/";
       if (typeof handler !== "function") {
@@ -20688,7 +20688,7 @@ var require_router = __commonJS({
       }
       return this;
     };
-    Router13.prototype.route = function route(path8) {
+    Router14.prototype.route = function route(path8) {
       const route2 = new Route(path8);
       const layer = new Layer(path8, {
         sensitive: this.caseSensitive,
@@ -20703,7 +20703,7 @@ var require_router = __commonJS({
       return route2;
     };
     methods.concat("all").forEach(function(method) {
-      Router13.prototype[method] = function(path8) {
+      Router14.prototype[method] = function(path8) {
         const route = this.route(path8);
         route[method].apply(route, slice.call(arguments, 1));
         return this;
@@ -20886,13 +20886,13 @@ var require_application = __commonJS({
     var compileTrust = require_utils3().compileTrust;
     var resolve = __require("node:path").resolve;
     var once = require_once();
-    var Router13 = require_router();
+    var Router14 = require_router();
     var slice = Array.prototype.slice;
     var flatten = Array.prototype.flat;
     var app2 = exports = module.exports = {};
     var trustProxyDefaultSymbol = "@@symbol:trust_proxy_default";
     app2.init = function init() {
-      var router13 = null;
+      var router14 = null;
       this.cache = /* @__PURE__ */ Object.create(null);
       this.engines = /* @__PURE__ */ Object.create(null);
       this.settings = /* @__PURE__ */ Object.create(null);
@@ -20901,13 +20901,13 @@ var require_application = __commonJS({
         configurable: true,
         enumerable: true,
         get: function getrouter() {
-          if (router13 === null) {
-            router13 = new Router13({
+          if (router14 === null) {
+            router14 = new Router14({
               caseSensitive: this.enabled("case sensitive routing"),
               strict: this.enabled("strict routing")
             });
           }
-          return router13;
+          return router14;
         }
       });
     };
@@ -20978,15 +20978,15 @@ var require_application = __commonJS({
       if (fns.length === 0) {
         throw new TypeError("app.use() requires a middleware function");
       }
-      var router13 = this.router;
+      var router14 = this.router;
       fns.forEach(function(fn2) {
         if (!fn2 || !fn2.handle || !fn2.set) {
-          return router13.use(path8, fn2);
+          return router14.use(path8, fn2);
         }
         debug(".use app under %s", path8);
         fn2.mountpath = path8;
         fn2.parent = this;
-        router13.use(path8, function mounted_app(req, res, next) {
+        router14.use(path8, function mounted_app(req, res, next) {
           var orig = req.app;
           fn2.handle(req, res, function(err) {
             Object.setPrototypeOf(req, orig.request);
@@ -23513,7 +23513,7 @@ var require_express = __commonJS({
     var EventEmitter = __require("node:events").EventEmitter;
     var mixin = require_merge_descriptors();
     var proto = require_application();
-    var Router13 = require_router();
+    var Router14 = require_router();
     var req = require_request();
     var res = require_response();
     exports = module.exports = createApplication;
@@ -23535,8 +23535,8 @@ var require_express = __commonJS({
     exports.application = proto;
     exports.request = req;
     exports.response = res;
-    exports.Route = Router13.Route;
-    exports.Router = Router13;
+    exports.Route = Router14.Route;
+    exports.Router = Router14;
     exports.json = bodyParser.json;
     exports.raw = bodyParser.raw;
     exports.static = require_serve_static();
@@ -33108,11 +33108,11 @@ var require_router2 = __commonJS({
     var debug = debug_1.Debug.extend("router");
     async function getTarget(req, config) {
       let newTarget;
-      const router13 = config.router;
-      if ((0, is_plain_object_1.isPlainObject)(router13)) {
-        newTarget = getTargetFromProxyTable(req, router13);
-      } else if (typeof router13 === "function") {
-        newTarget = await router13(req);
+      const router14 = config.router;
+      if ((0, is_plain_object_1.isPlainObject)(router14)) {
+        newTarget = getTargetFromProxyTable(req, router14);
+      } else if (typeof router14 === "function") {
+        newTarget = await router14(req);
       }
       return newTarget;
     }
@@ -33155,7 +33155,7 @@ var require_http_proxy_middleware = __commonJS({
     var get_plugins_1 = require_get_plugins();
     var path_filter_1 = require_path_filter();
     var PathRewriter = require_path_rewriter();
-    var Router13 = require_router2();
+    var Router14 = require_router2();
     var debug_1 = require_debug2();
     var function_1 = require_function();
     var logger_1 = require_logger2();
@@ -33226,7 +33226,7 @@ var require_http_proxy_middleware = __commonJS({
         this.applyRouter = async (req, options2) => {
           let newTarget;
           if (options2.router) {
-            newTarget = await Router13.getTarget(req, options2);
+            newTarget = await Router14.getTarget(req, options2);
             if (newTarget) {
               (0, debug_1.Debug)('router new target: "%s"', newTarget);
               options2.target = newTarget;
@@ -67457,13 +67457,13 @@ var require_websocket_server = __commonJS({
 });
 
 // src/app.ts
-var import_express13 = __toESM(require_express2(), 1);
+var import_express14 = __toESM(require_express2(), 1);
 var import_cors = __toESM(require_lib3(), 1);
 var import_pino_http = __toESM(require_logger(), 1);
 var import_http_proxy_middleware = __toESM(require_dist2(), 1);
 
 // src/routes/index.ts
-var import_express11 = __toESM(require_express2(), 1);
+var import_express12 = __toESM(require_express2(), 1);
 
 // src/routes/health.ts
 var import_express = __toESM(require_express2(), 1);
@@ -73933,7 +73933,7 @@ router2.post("/tools/outlook/register", async (req, res) => {
       const _memRaw = _rfs("/proc/meminfo", "utf8");
       const _availMat = _memRaw.match(/MemAvailable:\s+(\d+)\s+kB/);
       const _availMB = _availMat ? Math.floor(parseInt(_availMat[1]) / 1024) : 9999;
-      const _memPerW = 1e3;
+      const _memPerW = 600;
       const _maxByMem = Math.max(1, Math.floor(_availMB / _memPerW));
       if (_maxByMem < resolvedWorkers) {
         job.logs.push({ type: "warn", message: `\u26A0 \u5185\u5B58\u611F\u77E5\u964D\u6863: \u7A7A\u95F2${_availMB}MB \u4E0D\u8DB3\u4EE5\u652F\u6491${resolvedWorkers}workers(\u6BCF\u4E2A~${_memPerW}MB) \u2192 \u81EA\u52A8\u964D\u4E3A${_maxByMem}` });
@@ -87146,26 +87146,183 @@ router10.post("/unified-db/write", async (req, res) => {
 });
 var unified_db_default = router10;
 
-// src/routes/index.ts
+// src/routes/cf-email.ts
+var import_express11 = __toESM(require_express2(), 1);
 var router11 = (0, import_express11.Router)();
-router11.use(health_default);
-router11.use(cdp_relay_default);
-router11.use(tools_default);
-router11.use(data_default);
-router11.use(agent_default);
-router11.use(claude_code_default);
-router11.use(accounts_default);
-router11.use("/gateway", gateway_default);
-router11.use("/gateway", admin_default);
-router11.use(unified_db_default);
-var routes_default = router11;
+var INSTANCES = [
+  {
+    name: "jonjim",
+    domain: "jonjim.eu.cc",
+    apiUrl: "https://mail-api.jonjim.eu.cc",
+    frontendUrl: "https://mail.jonjim.eu.cc",
+    sitePassword: process.env["JONJIM_SITE_PASSWORD"] || "8GKNFyLCo0pL7drOqKZQ6jGB",
+    adminPassword: process.env["JONJIM_ADMIN_PASSWORD"] || "360cb32181e4ef281afb3b63"
+  },
+  {
+    name: "hackerjim",
+    domain: "hackerjim.eu.cc",
+    apiUrl: "https://mail-api.hackerjim.eu.cc",
+    frontendUrl: "https://mail.hackerjim.eu.cc",
+    sitePassword: process.env["HACKERJIM_SITE_PASSWORD"] || "ak4yJVQ8szp8H5jS3Mx6Y1sm",
+    adminPassword: process.env["HACKERJIM_ADMIN_PASSWORD"] || "ufmTbatyzZ0jkKrDvYhIc281"
+  }
+];
+async function cfFetch(inst, path8, options = {}) {
+  const url = `${inst.apiUrl}${path8}`;
+  const headers = {
+    "x-custom-auth": inst.sitePassword,
+    "x-admin-auth": inst.adminPassword,
+    ...options.headers || {}
+  };
+  return fetch(url, { ...options, headers });
+}
+router11.get("/cf-email/instances", async (_req, res) => {
+  const results = await Promise.all(
+    INSTANCES.map(async (inst) => {
+      try {
+        const [sr, statR] = await Promise.all([
+          cfFetch(inst, "/open_api/settings"),
+          cfFetch(inst, "/jimhacker/statistics")
+        ]);
+        const settings = sr.ok ? await sr.json() : null;
+        const stats = statR.ok ? await statR.json() : null;
+        return {
+          name: inst.name,
+          domain: inst.domain,
+          frontendUrl: inst.frontendUrl,
+          status: statR.ok ? "ok" : "error",
+          statusCode: statR.status,
+          title: settings?.title,
+          needAuth: settings?.needAuth,
+          stats
+        };
+      } catch (e) {
+        return { name: inst.name, domain: inst.domain, status: "unreachable", error: String(e) };
+      }
+    })
+  );
+  res.json({ instances: results });
+});
+router11.get("/cf-email/:name/statistics", async (req, res) => {
+  const inst = INSTANCES.find((i) => i.name === req.params["name"]);
+  if (!inst) return res.status(404).json({ error: "instance not found" });
+  const r = await cfFetch(inst, "/jimhacker/statistics");
+  res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
+});
+router11.get("/cf-email/:name/addresses", async (req, res) => {
+  const inst = INSTANCES.find((i) => i.name === req.params["name"]);
+  if (!inst) return res.status(404).json({ error: "instance not found" });
+  const { limit = "20", offset = "0" } = req.query;
+  const r = await cfFetch(inst, `/jimhacker/address?limit=${limit}&offset=${offset}`);
+  res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
+});
+router11.post("/cf-email/:name/addresses", async (req, res) => {
+  const inst = INSTANCES.find((i) => i.name === req.params["name"]);
+  if (!inst) return res.status(404).json({ error: "instance not found" });
+  const { name, domain } = req.body;
+  const r = await cfFetch(inst, "/jimhacker/new_address", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, domain: domain || inst.domain })
+  });
+  const text = await r.text();
+  res.status(r.status).json(r.ok ? JSON.parse(text) : { error: text });
+});
+router11.delete("/cf-email/:name/addresses/:id", async (req, res) => {
+  const inst = INSTANCES.find((i) => i.name === req.params["name"]);
+  if (!inst) return res.status(404).json({ error: "instance not found" });
+  const r = await cfFetch(inst, `/jimhacker/delete_address/${req.params["id"]}`, { method: "DELETE" });
+  const text = await r.text();
+  res.status(r.status).json(r.ok ? JSON.parse(text) : { error: text });
+});
+router11.delete("/cf-email/:name/addresses/:id/inbox", async (req, res) => {
+  const inst = INSTANCES.find((i) => i.name === req.params["name"]);
+  if (!inst) return res.status(404).json({ error: "instance not found" });
+  const r = await cfFetch(inst, `/jimhacker/clear_inbox/${req.params["id"]}`, { method: "DELETE" });
+  res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
+});
+router11.get("/cf-email/:name/mails", async (req, res) => {
+  const inst = INSTANCES.find((i) => i.name === req.params["name"]);
+  if (!inst) return res.status(404).json({ error: "instance not found" });
+  const { limit = "20", offset = "0", address } = req.query;
+  const qs = new URLSearchParams({ limit, offset, ...address ? { address } : {} });
+  const r = await cfFetch(inst, `/jimhacker/mails?${qs}`);
+  res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
+});
+router11.delete("/cf-email/:name/mails/:id", async (req, res) => {
+  const inst = INSTANCES.find((i) => i.name === req.params["name"]);
+  if (!inst) return res.status(404).json({ error: "instance not found" });
+  const r = await cfFetch(inst, `/jimhacker/mails/${req.params["id"]}`, { method: "DELETE" });
+  res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
+});
+router11.post("/cf-email/:name/addresses/:id/reset-password", async (req, res) => {
+  const inst = INSTANCES.find((i) => i.name === req.params["name"]);
+  if (!inst) return res.status(404).json({ error: "instance not found" });
+  const r = await cfFetch(inst, `/jimhacker/address/${req.params["id"]}/reset_password`, { method: "POST" });
+  res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
+});
+router11.post("/cf-email/:name/new-address", async (req, res) => {
+  const inst = INSTANCES.find((i) => i.name === req.params["name"]);
+  if (!inst) return res.status(404).json({ error: "instance not found" });
+  const { name: addrName } = req.body;
+  const r = await cfFetch(inst, "/jimhacker/new_address", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: addrName, domain: inst.domain })
+  });
+  const text = await r.text();
+  res.status(r.status).json(r.ok ? JSON.parse(text) : { error: text });
+});
+router11.post("/cf-email/:name/send", async (req, res) => {
+  const inst = INSTANCES.find((i) => i.name === req.params["name"]);
+  if (!inst) return res.status(404).json({ error: "instance not found" });
+  const r = await cfFetch(inst, "/jimhacker/send_mail", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req.body)
+  });
+  const text = await r.text();
+  res.status(r.status).json(r.ok ? JSON.parse(text) : { error: text });
+});
+router11.get("/cf-email/:name/account-settings", async (req, res) => {
+  const inst = INSTANCES.find((i) => i.name === req.params["name"]);
+  if (!inst) return res.status(404).json({ error: "instance not found" });
+  const r = await cfFetch(inst, "/jimhacker/account_settings");
+  res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
+});
+router11.post("/cf-email/:name/account-settings", async (req, res) => {
+  const inst = INSTANCES.find((i) => i.name === req.params["name"]);
+  if (!inst) return res.status(404).json({ error: "instance not found" });
+  const r = await cfFetch(inst, "/jimhacker/account_settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req.body)
+  });
+  res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
+});
+var cf_email_default = router11;
+
+// src/routes/index.ts
+var router12 = (0, import_express12.Router)();
+router12.use(health_default);
+router12.use(cdp_relay_default);
+router12.use(tools_default);
+router12.use(data_default);
+router12.use(agent_default);
+router12.use(claude_code_default);
+router12.use(accounts_default);
+router12.use("/gateway", gateway_default);
+router12.use("/gateway", admin_default);
+router12.use(unified_db_default);
+router12.use(cf_email_default);
+var routes_default = router12;
 
 // src/routes/tunnel.ts
-var import_express12 = __toESM(require_express2(), 1);
+var import_express13 = __toESM(require_express2(), 1);
 import * as net from "node:net";
 import * as http from "node:http";
 import * as https2 from "node:https";
-var router12 = (0, import_express12.Router)();
+var router13 = (0, import_express13.Router)();
 var TUNNEL_TOKEN = process.env["TUNNEL_TOKEN"] ?? "123456";
 var EXEC_SECRET_VAL = process.env["EXEC_SECRET"] || "123456";
 var VPS_GATEWAY2 = (process.env["VPS_GATEWAY"] || "http://45.205.27.69:8080").replace(/\/$/, "");
@@ -87190,7 +87347,7 @@ function cleanupSession(id) {
   sessions3.delete(id);
 }
 function createTunnelRouter(prefix) {
-  router12.post(`/${prefix}/open`, (req, res) => {
+  router13.post(`/${prefix}/open`, (req, res) => {
     if (!checkToken(req.query["token"] ?? req.query["tok"])) {
       res.status(403).json({ error: "forbidden" });
       return;
@@ -87237,7 +87394,7 @@ function createTunnelRouter(prefix) {
       if (!sessions3.has(id)) socket.destroy();
     }, 1e4);
   });
-  router12.get(`/${prefix}/read/:id`, async (req, res) => {
+  router13.get(`/${prefix}/read/:id`, async (req, res) => {
     if (!checkToken(req.query["token"] ?? req.query["tok"])) {
       res.status(403).json({ error: "forbidden" });
       return;
@@ -87283,7 +87440,7 @@ function createTunnelRouter(prefix) {
     }
     res.end(data);
   });
-  router12.post(`/${prefix}/write/:id`, (req, res) => {
+  router13.post(`/${prefix}/write/:id`, (req, res) => {
     if (!checkToken(req.query["token"] ?? req.query["tok"])) {
       res.status(403).json({ error: "forbidden" });
       return;
@@ -87301,7 +87458,7 @@ function createTunnelRouter(prefix) {
       res.json({ ok: true });
     });
   });
-  router12.delete(`/${prefix}/:id`, (req, res) => {
+  router13.delete(`/${prefix}/:id`, (req, res) => {
     if (!checkToken(req.query["token"] ?? req.query["tok"])) {
       res.status(403).json({ error: "forbidden" });
       return;
@@ -87309,7 +87466,7 @@ function createTunnelRouter(prefix) {
     cleanupSession(req.params["id"]);
     res.json({ ok: true });
   });
-  router12.get(`/${prefix}/health`, (_req, res) => {
+  router13.get(`/${prefix}/health`, (_req, res) => {
     res.json({
       ok: true,
       sessions: sessions3.size,
@@ -87318,10 +87475,10 @@ function createTunnelRouter(prefix) {
     });
   });
 }
-router12.get(["/health", "/nodes", "/stats"], (_req, res) => {
+router13.get(["/health", "/nodes", "/stats"], (_req, res) => {
   res.json({ ok: true, sessions: sessions3.size, name: NODE_NAME });
 });
-router12.get("/v1/models", (_req, res) => {
+router13.get("/v1/models", (_req, res) => {
   res.json({
     object: "list",
     data: [{ id: "tunnel-proxy", object: "model", owned_by: "subnode" }]
@@ -87500,10 +87657,10 @@ function selfRegister(attempt = 0) {
   request.write(body);
   request.end();
 }
-var tunnel_default = router12;
+var tunnel_default = router13;
 
 // src/app.ts
-var app = (0, import_express13.default)();
+var app = (0, import_express14.default)();
 app.use(
   (0, import_pino_http.default)({
     logger,
@@ -87541,9 +87698,9 @@ app.use((0, import_cors.default)({
   maxAge: 86400
   // OPTIONS 预检缓存 24h，减少浏览器预检次数
 }));
-app.use(import_express13.default.urlencoded({ extended: true, limit: "4mb" }));
+app.use(import_express14.default.urlencoded({ extended: true, limit: "4mb" }));
 app.use("/api", tunnel_default);
-app.use(import_express13.default.json({ limit: "4mb" }));
+app.use(import_express14.default.json({ limit: "4mb" }));
 app.use("/api", routes_default);
 app.get("/health", (_req, res) => {
   res.json({ ok: true, name: "replit-subnode", tunnel: true });
