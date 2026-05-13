@@ -344,10 +344,14 @@ class BaseController:
 
             page.locator('[data-testid="primaryButton"]').click(timeout=5000)
 
-            # 等待隐私链接消失 → CAPTCHA 出现
-            page.locator(
-                'span > [href="https://go.microsoft.com/fwlink/?LinkID=521839"]'
-            ).wait_for(state="detached", timeout=22000)
+            # v9.72: MS 新版 UI 在所有页面保留 Privacy Statement 链接，
+            # 等它消失不再可靠。改为等待 CAPTCHA iframe 出现（正向信号）。
+            # 若 25s 内未出现（稀有情况），继续往后做 unusual-activity 检查。
+            try:
+                page.wait_for_selector(SEL_IFRAME_CHALLENGE, state="attached", timeout=25000)
+                print("[register] CAPTCHA iframe 已出现", flush=True)
+            except Exception:
+                print("[register] CAPTCHA iframe 25s 未出现，继续检查页面状态", flush=True)
 
             page.wait_for_timeout(400)
 
