@@ -1192,9 +1192,9 @@ export default function MailCenter() {
             const active       = selAccount?.id === acc.id;
             const isSuspended  = acc.status === "suspended";
             const isNeedsOAuth   = acc.status === "needs_oauth" || acc.status === "needs_oauth_pending";
+            const accTags      = tagsOf(acc);
             const isAutoPending  = acc.status === "needs_oauth" && !accTags.includes("needs_oauth_manual");  // healthcheck 将自动修复
             const isOAuthPending = acc.status === "needs_oauth_pending";  // healthcheck 正在处理中
-            const accTags      = tagsOf(acc);
             const isAbuse      = accTags.includes("abuse_mode");
             const isOAuth      = hasOAuth(acc) && !isSuspended;
             const isImap       = hasImap(acc) && !isSuspended;
