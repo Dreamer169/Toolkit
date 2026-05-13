@@ -864,10 +864,18 @@ def _handle_fwd_signin(page, email: str, password: str) -> bool:
             while _popup_skip_rounds < 8:
                 _popup_skip_rounds += 1
                 popup_u = _url(popup)
-                log(f"  [fwd-signin] popup skip round {_popup_skip_rounds}: {popup_u[:80]}")
+                # v9.37 Fix12: extract domain only (not full URL) to avoid
+                # matching "login.live.com" in redirect query parameters.
+                # e.g. proofs/Add?...&ru=https://login.live.com/... would
+                # falsely match if we checked the full URL string.
+                try:
+                    _popup_domain = popup_u.replace("https://","").replace("http://","").split("/")[0].split("?")[0].lower()
+                except Exception:
+                    _popup_domain = popup_u.lower()
+                log(f"  [fwd-signin] popup skip round {_popup_skip_rounds}: domain={_popup_domain} url={popup_u[:60]}")
                 # Check if popup is on Outlook callback URL (OAuth done)
-                if "outlook.live.com" in popup_u or popup_u == "" or popup_u == "about:blank":
-                    log("  [fwd-signin] popup navigated to Outlook/blank — OAuth done")
+                if _popup_domain == "outlook.live.com" or popup_u == "" or popup_u == "about:blank":
+                    log("  [fwd-signin] popup on Outlook/blank — OAuth done")
                     break
                 # Check if popup closed itself
                 try:
@@ -876,7 +884,12 @@ def _handle_fwd_signin(page, email: str, password: str) -> bool:
                         break
                 except Exception:
                     break
-                # Try skipping interrupt pages
+                # Detect page type by domain only
+                _LOGIN_DOMAINS = ("login.live.com", "login.microsoftonline.com", "login.windows.net")
+                _PROOFS_DOMAINS_SET = ("account.live.com", "account.microsoft.com")
+                _is_login = _popup_domain in _LOGIN_DOMAINS
+                _is_proofs = _popup_domain in _PROOFS_DOMAINS_SET and ("proofs" in popup_u or "security" in popup_u)
+                # Try skipping interrupt pages (button/link)
                 _skipped = False
                 for sel in _PROOFS_SKIP_SELS:
                     try:
@@ -890,15 +903,38 @@ def _handle_fwd_signin(page, email: str, password: str) -> bool:
                     except Exception:
                         continue
                 if not _skipped:
-                    # No skip button found — check if we're on a known non-skip page
-                    if any(x in popup_u for x in ("login.live.com", "login.microsoftonline.com")):
-                        # Might need another auth step
+                    if _is_proofs:
+                        # On proofs/Add — try JS click on "Not now" or "Cancel" link
+                        _js_skipped = popup.evaluate("""() => {
+                            var kws = ['not now', 'skip', 'maybe later', 'cancel', 'no thanks'];
+                            for (var el of document.querySelectorAll('a,button,[role="button"]')) {
+                                var t = el.textContent.trim().toLowerCase();
+                                if (kws.some(function(k){return t===k||t.indexOf(k)>=0;})) {
+                                    el.click();
+                                    return 'js-skip:' + el.textContent.trim().slice(0,30);
+                                }
+                            }
+                            return 'not-found';
+                        }""")
+                        log(f"  [fwd-signin] proofs JS skip: {_js_skipped}")
+                        if _js_skipped == "not-found":
+                            # Nothing to skip — may be a mandatory add-proofs page.
+                            # Try _handle_proofs to add backup email, then continue.
+                            log("  [fwd-signin] calling _handle_proofs on popup...")
+                            try:
+                                _handle_proofs(popup)
+                            except Exception as _pe:
+                                log(f"  [fwd-signin] _handle_proofs error: {_pe}")
+                        popup.wait_for_timeout(3000)
+                    elif _is_login:
+                        # Genuinely on a login page — may need another auth step
                         log("  [fwd-signin] popup back on login page — re-reauthing...")
                         _handle_reauth(popup, email, password)
                         popup.wait_for_timeout(2000)
                     else:
-                        # Wait and check again
-                        popup.wait_for_timeout(2000)
+                        # Unknown page — wait and check next round
+                        log(f"  [fwd-signin] popup on unknown domain '{_popup_domain}' — waiting...")
+                        popup.wait_for_timeout(3000)
             _popup_final_url = _url(popup)
             log(f"  [fwd-signin] popup after auth+skip: {_popup_final_url[:100]}")
         elif popup_url == "about:blank" or not popup_url:
