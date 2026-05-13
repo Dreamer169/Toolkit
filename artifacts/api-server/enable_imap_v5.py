@@ -81,10 +81,26 @@ def mailtm_poll_code(token: str, timeout=240):
                     html_raw = full.get("html", full.get("text", "")) or ""
                     # mail.tm html field is sometimes a list of HTML strings
                     html = " ".join(html_raw) if isinstance(html_raw, list) else str(html_raw)
-                    m = re.search(r'\b(\d{4,8})\b', re.sub(r'\s+', ' ', html))
-                    if m:
-                        log(f"  [mail.tm] code={m.group(1)} from: {msg.get('subject','')[:50]}")
-                        return m.group(1)
+                    # FIX-CODE-EXTRACT: prefer 6-7 digit OTP, skip year-like 4-digit numbers
+                    # MS personal account codes are 6-7 digits.
+                    # '(c) 1999-2024 Microsoft' in footer matches 4-digit regex first.
+                    _raw = re.sub(r'\s+', ' ', html)
+                    # Strategy 1: context-aware match near OTP keywords
+                    _ctx = re.search(
+                        r'(?:code|verification|confirm|pin|otp)[^0-9]{0,40}(\d{4,8})'
+                        r'|(\d{4,8})[^0-9]{0,20}(?:is your|is the|code|pin)',
+                        _raw, re.I)
+                    _oc = (_ctx.group(1) or _ctx.group(2)) if _ctx else None
+                    # Strategy 2: all 4-8 digit nums, filter year-like (1900-2099)
+                    _nums = [n for n in re.findall(r'\b(\d{4,8})\b', _raw)
+                             if not (len(n) == 4 and 1900 <= int(n) <= 2099)]
+                    _seven = [n for n in _nums if len(n) == 7]
+                    _six   = [n for n in _nums if len(n) == 6]
+                    m_code = _oc or (_seven[0] if _seven else None) or \
+                             (_six[0] if _six else None) or (_nums[0] if _nums else None)
+                    if m_code:
+                        log(f"  [mail.tm] code={m_code} from: {msg.get('subject','')[:50]}")
+                        return m_code
                 seen.add(mid)
         time.sleep(8)
     log("  [mail.tm] timeout - no code")
