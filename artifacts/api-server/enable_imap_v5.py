@@ -1304,10 +1304,21 @@ def _handle_security_code(page, mt_token: str) -> bool:
                     break
             except Exception:
                 continue
-        if not _post_clicked:
-            log("  [code] no post-verify button found — waiting 8s for auto-redirect...")
-            page.wait_for_timeout(8000)
-            log(f"  [code] final url={_url(page)[:80]}")
+        # Whether clicked or not: wait up to 30s for popup to navigate away from epid URL
+        log("  [code] waiting up to 30s for popup to nav away from proofs/Verify...")
+        for _nw in range(10):
+            page.wait_for_timeout(3000)
+            _nurl = _url(page)
+            try: _nclosed = page.is_closed()
+            except Exception: _nclosed = True
+            if _nclosed:
+                log(f"  [code] popup closed itself after {(_nw+1)*3}s")
+                break
+            if "proofs" not in _nurl.lower() and "account.live.com" not in _nurl:
+                log(f"  [code] popup nav away to {_nurl[:70]} after {(_nw+1)*3}s")
+                page.wait_for_timeout(5000)  # allow OAuth grant to complete
+                break
+        log(f"  [code] final url={_url(page)[:80]}")
     return True
 
 
