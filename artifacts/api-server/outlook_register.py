@@ -2967,94 +2967,106 @@ def make_pool_skip_result(i: int, args, engine_name: str, error: str) -> dict:
 
 
 def run_parallel(args) -> None:
-    """Concurrent registration: split count across workers sub-processes.
-    Each sub-process runs with --workers 1 to prevent recursion.
-    Uses threads only to multiplex stdout from sub-processes.
-    Avoids sync_playwright thread-safety issues entirely.
+    """v9.73 keep-pool-full: W threads drain a task-queue one account at a time.
+
+    Old model (v9.31): pre-chunk N accounts into W static slices; each worker
+    subprocess runs --count K. Problem: fastest worker idles while others finish.
+
+    New model (v9.73): queue of N tasks, W threads each pick the NEXT task the
+    moment they finish the previous one -> W workers stay busy until the very
+    last account completes. CF IPs allocated per-task on demand (only W IPs
+    alive at any moment, not all N upfront).
     """
-    import os as _os, sys as _sys, subprocess as _sp, threading as _th, json as _jj, time as _tm
+    import os as _os, sys as _sys, subprocess as _sp
+    import threading as _th, json as _jj, time as _tm
+    from queue import Queue, Empty
 
     n = args.count
     w = min(max(1, args.workers), n, 16)
-    base, rem = divmod(n, w)
-    chunks = [base + (1 if i < rem else 0) for i in range(w)]
+    use_cf = getattr(args, "proxy_mode", "") == "cf"
 
-    # Distribute proxy list across workers (strict 1-IP-per-account)
+    # Non-CF proxy list (round-robin per task index)
     proxy_list = []
     if args.proxies:
         proxy_list = [p.strip() for p in args.proxies.split(",") if p.strip()]
     elif args.proxy:
         proxy_list = [args.proxy.strip()]
 
-    proxy_slices  = [[] for _ in range(w)]
-    _pre_relays   = []   # (job_id, XrayRelay_or_None, ip_str)  — cleanup after join
-
-    # v9.31 Fix: CF 池模式下，父进程统一预分配所有 IP 并启动 xray 中继，
-    # 将 SOCKS5 URL 切片分发给各 worker（消除跨进程竞态 + 静态端口共享两个 bug）
-    if getattr(args, "proxy_mode", "") == "cf":
+    # Import CF pool tools once in parent process
+    _cf_par = None
+    _XR_par = None
+    if use_cf:
         _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
         try:
             import cf_ip_pool as _cf_par
             from xray_relay import XrayRelay as _XR_par
-        except ImportError as _e:
-            print("[parallel-cf] import error: %s — 回退子进程 CF 池模式" % _e, flush=True)
+            _pool_avail = _cf_par.get_pool_status().get("available", 0)
+            print("[parallel-kpf] CF池可用 %d 个" % _pool_avail, flush=True)
+            if _pool_avail < w + 5:
+                try:
+                    import importlib as _ilib
+                    _m = _ilib.import_module("__main__")
+                    if hasattr(_m, "start_cf_pool_refill"):
+                        _m.start_cf_pool_refill("kpf_low", count=240, target=80, port=args.cf_port)
+                except Exception:
+                    pass
+        except ImportError as e:
+            print("[parallel-kpf] CF pool import error: %s" % e, flush=True)
             _cf_par = None
-        if _cf_par is not None:
-            _all_socks = []
-            print("[parallel-cf] 父进程预分配 %d 个独立 CF IP..." % n, flush=True)
-            for _pi in range(n):
-                _jid = "par_pre_%d_%d" % (_pi, int(_tm.time()))
-                _ip_info = _cf_par.acquire_ip(_jid, auto_refresh=False)
-                if not _ip_info:
-                    print("[parallel-cf] 第%d个IP分配失败，CF池不足，停止预分配" % _pi, flush=True)
-                    break
-                _relay = _XR_par(_ip_info["ip"], force_dynamic=True)  # v9.32: 强制动态CF VLESS隧道，绕过residential
-                if _relay.start(timeout=15.0):  # 动态模式需要更多启动时间
-                    _all_socks.append(_relay.socks5_url)
-                    _pre_relays.append((_jid, _relay, _ip_info["ip"]))
-                    print("[parallel-cf]   [%d/%d] CF=%s -> %s" % (
-                        _pi+1, n, _ip_info["ip"], _relay.socks5_url), flush=True)
-                else:
-                    _cf_par.ban_ip(_ip_info["ip"])
-                    _cf_par.release_ip(_jid)
-                    print("[parallel-cf]   [%d/%d] CF=%s xray 启动失败，已 ban" % (
-                        _pi+1, n, _ip_info["ip"]), flush=True)
-            if _all_socks:
-                # 覆盖 proxy_mode，让 worker 用 --proxies 而非 --proxy-mode cf
-                args.proxy_mode = ""
-                proxy_list = _all_socks
-                idx = 0
-                for wi2, chunk2 in enumerate(chunks):
-                    proxy_slices[wi2] = proxy_list[idx: idx + chunk2]
-                    idx += chunk2
-                    if idx >= len(proxy_list):
-                        break
-                print("[parallel-cf] 预分配完成: %d 个唯一 SOCKS5 端口分发给 %d workers" % (
-                    len(_all_socks), w), flush=True)
-            else:
-                print("[parallel-cf] 预分配全部失败，各 worker 独立走 CF 池模式（原逻辑回退）", flush=True)
-    elif proxy_list and getattr(args, "proxy_mode", "") != "cf":
-        idx = 0
-        for wi2, chunk2 in enumerate(chunks):
-            proxy_slices[wi2] = proxy_list[idx: idx + chunk2]
-            idx += chunk2
-            if idx >= len(proxy_list):
-                break
+
+    # Task queue: N slots, W threads compete to drain it
+    task_q = Queue()
+    for _qi in range(n):
+        task_q.put(_qi)
 
     all_results = []
     lock = _th.Lock()
+    _done = [0]
+    sep = "─" * 60
 
-    sep = "-" * 60
     print("", flush=True)
-    print("[parallel] workers=%d  accounts=%d  per-worker=%s" % (w, n, chunks), flush=True)
+    print("[parallel-kpf] workers=%d  accounts=%d  mode=keep-pool-full" % (w, n), flush=True)
     print(sep, flush=True)
 
-    def worker_fn(wi, chunk_count, proxies_slice):
-        if chunk_count == 0:
-            return
+    # ── CF IP helpers ─────────────────────────────────────────────────────────
+
+    def alloc_cf_ip(task_idx):
+        """Allocate one CF IP + start xray relay. Returns (url, jid, relay)."""
+        if _cf_par is None or _XR_par is None:
+            return None, None, None
+        jid = "kpf_%d_%d" % (task_idx, int(_tm.time() * 1000) % 100000)
+        ip_info = _cf_par.acquire_ip(jid, auto_refresh=False)
+        if not ip_info:
+            print("[parallel-kpf] [T%02d] CF池无可用IP" % (task_idx + 1), flush=True)
+            return None, None, None
+        relay = _XR_par(ip_info["ip"], force_dynamic=True)
+        if relay.start(timeout=15.0):
+            return relay.socks5_url, jid, relay
+        _cf_par.ban_ip(ip_info["ip"])
+        _cf_par.release_ip(jid)
+        print("[parallel-kpf] [T%02d] xray fail CF=%s -> banned" % (task_idx + 1, ip_info["ip"]), flush=True)
+        return None, None, None
+
+    def free_cf_ip(jid, relay):
+        """Stop xray relay and release CF IP slot."""
+        if relay is not None:
+            try:
+                relay.stop()
+            except Exception:
+                pass
+        if jid is not None and _cf_par is not None:
+            try:
+                _cf_par.release_ip(jid)
+            except Exception:
+                pass
+
+    # ── Single-account subprocess ─────────────────────────────────────────────
+
+    def run_one(task_idx, proxy_url=""):
+        """Spawn --count 1 subprocess; return parsed JSON result list."""
         cmd = [
             _sys.executable, _os.path.abspath(__file__),
-            "--count",   str(chunk_count),
+            "--count",   "1",
             "--engine",  args.engine,
             "--headless", args.headless,
             "--wait",    str(args.wait),
@@ -3062,78 +3074,95 @@ def run_parallel(args) -> None:
             "--delay",   str(args.delay),
             "--workers", "1",
         ]
-        if getattr(args, "proxy_mode", "") == "cf":
+        if proxy_url:
+            cmd += ["--proxy", proxy_url]
+        elif use_cf:
+            # CF alloc failed upstream; let subprocess handle CF pool directly
             cmd += ["--proxy-mode", "cf", "--cf-port", str(args.cf_port)]
-        elif len(proxies_slice) > 1:
-            cmd += ["--proxies", ",".join(proxies_slice)]
-        elif len(proxies_slice) == 1:
-            cmd += ["--proxy", proxies_slice[0]]
-        if wi == 0:
-            if getattr(args, "username", ""):
-                cmd += ["--username", args.username]
-            if getattr(args, "password", ""):
-                cmd += ["--password", args.password]
+        elif proxy_list:
+            cmd += ["--proxy", proxy_list[task_idx % len(proxy_list)]]
 
-        env = {**_os.environ, "PYTHONUNBUFFERED": "1"}
+        env = dict(_os.environ, PYTHONUNBUFFERED="1")
         proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True, env=env)
 
         json_buf = ""
         in_json = False
-        for raw_line in proc.stdout:
-            line = raw_line.rstrip()
-            if "JSON" in line and ("\u2500\u2500" in line or "--" in line or "results" in line.lower()) or in_json:
+        for raw in proc.stdout:
+            line = raw.rstrip()
+            if not in_json and "JSON" in line and (
+                    "──" in line or "--" in line or "results" in line.lower()):
                 in_json = True
-                json_buf += raw_line
+            if in_json:
+                json_buf += raw
                 continue
             with lock:
-                print("[W%d] %s" % (wi + 1, line), flush=True)
+                print("[T%02d] %s" % (task_idx + 1, line), flush=True)
 
         proc.wait()
         try:
             start = json_buf.find("[")
             if start >= 0:
-                parsed = _jj.loads(json_buf[start:].strip())
-                with lock:
-                    all_results.extend(parsed)
+                return _jj.loads(json_buf[start:].strip())
         except Exception as e:
             with lock:
-                print("[W%d] JSON parse error: %s" % (wi + 1, e), flush=True)
+                print("[T%02d] JSON parse error: %s" % (task_idx + 1, e), flush=True)
+        return []
 
-    threads = []
-    for wi in range(w):
-        t = _th.Thread(target=worker_fn, args=(wi, chunks[wi], proxy_slices[wi]))
+    # ── Worker thread ─────────────────────────────────────────────────────────
+
+    def worker_thread(thread_id):
+        """Drain task_q: allocate CF IP, run subprocess, release, repeat."""
+        while True:
+            try:
+                task_idx = task_q.get_nowait()
+            except Empty:
+                break
+
+            t0 = _tm.time()
+            socks5_url, jid, relay = None, None, None
+            if use_cf and _cf_par is not None:
+                socks5_url, jid, relay = alloc_cf_ip(task_idx)
+
+            results = run_one(task_idx, proxy_url=socks5_url or "")
+
+            free_cf_ip(jid, relay)   # release ASAP so pool slot opens for next task
+
+            elapsed = _tm.time() - t0
+            with lock:
+                all_results.extend(results)
+                _done[0] += 1
+                ok_n   = sum(1 for r in all_results if r.get("success"))
+                fail_n = _done[0] - ok_n
+                status = "✅" if results and results[0].get("success") else "❌"
+                email  = results[0].get("email", "?") if results else "?"
+                print("[kpf] %s [%d/%d] %s  %.0fs  ✅%d ❌%d" % (
+                    status, _done[0], n, email, elapsed, ok_n, fail_n), flush=True)
+
+            task_q.task_done()
+
+    # ── Launch W threads, wait for all ───────────────────────────────────────
+
+    threads = [_th.Thread(target=worker_thread, args=(i,), daemon=True) for i in range(w)]
+    for t in threads:
         t.start()
-        threads.append(t)
     for t in threads:
         t.join()
-
-    # v9.31 Fix: 父进程预分配的 xray relay 全部 stop + release
-    for (_jid, _relay, _cf_ip) in _pre_relays:
-        try:
-            _relay.stop()
-        except Exception:
-            pass
-        try:
-            import cf_ip_pool as _cf_cleanup
-            _cf_cleanup.release_ip(_jid)
-        except Exception:
-            pass
 
     ok  = [r for r in all_results if r.get("success")]
     bad = [r for r in all_results if not r.get("success")]
     print("", flush=True)
     print(sep, flush=True)
-    print("OK: %d / %d" % (len(ok), len(all_results)), flush=True)
+    print("✅ 成功: %d / %d" % (len(ok), len(all_results)), flush=True)
     for r in ok:
         print("  %s  pw: %s" % (r.get("email", ""), r.get("password", "")), flush=True)
     if bad:
-        print("FAIL: %d" % len(bad), flush=True)
+        print("❌ 失败: %d" % len(bad), flush=True)
         for r in bad:
             print("  %s: %s" % (r.get("email", ""), r.get("error", "")), flush=True)
     print("", flush=True)
     print("\n── JSON 结果 ──", flush=True)
-    import json as _jjj
-    print(_jjj.dumps(all_results, ensure_ascii=False, indent=2), flush=True)
+    import json as _jfinal
+    print(_jfinal.dumps(all_results, ensure_ascii=False, indent=2), flush=True)
 
 def main():
     # —— 磁盘健康校验（exit 2 阻止启动；warn 仅打印不阻塞）——
