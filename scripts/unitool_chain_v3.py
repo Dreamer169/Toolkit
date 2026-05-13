@@ -591,7 +591,15 @@ def db_get_all_ref_codes() -> list:
             available.append({"id": acc_id, "email": acc_email,
                                "ref_code": rc, "used": used})
 
-    available.sort(key=lambda x: x["used"])
+    # 去重：同一 ref_code 可能被多个账号记录，保留 used 最大的那条（最保守估计）
+    dedup: dict = {}
+    for r in available:
+        rc = r["ref_code"]
+        if rc not in dedup or r["used"] > dedup[rc]["used"]:
+            dedup[rc] = r
+    available = list(dedup.values())
+    # 填满优先：used 最多的排前面，优先用完 10 个再换下一个
+    available.sort(key=lambda x: x["used"], reverse=True)
     log(f"[ref] 可用 ref_code 池: {len(available)} 个 → " +
         ", ".join(f"{r['ref_code']}({r['used']}/{MAX_REF_SLOTS})" for r in available))
     return available
@@ -599,42 +607,14 @@ def db_get_all_ref_codes() -> list:
 
 def pick_rotating_ref_code(pool: list) -> dict | None:
     """
-    从 pool 中轮转选取 ref_code，保证多码分散：
-      - 读 ROTATE_FILE 中的 last_code 和 last_ts
-      - 若上次用过的码仍有余量，选 pool 中下一个（round-robin）
-      - 若只有1个码，直接返回它
-    返回 pool 中的一个 dict，或 None（池为空）
+    填满优先：pool 已按 used 降序排列，始终选 pool[0]。
+    当前码用满 10 个后，db_get_all_ref_codes 会自动将其排除，
+    pool[0] 自然切换到下一个待填满的码。
     """
     if not pool:
         return None
-    if len(pool) == 1:
-        return pool[0]
-
-    # 读上次状态
-    last_code = ""
-    try:
-        state = json.loads(open(ROTATE_FILE).read())
-        last_code = state.get("last_code", "")
-    except Exception:
-        pass
-
-    codes = [r["ref_code"] for r in pool]
-    if last_code in codes:
-        idx = (codes.index(last_code) + 1) % len(pool)
-    else:
-        idx = 0  # 上次的码已不在池中（用完/失效），从头开始
-
-    chosen = pool[idx]
-    try:
-        open(ROTATE_FILE, "w").write(json.dumps({
-            "last_code": chosen["ref_code"],
-            "last_email": chosen["email"],
-            "ts": time.time(),
-            "pool_size": len(pool),
-        }))
-    except Exception:
-        pass
-    log(f"[ref] 轮转选取 #{idx+1}/{len(pool)}: ref_code={chosen['ref_code']} "
+    chosen = pool[0]
+    log(f"[ref] 填满优先 #{1}/{len(pool)}: ref_code={chosen['ref_code']} "
         f"from {chosen['email']} used={chosen['used']}/{MAX_REF_SLOTS}")
     return chosen
 
