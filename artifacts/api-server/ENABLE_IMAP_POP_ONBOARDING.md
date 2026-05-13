@@ -17,7 +17,7 @@ Microsoft 默认关闭这两项，且在设置页面强制要求用户通过 OAu
 
 | 项目 | 值 |
 |------|-----|
-| 服务器 | `45.205.27.69`，root 密码 `HGxQ0ADXPD0b` |
+| 服务器 | `45.205.27.69`，root 密码 `<PASSWORD_REDACTED>` |
 | 项目路径 | `/data/Toolkit/artifacts/api-server/` |
 | 数据库 | `postgresql://postgres:postgres@localhost/toolkit` |
 | Browser | `chrome-headless-shell`（路径见 `launch_browser()`） |

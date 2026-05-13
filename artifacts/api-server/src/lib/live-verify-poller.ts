@@ -197,20 +197,29 @@ async function runOnce() {
         }
         // v9.30 Fix: replitRows used for reverse UPDATE only; no longer blocks scanning
         // 拉取 verify 邮件 (未读, 主题含 verify/confirm/Replit)
-        let msgs: Array<{id:string;subject:string;receivedDateTime?:string}> = [];
-        let _readVerify: Array<{id:string;subject:string;receivedDateTime?:string;isRead?:boolean}> = [];
+        // v9.36 Fix: fetch `from` field so we can verify sender is actually replit.com
+        type MsgMeta = {id:string;subject:string;receivedDateTime?:string;isRead?:boolean;from?:{emailAddress?:{address?:string}}};
+        let msgs: Array<MsgMeta> = [];
+        let _readVerify: Array<MsgMeta> = [];
+        const _isReplitEmail = (m: MsgMeta): boolean => {
+          const sender = (m.from?.emailAddress?.address ?? "").toLowerCase();
+          const subj   = (m.subject ?? "").toLowerCase();
+          // Must be from replit.com domain OR subject clearly identifies Replit
+          return sender.includes("replit.com") ||
+                 (subj.includes("replit") && (subj.includes("verify") || subj.includes("confirm")));
+        };
         try {
           const listResp = await microsoftFetch(
-            `https://graph.microsoft.com/v1.0/me/messages?$top=20&$orderby=receivedDateTime%20desc&$select=id,subject,receivedDateTime,isRead`,
+            // v9.36: add `from` to $select so sender can be checked
+            `https://graph.microsoft.com/v1.0/me/messages?$top=20&$orderby=receivedDateTime%20desc&$select=id,subject,receivedDateTime,isRead,from`,
             { headers: { Authorization: `Bearer ${accessToken}` } },
             _proxy  // v8.86 Bug K: 与 refreshToken 同代理, 维持出向 IP 一致
           );
-          const list = await listResp.json() as { value?: Array<{id:string;subject:string;receivedDateTime?:string;isRead?:boolean}> };
-          // v9.31d: 同时获取已读+未读, 区分处理
-          const _allVerify = (list.value || []).filter(m => {
-            const s = (m.subject || '').toLowerCase();
-            return s.includes('verify') || s.includes('confirm') || s.includes('replit');
-          });
+          const list = await listResp.json() as { value?: Array<MsgMeta> };
+          // v9.36 Fix: only match emails that are actually from Replit (replit.com sender,
+          //   or subject = "replit" + "verify/confirm"). This prevents other services'
+          //   "verify your email" / "confirm your order" emails from being matched.
+          const _allVerify = (list.value || []).filter(_isReplitEmail);
           _readVerify = _allVerify.filter(m => m.isRead);
           msgs = _allVerify.filter(m => !m.isRead);
         } catch (e) {
@@ -218,11 +227,14 @@ async function runOnce() {
           stats.skipped++;
           return;
         }
-        // v9.31d: 验证邮件已读(用户手动点击/其他流程) → 打 replit_used 退出扫描
+        // v9.36 Fix: 验证邮件已读 → 打 replit_used，但必须已确认是 replit.com 发件人
+        // (旧逻辑：任何已读的 verify/confirm 邮件都会误触发，导致账号被提前封存)
         if (msgs.length === 0) {
           if (_readVerify.length > 0) {
+            const firstSender = _readVerify[0].from?.emailAddress?.address ?? "(unknown)";
             try { await tagAccount(acc.id, "replit_used"); } catch (_) {}
-            logger.info({ email: acc.email, readCount: _readVerify.length }, "[live-verify] 验证邮件已读 → 自动标 replit_used");
+            logger.info({ email: acc.email, readCount: _readVerify.length, sender: firstSender },
+              "[live-verify] Replit 验证邮件已读 → 自动标 replit_used");
           }
           stats.ok++; return;
         }

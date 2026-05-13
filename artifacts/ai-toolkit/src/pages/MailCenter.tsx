@@ -123,6 +123,7 @@ export default function MailCenter() {
   const [accSearch, setAccSearch]       = useState("");
   const [checkBusy, setCheckBusy]       = useState(false);
   const [checkResult, setCheckResult]   = useState<string | null>(null);
+  const [checkProgress, setCheckProgress] = useState<{ checked: number; total: number; valid: number; needsAuth: number; banned: number } | null>(null);
   const [busy, setBusy]                 = useState(false);
   const [authBusy, setAuthBusy]         = useState<number | "all" | null>(null);
   const [error, setError]               = useState("");
@@ -202,16 +203,30 @@ export default function MailCenter() {
 
   const handleAutoCheck = async () => {
     if (checkBusy) return;
-    setCheckBusy(true); setCheckResult(null);
+    setCheckBusy(true); setCheckResult(null); setCheckProgress(null);
     try {
       const res = await fetch("/api/tools/outlook/auto-check", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ limit: 30 }),
+        body: JSON.stringify({}),
       });
-      const d = await res.json() as { success: boolean; checked: number; valid: number; needsAuth: number; banned: number; skipped: number };
+      const d = await res.json() as { success: boolean; started?: boolean; running?: boolean; total?: number; message?: string };
       if (d.success) {
-        setCheckResult("已检测 " + d.checked + " 个｜✓正常 " + d.valid + "  ⚠需授权 " + d.needsAuth + "  ✗封禁 " + d.banned);
-        await loadAccounts();
+        if (d.running) {
+          setCheckResult("⏳ 后台检测正在运行中…");
+          setCheckBusy(false);
+        } else {
+          const totalN = d.total ?? 0;
+          setCheckResult("✅ 已在后台启动，共 " + totalN + " 个账号");
+          const pollProgress = () => {
+            fetch("/api/tools/outlook/auto-check/status").then(r => r.json()).then((s: { running?: boolean; stats?: { checked: number; valid: number; needsAuth: number; banned: number; skipped: number; finishedAt: string | null } }) => {
+              if (s.stats) setCheckProgress({ checked: s.stats.checked, total: totalN, valid: s.stats.valid, needsAuth: s.stats.needsAuth, banned: s.stats.banned });
+              if (s.running) { setTimeout(pollProgress, 3000); }
+              else { setCheckBusy(false); loadAccounts(); }
+            }).catch(() => setCheckBusy(false));
+          };
+          setTimeout(pollProgress, 2000);
+          return;
+        }
       } else { setCheckResult("检测失败"); }
     } catch { setCheckResult("检测出错"); }
     finally { setCheckBusy(false); }
@@ -995,11 +1010,21 @@ export default function MailCenter() {
           >
             {checkBusy
               ? <><svg className="w-3 h-3 animate-spin mr-1" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>检测中…</>
-              : <><svg className="w-3 h-3 mr-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>立即检测（30个）</>
+              : <><svg className="w-3 h-3 mr-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>立即检测（全部）</>
             }
           </button>
           {checkResult && <p className="text-[10px] text-blue-400 mt-0.5 leading-tight">{checkResult}</p>}
-          <p className="text-[10px] text-gray-600 mt-0.5 leading-tight">↻ 后台每 4 小时自动检测 50 个</p>
+          {checkProgress && checkProgress.total > 0 && (
+            <div className="mt-0.5">
+              <div className="w-full bg-[#161b22] rounded-full h-1">
+                <div className="bg-blue-500 h-1 rounded-full transition-all" style={{ width: Math.min(100, Math.round(checkProgress.checked / checkProgress.total * 100)) + "%" }} />
+              </div>
+              <p className="text-[9px] text-gray-500 mt-0.5">
+                {checkProgress.checked}/{checkProgress.total} &#x2713;{checkProgress.valid} &#x26a0;{checkProgress.needsAuth} &#x2717;{checkProgress.banned}
+              </p>
+            </div>
+          )}
+          <p className="text-[10px] text-gray-600 mt-0.5 leading-tight">↻ 后台每 4 小时自动检测全部</p>
         </div>
         <div className="flex-1 overflow-y-auto flex flex-col">
           {/* 状态过滤标签栏 */}
