@@ -1275,7 +1275,39 @@ def _handle_security_code(page, mt_token: str) -> bool:
         'input[value*="Confirm"]',
     ])
     page.wait_for_timeout(5000)
-    log(f"  [code] submitted, url={_url(page)[:80]}")
+    _submitted_url = _url(page)
+    log(f"  [code] submitted, url={_submitted_url[:80]}")
+    # FIX-POST-VERIFY: If epid param appears, MS shows confirmation page.
+    # Need to click Next/Finish to redirect popup to the OAuth callback URI.
+    if "epid" in _submitted_url:
+        log("  [code] epid URL — waiting 4s then clicking post-verify button...")
+        page.wait_for_timeout(4000)
+        _post_clicked = False
+        for _pbtn in [
+            "button:has-text(\"Next\")",
+            "button:has-text(\"Finish\")",
+            "button:has-text(\"OK\")",
+            "button:has-text(\"Done\")",
+            "button:has-text(\"I understand\")",
+            "button:has-text(\"Continue\")",
+            "input[value*=\"Next\"]",
+            "input[value*=\"Finish\"]",
+        ]:
+            try:
+                _ploc = page.locator(_pbtn).first
+                if _ploc.is_visible(timeout=2000):
+                    _ploc.click()
+                    log(f"  [code] post-verify click: {_pbtn}")
+                    page.wait_for_timeout(6000)
+                    log(f"  [code] after post-verify click url={_url(page)[:80]}")
+                    _post_clicked = True
+                    break
+            except Exception:
+                continue
+        if not _post_clicked:
+            log("  [code] no post-verify button found — waiting 8s for auto-redirect...")
+            page.wait_for_timeout(8000)
+            log(f"  [code] final url={_url(page)[:80]}")
     return True
 
 
@@ -2038,22 +2070,46 @@ def enable_imap(email, password, account_id=None,
                         break
                     page.wait_for_timeout(1500)
 
-            # FIX-C: Full page navigation to IMAP URL (not just menu re-click).
-            # This forces MS to re-evaluate auth state and show IMAP/POP toggles.
-            # Step 1: Navigate to inbox to clear settings state
-            try:
-                log("  [fwd-panel] FIX-C: navigating to inbox to refresh auth state...")
-                page.goto("https://outlook.live.com/mail/0/", wait_until="domcontentloaded", timeout=12000)
+            # FIX-C v2: Stay on current IMAP panel page (do NOT navigate away —
+            # that destroys the JS postMessage listener the popup needs to reach).
+            # Strategy: wait up to 30s for panel to unlock, then try page.reload().
+            log("  [fwd-panel] FIX-C v2: waiting up to 30s on page for panel unlock...")
+            _wall_cleared = False
+            for _wchk in range(10):
                 page.wait_for_timeout(3000)
-            except Exception as _e:
-                log(f"  [fwd-panel] inbox nav error: {_e}")
-            # Step 2: Navigate directly to IMAP settings URL
-            log("  [fwd-panel] FIX-C: navigating to IMAP settings URL...")
-            _nav_to_imap_direct(page)
-            page.wait_for_timeout(4000)
-            # Step 3: Click the Forwarding and IMAP menu item
-            _click_fwd_imap_menu(page)
-            page.wait_for_timeout(5000)
+                if not _has_signin_wall(page):
+                    log(f"  [fwd-panel] ✅ wall cleared after {(_wchk+1)*3}s wait")
+                    _wall_cleared = True
+                    break
+                if _has_imap_content(page, 500):
+                    log(f"  [fwd-panel] ✅ IMAP content appeared after {(_wchk+1)*3}s")
+                    _wall_cleared = True
+                    break
+            if not _wall_cleared:
+                # Try page.reload() — preserves OAuth cookie set by popup
+                log("  [fwd-panel] wall still present — reloading page...")
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=20000)
+                    page.wait_for_timeout(5000)
+                    _click_fwd_imap_menu(page)
+                    page.wait_for_timeout(5000)
+                except Exception as _re:
+                    log(f"  [fwd-panel] reload error: {_re}")
+                if not _has_signin_wall(page):
+                    log("  [fwd-panel] ✅ wall cleared after reload")
+                    _wall_cleared = True
+                else:
+                    # Last resort: full navigation
+                    log("  [fwd-panel] FIX-C last-resort: full inbox→IMAP navigation...")
+                    try:
+                        page.goto("https://outlook.live.com/mail/0/",
+                                  wait_until="domcontentloaded", timeout=12000)
+                        page.wait_for_timeout(3000)
+                    except Exception: pass
+                    _nav_to_imap_direct(page)
+                    page.wait_for_timeout(4000)
+                    _click_fwd_imap_menu(page)
+                    page.wait_for_timeout(5000)
             _ss(page, "05d_imap_unlocked", label)
 
             # Check if Sign-in wall is gone
