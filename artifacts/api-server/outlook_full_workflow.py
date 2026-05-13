@@ -165,7 +165,7 @@ def run_register_and_oauth(
 
     ctrl = PatchrightController(
         proxy=proxy,
-        wait_ms=1500,
+        wait_ms=11,          # 单位：秒（BOT_PROTECTION_WAIT=11s），不是毫秒！
         max_captcha_retries=3,
     )
     result = register_one(
