@@ -343,6 +343,7 @@ export default function MailCenter() {
   }, [loadLiveVerifyStatus]);
 
   // 30s 自动轮询新邮件
+  // 30s 自动轮询新邮件（token 失效时顺手更新账号状态并刷新列表）
   const silentRefresh = useCallback(async (acc: Account, fld: string, q: string) => {
     const d = await fetch(`${API}/tools/outlook/fetch-messages-by-id`, {
       method: "POST",
@@ -350,8 +351,12 @@ export default function MailCenter() {
       body: JSON.stringify({ accountId: acc.id, folder: fld, top: 150, search: q || undefined }),
     }).then(r => r.json()).catch(() => null);
     if (d?.success) { setMessages(d.messages ?? []); setAutoRefreshError(""); }
-    else if (d && !d.success) setAutoRefreshError(d.error ?? "刷新失败");
-  }, []);
+    else if (d && !d.success) {
+      setAutoRefreshError(d.error ?? "刷新失败");
+      // 后端已更新账号状态（token_invalid / abuse_mode） → 刷新左侧账号列表让用户看到变化
+      if (d.statusUpdated || d.needsAuth) { try { await loadAccounts(); } catch {} }
+    }
+  }, [loadAccounts]);
 
   useEffect(() => {
     if (autoRefreshRef.current) { clearInterval(autoRefreshRef.current); autoRefreshRef.current = null; }
@@ -383,9 +388,9 @@ export default function MailCenter() {
       setMessages(d.messages ?? []);
     } else {
       setError(d.error ?? "获取失败");
-      if (d.needsAuth) setNeedsAuth(true);
+      if (d.needsAuth) { setNeedsAuth(true); try { await loadAccounts(); } catch {} }
     }
-  }, []);
+  }, [loadAccounts]);
 
   const selectAccount = (acc: Account) => {
     setSelAccount(acc);
