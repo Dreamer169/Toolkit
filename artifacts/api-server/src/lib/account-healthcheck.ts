@@ -173,6 +173,34 @@ async function runCheck() {
   try {
     const { query, execute } = await import("../db.js");
 
+    // ── 0. 把 suspended+无token+有密码+无封禁 账号批量提升到 needs_oauth 队列 ───────
+    // 这些账号被 step-1 永久跳过（status='suspended' 被排除），需要单独"入队"
+    // 断点自愈：提升后 updated_at=NOW()；若 OAuth 失败打上 needs_oauth_manual 则永不再提升
+    // 若服务器重启：已提升的账号状态仍是 needs_oauth，下轮 runCheck 自动继续处理
+    const suspendedNoauth = await query<{ id: number }>(
+      `SELECT id FROM accounts
+       WHERE platform = 'outlook'
+         AND status = 'suspended'
+         AND (token IS NULL OR token = '')
+         AND (refresh_token IS NULL OR refresh_token = '')
+         AND password IS NOT NULL AND password != ''
+         AND COALESCE(tags, '') NOT LIKE '%abuse_mode%'
+         AND COALESCE(tags, '') NOT LIKE '%needs_oauth_manual%'
+         AND updated_at < NOW() - INTERVAL '2 hours'
+       ORDER BY updated_at ASC
+       LIMIT 10`,
+      []
+    );
+    if (suspendedNoauth.length > 0) {
+      for (const { id } of suspendedNoauth) {
+        await execute(
+          "UPDATE accounts SET status='needs_oauth', updated_at=NOW() WHERE id=$1",
+          [id]
+        );
+      }
+      logger.info({ count: suspendedNoauth.length }, "[healthcheck] suspended+无token 账号已提升到 needs_oauth 队列，等待自动补授权");
+    }
+
     // ── 1. 找无 token 且有密码的账号（排除已挂起/已标记手动处理/已在处理中的）──
     const needsOAuth = await query<{ id: number; email: string; password: string }>(
       `SELECT id, email, password FROM accounts
@@ -184,7 +212,7 @@ async function runCheck() {
          AND COALESCE(tags, '') NOT LIKE '%abuse_mode%'
          AND COALESCE(tags, '') NOT LIKE '%needs_oauth_manual%'
        ORDER BY created_at ASC
-       LIMIT 3`,  // 每轮最多并行处理3个，避免内存压力
+       LIMIT 5`,  // 每轮处理5个（原3个）；suspended 提升 + DB 状态即为断点，重启自动续跑
       []
     );
 
