@@ -1,3 +1,4 @@
+import { logger } from "../lib/logger.js";
 import { PersistenceManager } from "../lib/persistence-manager.js";
 import { jobQueue } from "../lib/job-queue.js";
 import { setLiveVerifyEnabled, getLiveVerifyStatus, incRegBusy, decRegBusy } from "../lib/live-verify-poller.js";
@@ -3352,22 +3353,50 @@ router.post("/tools/cf-pool/retest", async (req, res) => {
 router.get("/tools/outlook/accounts", async (req, res) => {
   try {
     const { query } = await import("../db.js");
+    const search = (req.query.search as string) || "";
+    const statusQ = (req.query.status as string) || "";
+    const limit = Math.min(parseInt(req.query.limit as string) || 300, 500);
+    const offset = parseInt(req.query.offset as string) || 0;
+
+    const conditions: string[] = ["platform='outlook'"];
+    const params: unknown[] = [];
+
+    if (search) {
+      params.push(`%${search.toLowerCase()}%`);
+      conditions.push(`LOWER(email) LIKE $${params.length}`);
+    }
+    if (statusQ === "active")    conditions.push("status='active'");
+    else if (statusQ === "suspended") conditions.push("status='suspended'");
+    else if (statusQ === "noauth")    conditions.push("(COALESCE(token,'')='' AND COALESCE(refresh_token,'')='')");
+    else if (statusQ === "autofix")   conditions.push("status='needs_oauth' AND COALESCE(tags,'') NOT LIKE '%needs_oauth_manual%'");
+
+    const where = conditions.join(" AND ");
+
+    const countRes = await query<{ count: string }>(
+      `SELECT COUNT(*) AS count FROM accounts WHERE ${where}`,
+      params
+    );
+    const total = parseInt(countRes[0]?.count ?? "0");
+
+    const rowParams = [...params, limit, offset];
     const rows = await query<{
       id: number; email: string; password: string | null; token: string | null; refresh_token: string | null; tags: string | null;
       status: string | null; notes: string | null; created_at: string;
     }>(
       `SELECT id, email, password, token, refresh_token, status, notes, tags, created_at
        FROM accounts
-       WHERE platform='outlook'
+       WHERE ${where}
        ORDER BY
          CASE WHEN status='active' THEN 0 ELSE 1 END,
          CASE WHEN COALESCE(refresh_token,'') <> '' OR COALESCE(token,'') <> '' THEN 0 ELSE 1 END,
          updated_at DESC NULLS LAST,
-         created_at DESC`,
-      []
+         created_at DESC
+       LIMIT $${rowParams.length - 1} OFFSET $${rowParams.length}`,
+      rowParams
     );
     res.json({
       success: true,
+      total,
       accounts: rows.map((row) => ({
         ...row,
         token: row.token ? "ok" : null,
@@ -5317,7 +5346,7 @@ async function runAutoCheck(): Promise<void> {
     }>(
       // auto-repair: 除 active 账号外，同时纳入 suspended+token_invalid 且仍有 refresh_token 的账号
       // （accounts.ts inbox 路径在 refresh 失败时设了 status='suspended'，否则这些账号永远被跳过）
-      `SELECT id,email,token,refresh_token,tags,status FROM accounts WHERE platform='outlook' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' AND (status='active' OR (status='suspended' AND COALESCE(tags,'') LIKE '%token_invalid%' AND COALESCE(refresh_token,'') <> '')) ORDER BY updated_at ASC`
+      `SELECT id,email,token,refresh_token,tags,status FROM accounts WHERE platform='outlook' AND ((COALESCE(tags,'') NOT LIKE '%abuse_mode%' AND status='active') OR (status='suspended' AND COALESCE(tags,'') LIKE '%token_invalid%' AND COALESCE(refresh_token,'') <> '')) ORDER BY updated_at ASC`
     );
     // 立即把 total 写入全局 stats，让 status 接口实时可见
     _autoCheckLastStats = { total: accounts.length, checked: 0, valid: 0, needsAuth: 0, banned: 0, skipped: 0, finishedAt: null };
@@ -5449,6 +5478,33 @@ router.post("/tools/outlook/auto-check/stop", (_req, res) => {
   res.json({ success: true, message: "已发送停止信号，当前账号处理完后将停止" });
 });
 
+
+// ── GET /tools/accounts/auto-fix-status ─────────────────────────────────────
+// 实时返回 needs_oauth_pending（补授权进行中）和 needs_oauth 非 manual（等待自动修复）账号列表
+// 前端每 5s 轮询，覆盖本地账号状态展示，无需整页刷新
+router.get("/tools/accounts/auto-fix-status", async (_req, res) => {
+  try {
+    const [pending, waiting] = await Promise.all([
+      query<{ id: number; email: string }>(
+        "SELECT id, email FROM accounts WHERE platform=outlook AND status=needs_oauth_pending ORDER BY updated_at DESC"
+      ),
+      query<{ id: number; email: string }>(
+        "SELECT id, email FROM accounts WHERE platform=outlook AND status=needs_oauth AND COALESCE(tags,) NOT LIKE %needs_oauth_manual% ORDER BY updated_at DESC"
+      ),
+    ]);
+    res.json({
+      success: true,
+      autoCheckRunning: _autoCheckRunning,
+      autoCheckStats: _autoCheckLastStats,
+      pending: pending.map(a => ({ id: a.id, email: a.email })),
+      waiting: waiting.map(a => ({ id: a.id, email: a.email })),
+      pendingIds: pending.map(a => a.id),
+      waitingIds: waiting.map(a => a.id),
+    });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CSV 导入 / 导出  (MailPilot 参考实现)
