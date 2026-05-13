@@ -64,7 +64,9 @@ def mailtm_poll_code(token: str, timeout=240):
     while time.time() < deadline:
         code, body = _mt_req("GET", "/messages", token=token)
         if code == 200:
-            for msg in body.get("hydra:member", []):
+            # mail.tm may return JSON-LD {hydra:member:[...]} or a bare list
+            members = body.get("hydra:member", []) if isinstance(body, dict) else (body if isinstance(body, list) else [])
+            for msg in members:
                 mid = msg["id"]
                 if mid in seen:
                     continue
@@ -1500,20 +1502,15 @@ def _has_imap_content(page, timeout_ms=10000) -> bool:
         "imap access", "enable imap", "pop and imap", "pop access",
         "imap settings", "pop/imap", "let devices and apps use imap",
         "pop access and forwarding",
-        # NOTE: "sign in and verify" etc deliberately EXCLUDED — those indicate
-        # the Sign-in WALL (IMAP not unlocked yet), not actual IMAP content.
-    )
-    # FIX-A: Sign-in wall keywords = IMAP NOT unlocked → return False explicitly
-    SIGNIN_WALL_KWS = (
+        # Sign-in wall keywords = we ARE on the IMAP panel (just locked).
+        # Include them so cycle exits and sign-in handling runs.
+        # FIX-E guard before _toggle_imap prevents toggling on a locked panel.
         "sign in and verify", "verify your account to forward",
         "sync to your devices",
     )
     txt = _txt(page).lower()
-    _has_wall = _still_on_outlook() and any(k in txt for k in SIGNIN_WALL_KWS)
-    _has_panel = _still_on_outlook() and any(k in txt for k in IMAP_PANEL_KWS)
-    if _has_panel and not _has_wall:
+    if _still_on_outlook() and any(k in txt for k in IMAP_PANEL_KWS):
         return True
-    # Panel not yet visible (or wall blocking) — fall through to Level 3
 
     # ── Level 3: radio/switch with IMAP/POP context ────────────────────────
     # CRITICAL: only count radio/switch if IMAP or POP specific text is nearby.
