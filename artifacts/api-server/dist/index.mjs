@@ -75963,8 +75963,26 @@ router2.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
       return;
     }
     if (acc.status === "suspended" && (acc.tags ?? "").includes("abuse_mode")) {
-      res.json({ success: false, error: "\u8D26\u53F7\u5DF2\u88AB\u5FAE\u8F6F\u5C01\u7981\uFF08API\u5C01\u7981\uFF09\uFF0C\u65E0\u6CD5\u8BFB\u53D6\u90AE\u4EF6", via: "blocked" });
-      return;
+      const _abuseTok = acc.token ?? "";
+      if (_abuseTok) {
+        try {
+          const _abuseProxy = await resolveAccountProxy(accountId);
+          const _abuseChk = await fetchGraphMessages(_abuseTok, "inbox", 1, void 0, false, _abuseProxy);
+          if (_abuseChk.ok) {
+            await execute2("UPDATE accounts SET status='active', updated_at=NOW() WHERE id=$1", [accountId]);
+            acc.status = "active";
+          } else if (_abuseChk.status === 403) {
+            res.json({ success: false, error: "\u8D26\u53F7\u5DF2\u88AB\u5FAE\u8F6F\u5C01\u7981\uFF08API 403\uFF09\uFF0C\u65E0\u6CD5\u8BFB\u53D6\u90AE\u4EF6", via: "blocked" });
+            return;
+          }
+        } catch {
+          res.json({ success: false, error: "\u8D26\u53F7\u5DF2\u88AB\u5FAE\u8F6F\u5C01\u7981\uFF08API\u5C01\u7981\uFF09\uFF0C\u65E0\u6CD5\u8BFB\u53D6\u90AE\u4EF6", via: "blocked" });
+          return;
+        }
+      } else {
+        res.json({ success: false, error: "\u8D26\u53F7\u5DF2\u88AB\u5FAE\u8F6F\u5C01\u7981\uFF08API\u5C01\u7981\uFF09\uFF0C\u65E0\u6CD5\u8BFB\u53D6\u90AE\u4EF6", via: "blocked" });
+        return;
+      }
     }
     const mailFolder = folder || "inbox";
     const isAllFolder = mailFolder === "all";
@@ -75993,21 +76011,46 @@ router2.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
         const _errCode = td.error ?? "";
         const _errDesc = td.error_description ?? "";
         try {
-          const _isAbuse = _errDesc.includes("AADSTS70000") || _errDesc.includes("service abuse");
+          const _isAbuse = _errCode === "invalid_grant" && (_errDesc.includes("AADSTS70000") || _errDesc.includes("service abuse") || _errDesc.includes("disabled") || _errDesc.includes("abuse"));
           if (_isAbuse) {
-            await addAccountTags(accountId, ["abuse_mode"], "suspended");
+            await addAccountTags(accountId, ["abuse_mode"]);
           } else if (_errCode === "invalid_grant") {
-            await addAccountTags(accountId, ["token_invalid"], "needs_oauth");
+            await addAccountTags(accountId, ["token_invalid"]);
           }
         } catch (_te) {
         }
         accessToken = acc.token ?? "";
       }
     }
+    const updateStatusFromGraphError = async (httpStatus, errCode) => {
+      try {
+        const isAbuse = httpStatus === 403 || errCode === "AccessDenied" || errCode === "accountClosed";
+        const isInvalid = httpStatus === 401 || errCode === "InvalidAuthenticationToken" || errCode === "AuthenticationError";
+        if (isAbuse && acc.status !== "suspended") {
+          await addAccountTags(accountId, ["abuse_mode"], "suspended");
+          req.log?.info({ accountId, httpStatus, errCode }, "[fetch-messages] Graph \u8FD4\u56DE\u5C01\u7981\u9519\u8BEF\uFF0C\u5DF2\u66F4\u65B0\u72B6\u6001\u4E3A suspended");
+          return true;
+        }
+        if (isInvalid) {
+          await addAccountTags(accountId, ["token_invalid"]);
+          req.log?.info({ accountId, httpStatus, errCode }, "[fetch-messages] Graph \u8FD4\u56DE token \u5931\u6548\uFF0C\u5DF2\u6253 token_invalid \u6807\u7B7E");
+          return true;
+        }
+      } catch (te) {
+        req.log?.warn({ err: String(te) }, "[fetch-messages] \u66F4\u65B0\u72B6\u6001\u5931\u8D25");
+      }
+      return false;
+    };
     if (accessToken) {
       if (isAllFolder) {
         const allRes = await fetchGraphMessages(accessToken, mailFolder, limit, search, true, acctProxy);
         if (allRes.ok) {
+          if (acc.status === "suspended") {
+            try {
+              await execute2("UPDATE accounts SET status='active', updated_at=NOW() WHERE id=$1", [accountId]);
+            } catch {
+            }
+          }
           if (allRes.messages.length > 0) {
             try {
               await addAccountTags(accountId, ["inbox_verified"]);
@@ -76017,9 +76060,20 @@ router2.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
           res.json({ success: true, messages: allRes.messages, count: allRes.messages.length, email: acc.email, via: "graph_all" });
           return;
         }
+        const allStatusUpdated = await updateStatusFromGraphError(allRes.status, allRes.error?.code);
+        if (allStatusUpdated) {
+          res.json({ success: false, error: "\u8D26\u53F7 OAuth \u6388\u6743\u5DF2\u5931\u6548\uFF0C\u72B6\u6001\u5DF2\u81EA\u52A8\u66F4\u65B0", needsAuth: true, statusUpdated: true });
+          return;
+        }
       }
       const primary = await fetchGraphMessages(accessToken, mailFolder, limit, search, false, acctProxy);
       if (primary.ok) {
+        if (acc.status === "suspended") {
+          try {
+            await execute2("UPDATE accounts SET status='active', updated_at=NOW() WHERE id=$1", [accountId]);
+          } catch {
+          }
+        }
         if (primary.messages.length > 0 || mailFolder !== "inbox") {
           if (primary.messages.length > 0) {
             try {
@@ -76042,10 +76096,17 @@ router2.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
         res.json({ success: true, messages: [], count: 0, email: acc.email, via: "graph", folderFallback: globalResult.ok });
         return;
       }
+      await updateStatusFromGraphError(primary.status, primary.error?.code);
     }
     if (accessToken) {
       const xoauthResult = await fetchViaImap(acc.email, acc.password ?? "", mailFolder, limit, search ?? "", accessToken, acctProxy);
       if (xoauthResult.success) {
+        if (acc.status === "suspended") {
+          try {
+            await execute2("UPDATE accounts SET status='active', updated_at=NOW() WHERE id=$1", [accountId]);
+          } catch {
+          }
+        }
         if (xoauthResult.messages.length > 0) {
           try {
             await addAccountTags(accountId, ["inbox_verified"]);
@@ -76093,7 +76154,11 @@ router2.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
       }
       const _isSuspAbuse = acc.status === "suspended" && (acc.tags ?? "").includes("abuse_mode");
       if (!_isSuspAbuse) {
-        res.json({ success: false, error: "\u8D26\u53F7 OAuth \u6388\u6743\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u6388\u6743\u540E\u5373\u53EF\u8BFB\u53D6\u90AE\u4EF6", needsAuth: true });
+        try {
+          await addAccountTags(accountId, ["token_invalid"]);
+        } catch {
+        }
+        res.json({ success: false, error: "\u8D26\u53F7 OAuth \u6388\u6743\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u6388\u6743\u540E\u5373\u53EF\u8BFB\u53D6\u90AE\u4EF6", needsAuth: true, statusUpdated: true });
         return;
       }
     }
@@ -77232,7 +77297,9 @@ router2.post("/tools/waf/scrape", async (req, res) => {
   }
 });
 var _autoCheckRunning = false;
+var _autoCheckStopped = false;
 var _autoCheckLastStats = {
+  total: 0,
   checked: 0,
   valid: 0,
   needsAuth: 0,
@@ -77246,6 +77313,7 @@ async function runAutoCheck() {
     return;
   }
   _autoCheckRunning = true;
+  _autoCheckStopped = false;
   const SCOPE = FULL_GRAPH_SCOPE;
   const BATCH = 30;
   const addTag = async (id, tag, newStatus) => {
@@ -77258,12 +77326,18 @@ async function runAutoCheck() {
   let checked = 0, valid = 0, needsAuth = 0, banned = 0, skipped = 0;
   try {
     const accounts = await query(
-      "SELECT id,email,token,refresh_token,tags FROM accounts WHERE platform='outlook' AND status='active' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' AND COALESCE(tags,'') NOT LIKE '%token_invalid%' ORDER BY updated_at ASC"
+      "SELECT id,email,token,refresh_token,tags FROM accounts WHERE platform='outlook' AND status='active' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' ORDER BY updated_at ASC"
     );
+    _autoCheckLastStats = { total: accounts.length, checked: 0, valid: 0, needsAuth: 0, banned: 0, skipped: 0, finishedAt: null };
     logger.info({ total: accounts.length }, "[auto-check] \u5F00\u59CB\u68C0\u6D4B\u5168\u90E8 active \u8D26\u53F7");
     for (let i = 0; i < accounts.length; i += BATCH) {
+      if (_autoCheckStopped) {
+        logger.info({ checked }, "[auto-check] \u7528\u6237\u624B\u52A8\u505C\u6B62");
+        break;
+      }
       const batch = accounts.slice(i, i + BATCH);
       for (const acc of batch) {
+        if (_autoCheckStopped) break;
         checked++;
         if (!acc.refresh_token || acc.refresh_token.length < 20) {
           needsAuth++;
@@ -77320,6 +77394,7 @@ async function runAutoCheck() {
           const gd = await gr.json();
           if (gr.ok) {
             valid++;
+            await execute(`UPDATE accounts SET tags=(SELECT NULLIF(array_to_string(ARRAY(SELECT DISTINCT trim(t) FROM unnest(string_to_array(COALESCE(tags,''),',')) AS t WHERE trim(t)<>'' AND trim(t)<>'token_invalid' AND trim(t)<>'needs_oauth_manual'),','),'')) WHERE id=$1`, [acc.id]);
             await addTag(acc.id, "inbox_verified");
           } else {
             const code = gd.error?.code ?? "";
@@ -77336,13 +77411,15 @@ async function runAutoCheck() {
         }
         await new Promise((r) => setTimeout(r, 200));
       }
-      logger.info({ batch: Math.floor(i / BATCH) + 1, batchSize: batch.length, checked, valid, needsAuth, banned, skipped }, "[auto-check] \u6279\u6B21\u5B8C\u6210");
+      const total = _autoCheckLastStats.total;
+      _autoCheckLastStats = { total, checked, valid, needsAuth, banned, skipped, stoppedEarly: _autoCheckStopped, finishedAt: null };
+      logger.info({ batch: Math.floor(i / BATCH) + 1, batchSize: batch.length, checked, valid, needsAuth, banned, skipped, stopped: _autoCheckStopped }, "[auto-check] \u6279\u6B21\u5B8C\u6210");
     }
   } catch (e) {
     logger.error({ err: String(e) }, "[auto-check] \u68C0\u6D4B\u51FA\u9519");
   } finally {
     _autoCheckRunning = false;
-    _autoCheckLastStats = { checked, valid, needsAuth, banned, skipped, finishedAt: (/* @__PURE__ */ new Date()).toISOString() };
+    _autoCheckLastStats = { total: _autoCheckLastStats.total, checked, valid, needsAuth, banned, skipped, stoppedEarly: _autoCheckStopped, finishedAt: (/* @__PURE__ */ new Date()).toISOString() };
     logger.info(_autoCheckLastStats, "[auto-check] \u5168\u90E8\u5B8C\u6210");
   }
 }
@@ -77361,7 +77438,7 @@ router2.post("/tools/outlook/auto-check", async (req, res) => {
       return;
     }
     const totalRow = await query(
-      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' AND COALESCE(tags,'') NOT LIKE '%token_invalid%'"
+      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%'"
     );
     const total = parseInt(totalRow[0]?.cnt ?? "0", 10);
     runAutoCheck().catch(() => {
@@ -77375,8 +77452,18 @@ router2.get("/tools/outlook/auto-check/status", (_req, res) => {
   res.json({
     success: true,
     running: _autoCheckRunning,
+    stopped: _autoCheckStopped,
     stats: _autoCheckLastStats
   });
+});
+router2.post("/tools/outlook/auto-check/stop", (_req, res) => {
+  if (!_autoCheckRunning) {
+    res.json({ success: false, message: "\u5F53\u524D\u6CA1\u6709\u6B63\u5728\u8FD0\u884C\u7684\u68C0\u6D4B" });
+    return;
+  }
+  _autoCheckStopped = true;
+  logger.info("[auto-check] \u6536\u5230\u505C\u6B62\u8BF7\u6C42");
+  res.json({ success: true, message: "\u5DF2\u53D1\u9001\u505C\u6B62\u4FE1\u53F7\uFF0C\u5F53\u524D\u8D26\u53F7\u5904\u7406\u5B8C\u540E\u5C06\u505C\u6B62" });
 });
 router2.get("/tools/outlook/export-csv", async (_req, res) => {
   try {

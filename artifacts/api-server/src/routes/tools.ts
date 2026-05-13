@@ -3923,10 +3923,32 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
     }>("SELECT id, email, password, token, refresh_token, status, tags FROM accounts WHERE id=$1 AND platform='outlook'", [accountId]);
     const acc = rows[0];
     if (!acc) { res.status(404).json({ success: false, error: "账号不存在" }); return; }
-    // 封禁账号直接短路，不浪费时间试 token/Graph/IMAP
+    // 封禁账号：先用旧 access_token 快速验 Graph，可能是被旧逻辑误打成 suspended
     if (acc.status === "suspended" && (acc.tags ?? "").includes("abuse_mode")) {
-      res.json({ success: false, error: "账号已被微软封禁（API封禁），无法读取邮件", via: "blocked" });
-      return;
+      const _abuseTok = acc.token ?? "";
+      if (_abuseTok) {
+        try {
+          const _abuseProxy = await resolveAccountProxy(accountId);
+          const _abuseChk = await fetchGraphMessages(_abuseTok, "inbox", 1, undefined, false, _abuseProxy);
+          if (_abuseChk.ok) {
+            // 旧 token 还能用：恢复 active（误打的 suspended），继续走正常流程
+            await execute("UPDATE accounts SET status='active', updated_at=NOW() WHERE id=$1", [accountId]);
+            acc.status = "active"; // 更新内存里的 acc 供后续流程使用
+          } else if (_abuseChk.status === 403) {
+            // 403 确认真的封禁，短路
+            res.json({ success: false, error: "账号已被微软封禁（API 403），无法读取邮件", via: "blocked" });
+            return;
+          }
+          // 其他错误（401/网络等）说明 token 过期但账号不一定被封，继续走正常流程尝试刷新
+        } catch {
+          res.json({ success: false, error: "账号已被微软封禁（API封禁），无法读取邮件", via: "blocked" });
+          return;
+        }
+      } else {
+        // 无 token，无从验证，直接短路
+        res.json({ success: false, error: "账号已被微软封禁（API封禁），无法读取邮件", via: "blocked" });
+        return;
+      }
     }
 
     const mailFolder = folder || "inbox";
@@ -3960,11 +3982,16 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
         const _errCode = (td as { error?: string }).error ?? "";
         const _errDesc = (td as { error_description?: string }).error_description ?? "";
         try {
-          const _isAbuse = _errDesc.includes("AADSTS70000") || _errDesc.includes("service abuse");
+          // 要求 invalid_grant + abuse 关键词，与 auto-check 保持一致
+          const _isAbuse = _errCode === "invalid_grant" &&
+            (_errDesc.includes("AADSTS70000") || _errDesc.includes("service abuse") ||
+             _errDesc.includes("disabled") || _errDesc.includes("abuse"));
           if (_isAbuse) {
-            await addAccountTags(accountId, ["abuse_mode"], "suspended");
+            // 只打 abuse_mode 标签，不改 status —— 等 Graph API 返回 403 才设 suspended
+            await addAccountTags(accountId, ["abuse_mode"]);
           } else if (_errCode === "invalid_grant") {
-            await addAccountTags(accountId, ["token_invalid"], "needs_oauth");
+            // 普通 token 失效：只打 token_invalid，status 留给 XOAUTH2 耗尽路径处理
+            await addAccountTags(accountId, ["token_invalid"]);
           }
         } catch (_te) { /* tag 失败不中断主流程 */ }
         accessToken = acc.token ?? "";
@@ -3996,6 +4023,10 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
       if (isAllFolder) {
         const allRes = await fetchGraphMessages(accessToken, mailFolder, limit, search, true, acctProxy);
         if (allRes.ok) {
+          // Graph 成功：若 status 仍是 suspended（被旧逻辑误打），恢复为 active
+          if (acc.status === "suspended") {
+            try { await execute("UPDATE accounts SET status='active', updated_at=NOW() WHERE id=$1", [accountId]); } catch {}
+          }
           if (allRes.messages.length > 0) { try { await addAccountTags(accountId, ["inbox_verified"]); } catch {} }
           res.json({ success: true, messages: allRes.messages, count: allRes.messages.length, email: acc.email, via: "graph_all" });
           return;
@@ -4009,6 +4040,10 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
       }
       const primary = await fetchGraphMessages(accessToken, mailFolder, limit, search, false, acctProxy);
       if (primary.ok) {
+        // Graph 成功：若 status 仍是 suspended（被旧逻辑误打），恢复为 active
+        if (acc.status === "suspended") {
+          try { await execute("UPDATE accounts SET status='active', updated_at=NOW() WHERE id=$1", [accountId]); } catch {}
+        }
         if (primary.messages.length > 0 || mailFolder !== "inbox") {
           if (primary.messages.length > 0) { try { await addAccountTags(accountId, ["inbox_verified"]); } catch {} }
           res.json({ success: true, messages: primary.messages, count: primary.messages.length, email: acc.email, via: "graph" });
@@ -4036,6 +4071,10 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
       // Graph API 失败但有 token → 尝试 XOAUTH2 IMAP
       const xoauthResult = await fetchViaImap(acc.email, acc.password ?? "", mailFolder, limit, search ?? "", accessToken, acctProxy);
       if (xoauthResult.success) {
+        // XOAUTH2 成功：若 status 仍是 suspended，恢复为 active
+        if (acc.status === "suspended") {
+          try { await execute("UPDATE accounts SET status='active', updated_at=NOW() WHERE id=$1", [accountId]); } catch {}
+        }
         if ((xoauthResult.messages as unknown[]).length > 0) { try { await addAccountTags(accountId, ["inbox_verified"]); } catch {} }
         res.json({ success: true, messages: xoauthResult.messages, count: (xoauthResult.messages as unknown[]).length, email: acc.email, via: "imap_xoauth2" });
         return;
