@@ -359,6 +359,7 @@ class BaseController:
                 return False, "验证码类型错误，非按压验证码", email
 
             # ── CAPTCHA ──────────────────────────────────────────────────
+            self._captcha_early_confirmed = False  # v9.71: reset per round
             captcha_ok = self.handle_captcha(page, blob_container)
             if not captcha_ok:
                 return False, "验证码处理失败", email
@@ -386,9 +387,25 @@ class BaseController:
                         _cap_text_cleared = True
                         print(f"[register] [captcha-clear] CAPTCHA cleared after {_cc_i*2}s", flush=True)
                         break
+                    # v9.71: Cancel按钮/passkey frame 快速出口
+                    try:
+                        if page.get_by_text(TXT_CANCEL_BTN).count() > 0:
+                            _cap_text_cleared = True
+                            print(f"[register] [captcha-clear] Cancel按钮已出现 ({_cc_i*2}s)", flush=True)
+                            break
+                        _cc_passkey = any(
+                            'interrupt' in getattr(_pf3, 'url', '') or 'passkey' in getattr(_pf3, 'url', '')
+                            for _pf3 in page.frames
+                        )
+                        if _cc_passkey:
+                            _cap_text_cleared = True
+                            print(f"[register] [captcha-clear] passkey/interrupt frame已出现 ({_cc_i*2}s)", flush=True)
+                            break
+                    except Exception:
+                        pass
                     # v9.60: 全流程 handle_captcha 重试 (14s 和 28s 各一次)
-                    # 原 Patch-H 只找 #px-captcha 按住, Arkose 重置后已消失 → 无效
-                    if _cc_i in (7, 14) and _cap_retry_count < 2:
+                    # v9.71: 早期信号已确认时跳过（避免触发新挑战）
+                    if _cc_i in (7, 14) and _cap_retry_count < 2 and not getattr(self, '_captcha_early_confirmed', False):
                         _cap_retry_count += 1
                         print(f"[register] [captcha-clear] v9.60 全流程重试#{_cap_retry_count} at {_cc_i*2}s", flush=True)
                         try:
@@ -1575,6 +1592,7 @@ class PatchrightController(BaseController):
 
                 if _early_solved_reason:
                     print(f"[captcha] ✅ press-hold 后早期检测：CAPTCHA 已通过（{_early_solved_reason}）→ 跳过音频流程", flush=True)
+                    self._captcha_early_confirmed = True  # v9.71: notify clear-wait
                     return True
             except Exception as _early_e:
                 print(f"[captcha]   早期检测异常: {_early_e}", flush=True)
