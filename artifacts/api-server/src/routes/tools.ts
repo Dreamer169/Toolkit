@@ -3983,9 +3983,9 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
         const _errDesc = (td as { error_description?: string }).error_description ?? "";
         try {
           // 要求 invalid_grant + abuse 关键词，与 auto-check 保持一致
+          // AADSTS70000 = 微软 service abuse 封禁; "disabled"/"abuse" 关键词太宽会误判
           const _isAbuse = _errCode === "invalid_grant" &&
-            (_errDesc.includes("AADSTS70000") || _errDesc.includes("service abuse") ||
-             _errDesc.includes("disabled") || _errDesc.includes("abuse"));
+            (_errDesc.includes("AADSTS70000") || _errDesc.includes("service abuse"));
           if (_isAbuse) {
             // 只打 abuse_mode 标签，不改 status —— 等 Graph API 返回 403 才设 suspended
             await addAccountTags(accountId, ["abuse_mode"]);
@@ -4001,7 +4001,11 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
     // ── 辅助：根据 Graph API 错误码更新账号状态（收信时顺手体检）────────────
     const updateStatusFromGraphError = async (httpStatus: number, errCode?: string): Promise<boolean> => {
       try {
-        const isAbuse = httpStatus === 403 || errCode === "AccessDenied" || errCode === "accountClosed";
+        // Graph 403 with "AccessDenied" 可能仅是 IMAP 权限不足，不足以判定微软封禁
+        // accountClosed 是账号关闭的明确信号；其余 403 需配合已有 abuse_mode 标签才升级 suspended
+        const isAbuse = errCode === "accountClosed" ||
+          (httpStatus === 403 && errCode !== "AccessDenied" && errCode !== undefined) ||
+          (httpStatus === 403 && (acc.tags ?? "").includes("abuse_mode"));
         const isInvalid = httpStatus === 401 || errCode === "InvalidAuthenticationToken" || errCode === "AuthenticationError";
         if (isAbuse && acc.status !== "suspended") {
           await addAccountTags(accountId, ["abuse_mode"], "suspended");
@@ -5339,9 +5343,10 @@ async function runAutoCheck(): Promise<void> {
           if (!tr.ok || !td.access_token) {
             const errCode = td.error ?? "";
             const errDesc = td.error_description ?? "";
+            // AADSTS70000 = 微软 service abuse 封禁
+            // AADSTS70008 = refresh token 正常过期 (NOT abuse) → token_invalid
             const isAbuse = errCode === "invalid_grant" &&
-              (errDesc.includes("AADSTS70000") || errDesc.includes("AADSTS70008") ||
-               errDesc.includes("service abuse") || errDesc.includes("disabled") || errDesc.includes("abuse"));
+              (errDesc.includes("AADSTS70000") || errDesc.includes("service abuse"));
             if (isAbuse) { banned++; await addTag(acc.id, "abuse_mode", "suspended"); }
             else          { needsAuth++; await addTag(acc.id, "token_invalid"); }
             continue;

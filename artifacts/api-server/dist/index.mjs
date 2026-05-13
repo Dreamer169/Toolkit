@@ -76011,7 +76011,7 @@ router2.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
         const _errCode = td.error ?? "";
         const _errDesc = td.error_description ?? "";
         try {
-          const _isAbuse = _errCode === "invalid_grant" && (_errDesc.includes("AADSTS70000") || _errDesc.includes("service abuse") || _errDesc.includes("disabled") || _errDesc.includes("abuse"));
+          const _isAbuse = _errCode === "invalid_grant" && (_errDesc.includes("AADSTS70000") || _errDesc.includes("service abuse"));
           if (_isAbuse) {
             await addAccountTags(accountId, ["abuse_mode"]);
           } else if (_errCode === "invalid_grant") {
@@ -76024,7 +76024,7 @@ router2.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
     }
     const updateStatusFromGraphError = async (httpStatus, errCode) => {
       try {
-        const isAbuse = httpStatus === 403 || errCode === "AccessDenied" || errCode === "accountClosed";
+        const isAbuse = errCode === "accountClosed" || httpStatus === 403 && errCode !== "AccessDenied" && errCode !== void 0 || httpStatus === 403 && (acc.tags ?? "").includes("abuse_mode");
         const isInvalid = httpStatus === 401 || errCode === "InvalidAuthenticationToken" || errCode === "AuthenticationError";
         if (isAbuse && acc.status !== "suspended") {
           await addAccountTags(accountId, ["abuse_mode"], "suspended");
@@ -77385,7 +77385,7 @@ async function runAutoCheck() {
           if (!tr.ok || !td.access_token) {
             const errCode = td.error ?? "";
             const errDesc = td.error_description ?? "";
-            const isAbuse = errCode === "invalid_grant" && (errDesc.includes("AADSTS70000") || errDesc.includes("AADSTS70008") || errDesc.includes("service abuse") || errDesc.includes("disabled") || errDesc.includes("abuse"));
+            const isAbuse = errCode === "invalid_grant" && (errDesc.includes("AADSTS70000") || errDesc.includes("service abuse"));
             if (isAbuse) {
               banned++;
               await addTag(acc.id, "abuse_mode", "suspended");
