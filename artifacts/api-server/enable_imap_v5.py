@@ -1243,6 +1243,20 @@ def _handle_security_code(page, mt_token: str) -> bool:
     """
     if not mt_token:
         return False
+    # FIX-RU-SAVE: extract ru= OAuth callback URL from proofs/Verify URL
+    # Must do this BEFORE code polling because epid URL drops the ru= param
+    import urllib.parse as _up
+    _ru_url = None
+    try:
+        _initial_verify_url = _url(page)
+        _qs = _up.parse_qs(_up.urlparse(_initial_verify_url).query)
+        _ru_url = _qs.get('ru', [None])[0]
+        if _ru_url:
+            log(f"  [code] saved ru= URL ({_ru_url[:60]}...)")
+        else:
+            log(f"  [code] no ru= found in URL: {_initial_verify_url[:80]}")
+    except Exception as _rue:
+        log(f"  [code] ru-extract error: {_rue}")
     code = mailtm_poll_code(mt_token, timeout=240)
     if not code:
         log("  [code] ❌ no code received")
@@ -1367,6 +1381,27 @@ def _handle_security_code(page, mt_token: str) -> bool:
                 page.wait_for_timeout(5000)  # allow OAuth grant to complete
                 break
         log(f"  [code] final url={_url(page)[:80]}")
+        # FIX-RU-NAV: If popup is still on proofs/ after all button clicks + 30s wait,
+        # navigate directly to the saved ru= OAuth callback URL.
+        # This bypasses the broken Next button and completes the OAuth grant.
+        try:
+            _stuck = _url(page)
+            _closed = page.is_closed()
+        except Exception:
+            _stuck = ""; _closed = True
+        if not _closed and _ru_url and ("proofs" in _stuck.lower() or "account.live.com" in _stuck):
+            log(f"  [code] FIX-RU-NAV: still on proofs — navigating popup to ru= directly...")
+            try:
+                page.goto(_ru_url, timeout=30000, wait_until="domcontentloaded")
+                page.wait_for_timeout(8000)
+                _after_ru = _url(page)
+                log(f"  [code] after ru-nav: url={_after_ru[:80]}")
+                # If we landed on the OAuth callback, wait for it to process
+                if _after_ru != _stuck:
+                    page.wait_for_timeout(5000)
+                    log(f"  [code] ru-nav final url={_url(page)[:80]}")
+            except Exception as _rne:
+                log(f"  [code] ru-nav error: {_rne}")
     return True
 
 
