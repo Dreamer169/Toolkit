@@ -323,6 +323,21 @@ def db_save_ssid_full(account_id, email, ssid):
     conn.commit(); conn.close()
     log(f"[DB] ssid全长保存 {email} id={account_id} ssid_len={len(ssid)}")
 
+    # 同步写入 SQLite ai_accounts，让数据管理中心/AI服务池能统计 unitool 账号
+    try:
+        import sqlite3 as _sq
+        _db_path = "/data/Toolkit/artifacts/api-server/data.db"
+        _sc = _sq.connect(_db_path, timeout=10)
+        _sc.execute("""
+            INSERT INTO ai_accounts (service, email, api_key, status, notes, created_at, updated_at)
+            VALUES ('unitool', ?, ?, 'active', 'chain_v3_auto', datetime('now'), datetime('now'))
+            ON CONFLICT DO NOTHING
+        """, (email, ssid))
+        _sc.commit(); _sc.close()
+        log(f"[DB] ai_accounts unitool 写入 OK {email}")
+    except Exception as _e:
+        log(f"[DB] ai_accounts unitool 写入失败(非致命): {_e}")
+
 def db_save_ref_code(account_id, ref_code):
     """保存 ref_code 到 notes，打 unitool_ref_activated 标签"""
     conn = db_connect(); cur = conn.cursor()
