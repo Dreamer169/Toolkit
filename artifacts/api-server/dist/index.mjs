@@ -77678,6 +77678,34 @@ router2.delete("/tools/outlook/full-workflow/:jobId", (req, res) => {
   }
   res.json({ success: true });
 });
+router2.get("/tools/unitool/token-stats", async (req, res) => {
+  const forceRefresh = req.query.refresh === "1";
+  try {
+    const { readFileSync: readFileSync2, existsSync: existsSync4 } = await import("fs");
+    const CACHE = "/tmp/unitool_token_cache.json";
+    if (!forceRefresh) {
+      if (existsSync4(CACHE)) {
+        const raw = JSON.parse(readFileSync2(CACHE, "utf8"));
+        const vals = Object.values(raw);
+        const total_regular = vals.reduce((s, v) => s + Math.max(0, v.regular ?? 0), 0);
+        const total_bonus = vals.reduce((s, v) => s + Math.max(0, v.bonus ?? 0), 0);
+        return res.json({ success: true, cached: true, accounts: vals.length, total_regular, total_bonus });
+      }
+      return res.json({ success: false, error: "no cache" });
+    }
+    const { spawn: spawn6 } = await import("child_process");
+    const child = spawn6("python3", [
+      "/data/Toolkit/scripts/unitool_token_stats.py",
+      "--refresh",
+      "--limit",
+      "100"
+    ], { detached: true, stdio: "ignore" });
+    child.unref();
+    res.json({ success: true, triggered: true, pid: child.pid });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
 var tools_default = router2;
 
 // src/routes/data.ts
@@ -78862,9 +78890,9 @@ router3.get("/data/unitool-stats", async (req, res) => {
       tokenCache = JSON.parse(rfs_t("/tmp/unitool_token_cache.json", "utf8"));
     } catch {
     }
-    const tokenRegular = Object.values(tokenCache).reduce((s, v) => s + (v.regular ?? 0), 0);
+    const tokenRegular = Object.values(tokenCache).reduce((s, v) => s + Math.max(0, v.regular ?? 0), 0);
     const tokenBonus = Object.values(tokenCache).reduce((s, v) => s + (v.bonus ?? 0), 0);
-    const tokenZeroRegular = Object.values(tokenCache).filter((v) => (v.regular ?? 0) === 0).length;
+    const tokenZeroRegular = Object.values(tokenCache).filter((v) => (v.regular ?? 0) <= 0).length;
     const tokenZeroAccs = Object.values(tokenCache).filter((v) => (v.regular ?? 0) + (v.bonus ?? 0) === 0).length;
     let rotateIdx = 0;
     try {

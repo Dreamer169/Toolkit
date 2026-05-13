@@ -112,7 +112,7 @@ def main():
             if accounts:
                 for acct in accounts:
                     pid = acct.get("product_id", "")
-                    val = int(acct.get("value", 0))
+                    val = round(float(acct.get("value") or 0), 4)
                     exp = acct.get("expires_at", "")
                     if pid == "regular":
                         regular = val; expires_regular = exp

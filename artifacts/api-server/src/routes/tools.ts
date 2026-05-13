@@ -5677,4 +5677,36 @@ router.delete('/tools/outlook/full-workflow/:jobId', (req, res) => {
 });
 
 
+// ── GET /tools/unitool/token-stats — 触发 unitool_token_stats.py 刷新缓存 ──
+// v5.40: 此路由之前缺失，导致监控页"刷新 token 余额"按钮无效
+router.get("/tools/unitool/token-stats", async (req, res) => {
+  const forceRefresh = req.query.refresh === "1";
+  try {
+    const { readFileSync, existsSync } = await import("fs");
+    const CACHE = "/tmp/unitool_token_cache.json";
+    // 如果只是读缓存
+    if (!forceRefresh) {
+      if (existsSync(CACHE)) {
+        const raw = JSON.parse(readFileSync(CACHE, "utf8"));
+        const vals = Object.values(raw) as Array<{ regular?: number; bonus?: number; ts?: number }>;
+        const total_regular = vals.reduce((s, v) => s + Math.max(0, v.regular ?? 0), 0);
+        const total_bonus   = vals.reduce((s, v) => s + Math.max(0, v.bonus   ?? 0), 0);
+        return res.json({ success: true, cached: true, accounts: vals.length, total_regular, total_bonus });
+      }
+      return res.json({ success: false, error: "no cache" });
+    }
+    // 后台触发刷新脚本（每次最多刷新 100 条避免超时）
+    const { spawn } = await import("child_process");
+    const child = spawn("python3", [
+      "/data/Toolkit/scripts/unitool_token_stats.py",
+      "--refresh", "--limit", "100"
+    ], { detached: true, stdio: "ignore" });
+    child.unref();
+    res.json({ success: true, triggered: true, pid: child.pid });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+
 export default router;
