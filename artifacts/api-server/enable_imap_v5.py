@@ -859,9 +859,9 @@ def _handle_fwd_signin(page, email: str, password: str) -> bool:
                 'a[href*="proofs/Skip"]',           # direct skip link
             ]
             _popup_skip_rounds = 0
-            _PROOFS_DOMAINS = ("account.live.com/proofs", "account.microsoft.com/proofs",
-                                "account.live.com/proof", "account.microsoft.com/security")
-            while _popup_skip_rounds < 8:
+            _popup_mt_token = ""   # v9.37 Fix13: store mail.tm token from first _handle_proofs call
+            _popup_mt_addr  = ""
+            while _popup_skip_rounds < 10:
                 _popup_skip_rounds += 1
                 popup_u = _url(popup)
                 # v9.37 Fix12: extract domain only (not full URL) to avoid
@@ -872,7 +872,9 @@ def _handle_fwd_signin(page, email: str, password: str) -> bool:
                     _popup_domain = popup_u.replace("https://","").replace("http://","").split("/")[0].split("?")[0].lower()
                 except Exception:
                     _popup_domain = popup_u.lower()
-                log(f"  [fwd-signin] popup skip round {_popup_skip_rounds}: domain={_popup_domain} url={popup_u[:60]}")
+                _is_verify_page = "verify" in popup_u.lower() or "Verify" in popup_u
+                _is_add_page    = ("proofs/Add" in popup_u or "proofs/add" in popup_u.lower()) and not _is_verify_page
+                log(f"  [fwd-signin] popup skip round {_popup_skip_rounds}: domain={_popup_domain} add={_is_add_page} verify={_is_verify_page} url={popup_u[:60]}")
                 # Check if popup is on Outlook callback URL (OAuth done)
                 if _popup_domain == "outlook.live.com" or popup_u == "" or popup_u == "about:blank":
                     log("  [fwd-signin] popup on Outlook/blank — OAuth done")
@@ -889,7 +891,7 @@ def _handle_fwd_signin(page, email: str, password: str) -> bool:
                 _PROOFS_DOMAINS_SET = ("account.live.com", "account.microsoft.com")
                 _is_login = _popup_domain in _LOGIN_DOMAINS
                 _is_proofs = _popup_domain in _PROOFS_DOMAINS_SET and ("proofs" in popup_u or "security" in popup_u)
-                # Try skipping interrupt pages (button/link)
+                # Try skipping interrupt pages (button/link) first
                 _skipped = False
                 for sel in _PROOFS_SKIP_SELS:
                     try:
@@ -902,39 +904,77 @@ def _handle_fwd_signin(page, email: str, password: str) -> bool:
                             break
                     except Exception:
                         continue
-                if not _skipped:
-                    if _is_proofs:
-                        # On proofs/Add — try JS click on "Not now" or "Cancel" link
-                        _js_skipped = popup.evaluate("""() => {
-                            var kws = ['not now', 'skip', 'maybe later', 'cancel', 'no thanks'];
-                            for (var el of document.querySelectorAll('a,button,[role="button"]')) {
-                                var t = el.textContent.trim().toLowerCase();
-                                if (kws.some(function(k){return t===k||t.indexOf(k)>=0;})) {
-                                    el.click();
-                                    return 'js-skip:' + el.textContent.trim().slice(0,30);
-                                }
+                if _skipped:
+                    continue
+                if _is_proofs and _is_verify_page and _popup_mt_token:
+                    # v9.37 Fix13: on proofs/Verify with stored token — enter verification code
+                    log(f"  [fwd-signin] proofs/Verify — entering code from mail.tm {_popup_mt_addr}...")
+                    try:
+                        _code_ok = _handle_security_code(popup, _popup_mt_token)
+                        log(f"  [fwd-signin] security code result: {_code_ok}")
+                    except Exception as _ce:
+                        log(f"  [fwd-signin] security code error: {_ce}")
+                    popup.wait_for_timeout(5000)
+                elif _is_proofs and _is_add_page:
+                    # On proofs/Add — try JS click "Not now"/"Cancel" first
+                    _js_skipped = popup.evaluate("""() => {
+                        var kws = ['not now', 'skip', 'maybe later', 'cancel', 'no thanks'];
+                        for (var el of document.querySelectorAll('a,button,[role="button"]')) {
+                            var t = el.textContent.trim().toLowerCase();
+                            if (kws.some(function(k){return t===k||t.indexOf(k)>=0;})) {
+                                el.click();
+                                return 'js-skip:' + el.textContent.trim().slice(0,30);
                             }
-                            return 'not-found';
-                        }""")
-                        log(f"  [fwd-signin] proofs JS skip: {_js_skipped}")
-                        if _js_skipped == "not-found":
-                            # Nothing to skip — may be a mandatory add-proofs page.
-                            # Try _handle_proofs to add backup email, then continue.
-                            log("  [fwd-signin] calling _handle_proofs on popup...")
+                        }
+                        return 'not-found';
+                    }""")
+                    log(f"  [fwd-signin] proofs/Add JS skip: {_js_skipped}")
+                    if _js_skipped == "not-found":
+                        # Mandatory — add backup email and store token for verification
+                        if not _popup_mt_token:
+                            log("  [fwd-signin] calling _handle_proofs on popup (first time)...")
                             try:
-                                _handle_proofs(popup)
+                                _ph_ok, _ph_addr, _ph_token = _handle_proofs(popup)
+                                if _ph_ok and _ph_token:
+                                    _popup_mt_addr  = _ph_addr
+                                    _popup_mt_token = _ph_token
+                                    log(f"  [fwd-signin] _handle_proofs ok, token stored: {_ph_addr}")
+                                else:
+                                    log(f"  [fwd-signin] _handle_proofs: ok={_ph_ok} no token")
                             except Exception as _pe:
                                 log(f"  [fwd-signin] _handle_proofs error: {_pe}")
-                        popup.wait_for_timeout(3000)
-                    elif _is_login:
-                        # Genuinely on a login page — may need another auth step
-                        log("  [fwd-signin] popup back on login page — re-reauthing...")
-                        _handle_reauth(popup, email, password)
-                        popup.wait_for_timeout(2000)
-                    else:
-                        # Unknown page — wait and check next round
-                        log(f"  [fwd-signin] popup on unknown domain '{_popup_domain}' — waiting...")
-                        popup.wait_for_timeout(3000)
+                        else:
+                            log("  [fwd-signin] already called _handle_proofs — waiting for Verify page...")
+                    popup.wait_for_timeout(3000)
+                elif _is_proofs:
+                    # Generic proofs page — try JS skip then wait
+                    _js_skipped2 = popup.evaluate("""() => {
+                        var kws = ['not now', 'skip', 'maybe later', 'cancel', 'no thanks'];
+                        for (var el of document.querySelectorAll('a,button,[role="button"]')) {
+                            var t = el.textContent.trim().toLowerCase();
+                            if (kws.some(function(k){return t===k||t.indexOf(k)>=0;})) {
+                                el.click();
+                                return 'js-skip:' + el.textContent.trim().slice(0,30);
+                            }
+                        }
+                        return 'not-found';
+                    }""")
+                    log(f"  [fwd-signin] generic proofs JS skip: {_js_skipped2}")
+                    if _popup_mt_token and _is_verify_page:
+                        try:
+                            _handle_security_code(popup, _popup_mt_token)
+                        except Exception:
+                            pass
+                    popup.wait_for_timeout(3000)
+                elif _is_login:
+                    # Genuinely on a login page — may need another auth step
+                    log("  [fwd-signin] popup back on login page — re-reauthing...")
+                    _handle_reauth(popup, email, password)
+                    popup.wait_for_timeout(2000)
+                else:
+                    # Unknown page — wait and check next round
+                    log(f"  [fwd-signin] popup on unknown domain '{_popup_domain}' — waiting...")
+                    popup.wait_for_timeout(3000)
             _popup_final_url = _url(popup)
             log(f"  [fwd-signin] popup after auth+skip: {_popup_final_url[:100]}")
         elif popup_url == "about:blank" or not popup_url:
