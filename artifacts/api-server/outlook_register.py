@@ -1500,9 +1500,14 @@ class PatchrightController(BaseController):
             if not _second_click_done:
                 print("[captcha] ⚠ 可访问性挑战按钮未找到，跳过", flush=True)
 
-            # v7.60 早期通过检测：press-hold 完成后若 CAPTCHA 已消失，跳过音频流程
-            # 修复：PerimeterX (px-captcha) 路径下 press-hold 已通过但代码继续等音频导致超时失败
-            page.wait_for_timeout(3500)
+            # v9.70: 等待 Arkose .draw 元素从 DOM 消失（替代固定 3.5s）
+            # .draw 是 Arkose 处理 press 输入时的动画元素，消失即 Arkose 已判定结果
+            # 来源：hrhcode/LainsNL 同款 patchright 实测逻辑
+            try:
+                page.locator('.draw').wait_for(state="detached", timeout=10000)
+                print("[captcha] ✅ .draw 已消失（Arkose 已处理 press）", flush=True)
+            except Exception:
+                print("[captcha] .draw 未检测到/超时（继续）", flush=True)
             try:
                 _early_solved_reason = None
                 # v8.19: 双语 Cancel 检测合并
@@ -1573,6 +1578,29 @@ class PatchrightController(BaseController):
                     return True
             except Exception as _early_e:
                 print(f"[captcha]   早期检测异常: {_early_e}", flush=True)
+
+            # v9.70: 检查'请再试一次' — Arkose 拒绝信号，立即 continue 无需等 20s 音频
+            # 来源：hrhcode/LainsNL patchright 实测（frame1.get_by_text('请再试一次')）
+            _retry_now = False
+            for _rtsel in [SEL_IFRAME_CHALLENGE, 'iframe[title*="challenge"]',
+                            'iframe[title*="Challenge"]']:
+                try:
+                    if page.frame_locator(_rtsel).get_by_text('请再试一次').count() > 0:
+                        _retry_now = True
+                        break
+                except Exception:
+                    pass
+            if not _retry_now:
+                for _rfr in page.frames:
+                    try:
+                        if _rfr.evaluate('() => !!(document.body) && document.body.innerText.includes("请再试一次")'):
+                            _retry_now = True
+                            break
+                    except Exception:
+                        pass
+            if _retry_now:
+                print("[captcha] ⚠ 检测到'请再试一次'（Arkose拒绝），立即进入下一次重试…", flush=True)
+                continue
 
             # ── 按住后轮询等待音频加载（最多20s，每2s检查一次网络拦截URL）──
             print("[captcha] 轮询等待音频加载（最多20s）…", flush=True)
