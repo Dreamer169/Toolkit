@@ -1292,6 +1292,9 @@ def _handle_security_code(page, mt_token: str) -> bool:
         log("  [code] filled via JS fallback")
 
     page.wait_for_timeout(500)
+    # Take screenshot before clicking Verify
+    try: page.screenshot(path="/tmp/popup_01_before_verify.png")
+    except Exception: pass
     _click_primary(page, [
         'button:has-text("Verify")',
         'button:has-text("Confirm")',
@@ -1302,6 +1305,9 @@ def _handle_security_code(page, mt_token: str) -> bool:
         'input[value*="Confirm"]',
     ])
     page.wait_for_timeout(5000)
+    # Take screenshot after Verify click
+    try: page.screenshot(path="/tmp/popup_02_after_verify.png")
+    except Exception: pass
     _submitted_url = _url(page)
     log(f"  [code] submitted, url={_submitted_url[:80]}")
     # FIX-POST-VERIFY: If epid param appears, MS shows confirmation page.
@@ -1325,8 +1331,23 @@ def _handle_security_code(page, mt_token: str) -> bool:
                 if _ploc.is_visible(timeout=2000):
                     _ploc.click()
                     log(f"  [code] post-verify click: {_pbtn}")
-                    page.wait_for_timeout(6000)
+                    page.wait_for_timeout(4000)
+                    # Screenshot after Next/Finish click to see page state
+                    try: page.screenshot(path="/tmp/popup_03_after_next.png")
+                    except Exception: pass
                     log(f"  [code] after post-verify click url={_url(page)[:80]}")
+                    # Log all visible buttons on this page
+                    try:
+                        _btns = page.evaluate("""() => {
+                            var elems = document.querySelectorAll('button,input[type=submit],a[role=button]');
+                            return Array.from(elems).slice(0,10).map(e => ({
+                                tag: e.tagName, text: e.textContent.trim().slice(0,30),
+                                value: e.value||'', name: e.name||''
+                            }));
+                        }""")
+                        log(f"  [code] page buttons after next: {_btns}")
+                    except Exception as _be: log(f"  [code] btn list error: {_be}")
+                    page.wait_for_timeout(2000)
                     _post_clicked = True
                     break
             except Exception:
