@@ -105,9 +105,11 @@ def _setup_proxy(exit_ip: str = "", manual_proxy: str = "") -> tuple:
     import socket
     xray_inst = None
 
-    # xray_relay.py: real ISP exit = ss-in-1/3/5/9 (proxy:false)
-    # 10857=ss-in-7 is CF-proxied → excluded; 10820-10829=in-socks CF → excluded
-    ISP_STATIC_PORTS = [10851, 10853, 10855, 10859]
+    # Port priority for Microsoft login (React SPA needs fast US IP for JS bundle loading):
+    #   1. tp-in ports 10910-10914: US datacenter IPs (~0.4s), proven to render MS login form
+    #   2. ss-in ISP ports: Italy/Turkey/Russia/HK (real ISP exit, proxy:false, slower CDN)
+    #   10857=ss-in-7 is CF-proxied → excluded; 10820-10829=in-socks CF → excluded
+    ISP_STATIC_PORTS = [10910, 10911, 10912, 10914, 10851, 10853, 10855, 10859]
 
     if exit_ip:
         try:
@@ -193,10 +195,9 @@ def db_tag_imap_enabled(account_id: int):
 def _find_isp_proxy() -> str:
     """Find first available ISP static port (real IP, not CF). Used for login.live.com."""
     import socket
-    # xray_relay.py: real ISP exit (ss-in-1/3/5/9 = proxy:false)
-    # 10851=Italy 10853=Turkey 10855=Russia 10859=HK
-    # 10857 is ss-in-7 (CF-proxied, proxy:true) — excluded
-    ISP_PORTS = [10851, 10853, 10855, 10859]
+    # tp-in ports (US IP, ~0.4s) first — proven to render Microsoft login React SPA
+    # then ss-in ISP direct (Italy/Turkey/Russia/HK, proxy:false)
+    ISP_PORTS = [10910, 10911, 10912, 10914, 10851, 10853, 10855, 10859]
     for port in ISP_PORTS:
         try:
             s = socket.create_connection(("127.0.0.1", port), timeout=1)
