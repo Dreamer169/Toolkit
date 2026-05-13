@@ -86,16 +86,15 @@ function fmtDate(iso: string) {
 
 
 const TAG_LABELS: Record<string, string> = {
-  // ── 账号状态标签（规范化，不重复）──────────────────────────────────────
-  inbox_verified:    "收件箱✓",        // 账号曾成功读取收件箱（仅 active 账号有效）
-  replit_used:       "已用于Replit",   // 已为 Replit 账号注册使用过
-  needs_oauth_manual:"需重新授权",     // 无 refresh_token，需要设备码重新授权
-  abuse_mode:        "微软封禁",       // Microsoft 判定 abuse，账号已死（不可恢复）
-  token_invalid:     "token失效",      // refresh_token 已失效，需重新授权
-  inbox_error:       "收件箱异常",     // 读取收件箱时发生错误
-  authcode_failed:   "授权码失败",     // 设备码/授权码流程曾失败
-  replit_avail:      "可用于Replit",   // 尚未注册 Replit，可用
+  inbox_verified:    "收件箱✓",
+  replit_used:       "已用Replit",
+  needs_oauth_manual:"需重新授权",
+  inbox_error:       "收件箱异常",
+  authcode_failed:   "授权码失败",
+  replit_avail:      "可用Replit",
 };
+// 对用户隐藏的内部运维标签（abuse_mode/token_invalid 已由 status 标签体现）
+const HIDDEN_TAGS = new Set(["abuse_mode","token_invalid","ssid_ok","unitool_registered","needs_oauth_manual"]);
 const TAG_CLASSES: Record<string, string> = {
   inbox_verified:    "text-emerald-300 bg-emerald-950/40 border-emerald-800/40",
   replit_used:       "text-blue-300 bg-blue-950/40 border-blue-800/40",
@@ -123,6 +122,9 @@ export default function MailCenter() {
   const [accSearch, setAccSearch]       = useState("");
   const [checkBusy, setCheckBusy]       = useState(false);
   const [checkStopBusy, setCheckStopBusy] = useState(false);
+  const [recoverBusy, setRecoverBusy]       = useState(false);
+  const [recoverResult, setRecoverResult]   = useState<string | null>(null);
+  const [recoverProgress, setRecoverProgress] = useState<{ checked: number; total: number; recovered: number; confirmed: number } | null>(null);
   const [checkResult, setCheckResult]   = useState<string | null>(null);
   const [checkProgress, setCheckProgress] = useState<{ checked: number; total: number; valid: number; needsAuth: number; banned: number; skipped: number } | null>(null);
   const [busy, setBusy]                 = useState(false);
@@ -201,6 +203,37 @@ export default function MailCenter() {
   const [manualForm, setManualForm]         = useState({ email: "", password: "", token: "" });
   const [manualBusy, setManualBusy]         = useState(false);
   const [manualMsg, setManualMsg]           = useState("");
+
+  const handleRecover = async () => {
+    if (recoverBusy) return;
+    setRecoverBusy(true); setRecoverResult(null); setRecoverProgress(null);
+    try {
+      const r = await fetch("/api/tools/outlook/recover-suspended", { method: "POST" });
+      const d = await r.json() as { success: boolean; running?: boolean; stats?: { total: number } };
+      if (d.success) {
+        const totalN = d.stats?.total ?? 0;
+        setRecoverResult(`🔍 已启动，扫描 ${totalN} 个被封账号…`);
+        const poll = () => {
+          fetch("/api/tools/outlook/recover-suspended/status")
+            .then(r2 => r2.json())
+            .then((s: { running?: boolean; stats?: { checked: number; total: number; recovered: number; confirmed: number; skipped: number; finishedAt: string | null } }) => {
+              if (s.stats) setRecoverProgress({ checked: s.stats.checked, total: s.stats.total || totalN, recovered: s.stats.recovered, confirmed: s.stats.confirmed });
+              if (s.running) { setTimeout(poll, 3000); }
+              else {
+                const st = s.stats;
+                setRecoverResult(st ? `✅ 回收完成：恢复 ${st.recovered} 个 / 确认封禁 ${st.confirmed} 个 / 跳过 ${st.skipped} 个` : "✅ 完成");
+                setRecoverBusy(false);
+                loadAccounts();
+              }
+            })
+            .catch(() => { setRecoverBusy(false); });
+        };
+        setTimeout(poll, 2000);
+        return;
+      } else { setRecoverResult("❌ 启动失败"); }
+    } catch { setRecoverResult("❌ 请求出错"); }
+    setRecoverBusy(false);
+  };
 
   const handleStopCheck = async () => {
     if (checkStopBusy) return;
@@ -1141,13 +1174,40 @@ export default function MailCenter() {
           {/* 被封账号管理操作栏 */}
           {statusFilter === "suspended" && (
             <div className="px-2 py-1.5 border-b border-[#21262d] shrink-0 space-y-1">
-              <button
-                onClick={bulkDeleteSuspended}
-                disabled={bulkDelBusy || accounts.filter(a => a.status === "suspended").length === 0}
-                className="w-full py-1 bg-red-800/50 hover:bg-red-800/70 disabled:opacity-40 rounded text-[11px] text-red-300 font-medium transition-colors"
-              >
-                {bulkDelBusy ? "删除中…" : `🗑 批量删除 ${accounts.filter(a => a.status === "suspended").length} 个被封账号`}
-              </button>
+              <div className="flex gap-1">
+                <button
+                  onClick={handleRecover}
+                  disabled={recoverBusy}
+                  className="flex-1 py-1 bg-amber-900/40 hover:bg-amber-800/50 disabled:opacity-40 rounded text-[11px] text-amber-300 font-medium transition-colors"
+                >
+                  {recoverBusy
+                    ? <><svg className="inline w-3 h-3 animate-spin mr-1" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>扫描中…</>
+                    : "♻ 回收误判封禁"
+                  }
+                </button>
+                <button
+                  onClick={bulkDeleteSuspended}
+                  disabled={bulkDelBusy || accounts.filter(a => a.status === "suspended").length === 0}
+                  className="flex-1 py-1 bg-red-800/40 hover:bg-red-800/60 disabled:opacity-40 rounded text-[11px] text-red-300 font-medium transition-colors"
+                >
+                  {bulkDelBusy ? "删除中…" : `🗑 删除 ${accounts.filter(a => a.status === "suspended").length} 个`}
+                </button>
+              </div>
+              {recoverResult && (
+                <p className={`text-[10px] leading-tight ${recoverResult.startsWith("✅") ? "text-emerald-400" : recoverResult.startsWith("❌") ? "text-red-400" : "text-amber-400"}`}>
+                  {recoverResult}
+                </p>
+              )}
+              {recoverProgress && recoverProgress.total > 0 && (
+                <div>
+                  <div className="w-full bg-[#161b22] rounded-full h-1">
+                    <div className="bg-amber-500 h-1 rounded-full transition-all" style={{ width: Math.min(100, Math.round(recoverProgress.checked / recoverProgress.total * 100)) + "%" }} />
+                  </div>
+                  <p className="text-[9px] text-gray-500 mt-0.5">
+                    {recoverProgress.checked}/{recoverProgress.total} · 恢复 <span className="text-emerald-400">{recoverProgress.recovered}</span> · 确认封禁 <span className="text-red-400">{recoverProgress.confirmed}</span>
+                  </p>
+                </div>
+              )}
               {bulkDelResult && <p className="text-[10px] text-gray-400">{bulkDelResult}</p>}
             </div>
           )}
@@ -1228,11 +1288,14 @@ export default function MailCenter() {
                     <div className="flex items-center gap-2 mt-0.5 ml-3">
                       <span className={`text-[10px] font-medium ${labelCls}`}>{label}</span>
                       {vb && <span className={`text-[10px] ${vb.cls}`}>· {vb.label}</span>}
-                      {accTags.map(tag => (
+                      {accTags.filter(tag => !HIDDEN_TAGS.has(tag) && TAG_LABELS[tag]).map(tag => (
                         <span key={tag} className={`text-[10px] px-1 py-0.5 rounded border ${TAG_CLASSES[tag] ?? "text-gray-400 bg-[#21262d] border-[#30363d]"}`}>
-                          {TAG_LABELS[tag] ?? tag}
+                          {TAG_LABELS[tag]}
                         </span>
                       ))}
+                      {isSuspended && !isAbuse && (
+                        <span className="text-[10px] px-1 py-0.5 rounded border text-gray-500 bg-[#161b22] border-[#21262d]">待核查</span>
+                      )}
                       <span className="text-[10px] text-gray-600 ml-auto">
                         {new Date(acc.created_at).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" })}
                       </span>

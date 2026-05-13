@@ -77905,6 +77905,73 @@ router2.post("/tools/outlook/emails-pool-check", (_req, res) => {
 router2.get("/tools/outlook/emails-pool-check/status", (_req, res) => {
   res.json({ success: true, stats: _emailsPoolCheckStats });
 });
+var _recoverRunning = false;
+var _recoverStats = { total: 0, checked: 0, recovered: 0, confirmed: 0, skipped: 0, finishedAt: null };
+async function runRecoverSuspended() {
+  if (_recoverRunning) return;
+  _recoverRunning = true;
+  let checked = 0, recovered = 0, confirmed = 0, skipped = 0;
+  try {
+    const accounts = await query(
+      "SELECT id, email, token FROM accounts WHERE platform='outlook' AND status='suspended' AND COALESCE(tags,'') LIKE '%abuse_mode%' AND token IS NOT NULL AND token != '' ORDER BY updated_at ASC"
+    );
+    _recoverStats = { total: accounts.length, checked: 0, recovered: 0, confirmed: 0, skipped: 0, finishedAt: null };
+    logger.info({ total: accounts.length }, "[recover-suspended] \u5F00\u59CB\u626B\u63CF");
+    const BATCH = 20;
+    for (let i = 0; i < accounts.length; i += BATCH) {
+      const batch = accounts.slice(i, i + BATCH);
+      await Promise.all(batch.map(async (acc) => {
+        checked++;
+        try {
+          const proxy = await resolveAccountProxy(acc.id);
+          const gr = await microsoftFetch(
+            "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=1&$select=id",
+            { headers: { Authorization: `Bearer ${acc.token}` } },
+            proxy
+          );
+          if (gr.ok) {
+            recovered++;
+            await execute(
+              `UPDATE accounts SET status='active', updated_at=NOW(),
+               tags=(SELECT NULLIF(array_to_string(ARRAY(
+                 SELECT DISTINCT trim(t) FROM unnest(string_to_array(COALESCE(tags,''),',')) AS t
+                 WHERE trim(t)<>'' AND trim(t)<>'abuse_mode' AND trim(t)<>'token_invalid'
+               ),','),'')) WHERE id=$1`,
+              [acc.id]
+            );
+            logger.info({ id: acc.id, email: acc.email }, "[recover-suspended] \u6062\u590D active\uFF08\u65E7token\u6709\u6548\uFF09");
+          } else if (gr.status === 403) {
+            confirmed++;
+          } else {
+            skipped++;
+          }
+        } catch {
+          skipped++;
+        }
+        _recoverStats = { total: _recoverStats.total, checked, recovered, confirmed, skipped, finishedAt: null };
+      }));
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  } catch (e) {
+    logger.error({ err: String(e) }, "[recover-suspended] \u51FA\u9519");
+  } finally {
+    _recoverRunning = false;
+    _recoverStats = { ..._recoverStats, finishedAt: (/* @__PURE__ */ new Date()).toISOString() };
+    logger.info(_recoverStats, "[recover-suspended] \u5B8C\u6210");
+  }
+}
+router2.post("/tools/outlook/recover-suspended", (_req, res) => {
+  if (_recoverRunning) {
+    res.json({ success: true, running: true, stats: _recoverStats });
+    return;
+  }
+  runRecoverSuspended().catch(() => {
+  });
+  res.json({ success: true, started: true, stats: _recoverStats });
+});
+router2.get("/tools/outlook/recover-suspended/status", (_req, res) => {
+  res.json({ success: true, running: _recoverRunning, stats: _recoverStats });
+});
 var tools_default = router2;
 
 // src/routes/data.ts
