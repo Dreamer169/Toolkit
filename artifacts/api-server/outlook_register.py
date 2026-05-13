@@ -3081,9 +3081,36 @@ def run_parallel(args) -> None:
             cmd += ["--proxy-mode", "cf", "--cf-port", str(args.cf_port)]
         elif proxy_list:
             cmd += ["--proxy", proxy_list[task_idx % len(proxy_list)]]
+        # Bug fix 1: pass --username/--password only to the very first task
+        if task_idx == 0:
+            if getattr(args, "username", ""):
+                cmd += ["--username", args.username]
+            if getattr(args, "password", ""):
+                cmd += ["--password", args.password]
 
         env = dict(_os.environ, PYTHONUNBUFFERED="1")
         proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True, env=env)
+
+        # Bug fix 2: enforce per-account timeout to kill frozen Chrome processes
+        _timeout = getattr(args, "timeout_per_account", 300)
+        _deadline = _tm.time() + _timeout
+        _timed_out = [False]
+
+        def _watchdog():
+            _wait = _deadline - _tm.time()
+            if _wait > 0:
+                _th.Event().wait(timeout=_wait)
+            if proc.poll() is None:
+                _timed_out[0] = True
+                with lock:
+                    print("[T%02d] ⏱ 超时 %ds，强杀子进程" % (task_idx + 1, _timeout), flush=True)
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+        _wdog = _th.Thread(target=_watchdog, daemon=True)
+        _wdog.start()
 
         json_buf = ""
         in_json = False
@@ -3099,6 +3126,8 @@ def run_parallel(args) -> None:
                 print("[T%02d] %s" % (task_idx + 1, line), flush=True)
 
         proc.wait()
+        if _timed_out[0]:
+            return [{"success": False, "email": "", "error": "timeout_%ds" % _timeout}]
         try:
             start = json_buf.find("[")
             if start >= 0:
@@ -3193,6 +3222,7 @@ def main():
     parser.add_argument("--username",        type=str,   default="",           help="指定首个 Outlook 用户名（可带 @outlook.com）")
     parser.add_argument("--password",        type=str,   default="",           help="指定首个 Outlook 密码")
     parser.add_argument("--workers",         type=int,   default=1,            help="parallel sub-process workers (1=sequential, N=concurrent, recommended ≤8 per memory)")
+    parser.add_argument("--timeout-per-account", type=int, default=300,        help="v9.73: max seconds per account subprocess before SIGKILL (default 300)")
     args = parser.parse_args()
 
 
