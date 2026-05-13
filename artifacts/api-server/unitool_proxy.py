@@ -580,11 +580,24 @@ def _balance_monitor_loop():
 #     - 旧注释 "GPT-4o" 是基于自报 cutoff 的错误推断，已修正
 #   gpt-5/gpt-5.4/gpt5.2 -> refused to reveal (unknown/unavailable)
 #   o-series: broken (TypeError/no-choices/no endpoints) at unitool backend
-#   grok/gemini: work via paginatedMessages poll
+#   grok/gemini/perplexity: work via paginatedMessages poll
+#   --- Gemini ---
 #   gemini-3-pro   -> gemini-3.1-pro-preview (Gemini 3.1 Pro) ✓ CONFIRMED: 自报"Gemini 3.1 Pro", has_realtime_search=true
 #   gemini-3.1-pro -> gemini-3.1-pro-preview (同一后端)       ✓ CONFIRMED: 自报"Gemini 3.1 Pro", unitool后端等价路由
-#                   NOTE: proxy原样传递两个不同service_id给unitool (NATIVE_SERVICES, 无alias关系)
-#                   unitool自身将两个service_id路由到同一Gemini 3.1 Pro实例 (非proxy合并)
+#                   NOTE: proxy原样传递两个不同service_id; unitool自身将两个入口路由到同一Gemini 3.1 Pro实例
+#   --- xAI Grok ---
+#   grok           -> grok-4-0709 (Grok 4, released July 2025) ✓ CONFIRMED (probe v6.2, 2026-05-13)
+#                   自报"Grok 4", version string "grok-4-0709"; knows Grok3 Dec2024 + Grok3-Heavy Feb2025
+#                   continuously updated + web browsing capability
+#   --- Perplexity (⚠ 实为 Claude + llmlayer.ai 搜索层) ---
+#   perplexity-sonar     -> claude-sonnet-4-6 + llmlayer.ai web search overlay ✓ CONFIRMED (probe v6.2)
+#                   ⚠ 不是真实 Perplexity! unitool 用 Claude Sonnet 4.6 包装为 "Perplexity Sonar"
+#                   llmlayer.ai ("Web Infrastructure For AI Agents") 提供搜索层 → 俄语"Источники"
+#   perplexity-sonar-pro -> claude-sonnet-4-6 + llmlayer.ai web search overlay ✓ CONFIRMED (probe v6.2)
+#                   ⚠ 同样不是真实 Perplexity! 与 sonar 同一后端模型 (claude-sonnet-4-6)
+#                   cutoff: reliable=Aug 2025, training_data=Jan 2026
+#   perplexity-sonar-pro-search -> 真实 Perplexity AI ✓ CONFIRMED (probe v6.2)
+#                   自报"Perplexity AI"; 真实实时搜索; 知道 GPT-5 Aug7 2025, Claude Opus4 May22 2025
 NATIVE_SERVICES = {
     # ChatGPT（实探 /api/services?parent_id=chatgpt 确认，含 minimum_balance）
     "gpt-5", "gpt-5.5", "gpt-5.4", "gpt-5-nano",
