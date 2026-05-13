@@ -115,6 +115,7 @@ function hasTag(acc: Account, tag: string): boolean {
 export default function MailCenter() {
   const [accounts, setAccounts]         = useState<Account[]>([]);
   const [accTotal, setAccTotal]           = useState(0);
+  const [statusCounts, setStatusCounts]   = useState<{ active: number; suspended: number; needs_oauth_auto: number; noauth: number }>({ active: 0, suspended: 0, needs_oauth_auto: 0, noauth: 0 });
   const [selAccount, setSelAccount]     = useState<Account | null>(null);
   const [folder, setFolder]             = useState("inbox");
   const [messages, setMessages]         = useState<MailMsg[]>([]);
@@ -296,7 +297,11 @@ export default function MailCenter() {
     if (opts?.search) qs.set('search', opts.search);
     if (opts?.status && opts.status !== 'all') qs.set('status', opts.status);
     const d = await fetch(API + '/tools/outlook/accounts?' + qs).then(r => r.json()).catch(() => ({}));
-    if (d.success) { setAccounts(d.accounts ?? []); setAccTotal(d.total ?? 0); }
+    if (d.success) {
+      setAccounts(d.accounts ?? []);
+      setAccTotal(d.total ?? 0);
+      if (d.statusCounts) setStatusCounts(d.statusCounts);
+    }
   }, []);
 
   useEffect(() => { loadAccounts(); }, [loadAccounts]);
@@ -1160,11 +1165,11 @@ export default function MailCenter() {
           {/* 状态过滤标签栏 */}
           <div className="px-2 py-1 border-b border-[#21262d] shrink-0 flex gap-1 flex-wrap">
             {([
-              { key: "all",       label: "全部",   count: accTotal || accounts.length },
-              { key: "active",    label: "活跃",   count: accounts.filter(a => a.status === "active").length },
-              { key: "suspended", label: "🔴 被封", count: accounts.filter(a => a.status === "suspended").length },
-              { key: "noauth",    label: "⚠ 未授权", count: accounts.filter(a => !hasOAuth(a) && !hasImap(a)).length },
-              { key: "autofix",   label: "⏳ 自动修复", count: accounts.filter(a => a.status === "needs_oauth" && !a.tags?.includes("needs_oauth_manual")).length },
+              { key: "all",       label: "全部",   count: accTotal },
+              { key: "active",    label: "活跃",   count: statusCounts.active },
+              { key: "suspended", label: "🔴 被封", count: statusCounts.suspended },
+              { key: "noauth",    label: "⚠ 未授权", count: statusCounts.noauth },
+              { key: "autofix",   label: "⏳ 自动修复", count: statusCounts.needs_oauth_auto },
             ] as const).map(t => (
               <button key={t.key}
                 onClick={() => setStatusFilter(t.key)}
