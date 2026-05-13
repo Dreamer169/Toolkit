@@ -518,7 +518,7 @@ def create_ref_code_via_proxy(ssid: str, email: str, port_hint: int = 0) -> str:
         except Exception as _e:
             log(f"[ref_create] port={port} exc={_e}")
     log(f"[ref_create] ❌ 所有代理端口均失败 ({email})")
-    # 全 RESI 端口失败 → CF Worker 兜底创建 ref_code（CF 边缘 IP）
+    # 全 RESI 端口失败 → CF Worker 底创建 ref_code（CF 边缘 IP）
     try:
         _cfc_body = _cf_worker_api(
             "https://unitool.ai/api/ref-codes", "POST", ssid,
@@ -530,8 +530,51 @@ def create_ref_code_via_proxy(ssid: str, email: str, port_hint: int = 0) -> str:
             if _cfc_code:
                 log(f"[CF] create ref_code via Worker: {_cfc_code}")
                 return _cfc_code
+            else:
+                log(f"[CF] create ref_code CF-FAIL body={_cfc_body[:200]}")
+        else:
+            log(f"[CF] create ref_code CF-EMPTY body={repr(_cfc_body)[:80]}")
     except Exception as _cfe:
         log(f"[CF] create ref fallback err: {_cfe}")
+
+    # 全 RESI + CF 均失败 → 外部代理池底（/tmp/resi_pool_external.json）
+    try:
+        import json as _jext, random as _rnd
+        _ext_file = "/tmp/resi_pool_external.json"
+        if os.path.exists(_ext_file):
+            _ext_list = list(_jext.loads(open(_ext_file).read()).get("proxies", []))
+            _rnd.shuffle(_ext_list)
+            for _ext_proxy in _ext_list[:8]:
+                try:
+                    _ep_cmd = [
+                        "curl", "-s", "--max-time", "15",
+                        "--socks5-hostname", _ext_proxy,
+                        "-b", f"__Secure-unitool-ssid={ssid}",
+                        "-X", "POST",
+                        "-H", "Content-Type: application/json",
+                        "-H", "Accept: application/json",
+                        "https://unitool.ai/api/ref-codes",
+                    ]
+                    _ep_proc = subprocess.Popen(_ep_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    try:
+                        _ep_out, _ = _ep_proc.communicate(timeout=20)
+                        _ep_raw = _ep_out.decode("utf-8", errors="ignore").strip()
+                    except subprocess.TimeoutExpired:
+                        _ep_proc.kill(); _ep_proc.communicate(); continue
+                    if not _ep_raw:
+                        continue
+                    _ep_d = _jext.loads(_ep_raw)
+                    _ep_code = _ep_d.get("code", "")
+                    if _ep_code:
+                        log(f"[ext_proxy] ref_code OK proxy={_ext_proxy} code={_ep_code}")
+                        return _ep_code
+                    _ep_err = _ep_d.get("error", "")
+                    log(f"[ext_proxy] {_ext_proxy} err={_ep_err}")
+                except Exception as _ep_e:
+                    log(f"[ext_proxy] {_ext_proxy} exc={_ep_e}")
+    except Exception as _ext_top:
+        log(f"[ext_proxy] top err: {_ext_top}")
+
     return ""
 
 

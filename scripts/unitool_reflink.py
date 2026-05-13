@@ -17,7 +17,7 @@ import psycopg2
 DB_URL = "postgresql://postgres:postgres@localhost/toolkit"
 AUTH_COOKIE = "__Secure-unitool-ssid"
 # 住宅代理端口列表
-RESI_PORTS = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
+RESI_PORTS = [10851, 10853, 10854, 10855, 10857, 10859]  # 10870-10889 dead
 
 def _pick_resi_port(key: str) -> int:
     return RESI_PORTS[hash(key) % len(RESI_PORTS)]
