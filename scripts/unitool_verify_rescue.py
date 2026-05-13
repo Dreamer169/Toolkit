@@ -787,9 +787,16 @@ def main():
         except Exception as _ie:
             log("[idle] err (non-fatal): " + str(_ie)[:80])
 
-    # Graph API polling fallback — only when IMAP token unavailable
-    if not verify_url and not _imap_tried:
-        if access_token:
+    # Graph fallback: immediate scan when IMAP failed; polling when IMAP unavailable
+    if not verify_url and access_token:
+        if _imap_tried:
+            # IMAP was attempted but failed/found nothing — do one immediate Graph scan
+            log("[graph] IMAP failed — immediate Graph scan...")
+            verify_url = find_verify_link(access_token)
+            if verify_url:
+                log("[graph] immediate scan found: " + verify_url[:80])
+        else:
+            # IMAP not available at all — do full Graph polling
             log("[graph] IMAP unavailable — Graph polling max %ds..." % (_max_polls * 20))
             for attempt in range(_max_polls):
                 import time as _t; _t.sleep(20)
@@ -797,8 +804,8 @@ def main():
                 if verify_url:
                     log("[graph] found at %ds: %s" % ((attempt+1)*20, verify_url[:80])); break
                 log("[graph] [%ds] not found" % ((attempt+1)*20))
-        else:
-            log("[graph] no Graph token and IMAP unavailable")
+    elif not verify_url and not access_token:
+        log("[graph] no Graph token and IMAP unavailable")
 
     ssid = ""
     if verify_url:
