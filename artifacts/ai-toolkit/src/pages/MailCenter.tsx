@@ -123,7 +123,7 @@ export default function MailCenter() {
   const [accSearch, setAccSearch]       = useState("");
   const [checkBusy, setCheckBusy]       = useState(false);
   const [checkResult, setCheckResult]   = useState<string | null>(null);
-  const [checkProgress, setCheckProgress] = useState<{ checked: number; total: number; valid: number; needsAuth: number; banned: number } | null>(null);
+  const [checkProgress, setCheckProgress] = useState<{ checked: number; total: number; valid: number; needsAuth: number; banned: number; skipped: number } | null>(null);
   const [busy, setBusy]                 = useState(false);
   const [authBusy, setAuthBusy]         = useState<number | "all" | null>(null);
   const [error, setError]               = useState("");
@@ -204,6 +204,33 @@ export default function MailCenter() {
   const handleAutoCheck = async () => {
     if (checkBusy) return;
     setCheckBusy(true); setCheckResult(null); setCheckProgress(null);
+    // 将轮询逻辑提取出来，可复用于「已在运行」场景
+    const startPolling = (totalN: number) => {
+      const pollProgress = () => {
+        fetch("/api/tools/outlook/auto-check/status")
+          .then(r => r.json())
+          .then((s: { running?: boolean; stats?: { checked: number; valid: number; needsAuth: number; banned: number; skipped: number; finishedAt: string | null } }) => {
+            if (s.stats) {
+              setCheckProgress({ checked: s.stats.checked, total: totalN, valid: s.stats.valid, needsAuth: s.stats.needsAuth, banned: s.stats.banned, skipped: s.stats.skipped });
+            }
+            if (s.running) {
+              setTimeout(pollProgress, 3000);
+            } else {
+              // 检测完成
+              if (s.stats) {
+                setCheckResult(`✅ 检测完成：${s.stats.valid} 活跃 / ${s.stats.banned} 被封 / ${s.stats.needsAuth} 需授权 / ${s.stats.skipped} 跳过`);
+              } else {
+                setCheckResult("✅ 检测完成");
+              }
+              setCheckBusy(false);
+              loadAccounts();
+            }
+          })
+          .catch(() => { setCheckResult("⚠ 轮询出错"); setCheckBusy(false); });
+      };
+      setTimeout(pollProgress, 2000);
+    };
+
     try {
       const res = await fetch("/api/tools/outlook/auto-check", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -212,24 +239,30 @@ export default function MailCenter() {
       const d = await res.json() as { success: boolean; started?: boolean; running?: boolean; total?: number; message?: string };
       if (d.success) {
         if (d.running) {
-          setCheckResult("⏳ 后台检测正在运行中…");
-          setCheckBusy(false);
+          // 已在运行 — 获取当前进度并开始轮询
+          setCheckResult("⏳ 检测已在后台运行，跟踪进度中…");
+          const status = await fetch("/api/tools/outlook/auto-check/status").then(r => r.json()).catch(() => null) as { running?: boolean; stats?: { checked: number; valid: number; needsAuth: number; banned: number; skipped: number; total?: number; finishedAt: string | null } } | null;
+          const totalN = status?.stats?.total ?? d.total ?? 0;
+          if (status?.stats) {
+            setCheckProgress({ checked: status.stats.checked, total: totalN, valid: status.stats.valid, needsAuth: status.stats.needsAuth, banned: status.stats.banned, skipped: status.stats.skipped });
+          }
+          startPolling(totalN);
+          // 不调用 finally 里的 setCheckBusy(false)：通过 return 跳出，但 finally 仍会执行
+          // 用 busyGuard 来阻止 finally 重置
         } else {
           const totalN = d.total ?? 0;
-          setCheckResult("✅ 已在后台启动，共 " + totalN + " 个账号");
-          const pollProgress = () => {
-            fetch("/api/tools/outlook/auto-check/status").then(r => r.json()).then((s: { running?: boolean; stats?: { checked: number; valid: number; needsAuth: number; banned: number; skipped: number; finishedAt: string | null } }) => {
-              if (s.stats) setCheckProgress({ checked: s.stats.checked, total: totalN, valid: s.stats.valid, needsAuth: s.stats.needsAuth, banned: s.stats.banned });
-              if (s.running) { setTimeout(pollProgress, 3000); }
-              else { setCheckBusy(false); loadAccounts(); }
-            }).catch(() => setCheckBusy(false));
-          };
-          setTimeout(pollProgress, 2000);
-          return;
+          setCheckResult("🚀 已在后台启动，共 " + totalN + " 个账号");
+          startPolling(totalN);
         }
-      } else { setCheckResult("检测失败"); }
-    } catch { setCheckResult("检测出错"); }
-    finally { setCheckBusy(false); }
+        return; // 两条路都走 polling，finally 里需跳过 setCheckBusy
+      } else {
+        setCheckResult("❌ 检测失败：" + (d.message ?? "未知错误"));
+        setCheckBusy(false);
+      }
+    } catch {
+      setCheckResult("❌ 请求出错，请检查网络");
+      setCheckBusy(false);
+    }
   };
   const loadAccounts = useCallback(async () => {
     const d = await fetch(`${API}/tools/outlook/accounts`).then(r => r.json()).catch(() => ({}));
@@ -1013,17 +1046,35 @@ export default function MailCenter() {
               : <><svg className="w-3 h-3 mr-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>立即检测（全部）</>
             }
           </button>
-          {checkResult && <p className="text-[10px] text-blue-400 mt-0.5 leading-tight">{checkResult}</p>}
-          {checkProgress && checkProgress.total > 0 && (
-            <div className="mt-0.5">
-              <div className="w-full bg-[#161b22] rounded-full h-1">
-                <div className="bg-blue-500 h-1 rounded-full transition-all" style={{ width: Math.min(100, Math.round(checkProgress.checked / checkProgress.total * 100)) + "%" }} />
-              </div>
-              <p className="text-[9px] text-gray-500 mt-0.5">
-                {checkProgress.checked}/{checkProgress.total} &#x2713;{checkProgress.valid} &#x26a0;{checkProgress.needsAuth} &#x2717;{checkProgress.banned}
-              </p>
-            </div>
+          {checkResult && (
+            <p className={`text-[10px] mt-0.5 leading-tight ${checkResult.startsWith("✅") ? "text-emerald-400" : checkResult.startsWith("❌") || checkResult.startsWith("⚠") ? "text-red-400" : "text-blue-400"}`}>
+              {checkResult}
+            </p>
           )}
+          {checkProgress && checkProgress.total > 0 && (() => {
+            const pct = Math.min(100, Math.round(checkProgress.checked / checkProgress.total * 100));
+            const done = !checkBusy;
+            return (
+              <div className="mt-1">
+                <div className="flex justify-between items-center mb-0.5">
+                  <span className="text-[9px] text-gray-500">{checkProgress.checked}/{checkProgress.total}</span>
+                  <span className={`text-[9px] font-medium ${done ? "text-emerald-400" : "text-blue-400"}`}>{pct}%</span>
+                </div>
+                <div className="w-full bg-[#161b22] rounded-full h-1.5">
+                  <div
+                    className={`h-1.5 rounded-full transition-all duration-500 ${done ? "bg-emerald-500" : "bg-blue-500"}`}
+                    style={{ width: pct + "%" }}
+                  />
+                </div>
+                <div className="flex gap-2 mt-0.5 flex-wrap">
+                  <span className="text-[9px] text-emerald-400">&#x2713; {checkProgress.valid} 活跃</span>
+                  <span className="text-[9px] text-red-400">&#x2717; {checkProgress.banned} 被封</span>
+                  <span className="text-[9px] text-amber-400">&#x26a0; {checkProgress.needsAuth} 需授权</span>
+                  <span className="text-[9px] text-gray-500">&#x25a1; {checkProgress.skipped} 跳过</span>
+                </div>
+              </div>
+            );
+          })()}
           <p className="text-[10px] text-gray-600 mt-0.5 leading-tight">↻ 后台每 4 小时自动检测全部</p>
         </div>
         <div className="flex-1 overflow-y-auto flex flex-col">
