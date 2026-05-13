@@ -28236,18 +28236,18 @@ var require_logger = __commonJS({
       delete opts.customErroredMessage;
       const quietReqLogger = !!opts.quietReqLogger;
       const quietResLogger = !!opts.quietResLogger;
-      const logger3 = wrapChild(opts, theStream);
-      const validLogLevels = Object.keys(logger3.levels.values).concat("silent");
+      const logger2 = wrapChild(opts, theStream);
+      const validLogLevels = Object.keys(logger2.levels.values).concat("silent");
       const useLevel = getValidLogLevel(opts.useLevel);
       delete opts.useLevel;
       const genReqId = reqIdGenFactory(opts.genReqId);
       const result = (req, res, next) => {
-        return loggingMiddleware(logger3, req, res, next);
+        return loggingMiddleware(logger2, req, res, next);
       };
-      result.logger = logger3;
+      result.logger = logger2;
       return result;
-      function onResFinished(res, logger4, err) {
-        let log = logger4;
+      function onResFinished(res, logger3, err) {
+        let log = logger3;
         const responseTime = Date.now() - res[startTime];
         const req = res[reqObject];
         const level = getLogLevelFromCustomLogLevel(customLogLevel, useLevel, res, err, req);
@@ -28256,10 +28256,10 @@ var require_logger = __commonJS({
         }
         const customPropBindings = typeof customProps === "function" ? customProps(req, res) : customProps;
         if (customPropBindings) {
-          const customPropBindingStr = logger4[stringifySym](customPropBindings).replace(/[{}]/g, "");
-          const customPropBindingsStr = logger4[chindingsSym];
+          const customPropBindingStr = logger3[stringifySym](customPropBindings).replace(/[{}]/g, "");
+          const customPropBindingsStr = logger3[chindingsSym];
           if (!customPropBindingsStr.includes(customPropBindingStr)) {
-            log = logger4.child(customPropBindings);
+            log = logger3.child(customPropBindings);
           }
         }
         if (err || res.err || res.statusCode >= 500) {
@@ -28282,10 +28282,10 @@ var require_logger = __commonJS({
           successMessage(req, res, responseTime)
         );
       }
-      function loggingMiddleware(logger4, req, res, next) {
+      function loggingMiddleware(logger3, req, res, next) {
         let shouldLogSuccess = true;
         req.id = req.id || genReqId(req, res);
-        const log = quietReqLogger ? logger4.child({ [requestIdKey]: req.id }) : logger4;
+        const log = quietReqLogger ? logger3.child({ [requestIdKey]: req.id }) : logger3;
         let fullReqLogger = log.child({ [reqKey]: req });
         const customPropBindings = typeof customProps === "function" ? customProps(req, res) : customProps;
         if (customPropBindings) {
@@ -28341,20 +28341,20 @@ var require_logger = __commonJS({
     function wrapChild(opts, stream) {
       const prevLogger = opts.logger;
       const prevGenReqId = opts.genReqId;
-      let logger3 = null;
+      let logger2 = null;
       if (prevLogger) {
         opts.logger = void 0;
         opts.genReqId = void 0;
-        logger3 = prevLogger.child({}, opts);
+        logger2 = prevLogger.child({}, opts);
         opts.logger = prevLogger;
         opts.genReqId = prevGenReqId;
       } else {
         if (opts.transport && !opts.transport.caller) {
           opts.transport.caller = getCallerFile();
         }
-        logger3 = pino2(opts, stream);
+        logger2 = pino2(opts, stream);
       }
-      return logger3;
+      return logger2;
     }
     function reqIdGenFactory(func) {
       if (typeof func === "function") return func;
@@ -29928,14 +29928,14 @@ var require_logger_plugin2 = __commonJS({
     var logger_1 = require_logger2();
     var logger_plugin_1 = require_logger_plugin();
     var loggerPlugin = (proxyServer, options) => {
-      const logger3 = (0, logger_1.getLogger)(options);
+      const logger2 = (0, logger_1.getLogger)(options);
       proxyServer.on("error", (err, req, res, target) => {
         const hostname = req?.headers?.host;
         const requestHref = `${hostname}${req?.url}`;
         const targetHref = `${target?.href}`;
         const errorMessage = "[HPM] Error occurred while proxying request %s to %s [%s] (%s)";
         const errReference = "https://nodejs.org/api/errors.html#errors_common_system_errors";
-        logger3.error(errorMessage, requestHref, targetHref, err.code || err, errReference);
+        logger2.error(errorMessage, requestHref, targetHref, err.code || err, errReference);
       });
       proxyServer.on("proxyRes", (proxyRes, req, res) => {
         const originalUrl = req.originalUrl ?? `${req.baseUrl || ""}${req.url}`;
@@ -29957,13 +29957,13 @@ var require_logger_plugin2 = __commonJS({
         }
         const targetUrl = target.toString();
         const exchange = `[HPM] ${req.method} ${originalUrl} -> ${targetUrl} [${proxyRes.statusCode}]`;
-        logger3.info(exchange);
+        logger2.info(exchange);
       });
       proxyServer.on("open", (socket) => {
-        logger3.info("[HPM] Client connected: %o", socket.address());
+        logger2.info("[HPM] Client connected: %o", socket.address());
       });
       proxyServer.on("close", (req, proxySocket, proxyHead) => {
-        logger3.info("[HPM] Client disconnected: %o", proxySocket.address());
+        logger2.info("[HPM] Client disconnected: %o", proxySocket.address());
       });
     };
     exports.loggerPlugin = loggerPlugin;
@@ -33468,7 +33468,7 @@ var require_options_adapter = __commonJS({
     };
     function legacyOptionsAdapter(legacyContext, legacyOptions) {
       let options = {};
-      let logger3;
+      let logger2;
       if (typeof legacyContext === "string" && !!url.parse(legacyContext).host) {
         throw new Error(`Shorthand syntax is removed from legacyCreateProxyMiddleware().
       Please use "legacyCreateProxyMiddleware({ target: 'http://www.example.org' })" instead.
@@ -33479,8 +33479,8 @@ var require_options_adapter = __commonJS({
       if (legacyContext && legacyOptions) {
         debug("map legacy context/filter to options.pathFilter");
         options = { ...legacyOptions, pathFilter: legacyContext };
-        logger3 = getLegacyLogger(options);
-        logger3.warn(`[http-proxy-middleware] Legacy "context" argument is deprecated. Migrate your "context" to "options.pathFilter":
+        logger2 = getLegacyLogger(options);
+        logger2.warn(`[http-proxy-middleware] Legacy "context" argument is deprecated. Migrate your "context" to "options.pathFilter":
 
       const options = {
         pathFilter: '${legacyContext}',
@@ -33490,16 +33490,16 @@ var require_options_adapter = __commonJS({
       `);
       } else if (legacyContext && !legacyOptions) {
         options = { ...legacyContext };
-        logger3 = getLegacyLogger(options);
+        logger2 = getLegacyLogger(options);
       } else {
-        logger3 = getLegacyLogger({});
+        logger2 = getLegacyLogger({});
       }
       Object.entries(proxyEventMap).forEach(([legacyEventName, proxyEventName]) => {
         if (options[legacyEventName]) {
           options.on = { ...options.on };
           options.on[proxyEventName] = options[legacyEventName];
           debug('map legacy event "%s" to "on.%s"', legacyEventName, proxyEventName);
-          logger3.warn(`[http-proxy-middleware] Legacy "${legacyEventName}" is deprecated. Migrate to "options.on.${proxyEventName}":
+          logger2.warn(`[http-proxy-middleware] Legacy "${legacyEventName}" is deprecated. Migrate to "options.on.${proxyEventName}":
 
         const options = {
           on: {
@@ -33517,7 +33517,7 @@ var require_options_adapter = __commonJS({
       debug("legacy logProvider: %O", logProvider);
       if (typeof logLevel === "string" && logLevel !== "silent") {
         debug('map "logProvider" to "logger"');
-        logger3.warn(`[http-proxy-middleware] Legacy "logLevel" and "logProvider" are deprecated. Migrate to "options.logger":
+        logger2.warn(`[http-proxy-middleware] Legacy "logLevel" and "logProvider" are deprecated. Migrate to "options.logger":
 
       const options = {
         logger: console,
@@ -71357,6 +71357,24 @@ router.get("/healthz", (_req, res) => {
 });
 var health_default = router;
 
+// src/lib/logger.ts
+var import_pino = __toESM(require_pino(), 1);
+var isProduction = process.env.NODE_ENV === "production";
+var logger = (0, import_pino.default)({
+  level: process.env.LOG_LEVEL ?? "info",
+  redact: [
+    "req.headers.authorization",
+    "req.headers.cookie",
+    "res.headers['set-cookie']"
+  ],
+  ...isProduction ? {} : {
+    transport: {
+      target: "pino-pretty",
+      options: { colorize: true }
+    }
+  }
+});
+
 // src/lib/persistence-manager.ts
 init_db();
 var PersistenceManager = class {
@@ -71541,24 +71559,6 @@ var JobQueue = class {
 };
 var jobQueue = new JobQueue();
 
-// src/lib/logger.ts
-var import_pino = __toESM(require_pino(), 1);
-var isProduction = process.env.NODE_ENV === "production";
-var logger2 = (0, import_pino.default)({
-  level: process.env.LOG_LEVEL ?? "info",
-  redact: [
-    "req.headers.authorization",
-    "req.headers.cookie",
-    "res.headers['set-cookie']"
-  ],
-  ...isProduction ? {} : {
-    transport: {
-      target: "pino-pretty",
-      options: { colorize: true }
-    }
-  }
-});
-
 // src/lib/proxy-fetch.ts
 var import_undici = __toESM(require_undici(), 1);
 import { Buffer as Buffer2 } from "buffer";
@@ -71657,7 +71657,7 @@ async function nestingFetch(input, init = {}) {
     } catch (err) {
       _errors[idx]++;
       if (isConnectError(err)) tripCircuit(idx);
-      logger2.warn({ err: String(err), host, attempt }, "[nesting-pool] worker error, trying next");
+      logger.warn({ err: String(err), host, attempt }, "[nesting-pool] worker error, trying next");
     }
   }
   throw new Error("nesting-pool: all workers unavailable");
@@ -71668,7 +71668,7 @@ function startNestingPool() {
   _started = true;
   for (let i = 0; i < WORKERS.length; i++) {
     const host = WORKERS[i];
-    fetch(`https://${host}/health`, { signal: AbortSignal.timeout(1e4) }).then((r) => r.json()).then((j) => logger2.info({ worker: host, health: j }, "[nesting-pool] Worker healthy")).catch((e) => logger2.warn({ err: String(e), worker: host }, "[nesting-pool] Worker health check failed"));
+    fetch(`https://${host}/health`, { signal: AbortSignal.timeout(1e4) }).then((r) => r.json()).then((j) => logger.info({ worker: host, health: j }, "[nesting-pool] Worker healthy")).catch((e) => logger.warn({ err: String(e), worker: host }, "[nesting-pool] Worker health check failed"));
   }
 }
 
@@ -71850,11 +71850,11 @@ var _inflightChildren = /* @__PURE__ */ new Set();
 function incRegBusy() {
   _regBusy++;
   _regBusyTs = Date.now();
-  logger2.info({ _regBusy }, "[live-verify] regBusy++");
+  logger.info({ _regBusy }, "[live-verify] regBusy++");
 }
 function decRegBusy() {
   _regBusy = Math.max(0, _regBusy - 1);
-  logger2.info({ _regBusy }, "[live-verify] regBusy--");
+  logger.info({ _regBusy }, "[live-verify] regBusy--");
 }
 function setLiveVerifyEnabled(val) {
   _enabled = val;
@@ -71866,7 +71866,7 @@ function setLiveVerifyEnabled(val) {
       }
     }
     _inflightChildren.clear();
-    logger2.info("[live-verify] \u5DF2\u5173\u95ED\uFF0C\u5F3A\u5236\u4E2D\u65AD\u6240\u6709\u5728\u98DE\u5B50\u8FDB\u7A0B");
+    logger.info("[live-verify] \u5DF2\u5173\u95ED\uFF0C\u5F3A\u5236\u4E2D\u65AD\u6240\u6709\u5728\u98DE\u5B50\u8FDB\u7A0B");
   }
 }
 function getLiveVerifyStatus() {
@@ -71890,9 +71890,9 @@ async function tagAccount(id, tag, status) {
     } else {
       await execute2("UPDATE accounts SET tags=$1, updated_at=NOW() WHERE id=$2", [mergedTags || null, id]);
     }
-    logger2.info({ id, tag, status }, "[live-verify] \u8D26\u53F7\u5DF2\u81EA\u52A8\u6253\u6807\u7B7E");
+    logger.info({ id, tag, status }, "[live-verify] \u8D26\u53F7\u5DF2\u81EA\u52A8\u6253\u6807\u7B7E");
   } catch (e) {
-    logger2.warn({ id, tag, err: String(e) }, "[live-verify] tagAccount \u5931\u8D25");
+    logger.warn({ id, tag, err: String(e) }, "[live-verify] tagAccount \u5931\u8D25");
   }
 }
 async function markAsRead(accessToken, messageId) {
@@ -71903,7 +71903,7 @@ async function markAsRead(accessToken, messageId) {
       body: JSON.stringify({ isRead: true })
     });
   } catch (e) {
-    logger2.warn({ messageId, err: String(e) }, "[live-verify] \u6807\u8BB0\u5DF2\u8BFB\u5931\u8D25\uFF08\u4E0D\u5F71\u54CD\u4E3B\u6D41\u7A0B\uFF09");
+    logger.warn({ messageId, err: String(e) }, "[live-verify] \u6807\u8BB0\u5DF2\u8BFB\u5931\u8D25\uFF08\u4E0D\u5F71\u54CD\u4E3B\u6D41\u7A0B\uFF09");
   }
 }
 async function refreshToken(rt, proxy) {
@@ -71927,15 +71927,15 @@ async function refreshToken(rt, proxy) {
 }
 async function runOnce() {
   if (_running) {
-    logger2.info("[live-verify] \u4E0A\u6B21\u8F6E\u8BE2\u5C1A\u672A\u7ED3\u675F\uFF0C\u8DF3\u8FC7");
+    logger.info("[live-verify] \u4E0A\u6B21\u8F6E\u8BE2\u5C1A\u672A\u7ED3\u675F\uFF0C\u8DF3\u8FC7");
     return;
   }
   if (_regBusy > 0 && _regBusyTs > 0 && Date.now() - _regBusyTs > REG_BUSY_TIMEOUT_MS) {
-    logger2.warn({ _regBusy, elapsedMin: Math.floor((Date.now() - _regBusyTs) / 6e4) }, "[live-verify] regBusy \u8D85\u8FC715min\u672A\u5F52\u96F6\uFF0C\u81EA\u52A8\u6E05\u96F6");
+    logger.warn({ _regBusy, elapsedMin: Math.floor((Date.now() - _regBusyTs) / 6e4) }, "[live-verify] regBusy \u8D85\u8FC715min\u672A\u5F52\u96F6\uFF0C\u81EA\u52A8\u6E05\u96F6");
     _regBusy = 0;
   }
   if (_regBusy >= 3) {
-    logger2.info({ _regBusy }, "[live-verify] \u6CE8\u518C\u7E41\u5FD9(>=3)\uFF0C\u8DF3\u8FC7\u672C\u8F6E");
+    logger.info({ _regBusy }, "[live-verify] \u6CE8\u518C\u7E41\u5FD9(>=3)\uFF0C\u8DF3\u8FC7\u672C\u8F6E");
     return;
   }
   _running = true;
@@ -71960,7 +71960,7 @@ async function runOnce() {
       _running = false;
       return;
     }
-    logger2.info({ count: rows.length }, "[live-verify] \u5F00\u59CB\u672C\u8F6E\u626B\u63CF");
+    logger.info({ count: rows.length }, "[live-verify] \u5F00\u59CB\u672C\u8F6E\u626B\u63CF");
     const processOneAccount = async (acc) => {
       try {
         const _proxy = getMicrosoftBrowserProxy();
@@ -71973,13 +71973,13 @@ async function runOnce() {
             const desc = result.errorDesc ?? "";
             const code = result.errorCode ?? "";
             if (desc.includes("AADSTS70000") || desc.includes("service abuse")) {
-              logger2.warn({ email: acc.email, errorCode: code }, "[live-verify] \u8D26\u53F7\u89E6\u53D1 service abuse\uFF0C\u81EA\u52A8\u6253\u6807\u7B7E");
+              logger.warn({ email: acc.email, errorCode: code }, "[live-verify] \u8D26\u53F7\u89E6\u53D1 service abuse\uFF0C\u81EA\u52A8\u6253\u6807\u7B7E");
               await tagAccount(acc.id, "abuse_mode", "suspended");
               stats.skipped++;
               return;
             }
             if (code === "invalid_grant" || desc.includes("AADSTS70008") || desc.includes("AADSTS700082")) {
-              logger2.warn({ email: acc.email }, "[live-verify] refresh_token \u5DF2\u5931\u6548\uFF0C\u81EA\u52A8\u6253 token_invalid");
+              logger.warn({ email: acc.email }, "[live-verify] refresh_token \u5DF2\u5931\u6548\uFF0C\u81EA\u52A8\u6253 token_invalid");
               await tagAccount(acc.id, "token_invalid", "needs_oauth");
               stats.skipped++;
               return;
@@ -72002,7 +72002,7 @@ async function runOnce() {
             [acc.email]
           );
         } catch (e) {
-          logger2.warn({ email: acc.email, err: String(e) }, "[live-verify] replit \u884C\u67E5\u8BE2\u5931\u8D25");
+          logger.warn({ email: acc.email, err: String(e) }, "[live-verify] replit \u884C\u67E5\u8BE2\u5931\u8D25");
         }
         let msgs = [];
         let _readVerify = [];
@@ -72024,7 +72024,7 @@ async function runOnce() {
           _readVerify = _allVerify.filter((m) => m.isRead);
           msgs = _allVerify.filter((m) => !m.isRead);
         } catch (e) {
-          logger2.warn({ email: acc.email, err: String(e) }, "[live-verify] \u62C9\u53D6\u90AE\u4EF6\u5931\u8D25");
+          logger.warn({ email: acc.email, err: String(e) }, "[live-verify] \u62C9\u53D6\u90AE\u4EF6\u5931\u8D25");
           stats.skipped++;
           return;
         }
@@ -72035,7 +72035,7 @@ async function runOnce() {
               await tagAccount(acc.id, "replit_used");
             } catch (_) {
             }
-            logger2.info(
+            logger.info(
               { email: acc.email, readCount: _readVerify.length, sender: firstSender },
               "[live-verify] Replit \u9A8C\u8BC1\u90AE\u4EF6\u5DF2\u8BFB \u2192 \u81EA\u52A8\u6807 replit_used"
             );
@@ -72059,9 +72059,9 @@ async function runOnce() {
                   `UPDATE accounts SET status='registered', tags=$1, updated_at=NOW() WHERE id=$2`,
                   [newTags, r.id]
                 );
-                logger2.info({ outlookEmail: acc.email, replitId: r.id }, "[live-verify] \u2705 \u53CD\u5411 UPDATE replit \u884C status=registered");
+                logger.info({ outlookEmail: acc.email, replitId: r.id }, "[live-verify] \u2705 \u53CD\u5411 UPDATE replit \u884C status=registered");
               } catch (e) {
-                logger2.warn({ replitId: r.id, err: String(e) }, "[live-verify] \u53CD\u5411 UPDATE replit \u884C\u5931\u8D25");
+                logger.warn({ replitId: r.id, err: String(e) }, "[live-verify] \u53CD\u5411 UPDATE replit \u884C\u5931\u8D25");
               }
             }
           }
@@ -72069,26 +72069,26 @@ async function runOnce() {
         stats.ok++;
         return;
       } catch (e) {
-        logger2.warn({ email: acc.email, err: String(e) }, "[live-verify] \u8D26\u53F7\u5904\u7406\u51FA\u9519");
+        logger.warn({ email: acc.email, err: String(e) }, "[live-verify] \u8D26\u53F7\u5904\u7406\u51FA\u9519");
         stats.skipped++;
       }
     };
     const CONCURRENCY = _regBusy > 0 ? 3 : 8;
     for (let i = 0; i < rows.length; i += CONCURRENCY) {
       if (!_enabled) {
-        logger2.info("[live-verify] \u68C0\u6D4B\u5230\u5173\u95ED\u4FE1\u53F7\uFF0C\u63D0\u524D\u7ED3\u675F\u672C\u8F6E");
+        logger.info("[live-verify] \u68C0\u6D4B\u5230\u5173\u95ED\u4FE1\u53F7\uFF0C\u63D0\u524D\u7ED3\u675F\u672C\u8F6E");
         break;
       }
       const chunk = rows.slice(i, i + CONCURRENCY);
       await Promise.allSettled(chunk.map((acc) => processOneAccount(acc)));
     }
   } catch (e) {
-    logger2.error({ err: String(e) }, "[live-verify] \u8F6E\u8BE2\u51FA\u9519");
+    logger.error({ err: String(e) }, "[live-verify] \u8F6E\u8BE2\u51FA\u9519");
   } finally {
     _running = false;
     _lastRun = (/* @__PURE__ */ new Date()).toISOString();
     _lastStats = stats;
-    logger2.info(stats, "[live-verify] \u672C\u8F6E\u5B8C\u6210");
+    logger.info(stats, "[live-verify] \u672C\u8F6E\u5B8C\u6210");
   }
 }
 async function processMessage(acc, msg, accessToken, stats, proxy) {
@@ -72130,7 +72130,7 @@ async function processMessage(acc, msg, accessToken, stats, proxy) {
   const errStr = (result.error ?? "").toLowerCase();
   const isTransient = !trueSuccess && (status === 0 || status === 403 || // Cloudflare bot challenge — 可重试
   status === 407 || status === 408 || status === 429 || status >= 500 || errStr.includes("timeout") || errStr.includes("proxy") || errStr.includes("network") || errStr.includes("connect") || errStr.includes("reset") || errStr.includes("refused") || errStr.includes("econnrefused") || errStr.includes("econnreset") || errStr.includes("etimedout"));
-  logger2.info({
+  logger.info({
     email: acc.email,
     subject: msg.subject,
     trueSuccess,
@@ -72158,7 +72158,7 @@ async function processMessage(acc, msg, accessToken, stats, proxy) {
         fs2.writeFileSync(`${dir}/${safeKey}.json`, payload);
       }
     } catch (e) {
-      logger2.warn({ email: acc.email, err: String(e) }, "[live-verify] verify_url \u7F13\u5B58\u843D\u76D8\u5931\u8D25 (\u975E\u81F4\u547D)");
+      logger.warn({ email: acc.email, err: String(e) }, "[live-verify] verify_url \u7F13\u5B58\u843D\u76D8\u5931\u8D25 (\u975E\u81F4\u547D)");
     }
     await markAsRead(accessToken, msg.id);
     failCounts.delete(msg.id);
@@ -72166,12 +72166,12 @@ async function processMessage(acc, msg, accessToken, stats, proxy) {
     stats.clicked++;
     try {
       await tagAccount(acc.id, "replit_used");
-      logger2.info({ email: acc.email, accountId: acc.id }, "[live-verify] verify \u771F\u5B9E\u6210\u529F \u2192 \u5DF2\u81EA\u52A8\u6807 replit_used");
+      logger.info({ email: acc.email, accountId: acc.id }, "[live-verify] verify \u771F\u5B9E\u6210\u529F \u2192 \u5DF2\u81EA\u52A8\u6807 replit_used");
     } catch (e) {
-      logger2.warn({ email: acc.email, err: String(e) }, "[live-verify] \u6807 replit_used \u5931\u8D25 (\u975E\u81F4\u547D)");
+      logger.warn({ email: acc.email, err: String(e) }, "[live-verify] \u6807 replit_used \u5931\u8D25 (\u975E\u81F4\u547D)");
     }
   } else if (isTerminalUsed) {
-    logger2.warn({ email: acc.email, msgId: msg.id.slice(0, 20), bodySnip: _bodySnip.slice(0, 80) }, "[live-verify] oobCode \u5DF2\u7528/\u65E0\u6548\uFF0C\u7ACB\u5373\u653E\u5F03\u5E76\u6807\u8BB0\u5DF2\u8BFB");
+    logger.warn({ email: acc.email, msgId: msg.id.slice(0, 20), bodySnip: _bodySnip.slice(0, 80) }, "[live-verify] oobCode \u5DF2\u7528/\u65E0\u6548\uFF0C\u7ACB\u5373\u653E\u5F03\u5E76\u6807\u8BB0\u5DF2\u8BFB");
     await markAsRead(accessToken, msg.id);
     failCounts.delete(msg.id);
     markHandled(msg.id);
@@ -72181,13 +72181,13 @@ async function processMessage(acc, msg, accessToken, stats, proxy) {
     const next = prev + 1;
     failCounts.set(msg.id, next);
     if (next >= 5) {
-      logger2.warn({ email: acc.email, msgId: msg.id.slice(0, 20), attempts: next }, "[live-verify] \u8FDE\u7EED5\u6B21\u77AC\u6001\u5931\u8D25\uFF0C\u653E\u5F03\u5E76\u6807\u8BB0\u5DF2\u8BFB\uFF08\u907F\u514D\u62D6\u7D2F\u5176\u4ED6\u90AE\u4EF6\uFF09");
+      logger.warn({ email: acc.email, msgId: msg.id.slice(0, 20), attempts: next }, "[live-verify] \u8FDE\u7EED5\u6B21\u77AC\u6001\u5931\u8D25\uFF0C\u653E\u5F03\u5E76\u6807\u8BB0\u5DF2\u8BFB\uFF08\u907F\u514D\u62D6\u7D2F\u5176\u4ED6\u90AE\u4EF6\uFF09");
       await markAsRead(accessToken, msg.id);
       failCounts.delete(msg.id);
       markHandled(msg.id);
       stats.failed++;
     } else {
-      logger2.info({ email: acc.email, httpStatus: status, error: result.error, attempts: next }, "[live-verify] \u77AC\u6001\u6545\u969C\uFF0C\u4E0B\u8F6E\u91CD\u8BD5");
+      logger.info({ email: acc.email, httpStatus: status, error: result.error, attempts: next }, "[live-verify] \u77AC\u6001\u6545\u969C\uFF0C\u4E0B\u8F6E\u91CD\u8BD5");
       stats.skipped++;
     }
   } else {
@@ -72195,12 +72195,12 @@ async function processMessage(acc, msg, accessToken, stats, proxy) {
     const next = prev + 1;
     failCounts.set(msg.id, next);
     if (next >= 3) {
-      logger2.warn({ email: acc.email, msgId: msg.id.slice(0, 20), attempts: next }, "[live-verify] \u8FDE\u7EED3\u6B21\u5931\u8D25\uFF0C\u653E\u5F03\u5E76\u6807\u8BB0\u5DF2\u8BFB");
+      logger.warn({ email: acc.email, msgId: msg.id.slice(0, 20), attempts: next }, "[live-verify] \u8FDE\u7EED3\u6B21\u5931\u8D25\uFF0C\u653E\u5F03\u5E76\u6807\u8BB0\u5DF2\u8BFB");
       await markAsRead(accessToken, msg.id);
       failCounts.delete(msg.id);
       markHandled(msg.id);
     } else {
-      logger2.info({ email: acc.email, attempts: next }, "[live-verify] \u70B9\u51FB\u5931\u8D25\uFF0C\u4E0B\u8F6E\u91CD\u8BD5");
+      logger.info({ email: acc.email, attempts: next }, "[live-verify] \u70B9\u51FB\u5931\u8D25\uFF0C\u4E0B\u8F6E\u91CD\u8BD5");
     }
     stats.failed++;
   }
@@ -72213,7 +72213,7 @@ function startLiveVerifyPoller(intervalMs = 3e4) {
     if (_enabled) runOnce().catch(() => {
     });
   }, intervalMs);
-  logger2.info({ intervalMs }, "[live-verify] \u5B9E\u65F6\u9A8C\u8BC1\u8F6E\u8BE2\u5DF2\u542F\u52A8");
+  logger.info({ intervalMs }, "[live-verify] \u5B9E\u65F6\u9A8C\u8BC1\u8F6E\u8BE2\u5DF2\u542F\u52A8");
 }
 
 // src/routes/tools.ts
@@ -75489,19 +75489,76 @@ router2.post("/tools/cf-pool/retest", async (req, res) => {
 router2.get("/tools/outlook/accounts", async (req, res) => {
   try {
     const { query: query2 } = await Promise.resolve().then(() => (init_db(), db_exports));
+    const search = req.query.search || "";
+    const statusQ = req.query.status || "";
+    const limit = Math.min(parseInt(req.query.limit) || 300, 500);
+    const offset = parseInt(req.query.offset) || 0;
+    const conditions = ["platform='outlook'"];
+    const params = [];
+    if (search) {
+      params.push(`%${search.toLowerCase()}%`);
+      conditions.push(`LOWER(email) LIKE $${params.length}`);
+    }
+    if (statusQ === "active") conditions.push("status='active'");
+    else if (statusQ === "suspended") conditions.push("status='suspended'");
+    else if (statusQ === "noauth") conditions.push("(COALESCE(token,'')='' AND COALESCE(refresh_token,'')='')");
+    else if (statusQ === "autofix") conditions.push("status='needs_oauth' AND COALESCE(tags,'') NOT LIKE '%needs_oauth_manual%'");
+    const where = conditions.join(" AND ");
+    const countRes = await query2(
+      `SELECT COUNT(*) AS count FROM accounts WHERE ${where}`,
+      params
+    );
+    const total = parseInt(countRes[0]?.count ?? "0");
+    const baseWhere = search ? `platform='outlook' AND LOWER(email) LIKE $1` : `platform='outlook'`;
+    const statusCountsRaw = await query2(
+      `SELECT COALESCE(status,'active') AS status, COUNT(*)::text AS cnt FROM accounts WHERE ${baseWhere} GROUP BY status`,
+      search ? [params[0]] : []
+    );
+    const sc = {};
+    for (const row of statusCountsRaw) sc[row.status] = parseInt(row.cnt);
+    const statusCounts = {
+      active: sc["active"] ?? 0,
+      suspended: sc["suspended"] ?? 0,
+      needs_oauth_auto: 0,
+      // 见下方独立查询，排除 enterprise_account
+      noauth: 0
+      // 需要单独查（token+refresh_token 均空）
+    };
+    const noauthRes = await query2(
+      `SELECT COUNT(*)::text AS cnt FROM accounts WHERE ${baseWhere}
+         AND COALESCE(token,'')='' AND COALESCE(refresh_token,'')=''
+         AND status NOT IN ('suspended','wrong_password')
+         AND COALESCE(tags,'') NOT LIKE '%abuse_mode%'
+         AND COALESCE(tags,'') NOT LIKE '%not_found%'
+         AND COALESCE(tags,'') NOT LIKE '%enterprise_account%'`,
+      search ? [params[0]] : []
+    );
+    statusCounts.noauth = parseInt(noauthRes[0]?.cnt ?? "0");
+    const needsOAuthAutoRes = await query2(
+      `SELECT COUNT(*)::text AS cnt FROM accounts WHERE ${baseWhere}
+         AND status = 'needs_oauth'
+         AND COALESCE(tags,'') NOT LIKE '%enterprise_account%'
+         AND COALESCE(tags,'') NOT LIKE '%needs_oauth_manual%'`,
+      search ? [params[0]] : []
+    );
+    statusCounts.needs_oauth_auto = parseInt(needsOAuthAutoRes[0]?.cnt ?? "0");
+    const rowParams = [...params, limit, offset];
     const rows = await query2(
       `SELECT id, email, password, token, refresh_token, status, notes, tags, created_at
        FROM accounts
-       WHERE platform='outlook'
+       WHERE ${where}
        ORDER BY
          CASE WHEN status='active' THEN 0 ELSE 1 END,
          CASE WHEN COALESCE(refresh_token,'') <> '' OR COALESCE(token,'') <> '' THEN 0 ELSE 1 END,
          updated_at DESC NULLS LAST,
-         created_at DESC`,
-      []
+         created_at DESC
+       LIMIT $${rowParams.length - 1} OFFSET $${rowParams.length}`,
+      rowParams
     );
     res.json({
       success: true,
+      total,
+      statusCounts,
       accounts: rows.map((row) => ({
         ...row,
         token: row.token ? "ok" : null,
@@ -77348,7 +77405,7 @@ async function runAutoCheck() {
     const accounts = await query(
       // auto-repair: 除 active 账号外，同时纳入 suspended+token_invalid 且仍有 refresh_token 的账号
       // （accounts.ts inbox 路径在 refresh 失败时设了 status='suspended'，否则这些账号永远被跳过）
-      `SELECT id,email,token,refresh_token,tags,status FROM accounts WHERE platform='outlook' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' AND (status='active' OR (status='suspended' AND COALESCE(tags,'') LIKE '%token_invalid%' AND COALESCE(refresh_token,'') <> '')) ORDER BY updated_at ASC`
+      `SELECT id,email,token,refresh_token,tags,status FROM accounts WHERE platform='outlook' AND ((COALESCE(tags,'') NOT LIKE '%abuse_mode%' AND status='active') OR (status='suspended' AND COALESCE(tags,'') LIKE '%token_invalid%' AND COALESCE(refresh_token,'') <> '')) ORDER BY updated_at ASC`
     );
     _autoCheckLastStats = { total: accounts.length, checked: 0, valid: 0, needsAuth: 0, banned: 0, skipped: 0, finishedAt: null };
     logger.info({ total: accounts.length }, "[auto-check] \u5F00\u59CB\u68C0\u6D4B\u5168\u90E8 active \u8D26\u53F7");
@@ -77489,6 +77546,29 @@ router2.post("/tools/outlook/auto-check/stop", (_req, res) => {
   _autoCheckStopped = true;
   logger.info("[auto-check] \u6536\u5230\u505C\u6B62\u8BF7\u6C42");
   res.json({ success: true, message: "\u5DF2\u53D1\u9001\u505C\u6B62\u4FE1\u53F7\uFF0C\u5F53\u524D\u8D26\u53F7\u5904\u7406\u5B8C\u540E\u5C06\u505C\u6B62" });
+});
+router2.get("/tools/accounts/auto-fix-status", async (_req, res) => {
+  try {
+    const [pending, waiting] = await Promise.all([
+      query(
+        "SELECT id, email FROM accounts WHERE platform='outlook' AND status='needs_oauth_pending' ORDER BY updated_at DESC"
+      ),
+      query(
+        "SELECT id, email FROM accounts WHERE platform='outlook' AND status='needs_oauth' AND COALESCE(tags,'') NOT LIKE '%needs_oauth_manual%' ORDER BY updated_at DESC"
+      )
+    ]);
+    res.json({
+      success: true,
+      autoCheckRunning: _autoCheckRunning,
+      autoCheckStats: _autoCheckLastStats,
+      pending: pending.map((a) => ({ id: a.id, email: a.email })),
+      waiting: waiting.map((a) => ({ id: a.id, email: a.email })),
+      pendingIds: pending.map((a) => a.id),
+      waitingIds: waiting.map((a) => a.id)
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
 });
 router2.get("/tools/outlook/export-csv", async (_req, res) => {
   try {
@@ -87264,7 +87344,7 @@ setInterval(() => {
 function selfRegister(attempt = 0) {
   const rawDomain = process.env["MY_URL"] ?? (process.env["REPLIT_DOMAINS"] ? `https://${process.env["REPLIT_DOMAINS"].split(",")[0]?.trim()}` : void 0);
   if (!rawDomain) {
-    logger2.debug("FriendNode self-register skipped: no deployed domain (REPLIT_DOMAINS not set)");
+    logger.debug("FriendNode self-register skipped: no deployed domain (REPLIT_DOMAINS not set)");
     return;
   }
   const DEV_DOMAIN_RE = /\.(picard|spock|worf|janeway|riker|troi|crusher|data|laforge)\.replit\.dev$/i;
@@ -87274,7 +87354,7 @@ function selfRegister(attempt = 0) {
   } catch {
   }
   if (DEV_DOMAIN_RE.test(parsedHostname)) {
-    logger2.debug({ domain: rawDomain }, "FriendNode self-register skipped: ephemeral dev domain, use REPLIT_DOMAINS instead");
+    logger.debug({ domain: rawDomain }, "FriendNode self-register skipped: ephemeral dev domain, use REPLIT_DOMAINS instead");
     return;
   }
   const domain = rawDomain;
@@ -87399,7 +87479,7 @@ function selfRegister(attempt = 0) {
       });
       response.on("end", () => {
         const ok = response.statusCode === 200 || response.statusCode === 201;
-        logger2.info(
+        logger.info(
           { statusCode: response.statusCode, url: gatewayUrl, attempt },
           ok ? "FriendNode registered ok" : "FriendNode register non-2xx"
         );
@@ -87411,7 +87491,7 @@ function selfRegister(attempt = 0) {
     }
   );
   request.on("error", (error) => {
-    logger2.warn({ err: error, attempt }, "FriendNode self-register error");
+    logger.warn({ err: error, attempt }, "FriendNode self-register error");
     {
       const delay = Math.min(3e4 * Math.pow(2, attempt), 10 * 6e4);
       setTimeout(() => selfRegister(attempt + 1), delay).unref();
@@ -87426,7 +87506,7 @@ var tunnel_default = router12;
 var app = (0, import_express13.default)();
 app.use(
   (0, import_pino_http.default)({
-    logger: logger2,
+    logger,
     serializers: {
       req(req) {
         return {
@@ -87504,7 +87584,7 @@ var _sub2apiProxy = (0, import_http_proxy_middleware.createProxyMiddleware)({
       for (const h of drop) delete proxyRes.headers[h];
     },
     error: (err, _req, res) => {
-      logger2.warn({ err: String(err) }, "[sub2api-proxy] upstream :8080 unavailable");
+      logger.warn({ err: String(err) }, "[sub2api-proxy] upstream :8080 unavailable");
       const r = res;
       if (r.writeHead && !r.headersSent) {
         r.writeHead(502, { "content-type": "application/json" });
@@ -87525,7 +87605,7 @@ var _frontendProxy = (0, import_http_proxy_middleware.createProxyMiddleware)({
   xfwd: true,
   on: {
     error: (err, _req, res) => {
-      logger2.warn({ err: String(err) }, "[frontend-proxy] upstream :3000 unavailable");
+      logger.warn({ err: String(err) }, "[frontend-proxy] upstream :3000 unavailable");
       const r = res;
       if (r.writeHead && !r.headersSent) {
         r.writeHead(502, { "content-type": "text/plain; charset=utf-8" });
@@ -87568,6 +87648,32 @@ function pickResidentialProxy() {
 }
 var _running2 = false;
 var _intervalId2 = null;
+async function checkIsEnterprise(email) {
+  try {
+    const r = await microsoftFetch("https://login.microsoftonline.com/common/GetCredentialType", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0",
+        "Origin": "https://login.microsoftonline.com"
+      },
+      body: JSON.stringify({
+        username: email,
+        isOtherIdpSupported: true,
+        checkPhones: false,
+        isRemoteNGCSupported: false,
+        isCookieBannerShown: false,
+        isFidoSupported: false,
+        originalRequest: "",
+        flowToken: ""
+      })
+    });
+    const data = await r.json();
+    return data.IfExistsResult === 5;
+  } catch {
+    return false;
+  }
+}
 async function getDeviceCode(email, proxy) {
   try {
     const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/devicecode", {
@@ -87580,12 +87686,12 @@ async function getDeviceCode(email, proxy) {
     }, proxy);
     const d = await r.json();
     if (!d.device_code || !d.user_code) {
-      logger2.warn({ email, error: d.error }, "[healthcheck] \u83B7\u53D6\u8BBE\u5907\u7801\u5931\u8D25");
+      logger.warn({ email, error: d.error }, "[healthcheck] \u83B7\u53D6\u8BBE\u5907\u7801\u5931\u8D25");
       return null;
     }
     return { deviceCode: d.device_code, userCode: d.user_code, verificationUri: d.verification_uri ?? "" };
   } catch (e) {
-    logger2.warn({ email, err: String(e) }, "[healthcheck] \u83B7\u53D6\u8BBE\u5907\u7801\u7F51\u7EDC\u9519\u8BEF");
+    logger.warn({ email, err: String(e) }, "[healthcheck] \u83B7\u53D6\u8BBE\u5907\u7801\u7F51\u7EDC\u9519\u8BEF");
     return null;
   }
 }
@@ -87611,11 +87717,11 @@ async function pollForToken(deviceCode, proxy, maxAttempts = 18) {
   return null;
 }
 async function autoOAuth(acc) {
-  logger2.info({ email: acc.email }, "[healthcheck] \u5F00\u59CB\u81EA\u52A8\u8865\u6388\u6743");
+  logger.info({ email: acc.email }, "[healthcheck] \u5F00\u59CB\u81EA\u52A8\u8865\u6388\u6743");
   const proxy = pickResidentialProxy();
   const dc = await getDeviceCode(acc.email, proxy);
-  if (!dc) return false;
-  logger2.info({ email: acc.email, userCode: dc.userCode }, "[healthcheck] \u8BBE\u5907\u7801\u5DF2\u83B7\u53D6\uFF0C\u542F\u52A8 patchright");
+  if (!dc) return { ok: false, reason: "no_device_code" };
+  logger.info({ email: acc.email, userCode: dc.userCode }, "[healthcheck] \u8BBE\u5907\u7801\u5DF2\u83B7\u53D6\uFF0C\u542F\u52A8 patchright");
   const scriptPath = path6.resolve(__dirname4, "../auto_device_code.py");
   const payload = JSON.stringify([{
     email: acc.email,
@@ -87630,10 +87736,10 @@ async function autoOAuth(acc) {
     const _memAvailKB = parseInt((_memRfs("/proc/meminfo", "utf8").match(/MemAvailable:\s+(\d+)/) || [, "0"])[1] ?? 0);
     const _memAvailMB = Math.floor(_memAvailKB / 1024);
     if (_memAvailMB < 600) {
-      logger2.warn({ email: acc.email, memAvailMB: _memAvailMB }, "[healthcheck] \u5185\u5B58\u4E0D\u8DB3(<600MB)\uFF0C\u8DF3\u8FC7 patchright\uFF0C\u5F85\u5185\u5B58\u6062\u590D\u540E\u91CD\u8BD5");
-      return false;
+      logger.warn({ email: acc.email, memAvailMB: _memAvailMB }, "[healthcheck] \u5185\u5B58\u4E0D\u8DB3(<600MB)\uFF0C\u8DF3\u8FC7 patchright\uFF0C\u5F85\u5185\u5B58\u6062\u590D\u540E\u91CD\u8BD5");
+      return { ok: false, reason: "low_memory" };
     }
-    logger2.info({ email: acc.email, memAvailMB: _memAvailMB }, "[healthcheck] \u5185\u5B58\u5145\u8DB3\uFF0C\u542F\u52A8 patchright");
+    logger.info({ email: acc.email, memAvailMB: _memAvailMB }, "[healthcheck] \u5185\u5B58\u5145\u8DB3\uFF0C\u542F\u52A8 patchright");
   } catch {
   }
   const autoResult = await new Promise((resolve) => {
@@ -87646,7 +87752,7 @@ async function autoOAuth(acc) {
     });
     child.stderr.on("data", (d) => {
       const line = d.toString().trim();
-      if (line) logger2.debug({ email: acc.email, line }, "[healthcheck] auto_device_code stderr");
+      if (line) logger.debug({ email: acc.email, line }, "[healthcheck] auto_device_code stderr");
     });
     child.on("close", () => {
       const match = out.match(/RESULTS:(.+)/);
@@ -87677,31 +87783,54 @@ async function autoOAuth(acc) {
     }, 12e4);
   });
   if (autoResult.status !== "done") {
-    logger2.warn(
+    logger.warn(
       { email: acc.email, status: autoResult.status, msg: autoResult.msg },
       "[healthcheck] patchright \u6388\u6743\u5931\u8D25"
     );
-    return false;
+    return { ok: false, reason: autoResult.msg ?? autoResult.status };
   }
-  logger2.info({ email: acc.email }, "[healthcheck] \u6D4F\u89C8\u5668\u6388\u6743\u5B8C\u6210\uFF0C\u8F6E\u8BE2 token");
+  logger.info({ email: acc.email }, "[healthcheck] \u6D4F\u89C8\u5668\u6388\u6743\u5B8C\u6210\uFF0C\u8F6E\u8BE2 token");
   const tokens = await pollForToken(dc.deviceCode, proxy);
   if (!tokens) {
-    logger2.warn({ email: acc.email }, "[healthcheck] token \u8F6E\u8BE2\u8D85\u65F6");
-    return false;
+    logger.warn({ email: acc.email }, "[healthcheck] token \u8F6E\u8BE2\u8D85\u65F6");
+    return { ok: false, reason: "token_poll_timeout" };
   }
   const { execute: execute2 } = await Promise.resolve().then(() => (init_db(), db_exports));
   await execute2(
     "UPDATE accounts SET token=$1, refresh_token=$2, status='active', updated_at=NOW() WHERE id=$3",
     [tokens.accessToken, tokens.refreshToken, acc.id]
   );
-  logger2.info({ email: acc.email }, "[healthcheck] \u81EA\u52A8\u8865\u6388\u6743\u6210\u529F\uFF0Ctoken \u5DF2\u5165\u5E93");
-  return true;
+  logger.info({ email: acc.email }, "[healthcheck] \u81EA\u52A8\u8865\u6388\u6743\u6210\u529F\uFF0Ctoken \u5DF2\u5165\u5E93");
+  return { ok: true };
 }
 async function runCheck() {
   if (_running2) return;
   _running2 = true;
   try {
     const { query: query2, execute: execute2 } = await Promise.resolve().then(() => (init_db(), db_exports));
+    const suspendedNoauth = await query2(
+      `SELECT id FROM accounts
+       WHERE platform = 'outlook'
+         AND status = 'suspended'
+         AND (token IS NULL OR token = '')
+         AND (refresh_token IS NULL OR refresh_token = '')
+         AND password IS NOT NULL AND password != ''
+         AND COALESCE(tags, '') NOT LIKE '%abuse_mode%'
+         AND COALESCE(tags, '') NOT LIKE '%needs_oauth_manual%'
+         AND updated_at < NOW() - INTERVAL '2 hours'
+       ORDER BY updated_at ASC
+       LIMIT 10`,
+      []
+    );
+    if (suspendedNoauth.length > 0) {
+      for (const { id } of suspendedNoauth) {
+        await execute2(
+          "UPDATE accounts SET status='needs_oauth', updated_at=NOW() WHERE id=$1",
+          [id]
+        );
+      }
+      logger.info({ count: suspendedNoauth.length }, "[healthcheck] suspended+\u65E0token \u8D26\u53F7\u5DF2\u63D0\u5347\u5230 needs_oauth \u961F\u5217\uFF0C\u7B49\u5F85\u81EA\u52A8\u8865\u6388\u6743");
+    }
     const needsOAuth = await query2(
       `SELECT id, email, password FROM accounts
        WHERE platform = 'outlook'
@@ -87711,33 +87840,61 @@ async function runCheck() {
          AND password IS NOT NULL AND password != ''
          AND COALESCE(tags, '') NOT LIKE '%abuse_mode%'
          AND COALESCE(tags, '') NOT LIKE '%needs_oauth_manual%'
+         AND COALESCE(tags, '') NOT LIKE '%enterprise_account%'
        ORDER BY created_at ASC
-       LIMIT 3`,
-      // 每轮最多并行处理3个，避免内存压力
+       LIMIT 5`,
+      // 每轮处理5个（原3个）；suspended 提升 + DB 状态即为断点，重启自动续跑
       []
     );
     if (needsOAuth.length > 0) {
-      logger2.info({ count: needsOAuth.length }, "[healthcheck] \u53D1\u73B0\u9700\u8981\u8865\u6388\u6743\u7684\u8D26\u53F7");
+      logger.info({ count: needsOAuth.length }, "[healthcheck] \u53D1\u73B0\u9700\u8981\u8865\u6388\u6743\u7684\u8D26\u53F7");
       for (const acc of needsOAuth) {
+        const isEnt = await checkIsEnterprise(acc.email);
+        if (isEnt) {
+          await execute2(
+            `UPDATE accounts SET status='needs_oauth',
+               tags=(SELECT NULLIF(string_agg(DISTINCT tag,','),'')
+                     FROM unnest(string_to_array(COALESCE(tags,'')||',enterprise_account',',')) AS tag
+                     WHERE tag<>''),
+               updated_at=NOW() WHERE id=$1`,
+            [acc.id]
+          );
+          logger.warn({ email: acc.email }, "[healthcheck] GetCredentialType=5(enterprise), \u8DF3\u8FC7 OAuth \u76F4\u63A5\u6253\u6807 enterprise_account");
+          continue;
+        }
         await execute2(
           "UPDATE accounts SET status='needs_oauth_pending', updated_at=NOW() WHERE id=$1",
           [acc.id]
         );
-        const ok = await autoOAuth(acc);
+        const { ok, reason } = await autoOAuth(acc);
         if (!ok) {
-          await execute2(
-            `UPDATE accounts
-             SET status = 'needs_oauth',
-                 tags   = (
-                   SELECT NULLIF(string_agg(DISTINCT tag, ','), '')
-                   FROM unnest(string_to_array(COALESCE(tags,'') || ',needs_oauth_manual', ',')) AS tag
-                   WHERE tag <> ''
-                 ),
-                 updated_at = NOW()
-             WHERE id = $1`,
-            [acc.id]
-          );
-          logger2.warn({ email: acc.email }, "[healthcheck] \u81EA\u52A8\u8865\u6388\u6743\u5931\u8D25\uFF0C\u5DF2\u6807\u8BB0 needs_oauth_manual");
+          if (reason === "code_invalid_or_expired") {
+            await execute2(
+              `UPDATE accounts
+               SET status = 'needs_oauth',
+                   tags   = (SELECT NULLIF(string_agg(DISTINCT tag, ','), '')
+                             FROM unnest(string_to_array(COALESCE(tags,'') || ',enterprise_account', ',')) AS tag
+                             WHERE tag <> ''),
+                   updated_at = NOW()
+               WHERE id = $1`,
+              [acc.id]
+            );
+            logger.warn({ email: acc.email }, "[healthcheck] \u4F01\u4E1A/AAD \u8D26\u53F7\uFF0Cconsumer OAuth \u65E0\u6548\uFF0C\u5DF2\u6807\u8BB0 enterprise_account");
+          } else {
+            await execute2(
+              `UPDATE accounts
+               SET status = 'needs_oauth',
+                   tags   = (
+                     SELECT NULLIF(string_agg(DISTINCT tag, ','), '')
+                     FROM unnest(string_to_array(COALESCE(tags,'') || ',needs_oauth_manual', ',')) AS tag
+                     WHERE tag <> ''
+                   ),
+                   updated_at = NOW()
+               WHERE id = $1`,
+              [acc.id]
+            );
+            logger.warn({ email: acc.email }, "[healthcheck] \u81EA\u52A8\u8865\u6388\u6743\u5931\u8D25\uFF0C\u5DF2\u6807\u8BB0 needs_oauth_manual");
+          }
         }
       }
     }
@@ -87747,6 +87904,7 @@ async function runCheck() {
          AND status NOT IN ('suspended', 'done', 'needs_oauth_pending')
          AND COALESCE(tags, '') LIKE '%needs_oauth_manual%'
          AND COALESCE(tags, '') NOT LIKE '%abuse_mode%'
+         AND COALESCE(tags, '') NOT LIKE '%enterprise_account%'
          AND password IS NOT NULL AND password != ''
          AND updated_at < NOW() - INTERVAL '1 hour'
        ORDER BY updated_at ASC
@@ -87754,10 +87912,23 @@ async function runCheck() {
       []
     );
     if (manualRetryRows.length > 0) {
-      logger2.info({ count: manualRetryRows.length }, "[healthcheck] \u53D1\u73B0\u53EF\u91CD\u8BD5\u7684 needs_oauth_manual \u8D26\u53F7");
+      logger.info({ count: manualRetryRows.length }, "[healthcheck] \u53D1\u73B0\u53EF\u91CD\u8BD5\u7684 needs_oauth_manual \u8D26\u53F7");
       for (const acc of manualRetryRows) {
+        const isEnt2 = await checkIsEnterprise(acc.email);
+        if (isEnt2) {
+          await execute2(
+            `UPDATE accounts SET status='needs_oauth',
+               tags=(SELECT NULLIF(string_agg(DISTINCT tag,','),'')
+                     FROM unnest(string_to_array(COALESCE(tags,'')||',enterprise_account',',')) AS tag
+                     WHERE tag<>''),
+               updated_at=NOW() WHERE id=$1`,
+            [acc.id]
+          );
+          logger.warn({ email: acc.email }, "[healthcheck] 1b GetCredentialType=5(enterprise), \u8DF3\u8FC7\u91CD\u8BD5\u76F4\u63A5\u6253\u6807 enterprise_account");
+          continue;
+        }
         await execute2("UPDATE accounts SET status='needs_oauth_pending', updated_at=NOW() WHERE id=$1", [acc.id]);
-        const ok = await autoOAuth(acc);
+        const { ok, reason: _reason2 } = await autoOAuth(acc);
         if (ok) {
           await execute2(
             `UPDATE accounts SET tags = NULLIF(TRIM(BOTH ',' FROM
@@ -87765,16 +87936,26 @@ async function runCheck() {
              ), ','), status='active', updated_at=NOW() WHERE id=$1`,
             [acc.id]
           );
-          logger2.info({ email: acc.email }, "[healthcheck] needs_oauth_manual \u91CD\u65B0\u6388\u6743\u6210\u529F\uFF0C\u6807\u7B7E\u5DF2\u6E05\u9664");
+          logger.info({ email: acc.email }, "[healthcheck] needs_oauth_manual \u91CD\u65B0\u6388\u6743\u6210\u529F\uFF0C\u6807\u7B7E\u5DF2\u6E05\u9664");
         } else {
           const _freshRow = await query2("SELECT tags FROM accounts WHERE id=$1", [acc.id]);
           const _freshTags = _freshRow[0]?.tags ?? "";
           if (_freshTags.includes("not_found")) {
             await execute2("UPDATE accounts SET status='suspended', tags=CASE WHEN COALESCE(tags,'')='' THEN 'abuse_mode' WHEN tags NOT LIKE '%abuse_mode%' THEN tags||',abuse_mode' ELSE tags END, updated_at=NOW() WHERE id=$1", [acc.id]);
-            logger2.warn({ email: acc.email }, "[healthcheck] MS\u62A5\u544A\u8D26\u53F7\u4E0D\u5B58\u5728(not_found)\uFF0C\u5DF2\u81EA\u52A8\u6682\u505C\uFF0C\u505C\u6B62\u91CD\u8BD5");
+            logger.warn({ email: acc.email }, "[healthcheck] MS\u62A5\u544A\u8D26\u53F7\u4E0D\u5B58\u5728(not_found)\uFF0C\u5DF2\u81EA\u52A8\u6682\u505C\uFF0C\u505C\u6B62\u91CD\u8BD5");
+          } else if (_reason2 === "code_invalid_or_expired") {
+            await execute2(
+              `UPDATE accounts SET status='needs_oauth',
+                 tags=(SELECT NULLIF(string_agg(DISTINCT tag,','),'')
+                       FROM unnest(string_to_array(COALESCE(tags,'')||',enterprise_account',',')) AS tag
+                       WHERE tag<>''),
+                 updated_at=NOW() WHERE id=$1`,
+              [acc.id]
+            );
+            logger.warn({ email: acc.email }, "[healthcheck] \u91CD\u8BD5\u65F6\u53D1\u73B0\u4F01\u4E1A/AAD\u8D26\u53F7\uFF0C\u5DF2\u6807\u8BB0 enterprise_account");
           } else {
             await execute2("UPDATE accounts SET status='needs_oauth', updated_at=NOW() WHERE id=$1", [acc.id]);
-            logger2.warn({ email: acc.email }, "[healthcheck] needs_oauth_manual \u91CD\u8BD5\u4ECD\u5931\u8D25\uFF0C1h\u540E\u518D\u8BD5");
+            logger.warn({ email: acc.email }, "[healthcheck] needs_oauth_manual \u91CD\u8BD5\u4ECD\u5931\u8D25\uFF0C1h\u540E\u518D\u8BD5");
           }
         }
       }
@@ -87787,7 +87968,7 @@ async function runCheck() {
       []
     );
   } catch (e) {
-    logger2.error({ err: String(e) }, "[healthcheck] \u8D26\u53F7\u5065\u5EB7\u68C0\u67E5\u51FA\u9519");
+    logger.error({ err: String(e) }, "[healthcheck] \u8D26\u53F7\u5065\u5EB7\u68C0\u67E5\u51FA\u9519");
   } finally {
     _running2 = false;
   }
@@ -87798,22 +87979,22 @@ function startAccountHealthcheck(intervalMs = 5 * 60 * 1e3) {
   }), intervalMs);
   setTimeout(() => runCheck().catch(() => {
   }), 45e3);
-  logger2.info({ intervalMs }, "[healthcheck] \u8D26\u53F7\u5065\u5EB7\u68C0\u67E5\u5DF2\u542F\u52A8\uFF08\u6BCF 5 \u5206\u949F\uFF09");
+  logger.info({ intervalMs }, "[healthcheck] \u8D26\u53F7\u5065\u5EB7\u68C0\u67E5\u5DF2\u542F\u52A8\uFF08\u6BCF 5 \u5206\u949F\uFF09");
 }
 
 // src/lib/replit-replay-audit.ts
 var _intervalId3 = null;
 async function tick() {
   if (isReplayAuditRunning()) {
-    logger2.info({ tag: "replay-audit-cron" }, "\u524D\u6B21 audit \u4ECD\u8FD0\u884C\u4E2D, \u672C\u8F6E\u8DF3\u8FC7");
+    logger.info({ tag: "replay-audit-cron" }, "\u524D\u6B21 audit \u4ECD\u8FD0\u884C\u4E2D, \u672C\u8F6E\u8DF3\u8FC7");
     return;
   }
   try {
     const r = await executeReplayAudit({ scope: "active", dryRun: false }, "cron");
     if (r.skipped) {
-      logger2.info({ skipped: r.skipped }, "[replay-audit-cron] \u5DF2\u88AB\u9501\u8DF3\u8FC7");
+      logger.info({ skipped: r.skipped }, "[replay-audit-cron] \u5DF2\u88AB\u9501\u8DF3\u8FC7");
     } else {
-      logger2.info({
+      logger.info({
         history_id: r.history_id,
         total: r.total,
         scanned: r.scanned,
@@ -87824,14 +88005,14 @@ async function tick() {
       }, "[replay-audit-cron] tick \u5B8C\u6210");
     }
   } catch (e) {
-    logger2.error({ err: String(e) }, "[replay-audit-cron] tick \u629B\u5F02\u5E38");
+    logger.error({ err: String(e) }, "[replay-audit-cron] tick \u629B\u5F02\u5E38");
   }
 }
 function startReplitReplayAudit() {
   const raw = process.env["REPLAY_AUDIT_INTERVAL_HOURS"];
   const hours = raw === void 0 ? 6 : Number(raw);
   if (!Number.isFinite(hours) || hours <= 0) {
-    logger2.info({ raw }, "[replay-audit-cron] \u5DF2\u7981\u7528 (REPLAY_AUDIT_INTERVAL_HOURS<=0 \u6216\u975E\u6CD5)");
+    logger.info({ raw }, "[replay-audit-cron] \u5DF2\u7981\u7528 (REPLAY_AUDIT_INTERVAL_HOURS<=0 \u6216\u975E\u6CD5)");
     return;
   }
   const intervalMs = Math.max(3e4, Math.floor(hours * 3600 * 1e3));
@@ -87842,7 +88023,7 @@ function startReplitReplayAudit() {
   setTimeout(() => {
     void tick();
   }, 6e4).unref();
-  logger2.info({ intervalMs, intervalHours: hours }, "[replay-audit-cron] \u5DF2\u542F\u52A8");
+  logger.info({ intervalMs, intervalHours: hours }, "[replay-audit-cron] \u5DF2\u542F\u52A8");
 }
 
 // src/lib/cf-pool-maintainer.ts
@@ -87872,7 +88053,7 @@ function runPython2(args, timeoutMs = 6e4) {
     env: { ...process.env, PYTHONUNBUFFERED: "1" }
   });
   if (r.error || r.status !== 0) {
-    logger2.warn({ args, stderr: r.stderr?.slice(0, 200), err: r.error?.message }, "[cf-pool] python3 \u8C03\u7528\u5931\u8D25");
+    logger.warn({ args, stderr: r.stderr?.slice(0, 200), err: r.error?.message }, "[cf-pool] python3 \u8C03\u7528\u5931\u8D25");
     return { ok: false, data: {} };
   }
   try {
@@ -87891,7 +88072,7 @@ function getPoolStatus() {
 function refreshPool() {
   if (_refreshRunning) return Promise.resolve({ newIps: 0, total: 0 });
   _refreshRunning = true;
-  logger2.info({ target: TARGET_POOL_SIZE, generate: GENERATE_COUNT }, "[cf-pool] \u5F00\u59CB\u540E\u53F0\u8865\u5145 IP \u6C60");
+  logger.info({ target: TARGET_POOL_SIZE, generate: GENERATE_COUNT }, "[cf-pool] \u5F00\u59CB\u540E\u53F0\u8865\u5145 IP \u6C60");
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
@@ -87925,42 +88106,42 @@ function refreshPool() {
         const data = JSON.parse(stdout || "{}");
         const newIps = data["new_ips"] ?? 0;
         const total = data["total_available"] ?? 0;
-        logger2.info({ newIps, total }, "[cf-pool] \u540E\u53F0\u8865\u5145\u5B8C\u6210");
+        logger.info({ newIps, total }, "[cf-pool] \u540E\u53F0\u8865\u5145\u5B8C\u6210");
         resolve({ newIps, total });
       } catch {
-        logger2.warn({ stderr: stderr.slice(0, 300) }, "[cf-pool] \u540E\u53F0\u8865\u5145\u89E3\u6790\u5931\u8D25");
+        logger.warn({ stderr: stderr.slice(0, 300) }, "[cf-pool] \u540E\u53F0\u8865\u5145\u89E3\u6790\u5931\u8D25");
         resolve({ newIps: 0, total: 0 });
       }
     });
     child.on("error", (err) => {
       clearTimeout(timer);
       _refreshRunning = false;
-      logger2.warn({ err: err.message }, "[cf-pool] \u540E\u53F0\u8865\u5145\u542F\u52A8\u5931\u8D25");
+      logger.warn({ err: err.message }, "[cf-pool] \u540E\u53F0\u8865\u5145\u542F\u52A8\u5931\u8D25");
       resolve({ newIps: 0, total: 0 });
     });
   });
 }
 async function runCheck2() {
   const { available } = getPoolStatus();
-  logger2.info({ available, min: MIN_POOL_SIZE }, "[cf-pool] \u7EF4\u62A4\u68C0\u67E5");
+  logger.info({ available, min: MIN_POOL_SIZE }, "[cf-pool] \u7EF4\u62A4\u68C0\u67E5");
   if (available < MIN_POOL_SIZE) {
-    logger2.info({ available, min: MIN_POOL_SIZE }, "[cf-pool] IP \u6C60\u4E0D\u8DB3\uFF0C\u89E6\u53D1\u540E\u53F0\u8865\u5145");
+    logger.info({ available, min: MIN_POOL_SIZE }, "[cf-pool] IP \u6C60\u4E0D\u8DB3\uFF0C\u89E6\u53D1\u540E\u53F0\u8865\u5145");
     await refreshPool();
   } else {
-    logger2.info({ available }, "[cf-pool] IP \u6C60\u5065\u5EB7\uFF0C\u65E0\u9700\u8865\u5145");
+    logger.info({ available }, "[cf-pool] IP \u6C60\u5065\u5EB7\uFF0C\u65E0\u9700\u8865\u5145");
   }
 }
 function startCfPoolMaintainer() {
-  logger2.info(
+  logger.info(
     { script: CF_POOL_SCRIPT2, minSize: MIN_POOL_SIZE, intervalMin: CHECK_INTERVAL_MS / 6e4 },
     "[cf-pool] IP \u6C60\u52A8\u6001\u7EF4\u62A4\u5668\u542F\u52A8"
   );
   setTimeout(() => {
-    runCheck2().catch((e) => logger2.error({ err: String(e) }, "[cf-pool] \u521D\u59CB\u68C0\u67E5\u51FA\u9519"));
+    runCheck2().catch((e) => logger.error({ err: String(e) }, "[cf-pool] \u521D\u59CB\u68C0\u67E5\u51FA\u9519"));
   }, 5e3);
   if (_intervalId4) clearInterval(_intervalId4);
   _intervalId4 = setInterval(() => {
-    runCheck2().catch((e) => logger2.error({ err: String(e) }, "[cf-pool] \u5B9A\u671F\u68C0\u67E5\u51FA\u9519"));
+    runCheck2().catch((e) => logger.error({ err: String(e) }, "[cf-pool] \u5B9A\u671F\u68C0\u67E5\u51FA\u9519"));
   }, CHECK_INTERVAL_MS);
 }
 
@@ -87971,7 +88152,7 @@ if (!rawPort) throw new Error("PORT environment variable is required but was not
 var port = Number(rawPort);
 if (Number.isNaN(port) || port <= 0) throw new Error(`Invalid PORT value: "${rawPort}"`);
 await initDatabase().catch((e) => {
-  logger2.error({ err: String(e) }, "initDatabase failed");
+  logger.error({ err: String(e) }, "initDatabase failed");
   process.exit(1);
 });
 async function _listenWithRetry() {
@@ -87984,14 +88165,14 @@ async function _listenWithRetry() {
         s.once("listening", () => resolve(s));
         s.once("error", reject);
       });
-      if (attempt > 1) logger2.warn({ attempt }, "listen succeeded after EADDRINUSE retry");
+      if (attempt > 1) logger.warn({ attempt }, "listen succeeded after EADDRINUSE retry");
       return sv;
     } catch (e) {
       lastErr = e;
       const code = e?.code;
       if (code === "EADDRINUSE") {
         const wait = Math.min(2e3 * attempt, 8e3);
-        logger2.warn({ attempt, port, wait }, "EADDRINUSE \u2014 old process still binding port, sleep+retry");
+        logger.warn({ attempt, port, wait }, "EADDRINUSE \u2014 old process still binding port, sleep+retry");
         await new Promise((r) => setTimeout(r, wait));
         continue;
       }
@@ -88004,11 +88185,11 @@ var server = await _listenWithRetry();
 {
   const err = null;
   if (err) {
-    logger2.error({ err }, "Error listening on port");
+    logger.error({ err }, "Error listening on port");
     process.exit(1);
   }
-  logger2.info({ port }, "Server listening");
-  logger2.info({ url: `http://localhost:${port}` }, "Stream relay URL");
+  logger.info({ port }, "Server listening");
+  logger.info({ url: `http://localhost:${port}` }, "Stream relay URL");
   setTimeout(selfRegister, 3e3).unref();
   startLiveVerifyPoller();
   startAccountHealthcheck(5 * 60 * 1e3);
@@ -88018,17 +88199,17 @@ var server = await _listenWithRetry();
   startProxyMaintenance();
   attachCdpRelayWebSocket(server);
   PersistenceManager.reapOrphans().then((n) => {
-    if (n > 0) logger2.warn({ reaped: n }, "reaped orphan running jobs");
-  }).catch((err2) => logger2.error({ err: err2 }, "reapOrphans failed"));
+    if (n > 0) logger.warn({ reaped: n }, "reaped orphan running jobs");
+  }).catch((err2) => logger.error({ err: err2 }, "reapOrphans failed"));
 }
 server.on("error", (err) => {
-  logger2.error({ err }, "Server error");
+  logger.error({ err }, "Server error");
 });
 process.on("unhandledRejection", (reason, promise) => {
-  logger2.error({ reason: String(reason), promise: String(promise) }, "[crash-guard] unhandledRejection \u2014 caught, not exiting");
+  logger.error({ reason: String(reason), promise: String(promise) }, "[crash-guard] unhandledRejection \u2014 caught, not exiting");
 });
 process.on("uncaughtException", (err) => {
-  logger2.error({ err: String(err), stack: err.stack }, "[crash-guard] uncaughtException \u2014 caught, not exiting");
+  logger.error({ err: String(err), stack: err.stack }, "[crash-guard] uncaughtException \u2014 caught, not exiting");
 });
 /*! Bundled license information:
 
