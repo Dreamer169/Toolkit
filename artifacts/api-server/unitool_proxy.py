@@ -717,44 +717,10 @@ MEDIA_ALIASES: dict[str, str] = {
 }
 
 
-FALLBACK_CHAINS: dict[str, list[str]] = {
-    "gpt-5":            ["gpt-5.5",   "gpt-5.4",  "gpt-4-1",  "gpt-4o-mini"],
-    "gpt-5.5":          ["gpt-5",     "gpt-5.4",  "gpt-4-1",  "gpt-4o-mini"],
-    "gpt-5.4":          ["gpt-5.5",   "gpt-5",    "gpt-4-1",  "gpt-4o-mini"],
-    "gpt5.1":           ["gpt5.2",    "gpt-5",    "gpt-5.5",  "gpt-4-1"],
-    "gpt5.2":           ["gpt5.1",    "gpt-5",    "gpt-5.5",  "gpt-4-1"],
-    "gpt-4-1":          ["gpt-5.4",   "gpt-5",    "gpt-4o-mini"],
-    "gpt-4o-mini":      ["gpt-4-1",   "gpt-5.4",  "gpt-5"],
-    "claude-opus-4-6":  ["claude-opus", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet"],
-    "claude-opus":      ["claude-opus-4-6", "claude-sonnet-4-6", "claude-sonnet"],
-    "claude-haiku":     ["claude-sonnet", "claude-sonnet-4-5"],
-    "claude-sonnet-4-6":["claude-sonnet-4-5", "claude-sonnet",     "claude-opus-4-6"],
-    "claude-sonnet-4-5":["claude-sonnet-4-6", "claude-sonnet",     "claude-opus-4-6"],
-    "claude-sonnet":    ["claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-6"],
-    "gpt-5-nano":       ["gpt-5",        "gpt-5.5",  "gpt-4-1",  "gpt-4o-mini"],
-    "gemini-3.1-pro":   ["gemini-3-pro", "gpt-5.5",   "gpt-5"],
-    "gemini-3-pro":     ["gemini-3.1-pro","gpt-5.5",   "gpt-5"],
-    # o-series reasoning models: all broken at unitool API (TypeError/No choices/404)
-    # v5.27: added non-o-series fallback (gpt-5/gpt-5.5)
-    # v5.30: ImmediateFallback skips primary — but chain still had o-series entries that also hung
-    # v5.30: o-series chains now go DIRECTLY to gpt-5/gpt-5.5, no other broken o-series
-    "gpt-o1":       ["gpt-5", "gpt-5.5", "gpt-5.4", "gpt-4-1"],
-    "gpt-o1-mini":  ["gpt-5", "gpt-5.5", "gpt-5.4", "gpt-4-1"],
-    "gpt-o3":       ["gpt-5", "gpt-5.5", "gpt-5.4", "gpt-4-1"],
-    "gpt-o3-mini":  ["gpt-5", "gpt-5.5", "gpt-5.4", "gpt-4-1"],
-    "gpt-o3-pro":   ["gpt-5", "gpt-5.5", "gpt-5.4", "gpt-4-1"],
-    "gpt-o4-mini":  ["gpt-5", "gpt-5.5", "gpt-5.4", "gpt-4-1"],
-    # gpt-4-5 back (v5.30: unitool API active=1 confirmed)
-    "gpt-4-5":      ["gpt-4-1", "gpt-5", "gpt-5.5"],
-    # grok (v5.30: HTTP 500 from unitool; add non-grok fallback)
-    "grok":         ["gpt-5.5", "gpt-5", "gpt5.2"],
-    # v5.39: claude-opus-4-7
-    "claude-opus-4-7":             ["claude-opus-4-6", "claude-opus", "claude-sonnet-4-6", "claude-sonnet"],
-    # v5.39: perplexity (status=updating in maintenance; fallback to GPT)
-    "perplexity-sonar":            ["perplexity-sonar-pro", "gpt-5.5", "gpt-5"],
-    "perplexity-sonar-pro":        ["perplexity-sonar", "gpt-5.5", "gpt-5"],
-    "perplexity-sonar-pro-search": ["perplexity-sonar-pro", "perplexity-sonar", "gpt-5.5"],
-}
+# FALLBACK_CHAINS was removed in v5.40 (2026-05-13):
+# v5.31 disabled cross-model fallback entirely (return error for requested model).
+# The dict was dead code — never referenced after v5.31 — and has now been deleted.
+# Use IMMEDIATE_FALLBACK_SERVICES for fast-fail on broken services (no fallback).
 
 # v5.30: Services confirmed completely broken at unitool API level.
 # Requesting them causes a hang (no response ever arrives) rather than an
