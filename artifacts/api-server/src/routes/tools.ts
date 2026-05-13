@@ -5198,8 +5198,8 @@ router.post("/tools/waf/scrape", async (req, res) => {
 
 // ── auto-check 核心逻辑 (v9.35: 分批处理全部账号，路由立即返回，4h 定时触发) ────────
 let _autoCheckRunning = false;
-let _autoCheckLastStats: { checked: number; valid: number; needsAuth: number; banned: number; skipped: number; finishedAt: string | null } = {
-  checked: 0, valid: 0, needsAuth: 0, banned: 0, skipped: 0, finishedAt: null,
+let _autoCheckLastStats: { total: number; checked: number; valid: number; needsAuth: number; banned: number; skipped: number; finishedAt: string | null } = {
+  total: 0, checked: 0, valid: 0, needsAuth: 0, banned: 0, skipped: 0, finishedAt: null,
 };
 
 async function runAutoCheck(): Promise<void> {
@@ -5222,6 +5222,8 @@ async function runAutoCheck(): Promise<void> {
     }>(
       "SELECT id,email,token,refresh_token,tags FROM accounts WHERE platform='outlook' AND status='active' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' ORDER BY updated_at ASC"
     );
+    // 立即把 total 写入全局 stats，让 status 接口实时可见
+    _autoCheckLastStats = { total: accounts.length, checked: 0, valid: 0, needsAuth: 0, banned: 0, skipped: 0, finishedAt: null };
     logger.info({ total: accounts.length }, "[auto-check] 开始检测全部 active 账号");
     for (let i = 0; i < accounts.length; i += BATCH) {
       const batch = accounts.slice(i, i + BATCH);
@@ -5278,13 +5280,16 @@ async function runAutoCheck(): Promise<void> {
         } catch { skipped++; }
         await new Promise(r => setTimeout(r, 200));
       }
+      // 每批结束后实时刷新全局 stats，让 status 接口返回最新进度
+      const total = _autoCheckLastStats.total;
+      _autoCheckLastStats = { total, checked, valid, needsAuth, banned, skipped, finishedAt: null };
       logger.info({ batch: Math.floor(i / BATCH) + 1, batchSize: batch.length, checked, valid, needsAuth, banned, skipped }, "[auto-check] 批次完成");
     }
   } catch (e: unknown) {
     logger.error({ err: String(e) }, "[auto-check] 检测出错");
   } finally {
     _autoCheckRunning = false;
-    _autoCheckLastStats = { checked, valid, needsAuth, banned, skipped, finishedAt: new Date().toISOString() };
+    _autoCheckLastStats = { total: _autoCheckLastStats.total, checked, valid, needsAuth, banned, skipped, finishedAt: new Date().toISOString() };
     logger.info(_autoCheckLastStats, "[auto-check] 全部完成");
   }
 }
