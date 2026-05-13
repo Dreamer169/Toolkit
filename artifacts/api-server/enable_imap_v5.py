@@ -294,7 +294,24 @@ def _ss(page, tag: str, label: str):
 
 def _txt(page) -> str:
     try:
-        return (page.evaluate("()=>document.body?.innerText?.slice(0,2000)||''") or "").lower()
+        # Try dialog/modal first (Settings panel uses a modal overlay)
+        result = page.evaluate("""
+            () => {
+                // Outlook Settings dialog is a modal overlay
+                var selectors = [
+                    '[role="dialog"]', '[class*="ms-Modal"]',
+                    '[data-testid*="settings"]', '[class*="SettingsPanel"]',
+                    '[class*="setting"]'
+                ];
+                for (var s of selectors) {
+                    var el = document.querySelector(s);
+                    if (el && el.innerText && el.innerText.length > 50)
+                        return el.innerText.slice(0,3000);
+                }
+                return document.body ? document.body.innerText.slice(0,2000) : '';
+            }
+        """) or ""
+        return result.lower()
     except Exception:
         return ""
 
@@ -698,6 +715,79 @@ def _page_state(page) -> str:
     return "unknown"
 
 
+
+def _handle_fwd_signin(page, email: str, password: str) -> bool:
+    """
+    Handle the 'Sign in' button inside the 'Forwarding and IMAP' settings panel.
+    Microsoft requires re-verification before showing IMAP/POP toggles.
+    The panel shows: "Sign in and verify your account to forward your email or sync to your devices."
+    Returns True if Sign in was clicked and login completed.
+    """
+    log("  [fwd-signin] checking for Sign in button in IMAP panel...")
+
+    # Check for the Sign in button (Playwright locators)
+    _signin_clicked = False
+    for sel in [
+        'button:has-text("Sign in")',
+        '[role="button"]:has-text("Sign in")',
+        'a:has-text("Sign in")',
+        'button:has-text("sign in")',
+    ]:
+        try:
+            loc = page.locator(sel).first
+            if loc.is_visible(timeout=2000):
+                loc.click()
+                log(f"  [fwd-signin] ✅ clicked Sign in via {sel}")
+                _signin_clicked = True
+                break
+        except Exception:
+            continue
+
+    if not _signin_clicked:
+        # JS fallback: search all clickable elements
+        _js = page.evaluate("""() => {
+            var kws = ['sign in', 'signin'];
+            for (var el of document.querySelectorAll('button,a,[role="button"]')) {
+                var t = el.textContent.trim().toLowerCase();
+                for (var k of kws) {
+                    if (t === k) { el.click(); return 'js:' + el.tagName + '/' + el.textContent.trim(); }
+                }
+            }
+            return 'not-found';
+        }""")
+        log(f"  [fwd-signin] JS: {_js}")
+        _signin_clicked = _js != "not-found"
+
+    if not _signin_clicked:
+        log("  [fwd-signin] no Sign in button found — panel may already be unlocked")
+        return False
+
+    # Wait for redirect to Microsoft login
+    page.wait_for_timeout(4000)
+    u = _url(page)
+    log(f"  [fwd-signin] after click, url={u[:100]}")
+
+    # Handle login if redirected to auth page
+    if any(x in u for x in ("login.live.com", "login.microsoftonline.com", "account.live.com")):
+        log("  [fwd-signin] redirected to login — handling reauth...")
+        _handle_reauth(page, email, password)
+        page.wait_for_timeout(3000)
+        for _ in range(5):
+            if not _skip_interrupts(page):
+                break
+            page.wait_for_timeout(1500)
+        log(f"  [fwd-signin] after login, url={_url(page)[:100]}")
+    elif "outlook.live.com" in u:
+        log("  [fwd-signin] stayed on Outlook — Sign in may have triggered in-page auth")
+        page.wait_for_timeout(3000)
+        for _ in range(3):
+            if not _skip_interrupts(page):
+                break
+            page.wait_for_timeout(1500)
+
+    return True
+
+
 def _handle_reauth(page, email: str, password: str) -> bool:
     """
     Handle password re-challenge. Microsoft requires re-auth when navigating to IMAP settings.
@@ -944,13 +1034,20 @@ def _nav_to_imap_direct(page) -> str:
         except Exception as e2:
             log(f"  [nav] warmup failed: {str(e2)[:60]}")
 
-    # Fast-check: if IMAP content already loaded, return immediately
+    # v9.37 FIX: Fast-check with short timeout (3s) to avoid mid-wait page navigation.
+    # Long timeouts here allowed MSAL session refresh to redirect the page away.
     if "outlook.live.com" in u and ("popimap" in u or "options/mail" in u):
-        if _has_imap_content(page, 8000):
-            log("  [nav] ✅ IMAP content confirmed via direct goto")
-            state = _page_state(page)
-            log(f"  [nav] state={state}, url={u[:100]}")
-            return state
+        if _has_imap_content(page, 3000):
+            # Re-confirm URL hasn't drifted during the check
+            u2 = _url(page)
+            if "outlook.live.com" in u2 and ("popimap" in u2 or "options/mail" in u2):
+                log("  [nav] ✅ IMAP content confirmed via direct goto")
+                state = _page_state(page)
+                log(f"  [nav] state={state}, url={u2[:100]}")
+                return state
+            else:
+                log(f"  [nav] ⚠ URL drifted during fast-check to {u2[:60]} — continuing gear-click path")
+                u = u2
 
     # Gear-click SPA path (v4-proven): new Outlook SPA may not render settings panel
     # from cold goto — need gear → Mail settings → POP/IMAP navigation.
@@ -1076,10 +1173,19 @@ def _nav_to_imap_direct(page) -> str:
             log(f"  [nav] JS fallback forwarding click: {_fwd_result}")
             _fwd_clicked = (_fwd_result != 'not-found')
 
-        # Wait for IMAP sub-page to fully render after clicking "Forwarding and IMAP"
+        # Wait for IMAP sub-page to render after clicking "Forwarding and IMAP"
         page.wait_for_timeout(3000)
         _u2 = _url(page)
         log(f"  [nav] after forwarding click, url={_u2[:100]}, fwd_clicked={_fwd_clicked}")
+
+        # ✅ KEY FIX: If we landed on /forwarding or /popimap after clicking the
+        # menu item, that IS success — even if the panel shows "Sign in" button.
+        # The Sign in prompt is handled later in the toggle section.
+        if _fwd_clicked and ("options/mail" in _u2 or "popimap" in _u2):
+            log("  [nav] ✅ on IMAP settings page after menu click (may show Sign in)")
+            state = _page_state(page)
+            log(f"  [nav] state={state}, url={_u2[:100]}")
+            return state
 
         if _has_imap_content(page, 8000):
             log("  [nav] ✅ IMAP content via gear-click menu")
@@ -1095,57 +1201,165 @@ def _nav_to_imap_direct(page) -> str:
 
 def _has_imap_content(page, timeout_ms=10000) -> bool:
     """
-    Check if IMAP *settings panel* content is present (not just inbox nav that says 'imap').
-    Uses specific IMAP settings keywords and toggle selectors.
+    v9.37 FIX: redesigned to prevent false-positives caused by page navigation
+    during long wait_for_selector() calls.
+
+    Root cause of previous bug:
+      wait_for_selector(timeout=12000) blocked for 12s. During those 12s, the
+      MSAL session refresh redirected the page. Then the fallback radio/switch
+      check found inputs on the NEW (wrong) page → returned True (false positive).
+
+    Fix strategy:
+      1. Use short (3s max) wait intervals, re-check URL between each check.
+      2. radio/switch fallback now requires IMAP-specific text to be present.
+      3. If URL drifts away from outlook.live.com during any check, return False.
     """
-    u = _url(page)
-    if "outlook.live.com" not in u:
+    import time as _t
+
+    def _still_on_outlook() -> bool:
+        return "outlook.live.com" in _url(page)
+
+    if not _still_on_outlook():
         return False
-    # Selector check: IMAP-specific toggle (radio/switch on the settings page)
+
+    # ── Level 1: IMAP-specific aria-label / data-testid (most reliable) ──
     try:
         page.wait_for_selector(
-            '[data-testid*="imap" i],[aria-label*="IMAP" i],'
-            '[data-testid*="popimap" i]',
-            timeout=timeout_ms
+            '[data-testid*="imap" i],[data-testid*="popimap" i],'
+            '[aria-label="Enable IMAP"],[aria-label="Disable IMAP"],'
+            '[aria-label="Enable POP"],[aria-label="Disable POP"]',
+            timeout=min(timeout_ms, 3000)
         )
-        return True
+        if _still_on_outlook():
+            return True
     except Exception:
         pass
-    # Check for radio/switch ONLY if on popimap URL (avoids inbox false-positive)
-    if "popimap" in u or "options/mail" in u:
-        try:
-            page.wait_for_selector(
-                'input[type="radio"],[role="radio"],[role="switch"]',
-                timeout=min(timeout_ms, 5000)
-            )
-            return True
-        except Exception:
-            pass
-    # Specific IMAP settings text (not generic "imap" which appears in inbox nav)
+
+    # ── Level 2: Specific IMAP settings text (instant, no wait) ──────────
     IMAP_PANEL_KWS = (
         "imap access", "enable imap", "pop and imap", "pop access",
         "imap settings", "pop/imap", "let devices and apps use imap",
-        "forwarding and imap", "sync email", "pop access and forwarding",
+        "pop access and forwarding",
+        "sign in and verify", "verify your account to forward",
+        "sync to your devices",
     )
-    txt = _txt(page)
-    if any(k in txt for k in IMAP_PANEL_KWS):
+    txt = _txt(page).lower()
+    if _still_on_outlook() and any(k in txt for k in IMAP_PANEL_KWS):
         return True
-    # v4 fallback: wait_for_function for specific phrases
-    try:
-        page.wait_for_function(
-            """() => {
-                var t = (document.body && document.body.innerText || '').toLowerCase();
-                return t.indexOf('imap access') >= 0 || t.indexOf('enable imap') >= 0 ||
-                       t.indexOf('pop and imap') >= 0 || t.indexOf('pop access') >= 0 ||
-                       t.indexOf('sync email') >= 0;
-            }""",
-            timeout=min(timeout_ms, 5000)
-        )
-        return True
-    except Exception:
-        pass
+
+    # ── Level 3: radio/switch with IMAP/POP context ────────────────────────
+    # CRITICAL: only count radio/switch if IMAP or POP specific text is nearby.
+    # Generic radio buttons exist in the Outlook inbox toolbar — they must NOT match.
+    u = _url(page)
+    if _still_on_outlook() and ("popimap" in u or "options/mail" in u):
+        try:
+            page.wait_for_selector(
+                'input[type="radio"],[role="radio"],[role="switch"]',
+                timeout=min(timeout_ms, 3000)
+            )
+            # Re-check URL (page may have navigated during wait)
+            if not _still_on_outlook():
+                return False
+            # Require IMAP/POP specific text in page context
+            txt2 = _txt(page).lower()
+            has_imap_ctx = (
+                ("imap" in txt2 and ("enable" in txt2 or "disable" in txt2 or "access" in txt2)) or
+                ("pop" in txt2 and ("enable" in txt2 or "disable" in txt2 or "access" in txt2))
+            )
+            if has_imap_ctx:
+                return True
+        except Exception:
+            pass
+
+    # ── Level 4: wait_for_function (short poll, re-check URL after) ───────
+    if _still_on_outlook() and timeout_ms > 3000:
+        try:
+            page.wait_for_function(
+                """() => {
+                    var t = (document.body && document.body.innerText || '').toLowerCase();
+                    return t.indexOf('imap access') >= 0 || t.indexOf('enable imap') >= 0 ||
+                           t.indexOf('pop and imap') >= 0 || t.indexOf('pop access') >= 0;
+                }""",
+                timeout=min(timeout_ms - 3000, 4000)
+            )
+            if _still_on_outlook():
+                return True
+        except Exception:
+            pass
+
     return False
 
+
+
+def _click_fwd_imap_menu(page) -> bool:
+    """
+    Click the "Forwarding and IMAP" menu item inside the Outlook Settings dialog.
+    When navigating to /mail/options/mail/popimap, Outlook opens the Settings
+    dialog to the Mail settings MENU (showing items like Layout, Compose, etc.).
+    The actual IMAP/POP toggle panel only appears AFTER clicking "Forwarding and IMAP".
+    Returns True if a click was sent, False if panel already open.
+    """
+    # v9.37 FIX: Only skip fwd-menu click if IMAP/POP-SPECIFIC radio inputs are present.
+    # Generic radio/checkbox elements exist in the Outlook inbox toolbar and must NOT
+    # be mistaken for the IMAP/POP toggle panel being open.
+    txt_now = _txt(page).lower()
+    _imap_pop_specific = (
+        ("imap" in txt_now and ("enable" in txt_now or "disable" in txt_now or "access" in txt_now)) or
+        ("pop" in txt_now and ("enable" in txt_now or "disable" in txt_now or "access" in txt_now))
+    )
+    if _imap_pop_specific:
+        try:
+            page.wait_for_selector(
+                'input[type="radio"],[role="radio"],[role="switch"],'
+                'input[type="checkbox"]',
+                timeout=1500
+            )
+            log("  [fwd-menu] IMAP/POP toggle inputs visible — panel already open")
+            return False
+        except Exception:
+            pass
+
+    # Try Playwright exact-text match (most reliable)
+    _labels = [
+        "Forwarding and IMAP", "POP and IMAP", "Sync Email",
+        "Forwarding", "POP / IMAP", "Email sync",
+    ]
+    for _lbl in _labels:
+        try:
+            _loc = page.get_by_text(_lbl, exact=True).first
+            if _loc.is_visible(timeout=2000):
+                _loc.click()
+                log(f"  [fwd-menu] clicked '{_lbl}' via get_by_text(exact)")
+                return True
+        except Exception:
+            continue
+
+    # JS fallback: match on direct text nodes only (avoids parent-container mismatch)
+    _js = page.evaluate("""
+        () => {
+            function dt(el) {
+                return Array.from(el.childNodes)
+                    .filter(function(n){return n.nodeType===3;})
+                    .map(function(n){return n.textContent.trim();})
+                    .join('').trim().toLowerCase();
+            }
+            var sels = 'button,[role=option],[role=menuitem],[role=treeitem],li>a,a,li';
+            var kws = ['forwarding and imap','pop and imap','sync email','forwarding','pop / imap'];
+            for (var el of document.querySelectorAll(sels)) {
+                var t = dt(el);
+                if (!t) continue;
+                for (var i=0;i<kws.length;i++) {
+                    if (t===kws[i] || t.indexOf(kws[i])===0) {
+                        el.click();
+                        return 'js:'+el.textContent.trim().slice(0,40);
+                    }
+                }
+            }
+            return 'not-found';
+        }
+    """)
+    log(f"  [fwd-menu] JS result: {_js}")
+    return _js != "not-found"
 
 def _toggle_imap(page) -> str:
     return page.evaluate("""() => {
@@ -1416,7 +1630,7 @@ def enable_imap(email, password, account_id=None,
                     log(f"  [cycle {_cycle}] ❌ login page reappeared after retry — giving up")
                     return False
                 log(f"  [cycle {_cycle}] login page — retrying fresh login...")
-                _do_fresh_login(page, ctx, email, password, isp_proxy=_isp_proxy)
+                _do_fresh_login(page, ctx, email, password, isp_proxy=_effective_proxy)
                 _fresh_retried = True
                 _ss(page, f"c{_cycle}_relogin", label)
                 state = _nav_to_imap_direct(page)
@@ -1428,7 +1642,7 @@ def enable_imap(email, password, account_id=None,
                     log(f"  [cycle {_cycle}] ❌ error page after retry — aborting")
                     return False
                 log(f"  [cycle {_cycle}] error/440 — retrying fresh login + IMAP nav...")
-                _do_fresh_login(page, ctx, email, password, isp_proxy=_isp_proxy)
+                _do_fresh_login(page, ctx, email, password, isp_proxy=_effective_proxy)
                 _fresh_retried = True
                 _ss(page, f"c{_cycle}_error_relogin", label)
                 state = _nav_to_imap_direct(page)
@@ -1451,7 +1665,65 @@ def enable_imap(email, password, account_id=None,
             log(f"  [cycle {_cycle}] breaking after repeated unknown state")
             break
 
+        # ── v9.37 FIX: Re-validate URL after cycle exit (page may have navigated) ──
+        _post_cycle_url = _url(page)
+        log(f"  [post-cycle] url={_post_cycle_url[:100]}")
+        if "outlook.live.com" not in _post_cycle_url:
+            log("  [post-cycle] ❌ page navigated away during cycle — re-doing full login+nav")
+            _login_ok2 = _do_fresh_login(page, ctx, email, password, isp_proxy=_effective_proxy)
+            if not _login_ok2:
+                log("  [post-cycle] ❌ re-login failed — aborting")
+                return False
+            state2 = _nav_to_imap_direct(page)
+            if state2 not in ("imap", "imap_loading"):
+                log(f"  [post-cycle] ❌ still not on IMAP page after re-login: state={state2}")
+                return False
+            page.wait_for_timeout(3000)
+        elif "popimap" not in _post_cycle_url and "options/mail" not in _post_cycle_url:
+            log("  [post-cycle] not on IMAP URL — re-navigating...")
+            state2 = _nav_to_imap_direct(page)
+            page.wait_for_timeout(3000)
+
         _ss(page, "05_pre_toggle", label)
+
+        # ── Step N+0.5: Click "Forwarding and IMAP" menu item ──────────────
+        # Settings dialog opens to MENU (URL=/popimap, "Forwarding and IMAP" visible
+        # as a link). Must click it to open the actual IMAP/POP toggle panel.
+        log("  [fwd-panel] clicking Forwarding-and-IMAP menu item if needed...")
+        _fwd_panel_clicked = _click_fwd_imap_menu(page)
+        if _fwd_panel_clicked:
+            log("  [fwd-panel] clicked — waiting 4s for panel to render...")
+            page.wait_for_timeout(4000)
+            _ss(page, "05b_after_fwd_click", label)
+        else:
+            log("  [fwd-panel] panel already open or not needed")
+
+        # ── Handle "Sign in" button in IMAP panel ───────────────────────
+        # After clicking "Forwarding and IMAP", Outlook may show a Sign-in prompt:
+        # "Sign in and verify your account to forward your email or sync to your devices."
+        # Must click Sign in + handle login before IMAP/POP toggles appear.
+        log("  [fwd-panel] checking for Sign in prompt...")
+        _signin_handled = _handle_fwd_signin(page, email, password)
+        if _signin_handled:
+            log("  [fwd-panel] Sign in handled — waiting 8s for page to settle...")
+            page.wait_for_timeout(8000)
+            _ss(page, "05c_after_signin", label)
+            u_after = _url(page)
+            log(f"  [fwd-panel] post-signin url={u_after[:100]}")
+            # Skip any post-login prompts
+            for _ in range(4):
+                if not _skip_interrupts(page):
+                    break
+                page.wait_for_timeout(1500)
+            # Navigate back to IMAP settings if redirected away
+            if "options/mail" not in _url(page) and "popimap" not in _url(page):
+                log("  [fwd-panel] not on IMAP page after signin — re-navigating...")
+                state = _nav_to_imap_direct(page)
+                page.wait_for_timeout(3000)
+            # Try to open the IMAP panel (now unlocked)
+            _click_fwd_imap_menu(page)
+            page.wait_for_timeout(5000)
+            _ss(page, "05d_imap_unlocked", label)
 
         # ── Step N+1: Check IMAP content one more time ───────────────────────
         if not _has_imap_content(page, 8000):
