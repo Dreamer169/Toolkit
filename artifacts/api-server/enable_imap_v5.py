@@ -718,14 +718,49 @@ def _page_state(page) -> str:
 
 def _handle_fwd_signin(page, email: str, password: str) -> bool:
     """
-    Handle the 'Sign in' button inside the 'Forwarding and IMAP' settings panel.
+    v9.37 FIX: Handle the 'Sign in' button inside the 'Forwarding and IMAP' settings panel.
+
     Microsoft requires re-verification before showing IMAP/POP toggles.
     The panel shows: "Sign in and verify your account to forward your email or sync to your devices."
-    Returns True if Sign in was clicked and login completed.
+
+    Key fix: clicking "Sign in" may open a POPUP window (new browser page) for OAuth.
+    The old code only waited 8s and never detected popups. This version:
+    1. Sets up a popup listener BEFORE clicking Sign in
+    2. If popup appears: handles auth in the popup (fills email+password)
+    3. If no popup: waits up to 15s for in-page auth to complete
+    4. Verifies the IMAP panel is now unlocked (Sign-in wall gone)
+
+    Returns True if Sign in was clicked and auth was attempted.
     """
     log("  [fwd-signin] checking for Sign in button in IMAP panel...")
 
-    # Check for the Sign in button (Playwright locators)
+    # Quick check: is Sign-in wall actually present?
+    txt_check = _txt(page).lower()
+    has_signin_wall = "sign in and verify" in txt_check or "sign in to verify" in txt_check
+    if not has_signin_wall:
+        # Check if toggles already visible (panel already unlocked)
+        try:
+            page.wait_for_selector(
+                'input[type="radio"],[role="radio"],[role="switch"]',
+                timeout=1500
+            )
+            wall_txt = _txt(page).lower()
+            if ("enable imap" in wall_txt or "imap access" in wall_txt or
+                    "pop access" in wall_txt or "disable imap" in wall_txt):
+                log("  [fwd-signin] panel already unlocked (no Sign-in wall + toggles visible)")
+                return False
+        except Exception:
+            pass
+
+    # ── Set up popup listener BEFORE clicking Sign in ─────────────────────
+    _popup_pages = []
+    def _on_new_page(new_page):
+        _popup_pages.append(new_page)
+        log(f"  [fwd-signin] popup detected: {_url(new_page)[:80]}")
+
+    page.context.on("page", _on_new_page)
+
+    # ── Click the Sign in button ──────────────────────────────────────────
     _signin_clicked = False
     for sel in [
         'button:has-text("Sign in")',
@@ -744,7 +779,6 @@ def _handle_fwd_signin(page, email: str, password: str) -> bool:
             continue
 
     if not _signin_clicked:
-        # JS fallback: search all clickable elements
         _js = page.evaluate("""() => {
             var kws = ['sign in', 'signin'];
             for (var el of document.querySelectorAll('button,a,[role="button"]')) {
@@ -759,32 +793,86 @@ def _handle_fwd_signin(page, email: str, password: str) -> bool:
         _signin_clicked = _js != "not-found"
 
     if not _signin_clicked:
+        page.context.remove_listener("page", _on_new_page)
         log("  [fwd-signin] no Sign in button found — panel may already be unlocked")
         return False
 
-    # Wait for redirect to Microsoft login
-    page.wait_for_timeout(4000)
-    u = _url(page)
-    log(f"  [fwd-signin] after click, url={u[:100]}")
+    # ── Wait and handle popup (if one opened) ────────────────────────────
+    # Wait up to 5s for a popup to appear
+    import time as _time
+    _popup_deadline = _time.time() + 5.0
+    while _time.time() < _popup_deadline and not _popup_pages:
+        page.wait_for_timeout(500)
 
-    # Handle login if redirected to auth page
-    if any(x in u for x in ("login.live.com", "login.microsoftonline.com", "account.live.com")):
-        log("  [fwd-signin] redirected to login — handling reauth...")
-        _handle_reauth(page, email, password)
+    if _popup_pages:
+        popup = _popup_pages[0]
+        log(f"  [fwd-signin] handling popup auth: {_url(popup)[:80]}")
+        # Wait for popup to load
+        try:
+            popup.wait_for_load_state("domcontentloaded", timeout=10000)
+        except Exception:
+            pass
+        popup_url = _url(popup)
+        log(f"  [fwd-signin] popup url: {popup_url[:100]}")
+        # Handle auth in popup (email/password entry)
+        if any(x in popup_url for x in ("login.live.com", "login.microsoftonline.com", "account.live.com", "outlook.live.com")):
+            _handle_reauth(popup, email, password)
+            popup.wait_for_timeout(3000)
+            for _ in range(4):
+                if not _skip_interrupts(popup):
+                    break
+                popup.wait_for_timeout(1000)
+            log(f"  [fwd-signin] popup after auth: {_url(popup)[:80]}")
+            try:
+                popup.close()
+            except Exception:
+                pass
+        page.wait_for_timeout(5000)
+    else:
+        # No popup — URL-based handling
         page.wait_for_timeout(3000)
-        for _ in range(5):
-            if not _skip_interrupts(page):
-                break
-            page.wait_for_timeout(1500)
-        log(f"  [fwd-signin] after login, url={_url(page)[:100]}")
-    elif "outlook.live.com" in u:
-        log("  [fwd-signin] stayed on Outlook — Sign in may have triggered in-page auth")
-        page.wait_for_timeout(3000)
-        for _ in range(3):
-            if not _skip_interrupts(page):
-                break
-            page.wait_for_timeout(1500)
+        u = _url(page)
+        log(f"  [fwd-signin] after click (no popup), url={u[:100]}")
 
+        if any(x in u for x in ("login.live.com", "login.microsoftonline.com", "account.live.com")):
+            log("  [fwd-signin] redirected to login — handling reauth...")
+            _handle_reauth(page, email, password)
+            page.wait_for_timeout(3000)
+            for _ in range(5):
+                if not _skip_interrupts(page):
+                    break
+                page.wait_for_timeout(1500)
+            log(f"  [fwd-signin] after login, url={_url(page)[:100]}")
+        elif "outlook.live.com" in u:
+            # In-page auth — wait longer for it to resolve
+            log("  [fwd-signin] stayed on Outlook — waiting up to 15s for in-page auth...")
+            for wait_chunk in range(5):
+                page.wait_for_timeout(3000)
+                txt_after = _txt(page).lower()
+                # Check if Sign-in wall is gone (IMAP toggles appeared)
+                if ("enable imap" in txt_after or "imap access" in txt_after or
+                        "pop access" in txt_after or "disable imap" in txt_after):
+                    log(f"  [fwd-signin] ✅ IMAP panel unlocked after {(wait_chunk+1)*3}s")
+                    break
+                # Check if wall is still there
+                if "sign in and verify" in txt_after:
+                    log(f"  [fwd-signin] wall still present after {(wait_chunk+1)*3}s...")
+                else:
+                    log(f"  [fwd-signin] page changed (wall gone) after {(wait_chunk+1)*3}s")
+                    break
+            for _ in range(3):
+                if not _skip_interrupts(page):
+                    break
+                page.wait_for_timeout(1000)
+
+    page.context.remove_listener("page", _on_new_page)
+
+    # ── Final state check ─────────────────────────────────────────────────
+    txt_final = _txt(page).lower()
+    wall_still_present = "sign in and verify" in txt_final
+    imap_unlocked = ("enable imap" in txt_final or "imap access" in txt_final or
+                     "pop access" in txt_final or "disable imap" in txt_final)
+    log(f"  [fwd-signin] final: wall_present={wall_still_present} imap_unlocked={imap_unlocked}")
     return True
 
 
@@ -1362,18 +1450,31 @@ def _click_fwd_imap_menu(page) -> bool:
     return _js != "not-found"
 
 def _toggle_imap(page) -> str:
+    """
+    v9.37 FIX: Enable IMAP toggle on the Outlook settings page.
+
+    Key fix: Filter out LEFT PANEL navigation menu items.
+    Previously [aria-label*="IMAP" i] matched the left panel "Forwarding and IMAP"
+    menu item (a BUTTON element) and clicked it instead of the actual IMAP radio.
+    Now navigation roles (button/link/option/treeitem) are excluded from attr search.
+    """
     return page.evaluate("""() => {
+        // ── Strategy 1: radio/checkbox with IMAP text in close parent ──────
         var inputs = Array.from(document.querySelectorAll(
             'input[type="radio"],input[type="checkbox"],[role="radio"],[role="switch"],[role="checkbox"]'));
         for (var el of inputs) {
             var par = el.closest('li') || el.closest('label') || el.closest('div') || el.parentElement;
             var txt = (par ? par.textContent : "").toLowerCase();
             if (txt.indexOf("imap") < 0) continue;
+            // Exclude elements where the parent ONLY mentions imap in nav context
+            var parRole = par ? (par.getAttribute("role") || par.tagName.toLowerCase()) : "";
+            if (parRole === "navigation" || parRole === "menu" || parRole === "menubar") continue;
             var chk = el.getAttribute("aria-checked") || (el.checked !== undefined ? String(el.checked) : "false");
             if (chk === "true" || el.checked) return "already-on";
             el.click();
             return "radio-clicked:" + (el.id || el.name || el.value || "?");
         }
+        // ── Strategy 2: label containing "enable imap" ─────────────────────
         for (var lbl of Array.from(document.querySelectorAll("label"))) {
             var lt = lbl.textContent.toLowerCase();
             if (lt.indexOf("enable imap") >= 0) {
@@ -1382,13 +1483,26 @@ def _toggle_imap(page) -> str:
                 lbl.click(); return "label";
             }
         }
+        // ── Strategy 3: aria-label with IMAP + exclude nav elements ─────────
+        // CRITICAL: filter out navigation menu items (buttons/links/options).
+        // The left panel "Forwarding and IMAP" item is a button — must be excluded.
+        var NAV_ROLES = ["button", "link", "option", "menuitem", "treeitem", "tab", "menubar", "menu"];
         var byAttr = Array.from(document.querySelectorAll('[aria-label*="IMAP" i],[data-testid*="imap" i]'));
         for (var el of byAttr) {
+            var role = (el.getAttribute("role") || el.tagName.toLowerCase()).toLowerCase();
+            // Skip navigation/menu elements
+            if (NAV_ROLES.indexOf(role) >= 0) continue;
+            // Also skip plain BUTTON elements in nav context
+            if (el.tagName === "BUTTON") {
+                // Only accept a button if it has aria-checked (= toggle button)
+                if (!el.hasAttribute("aria-checked")) continue;
+            }
             var chk = el.getAttribute("aria-checked") || (el.checked !== undefined ? String(el.checked) : "false");
             if (chk === "true" || el.checked) return "attr-already-on";
             el.click();
             return "attr-clicked:" + el.getAttribute("aria-label");
         }
+        // ── Strategy 4: any visible [role="switch"] ──────────────────────────
         var sw = Array.from(document.querySelectorAll('[role="switch"]'));
         for (var s of sw) {
             if (s.getAttribute("aria-checked") !== "true") { s.click(); return "switch-clicked"; }
