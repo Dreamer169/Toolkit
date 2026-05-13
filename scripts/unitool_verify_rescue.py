@@ -66,6 +66,7 @@ def get_pending_account():
           AND tags NOT LIKE '%unitool_registered%'
           AND tags NOT LIKE '%unitool_processing%'
           AND tags NOT LIKE '%unitool_rescue_dead%'
+          AND tags NOT LIKE '%abuse_mode%'
           AND updated_at < NOW() - INTERVAL '2 minutes'
           AND (
             notes IS NULL
@@ -714,6 +715,26 @@ def main():
         log(f"[graph] token len={len(access_token)}")
     except Exception as e:
         log(f"[graph] token fail: {e}")
+        _emsg = str(e)
+        if "AADSTS70000" in _emsg or "service abuse mode" in _emsg:
+            log(f"[graph] ⛔ AADSTS70000 — 账号永久封禁，标 abuse_mode 并跳过")
+            try:
+                _ac = db_connect(); _cur = _ac.cursor()
+                _cur.execute("SELECT tags FROM accounts WHERE id=%s", (_account_id,))
+                _r = _cur.fetchone(); _tg = _r[0] if _r and _r[0] else ""
+                import re as _re
+                _tg = _re.sub(r",?unitool_(processing|verify_pending|reg_retry)", "", _tg).strip(",")
+                for _t in ("abuse_mode", "unitool_fail"):
+                    if _t not in _tg:
+                        _tg = (_tg + "," + _t).strip(",")
+                _cur.execute("UPDATE accounts SET status='suspended', tags=%s, updated_at=NOW() WHERE id=%s",
+                             (_tg, _account_id))
+                _ac.commit(); _ac.close()
+                log(f"[graph] DB 更新 → {_tg}")
+            except Exception as _dbe:
+                log(f"[graph] DB err: {_dbe}")
+            _success_flag = True  # 防止 atexit 再次 unlock
+            return
 
     # Fix-7a: smart polling — 0 vr_attempt→360s first try, 1+→100s repeat
     _notes_pre = ""

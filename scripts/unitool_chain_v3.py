@@ -1036,6 +1036,26 @@ def run_inline_verify(email: str, password: str, refresh_token: str, max_wait: i
     except urllib.error.HTTPError as _he:
         _err_raw = _he.read().decode(errors="replace")
         log(f"[inline_verify] token fail HTTP {_he.code}: {_err_raw[:200]}")
+        # AADSTS70000 = 微软永久封禁该账号（service abuse mode），token 不可恢复
+        # 直接标 abuse_mode+suspended，返回特殊标记让调用方跳过 verify_pending 队列
+        if "AADSTS70000" in _err_raw or "service abuse mode" in _err_raw:
+            log(f"[inline_verify] ⛔ AADSTS70000 → 账号已被微软永久封禁，标 abuse_mode")
+            try:
+                _ac = db_connect(); _ac_cur = _ac.cursor()
+                _ac_cur.execute("SELECT tags FROM accounts WHERE id=%s", (account_id,))
+                _row = _ac_cur.fetchone(); _tags = _row[0] if _row and _row[0] else ""
+                _new = re.sub(r",?unitool_(processing|verify_pending|reg_retry)", "", _tags).strip(",")
+                for _t in ("abuse_mode", "unitool_fail"):
+                    if _t not in _new:
+                        _new = (_new + "," + _t).strip(",")
+                _ac_cur.execute(
+                    "UPDATE accounts SET status='suspended', tags=%s, updated_at=NOW() WHERE id=%s",
+                    (_new, account_id))
+                _ac.commit(); _ac.close()
+                log(f"[inline_verify] DB 标记完成 → {_new}")
+            except Exception as _dbe:
+                log(f"[inline_verify] DB 标记失败(非致命): {_dbe}")
+            return "__AADSTS70000__"   # 特殊标记，让调用方不进 verify_pending
         return ""
     except Exception as e:
         log(f"[inline_verify] token fail: {e}"); return ""
@@ -1260,11 +1280,14 @@ def main():
             log("[ssid] \u8d44\u6e90\u4e0d\u8db3\uff0c\u8df3\u8fc7\u767b\u5f55\u5c3c\u5e95")
 
     if not ssid:
-        if reg_result.get("ok"):
-            log("[main] \u26a0 email_sent OK but no ssid -> unitool_verify_pending")
+        if ssid == "__AADSTS70000__" or ssid is None:
+            # already marked abuse_mode+unitool_fail inside run_inline_verify
+            log("[main] ⛔ AADSTS70000 已处理，跳出（不进 verify_pending）")
+        elif reg_result.get("ok"):
+            log("[main] ⚠ email_sent OK but no ssid -> unitool_verify_pending")
             db_mark_fail(account_id, "verify_email_not_found")
         else:
-            log(f"[main] \u274c three-fallback fail, no ssid")
+            log(f"[main] ❌ three-fallback fail, no ssid")
             db_mark_fail(account_id, "no_ssid_after_3_fallbacks")
         return
     log(f"[main] ✅ ssid 获取成功 len={len(ssid)}")
