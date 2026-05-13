@@ -144,7 +144,7 @@ def wait_for_cursor_otp(timeout: int = 120) -> str | None:
 # ─────────────────────────────────────────────────────────────
 # 2. Replit 验证邮件（新功能）
 # ─────────────────────────────────────────────────────────────
-REPLIT_KWS = ("replit", "verify", "confirm", "activate", "email", "welcome")
+REPLIT_KWS = ("replit", "verify your email", "confirm your email", "activate your account")
 
 def wait_for_replit_verify(
     refresh_token: str,
@@ -183,7 +183,8 @@ def wait_for_replit_verify(
                 for _jm in _junk.get("value", []):
                     _jsubj = (_jm.get("subject") or "").lower()
                     _jfrom = ((_jm.get("from") or {}).get("emailAddress") or {}).get("address", "").lower()
-                    if any(k in _jsubj for k in REPLIT_KWS) or "replit" in _jfrom:
+                    # Fix: Junk 只接受 sender 来自 replit.com 或 subject 明确含 "replit"
+                    if "replit" in _jsubj or "replit.com" in _jfrom or "@replit.com" in _jfrom:
                         _jid = _jm.get("id")
                         _jdetail = _graph_get_with_token(f"/me/messages/{_jid}?$select=body", token)
                         _jurl = _extract_verify_url((_jdetail.get("body") or {}).get("content", ""))
@@ -220,11 +221,15 @@ def wait_for_replit_verify(
                 preview = msg.get("bodyPreview", "").lower()
                 sender  = msg.get("from", {}).get("emailAddress", {}).get("address", "").lower()
 
+                # Fix: 必须 sender 来自 replit.com 或 subject 明确含 "replit"
+                # 避免任何服务的 "Verify Your Email" 邮件被误判为 Replit 验证邮件
+                _sender_is_replit = "@replit.com" in sender or "replit.com" in sender
+                _subj_has_replit  = "replit" in subj
+                _body_has_replit  = "replit" in preview
                 is_replit = (
-                    any(k in subj for k in REPLIT_KWS)
-                    or any(k in preview for k in REPLIT_KWS)
-                    or "replit" in sender
-                    or "noreply" in sender
+                    _sender_is_replit
+                    or _subj_has_replit
+                    or (_body_has_replit and any(k in subj for k in REPLIT_KWS))
                 )
                 if not is_replit:
                     seen_ids.add(mid)
@@ -256,7 +261,8 @@ def _extract_verify_url(html: str) -> str | None:
     candidates = re.findall(r'https?://[^\s"\'<>]+', html)
     priority_kws = ("replit.com/verify", "replit.com/email", "replit.com/confirm",
                     "email-action", "/auth/")
-    fallback_kws = ("replit.com", "verify", "confirm", "activate")
+    # Fix: fallback 只保留 replit.com，避免提取其他服务的 verify/confirm 链接
+    fallback_kws = ("replit.com",)
     for url in candidates:
         if any(k in url.lower() for k in priority_kws):
             return url.rstrip(".")
