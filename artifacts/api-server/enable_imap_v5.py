@@ -78,7 +78,9 @@ def mailtm_poll_code(token: str, timeout=240):
                     continue
                 c2, full = _mt_req("GET", f"/messages/{mid}", token=token)
                 if c2 == 200:
-                    html = full.get("html", full.get("text", "")) or ""
+                    html_raw = full.get("html", full.get("text", "")) or ""
+                    # mail.tm html field is sometimes a list of HTML strings
+                    html = " ".join(html_raw) if isinstance(html_raw, list) else str(html_raw)
                     m = re.search(r'\b(\d{4,8})\b', re.sub(r'\s+', ' ', html))
                     if m:
                         log(f"  [mail.tm] code={m.group(1)} from: {msg.get('subject','')[:50]}")
