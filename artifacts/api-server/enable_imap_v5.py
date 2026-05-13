@@ -875,6 +875,7 @@ def _handle_fwd_signin(page, email: str, password: str) -> bool:
             _popup_skip_rounds = 0
             _popup_mt_token = ""   # v9.37 Fix13: store mail.tm token from first _handle_proofs call
             _popup_mt_addr  = ""
+            _code_submitted  = False  # prevent re-submitting same OTP code
             while _popup_skip_rounds < 10:
                 _popup_skip_rounds += 1
                 popup_u = _url(popup)
@@ -920,15 +921,34 @@ def _handle_fwd_signin(page, email: str, password: str) -> bool:
                         continue
                 if _skipped:
                     continue
-                if _is_proofs and _is_verify_page and _popup_mt_token:
+                if _is_proofs and _is_verify_page and _popup_mt_token and not _code_submitted:
                     # v9.37 Fix13: on proofs/Verify with stored token — enter verification code
                     log(f"  [fwd-signin] proofs/Verify — entering code from mail.tm {_popup_mt_addr}...")
+                    _code_ok = False
                     try:
                         _code_ok = _handle_security_code(popup, _popup_mt_token)
                         log(f"  [fwd-signin] security code result: {_code_ok}")
                     except Exception as _ce:
                         log(f"  [fwd-signin] security code error: {_ce}")
-                    popup.wait_for_timeout(5000)
+                    if _code_ok:
+                        _code_submitted = True
+                        # Wait up to 15s for popup to navigate away from proofs/Verify
+                        log("  [fwd-signin] code OK — waiting 15s for popup nav away...")
+                        for _nw in range(5):
+                            popup.wait_for_timeout(3000)
+                            _pu = _url(popup)
+                            try: _pc = popup.is_closed()
+                            except Exception: _pc = True
+                            if _pc or "outlook.live.com" in _pu or "login.live.com" in _pu:
+                                log("  [fwd-signin] popup nav away (outlook/login) after code OK")
+                                break
+                            if "verify" not in _pu.lower() and "proofs" not in _pu.lower():
+                                log(f"  [fwd-signin] popup nav away to {_pu[:60]} after code OK")
+                                break
+                        log("  [fwd-signin] breaking skip-round loop after code submission")
+                        break  # Exit while loop — code submitted, OAuth completing
+                    else:
+                        popup.wait_for_timeout(5000)
                 elif _is_proofs and _is_add_page:
                     # On proofs/Add — try JS click "Not now"/"Cancel" first
                     _js_skipped = popup.evaluate("""() => {
