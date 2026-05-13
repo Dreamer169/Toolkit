@@ -2070,24 +2070,38 @@ def enable_imap(email, password, account_id=None,
                         break
                     page.wait_for_timeout(1500)
 
-            # FIX-C v2: Stay on current IMAP panel page (do NOT navigate away —
-            # that destroys the JS postMessage listener the popup needs to reach).
-            # Strategy: wait up to 30s for panel to unlock, then try page.reload().
-            log("  [fwd-panel] FIX-C v2: waiting up to 30s on page for panel unlock...")
+            # FIX-C v2: OAuth cookie was just set by popup. Try reload FIRST
+            # (do NOT navigate away — destroys JS postMessage listener).
+            # Strategy: 1) immediate reload, 2) 30s page-wait, 3) last-resort nav
             _wall_cleared = False
-            for _wchk in range(10):
-                page.wait_for_timeout(3000)
-                if not _has_signin_wall(page):
-                    log(f"  [fwd-panel] ✅ wall cleared after {(_wchk+1)*3}s wait")
-                    _wall_cleared = True
-                    break
-                if _has_imap_content(page, 500):
-                    log(f"  [fwd-panel] ✅ IMAP content appeared after {(_wchk+1)*3}s")
-                    _wall_cleared = True
-                    break
+            # Step 1: Immediate page.reload() — picks up OAuth cookie from popup
+            log("  [fwd-panel] FIX-C v2 step-1: reloading page to pick up OAuth cookie...")
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_timeout(5000)
+                _click_fwd_imap_menu(page)
+                page.wait_for_timeout(4000)
+            except Exception as _re:
+                log(f"  [fwd-panel] reload step-1 error: {_re}")
+            if not _has_signin_wall(page):
+                log("  [fwd-panel] ✅ wall cleared after step-1 reload")
+                _wall_cleared = True
+            # Step 2: If still wall, wait up to 30s more on current page
             if not _wall_cleared:
-                # Try page.reload() — preserves OAuth cookie set by popup
-                log("  [fwd-panel] wall still present — reloading page...")
+                log("  [fwd-panel] FIX-C v2 step-2: waiting up to 30s for panel unlock...")
+                for _wchk in range(10):
+                    page.wait_for_timeout(3000)
+                    if not _has_signin_wall(page):
+                        log(f"  [fwd-panel] ✅ wall cleared after {(_wchk+1)*3}s wait")
+                        _wall_cleared = True
+                        break
+                    if _has_imap_content(page, 500) and not _has_signin_wall(page):
+                        log(f"  [fwd-panel] ✅ IMAP content (no wall) after {(_wchk+1)*3}s")
+                        _wall_cleared = True
+                        break
+            if not _wall_cleared:
+                # Step 3: second reload attempt
+                log("  [fwd-panel] wall still present — 2nd reload...")
                 try:
                     page.reload(wait_until="domcontentloaded", timeout=20000)
                     page.wait_for_timeout(5000)
@@ -2113,8 +2127,8 @@ def enable_imap(email, password, account_id=None,
             _ss(page, "05d_imap_unlocked", label)
 
             # Check if Sign-in wall is gone
-            if not _has_signin_wall(page):
-                log("  [fwd-panel] ✅ Sign-in wall gone — IMAP panel should be unlocked")
+            if _wall_cleared or not _has_signin_wall(page):
+                log("  [fwd-panel] ✅ Sign-in wall gone — IMAP panel unlocked")
                 break
             _signin_attempts += 1
             if _signin_attempts >= 2:
