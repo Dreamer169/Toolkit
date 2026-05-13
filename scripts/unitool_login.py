@@ -290,8 +290,13 @@ async def login_one(email: str, password: str, headless: bool = True,
             _log(f"  [display] headless=False (DISPLAY={display})")
     opt.headless = headless
     if CHROME: opt.binary_location = CHROME
-    _resi_port = _pick_resi_port(email)
-    _log(f"  [{email}] 住宅代理端口: {_resi_port}")
+    # FIX: 使用 resi_pool.pick_sticky(email) 与注册/验证步骤保持同一 IP
+    try:
+        import resi_pool as _rpool_login
+        _resi_port = _rpool_login.pick_sticky(email)
+    except Exception:
+        _resi_port = _pick_resi_port(email)
+    _log(f"  [{email}] 住宅代理端口: {_resi_port} (sticky)")
     for a in ["--no-sandbox", "--disable-dev-shm-usage", "--window-size=1440,900",
                "--disable-gpu", "--lang=en-US",
                f"--proxy-server=socks5://127.0.0.1:{_resi_port}"]:
