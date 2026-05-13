@@ -1633,7 +1633,7 @@ router.post("/tools/outlook/register", async (req, res) => {
       const _memRaw   = _rfs("/proc/meminfo", "utf8");
       const _availMat = _memRaw.match(/MemAvailable:\s+(\d+)\s+kB/);
       const _availMB  = _availMat ? Math.floor(parseInt(_availMat[1]) / 1024) : 9999;
-      const _memPerW  = 1000;  // Chrome实测~1GB，防OOM
+      const _memPerW  = 600;  // Chrome实测峰値~500-700MB(main+renderers)，1000过于保守
       const _maxByMem = Math.max(1, Math.floor(_availMB / _memPerW));
       if (_maxByMem < resolvedWorkers) {
         job.logs.push({ type: "warn", message: `⚠ 内存感知降档: 空闲${_availMB}MB 不足以支撑${resolvedWorkers}workers(每个~${_memPerW}MB) → 自动降为${_maxByMem}` });

@@ -714,40 +714,60 @@ def replenish_if_needed():
         log(f"[watermark] ❌ 请求异常: {e}")
 
 # ── 资源检查 ──────────────────────────────────────────────────────────────────
-def check_resources():
-    """确保内存 ≥ 600MB 且 Chrome 实例 ≤ 5 个"""
-    try:
-        for line in open("/proc/meminfo"):
-            if "MemAvailable" in line:
-                mb = int(line.split()[1]) // 1024
-                log(f"[res] 内存={mb}MB")
-                if mb < 600:
-                    log("[res] SKIP mem<600MB"); return False
-                break
-    except Exception:
-        pass
-    try:
-        # v5.13: Popen to avoid KBI propagation
-        _ps_proc = subprocess.Popen(
-            ["bash", "-c",
-             "ps aux | grep chrome-linux64/chrome | grep -v 'crashpad\\|grep' | wc -l"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def check_resources(max_wait: int = 300, interval: int = 30) -> bool:
+    """v5.15: 内存>=700MB 且 Chrome主进程<=2个。
+    内部轮询等待直到满足条件或超时（默认最多等 5 分钟）。
+    返回 True=可以继续，False=等待超时仍不满足。
+    """
+    def _get_mem_mb():
         try:
-            _ps_out, _ = _ps_proc.communicate(timeout=10)
-            _ps_stdout = _ps_out.decode("utf-8", errors="ignore")
-        except KeyboardInterrupt:
-            try: _ps_proc.kill(); _ps_proc.communicate()
-            except Exception: pass
-            raise
+            for line in open("/proc/meminfo"):
+                if "MemAvailable" in line:
+                    return int(line.split()[1]) // 1024
         except Exception:
-            _ps_stdout = "0"
-        n = max(0, int(_ps_stdout.strip() or 0))
-        log(f"[res] Chrome进程数={n}")
-        if n > 8:
-            log(f"[res] SKIP chrome_count={n}>8"); return False
-    except Exception:
-        pass
-    return True
+            pass
+        return 9999
+
+    def _get_chrome_main():
+        try:
+            _p = subprocess.Popen(
+                ["bash", "-c",
+                 "ps aux | grep chrome-linux64/chrome | grep 'remote-debugging-port' | grep -v 'crashpad\|grep\|--type=' | wc -l"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                _o, _ = _p.communicate(timeout=10)
+                return max(0, int(_o.decode("utf-8", errors="ignore").strip() or 0))
+            except KeyboardInterrupt:
+                try: _p.kill(); _p.communicate()
+                except Exception: pass
+                raise
+            except Exception:
+                return 0
+        except Exception:
+            return 0
+
+    waited = 0
+    while True:
+        mb = _get_mem_mb()
+        n  = _get_chrome_main()
+        log(f"[res] 内存={mb}MB  Chrome主进程数={n}")
+
+        mem_ok    = mb >= 700
+        chrome_ok = n < 3
+
+        if mem_ok and chrome_ok:
+            return True
+
+        if waited >= max_wait:
+            log(f"[res] ⚠ 等待超时 {max_wait}s：mem={mb}MB chrome={n}，强制跳过")
+            return False
+
+        reasons = []
+        if not mem_ok:    reasons.append(f"内存{mb}MB<700")
+        if not chrome_ok: reasons.append(f"Chrome={n}>=3")
+        log(f"[res] 等待 {interval}s（{'、'.join(reasons)}）已等 {waited}s / 上限 {max_wait}s")
+        time.sleep(interval)
+        waited += interval
 
 # ── ssid 持久化 ───────────────────────────────────────────────────────────────
 def persist_ssid(email, ssid):
@@ -1064,7 +1084,7 @@ def run_inline_verify(email: str, password: str, refresh_token: str, max_wait: i
         time.sleep(30)
         for folder in ("JunkEmail", "Inbox", "Clutter", "DeletedItems"):
             try:
-                _filter = "from/emailAddress/address%20eq%20%27no-reply%40unitool.ai%27"
+                _filter = "from/emailAddress/address%20eq%20%27noreply%40unitool.ai%27"
                 _url = (f"https://graph.microsoft.com/v1.0/me/mailFolders/"
                         f"{folder}/messages?$filter={_filter}"
                         f"&$top=10&$select=subject,body,receivedDateTime")
@@ -1224,8 +1244,8 @@ def main():
 
     # ── Step 1: 资源检查 ───────────────────────────────────────────────────────
     if not check_resources():
-        log("[main] 资源不足 → sleep 60s")
-        time.sleep(60); return
+        log("[main] 资源超时仍不足，跳过本轮")
+        return
 
     # ── Step 2: 获取当前可用 ref_code ──────────────────────────────────────────
     ref_master_id, ref_master_email, ref_code, ref_used = db_get_current_ref_code()
