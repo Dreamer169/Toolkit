@@ -1168,7 +1168,7 @@ export default function MailCenter() {
               { key: "all",       label: "全部",   count: accTotal },
               { key: "active",    label: "活跃",   count: statusCounts.active },
               { key: "suspended", label: "🔴 被封", count: statusCounts.suspended },
-              { key: "noauth",    label: "⚠ 未授权", count: statusCounts.noauth },
+              { key: "noauth",    label: "🔧 待修复", count: statusCounts.noauth },
               { key: "autofix",   label: "⏳ 自动修复", count: statusCounts.needs_oauth_auto },
             ] as const).map(t => (
               <button key={t.key}
@@ -1227,7 +1227,9 @@ export default function MailCenter() {
             .filter(a => {
               if (statusFilter === "active")    return a.status === "active";
               if (statusFilter === "suspended") return a.status === "suspended";
-              if (statusFilter === "noauth")    return !hasOAuth(a) && !hasImap(a);
+              if (statusFilter === "noauth")    return !hasOAuth(a) && !hasImap(a)
+                && a.status !== "suspended" && a.status !== "wrong_password"
+                && !a.tags?.includes("abuse_mode") && !a.tags?.includes("not_found");
             if (statusFilter === "autofix")   return a.status === "needs_oauth" && !a.tags?.includes("needs_oauth_manual");
               return true;
             })
