@@ -1738,11 +1738,11 @@ router.post("/tools/outlook/register", async (req, res) => {
                    idn.cookies_json||null, idn.fingerprint_json||null,
                    idn.user_agent||null, idn.exit_ip||null,
                    idn.proxy_port||null,
-                   idn.proxy_formatted||(idn.proxy_port?`socks5://127.0.0.1:\${idn.proxy_port}`:null)]
+                   idn.proxy_formatted||(idn.proxy_port?`socks5://127.0.0.1:${idn.proxy_port}`:null)]
                 );
-                job.logs.push({ type: "success", message: `✅ [inline] 已入库: \${em} id=\${ar?.id}` });
+                job.logs.push({ type: "success", message: `✅ [inline] 已入库: ${em} id=${ar?.id}` });
               } catch(e) {
-                job.logs.push({ type: "warn", message: `⚠ [inline] 入库失败(\${em}): \${e}` });
+                job.logs.push({ type: "warn", message: `⚠ [inline] 入库失败(${em}): ${e}` });
               }
             })();
           }
