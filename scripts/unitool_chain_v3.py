@@ -1110,8 +1110,12 @@ def run_inline_verify(email: str, password: str, refresh_token: str, max_wait: i
     for f in [ck, hdr]:
         try: os.remove(f)
         except: pass
+    # FIX: 验证链接点击必须通过同一 RESI 代理，否则 unitool 看到 IP 切换会失效
+    _verify_port = _rpool.pick_sticky(email)
+    log(f"[inline_verify] 通过代理 port={_verify_port} 点击验证链接")
     _curl = [
         "curl", "-sS", "-L", "--max-redirs", "8",
+        "--socks5-hostname", f"127.0.0.1:{_verify_port}",
         "-c", ck, "-b", ck, "-D", hdr,
         "-H", "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0.0.0",
         "-H", "Accept: text/html,application/xhtml+xml,*/*;q=0.9",
@@ -1301,8 +1305,8 @@ def main():
     # ── Step 7: 为该账号生成专属 ref_code，并激活到 DB ─────────────────────────
     # FIX F: 先通过代理 POST /api/ref-codes 为新账号创建专属码，再 run_reflink 读取保存
     log(f"[main] ▶ Step7a: 通过代理为 {email} 创建专属 ref_code...")
-    # 用账号 id 做偏移，确保不同账号使用不同 RESI IP
-    _port_hint = account_id  # passed as hint to resi_pool.pick() inside create_ref_code_via_proxy
+    # FIX: 用 email hash 作 hint，保持与注册 IP 一致（而非无关的 account_id）
+    _port_hint = hash(email)
     created_code = create_ref_code_via_proxy(ssid, email, port_hint=_port_hint)
     if created_code:
         log(f"[main] ✅ 代理创建成功: ref_code={created_code}")
