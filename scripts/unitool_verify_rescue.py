@@ -558,7 +558,7 @@ def _run_login_once(email, password):
     """unitool_login.py 单次尝试，返回 ssid 或 ''"""
     if not os.path.exists(LOGIN_SCRIPT):
         log(f"[login] not found: {LOGIN_SCRIPT}"); return ""
-    env = {**os.environ, "DISPLAY": ":99", "PYTHONUNBUFFERED": "1"}
+    env = {**os.environ, "DISPLAY": ":102", "PYTHONUNBUFFERED": "1"}
     proc = None
     try:
         proc = subprocess.Popen(
