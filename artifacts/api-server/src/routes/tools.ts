@@ -3971,6 +3971,25 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
       }
     }
 
+    // ── 辅助：根据 Graph API 错误码更新账号状态（收信时顺手体检）────────────
+    const updateStatusFromGraphError = async (httpStatus: number, errCode?: string): Promise<boolean> => {
+      try {
+        const isAbuse = httpStatus === 403 || errCode === "AccessDenied" || errCode === "accountClosed";
+        const isInvalid = httpStatus === 401 || errCode === "InvalidAuthenticationToken" || errCode === "AuthenticationError";
+        if (isAbuse && acc.status !== "suspended") {
+          await addAccountTags(accountId, ["abuse_mode"], "suspended");
+          req.log?.info({ accountId, httpStatus, errCode }, "[fetch-messages] Graph 返回封禁错误，已更新状态为 suspended");
+          return true;
+        }
+        if (isInvalid) {
+          await addAccountTags(accountId, ["token_invalid"]);
+          req.log?.info({ accountId, httpStatus, errCode }, "[fetch-messages] Graph 返回 token 失效，已打 token_invalid 标签");
+          return true;
+        }
+      } catch (te) { req.log?.warn({ err: String(te) }, "[fetch-messages] 更新状态失败"); }
+      return false;
+    };
+
     // 有 accessToken → Graph API
     if (accessToken) {
       // "全部邮件"：直接走全局 /me/messages，跨所有文件夹（含垃圾邮件、归档等）
@@ -3979,6 +3998,12 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
         if (allRes.ok) {
           if (allRes.messages.length > 0) { try { await addAccountTags(accountId, ["inbox_verified"]); } catch {} }
           res.json({ success: true, messages: allRes.messages, count: allRes.messages.length, email: acc.email, via: "graph_all" });
+          return;
+        }
+        // allFolder Graph 失败 → 更新状态；allFolder 无 IMAP 对应，直接返回
+        const allStatusUpdated = await updateStatusFromGraphError(allRes.status, allRes.error?.code);
+        if (allStatusUpdated) {
+          res.json({ success: false, error: "账号 OAuth 授权已失效，状态已自动更新", needsAuth: true, statusUpdated: true });
           return;
         }
       }
@@ -3990,7 +4015,7 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
           return;
         }
         // 收件箱为空时再查整个邮箱。历史邮件可能已被微软规则、自动验证或用户操作移动到归档/垃圾/已删除，
-        // 只查 mailFolders/inbox 会误显示为“空邮箱”。
+        // 只查 mailFolders/inbox 会误显示为"空邮箱"。
         const globalResult = await fetchGraphMessages(accessToken, mailFolder, limit, search, true, acctProxy);
         if (globalResult.ok && globalResult.messages.length > 0) {
           try { await addAccountTags(accountId, ["inbox_verified"]); } catch {}
@@ -4000,7 +4025,8 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
         res.json({ success: true, messages: [], count: 0, email: acc.email, via: "graph", folderFallback: globalResult.ok });
         return;
       }
-      // Graph API 失败（token 过期等）→ 降级 IMAP
+      // Graph API 失败（token 过期 / 封禁等）→ 先更新状态，再降级 IMAP
+      await updateStatusFromGraphError(primary.status, primary.error?.code);
     }
 
     // ── IMAP 路径（降级）──────────────────────────────────────────────────
@@ -4040,11 +4066,11 @@ router.post("/tools/outlook/fetch-messages-by-id", async (req, res) => {
           }
         } catch { /* live.com fallback 失败，继续走原逻辑 */ }
       }
-      // XOAUTH2 两端点均失败 → 判断是否为永久封禁账号（suspended+abuse_mode）
-      // 永久封禁账号不提示重授权，正常显示错误；其他账号提示 token 失效需重授权
+      // XOAUTH2 两端点均失败 → 所有 OAuth 路径耗尽，补打 token_invalid（幂等）
       const _isSuspAbuse = acc.status === "suspended" && (acc.tags ?? "").includes("abuse_mode");
       if (!_isSuspAbuse) {
-        res.json({ success: false, error: "账号 OAuth 授权已失效，请重新授权后即可读取邮件", needsAuth: true });
+        try { await addAccountTags(accountId, ["token_invalid"]); } catch {}
+        res.json({ success: false, error: "账号 OAuth 授权已失效，请重新授权后即可读取邮件", needsAuth: true, statusUpdated: true });
         return;
       }
     }
