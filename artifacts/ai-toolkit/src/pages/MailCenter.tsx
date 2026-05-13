@@ -122,6 +122,7 @@ export default function MailCenter() {
   const [search, setSearch]             = useState("");
   const [accSearch, setAccSearch]       = useState("");
   const [checkBusy, setCheckBusy]       = useState(false);
+  const [checkStopBusy, setCheckStopBusy] = useState(false);
   const [checkResult, setCheckResult]   = useState<string | null>(null);
   const [checkProgress, setCheckProgress] = useState<{ checked: number; total: number; valid: number; needsAuth: number; banned: number; skipped: number } | null>(null);
   const [busy, setBusy]                 = useState(false);
@@ -201,6 +202,24 @@ export default function MailCenter() {
   const [manualBusy, setManualBusy]         = useState(false);
   const [manualMsg, setManualMsg]           = useState("");
 
+  const handleStopCheck = async () => {
+    if (checkStopBusy) return;
+    setCheckStopBusy(true);
+    try {
+      const r = await fetch("/api/tools/outlook/auto-check/stop", { method: "POST" });
+      const d = await r.json() as { success: boolean; message?: string };
+      if (d.success) {
+        setCheckResult("🛑 停止信号已发送，正在等待当前账号处理完成…");
+      } else {
+        setCheckResult("⚠ " + (d.message ?? "停止失败"));
+      }
+    } catch {
+      setCheckResult("❌ 停止请求失败");
+    } finally {
+      setCheckStopBusy(false);
+    }
+  };
+
   const handleAutoCheck = async () => {
     if (checkBusy) return;
     setCheckBusy(true); setCheckResult(null); setCheckProgress(null);
@@ -209,15 +228,17 @@ export default function MailCenter() {
       const pollProgress = () => {
         fetch("/api/tools/outlook/auto-check/status")
           .then(r => r.json())
-          .then((s: { running?: boolean; stats?: { checked: number; valid: number; needsAuth: number; banned: number; skipped: number; finishedAt: string | null } }) => {
+          .then((s: { running?: boolean; stopped?: boolean; stats?: { checked: number; valid: number; needsAuth: number; banned: number; skipped: number; stoppedEarly?: boolean; finishedAt: string | null } }) => {
             if (s.stats) {
               setCheckProgress({ checked: s.stats.checked, total: totalN, valid: s.stats.valid, needsAuth: s.stats.needsAuth, banned: s.stats.banned, skipped: s.stats.skipped });
             }
             if (s.running) {
               setTimeout(pollProgress, 3000);
             } else {
-              // 检测完成
-              if (s.stats) {
+              // 检测结束（正常完成 or 手动停止）
+              if (s.stats?.stoppedEarly) {
+                setCheckResult(`🛑 已停止：已检 ${s.stats.checked}/${totalN} — ${s.stats.valid} 活跃 / ${s.stats.banned} 被封 / ${s.stats.needsAuth} 需授权`);
+              } else if (s.stats) {
                 setCheckResult(`✅ 检测完成：${s.stats.valid} 活跃 / ${s.stats.banned} 被封 / ${s.stats.needsAuth} 需授权 / ${s.stats.skipped} 跳过`);
               } else {
                 setCheckResult("✅ 检测完成");
@@ -1036,18 +1057,33 @@ export default function MailCenter() {
 
         {/* 自动检测按钮 — 固定区域，不随账号列表滚动 */}
         <div className="px-2 py-1.5 border-b border-[#21262d] shrink-0">
-          <button
-            onClick={handleAutoCheck}
-            disabled={checkBusy}
-            className="w-full flex items-center justify-center gap-1 py-1 rounded text-xs font-medium bg-[#1c2128] hover:bg-[#21262d] border border-[#30363d] text-gray-300 disabled:opacity-50 transition-colors"
-          >
-            {checkBusy
-              ? <><svg className="w-3 h-3 animate-spin mr-1" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>检测中…</>
-              : <><svg className="w-3 h-3 mr-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>立即检测（全部）</>
-            }
-          </button>
+          <div className="flex gap-1">
+            <button
+              onClick={handleAutoCheck}
+              disabled={checkBusy}
+              className="flex-1 flex items-center justify-center gap-1 py-1 rounded text-xs font-medium bg-[#1c2128] hover:bg-[#21262d] border border-[#30363d] text-gray-300 disabled:opacity-50 transition-colors"
+            >
+              {checkBusy
+                ? <><svg className="w-3 h-3 animate-spin mr-1" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>检测中…</>
+                : <><svg className="w-3 h-3 mr-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>立即检测（全部）</>
+              }
+            </button>
+            {checkBusy && (
+              <button
+                onClick={handleStopCheck}
+                disabled={checkStopBusy}
+                title="停止检测"
+                className="flex items-center justify-center px-2 py-1 rounded text-xs font-medium bg-red-950/40 hover:bg-red-900/50 border border-red-800/50 text-red-400 disabled:opacity-40 transition-colors"
+              >
+                {checkStopBusy
+                  ? <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>
+                  : <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+                }
+              </button>
+            )}
+          </div>
           {checkResult && (
-            <p className={`text-[10px] mt-0.5 leading-tight ${checkResult.startsWith("✅") ? "text-emerald-400" : checkResult.startsWith("❌") || checkResult.startsWith("⚠") ? "text-red-400" : "text-blue-400"}`}>
+            <p className={`text-[10px] mt-0.5 leading-tight ${checkResult.startsWith("✅") ? "text-emerald-400" : checkResult.startsWith("🛑") ? "text-orange-400" : checkResult.startsWith("❌") || checkResult.startsWith("⚠") ? "text-red-400" : "text-blue-400"}`}>
               {checkResult}
             </p>
           )}
