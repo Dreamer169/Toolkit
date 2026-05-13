@@ -473,7 +473,8 @@ async def _pydoll_register(
     except ImportError:
         return {"ok": False, "error": "pydoll_not_installed"}
 
-    port = resi_port or _pick_port(hash(email))
+    # FIX: 使用 pick_sticky(email) 确保同一账号全流程使用同一 IP
+    port = resi_port or (_rpool.pick_sticky(email) if _RESI else _pick_port(hash(email)))
     log(f"[pydoll] 启动 Chrome RESI={port} email={email}")
 
     opt = ChromiumOptions()
@@ -796,7 +797,8 @@ def _http_submit_with_cookies(
     正常流程不用此函数——主流程已在 pydoll 内完成 fetch()。
     此函数供外部已有 token + cookies 时使用。
     """
-    port = resi_port or _pick_port(hash(email))
+    # FIX: 使用 pick_sticky(email) 与注册步骤保持同一 IP
+    port = resi_port or (_rpool.pick_sticky(email) if _RESI else _pick_port(hash(email)))
     sess = make_session(port)
     result = {"ok": False, "email": email, "port": port, "raw": ""}
 
@@ -894,15 +896,18 @@ async def http_register_hybrid(
       比全浏览器省去：表单填写 / 按钮等待 / 页面跳转（快 ~30%）
       token ↔ cookie 绑定在同一浏览器会话，CF 验证必然通过
     """
-    # Fix14: bypass失败换端口重试（CF Turnstile 静默拒绝当前IP时换IP）
+    # FIX: 使用 pick_sticky(email) 保证同账号全流程 IP 一致；
+    # bypass 失败时 report_ref_failure → sticky 自动重新分配（不再手动换端口）
     _BYPASS_FAIL_ERRORS = ("bypass_failed", "token_empty_after_bypass")
-    port = resi_port or _pick_port(hash(email))
+    port = resi_port or (_rpool.pick_sticky(email) if _RESI else _pick_port(hash(email)))
     result = {}
     for _attempt in range(3):
         if _attempt > 0:
             if _RESI:
-                _rpool.report_failure(port)
-            port = _pick_port(hash(email) + _attempt * 37)
+                _rpool.report_ref_failure(port)
+                # release 让 pick_sticky 重新分配（新 IP），而不是强制取模换端口
+                _rpool.release_session(email)
+                port = _rpool.pick_sticky(email)
             log(f"[hybrid] bypass失败换端口 attempt={_attempt+1} new_port={port}")
         log(f"[hybrid] {email} ref={ref_code or chr(45)} port={port} attempt={_attempt+1}")
         result = await _pydoll_register(email, password, ref_code=ref_code, resi_port=port)
