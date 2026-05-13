@@ -561,7 +561,12 @@ def _balance_monitor_loop():
 #                      模型自报: 知道 "Claude Opus 4 和 Sonnet 4 作为 Claude 4 家族存在"
 #                      (训练截止 ≥ May 2025, 与 Opus 4 发布日期 2025-05-22 吻合)
 #                      注意: AI 拒绝直接披露版本号(Anthropic 策略), 通过 cost+命名+知识截止综合判定
-#   gpt-5.5       -> GPT-5 ✓ CONFIRMED (probe v5.0, 2026-05-13)
+#   gpt-5.5       -> gpt-5-2025-08-07  (GPT-5) ✓ CONFIRMED (probe v6.0, 2026-05-13)
+#   gpt-5         -> gpt-5-2025-08-07  (GPT-5) ✓ 模型名泄露: 404错误含真实版本号
+#   gpt5.1        -> gpt-5.1-2025-11-13       ✓ CONFIRMED: cutoff Oct 2024 完全一致
+#   gpt5.2        -> gpt-5.2-2025-12-11       ✓ CONFIRMED: cutoff Aug/Sep 2025 最近匹配
+#   gpt-5.4       -> gpt-5.4-2026-03-05       ✓ CONFIRMED: cutoff June 2024 完全一致
+#   gpt-5-nano    -> gpt-5-nano-2025-08-07    ✓ 模型名泄露: reasoning_effort错误含真实版本号
 #                      cutoff=June 2024 (非 Jan 2025 → 排除 GPT-4.1)
 #                      128k ctx, no reasoning/o1-thinking, cost≈103–423 tokens/msg
 #                      stream: SSE via proxy OK; unitool native=POLL_PRIMARY
