@@ -41,7 +41,7 @@ interface Stats {
 interface UnitoolStats {
   outlook:      { fresh: number; registered: number; fail: number; processing: number; total: number };
   ref:          { master: string; ref_code: string; used: number; limit: number; pool_total: number; pool_available: number; pool_exhausted: number; total_slots: number };
-  pool:         { total: number; live: number; dead: number; ssid_len: number };
+  pool:         { total: number; live: number; dead: number; with_balance: number; ssid_len: number };
   recent:       { id: number; email: string; ssid_prefix: string; ssid_len: number; updated_at: string }[];
   chain:        { status: string; last_run: string; brief: string };
   fail_reasons: { reason: string; count: number }[];
@@ -164,7 +164,7 @@ function StatsPanel() {
             <div className="bg-[#0d1117] border border-[#30363d] rounded-lg p-3 text-center">
               <div className="text-2xl font-bold text-emerald-400">{uStats.pool.live}</div>
               <div className="text-xs text-gray-400 mt-1">反代池 live</div>
-              <div className="text-xs text-gray-600">池总量 {uStats.pool.total}（含历史文件）</div>
+              <div className="text-xs text-gray-600">有余额 {uStats.pool.with_balance} | 标死 {uStats.pool.dead}</div>
             </div>
             <div className="bg-[#0d1117] border border-[#30363d] rounded-lg p-3 text-center">
               <div className={`text-2xl font-bold ${uStats.ref.pool_available === 0 ? "text-red-400" : "text-emerald-400"}`}>

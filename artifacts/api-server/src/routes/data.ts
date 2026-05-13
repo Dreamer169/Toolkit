@@ -1143,7 +1143,7 @@ router.get("/data/unitool-stats", async (req, res) => {
     currentRefUsed = curCode?.used ?? 0;
 
     // 3. proxy 池状态
-    let pool = { total:0, live:0, dead:0, ssid_len:0 };
+    let pool = { total:0, live:0, dead:0, with_balance:0, ssid_len:0 };
     try {
       const { get } = await import("http");
       const poolRaw = await new Promise<string>((resolve, reject) => {
@@ -1152,7 +1152,7 @@ router.get("/data/unitool-stats", async (req, res) => {
         });
         r2.on("error", reject);
       });
-      const pd = JSON.parse(poolRaw) as { pool_size:number; live:number; accounts?:unknown[] };
+      const pd = JSON.parse(poolRaw) as { pool_size:number; live:number; accounts?:Array<{dead:boolean;dead_until:number;balance:number|null}> };
       // ssid_len: 读取实际 ssid 文件字节数（所有文件固定 264 chars）
       let ssid_len = 0;
       try {
@@ -1162,7 +1162,11 @@ router.get("/data/unitool-stats", async (req, res) => {
           ssid_len = readFileSync(`/data/unitool_ssids/${ssidFiles[0]}`).length;
         }
       } catch {}
-      pool = { total: pd.pool_size, live: pd.live, dead: pd.pool_size - pd.live, ssid_len };
+      const now = Date.now() / 1000;
+      const accs = (pd as any).accounts ?? [];
+      const deadCount   = accs.filter((a: any) => a.dead || a.dead_until > now).length;
+      const withBalance = accs.filter((a: any) => !a.dead && a.dead_until <= now && typeof a.balance === "number" && a.balance > 0).length;
+      pool = { total: pd.pool_size, live: pd.live, dead: deadCount, with_balance: withBalance, ssid_len };
     } catch {}
 
     // 4. 最近5条成功注册
