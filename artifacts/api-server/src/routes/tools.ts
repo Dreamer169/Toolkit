@@ -5198,13 +5198,15 @@ router.post("/tools/waf/scrape", async (req, res) => {
 
 // ── auto-check 核心逻辑 (v9.35: 分批处理全部账号，路由立即返回，4h 定时触发) ────────
 let _autoCheckRunning = false;
-let _autoCheckLastStats: { total: number; checked: number; valid: number; needsAuth: number; banned: number; skipped: number; finishedAt: string | null } = {
+let _autoCheckStopped = false;  // 用户手动停止标志
+let _autoCheckLastStats: { total: number; checked: number; valid: number; needsAuth: number; banned: number; skipped: number; stoppedEarly?: boolean; finishedAt: string | null } = {
   total: 0, checked: 0, valid: 0, needsAuth: 0, banned: 0, skipped: 0, finishedAt: null,
 };
 
 async function runAutoCheck(): Promise<void> {
   if (_autoCheckRunning) { logger.info("[auto-check] 上次检测仍在运行，跳过"); return; }
   _autoCheckRunning = true;
+  _autoCheckStopped = false;
   const SCOPE = FULL_GRAPH_SCOPE;
   const BATCH = 30;
   const addTag = async (id: number, tag: string, newStatus?: string) => {
@@ -5226,8 +5228,10 @@ async function runAutoCheck(): Promise<void> {
     _autoCheckLastStats = { total: accounts.length, checked: 0, valid: 0, needsAuth: 0, banned: 0, skipped: 0, finishedAt: null };
     logger.info({ total: accounts.length }, "[auto-check] 开始检测全部 active 账号");
     for (let i = 0; i < accounts.length; i += BATCH) {
+      if (_autoCheckStopped) { logger.info({ checked }, "[auto-check] 用户手动停止"); break; }
       const batch = accounts.slice(i, i + BATCH);
       for (const acc of batch) {
+        if (_autoCheckStopped) break;
         checked++;
         if (!acc.refresh_token || acc.refresh_token.length < 20) {
           needsAuth++; await addTag(acc.id, "needs_oauth_manual"); continue;
@@ -5282,14 +5286,14 @@ async function runAutoCheck(): Promise<void> {
       }
       // 每批结束后实时刷新全局 stats，让 status 接口返回最新进度
       const total = _autoCheckLastStats.total;
-      _autoCheckLastStats = { total, checked, valid, needsAuth, banned, skipped, finishedAt: null };
-      logger.info({ batch: Math.floor(i / BATCH) + 1, batchSize: batch.length, checked, valid, needsAuth, banned, skipped }, "[auto-check] 批次完成");
+      _autoCheckLastStats = { total, checked, valid, needsAuth, banned, skipped, stoppedEarly: _autoCheckStopped, finishedAt: null };
+      logger.info({ batch: Math.floor(i / BATCH) + 1, batchSize: batch.length, checked, valid, needsAuth, banned, skipped, stopped: _autoCheckStopped }, "[auto-check] 批次完成");
     }
   } catch (e: unknown) {
     logger.error({ err: String(e) }, "[auto-check] 检测出错");
   } finally {
     _autoCheckRunning = false;
-    _autoCheckLastStats = { total: _autoCheckLastStats.total, checked, valid, needsAuth, banned, skipped, finishedAt: new Date().toISOString() };
+    _autoCheckLastStats = { total: _autoCheckLastStats.total, checked, valid, needsAuth, banned, skipped, stoppedEarly: _autoCheckStopped, finishedAt: new Date().toISOString() };
     logger.info(_autoCheckLastStats, "[auto-check] 全部完成");
   }
 }
@@ -5323,8 +5327,20 @@ router.get("/tools/outlook/auto-check/status", (_req, res) => {
   res.json({
     success: true,
     running: _autoCheckRunning,
+    stopped: _autoCheckStopped,
     stats: _autoCheckLastStats,
   });
+});
+
+// ── POST /tools/outlook/auto-check/stop ─────────────────────────────────────
+router.post("/tools/outlook/auto-check/stop", (_req, res) => {
+  if (!_autoCheckRunning) {
+    res.json({ success: false, message: "当前没有正在运行的检测" });
+    return;
+  }
+  _autoCheckStopped = true;
+  logger.info("[auto-check] 收到停止请求");
+  res.json({ success: true, message: "已发送停止信号，当前账号处理完后将停止" });
 });
 
 
