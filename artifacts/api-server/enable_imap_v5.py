@@ -78,9 +78,20 @@ def mailtm_poll_code(token: str, timeout=240):
                     continue
                 c2, full = _mt_req("GET", f"/messages/{mid}", token=token)
                 if c2 == 200:
-                    html_raw = full.get("html", full.get("text", "")) or ""
+                    html_raw = full.get("html", "") or ""
+                    text_raw = full.get("text", "") or ""
                     # mail.tm html field is sometimes a list of HTML strings
                     html = " ".join(html_raw) if isinstance(html_raw, list) else str(html_raw)
+                    text_str = " ".join(text_raw) if isinstance(text_raw, list) else str(text_raw)
+                    # DEBUG: log raw content to understand what code is in the email
+                    import re as _re2
+                    _all_nums_debug = _re2.findall(r'\b\d{4,8}\b', _re2.sub(r'\s+', ' ', text_str or html)[:2000])
+                    log(f"  [mail.tm] intro={msg.get('intro','')[:80]}")
+                    log(f"  [mail.tm] text_sample={text_str[:300]}")
+                    log(f"  [mail.tm] all_nums={_all_nums_debug[:15]}")
+                    # Use text field if available (cleaner format, no HTML noise)
+                    if text_str and len(text_str) > 10:
+                        html = text_str  # prefer plain text for code extraction
                     # FIX-CODE-EXTRACT: prefer 6-7 digit OTP, skip year-like 4-digit numbers
                     # MS personal account codes are 6-7 digits.
                     # '(c) 1999-2024 Microsoft' in footer matches 4-digit regex first.
