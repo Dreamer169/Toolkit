@@ -350,7 +350,14 @@ async def login_one(email: str, password: str, headless: bool = True,
                 if (el.innerText.trim().toLowerCase() === 'sign in') { el.click(); break; }
             }
         """, return_by_value=True)
-        await asyncio.sleep(2)   # 等 signin Turnstile iframe 渲染
+        await asyncio.sleep(3)   # 等 signin Turnstile iframe 渲染
+        # Fix: clear stale signup token from postMessage cache before signin bypass
+        await tab.execute_script(
+            "window.__cf_captured_token='';" 
+            "var inp=document.querySelector('[name=\"cf-turnstile-response\"]');" 
+            "if(inp) inp.value='';",
+            return_by_value=True)
+        _log(f"  [{email}] cleared stale token cache before signin bypass")
 
         # ── 4. bypass signin Turnstile (manual, SPA tab 切换无 LOAD_EVENT) ──
         _log(f"  [{email}] bypassing signin Turnstile...")
@@ -360,6 +367,12 @@ async def login_one(email: str, password: str, headless: bool = True,
         signin_tok = ""
         for _bypass_round in range(3):
             if _bypass_round > 0:
+                # Fix: clear stale token before each retry
+                await tab.execute_script(
+                    "window.__cf_captured_token='';" 
+                    "var inp=document.querySelector('[name=\"cf-turnstile-response\"]');" 
+                    "if(inp) inp.value='';",
+                    return_by_value=True)
                 _log(f"  [{email}] [round {_bypass_round+1}] retry bypass signin Turnstile...")
                 await _bypass_turnstile(tab, f"signin-r{_bypass_round+1}", timeout=12)
             await asyncio.sleep(3)
@@ -369,12 +382,19 @@ async def login_one(email: str, password: str, headless: bool = True,
                 ca = _s(await tab.execute_script(
                     "(document.querySelector('[name=\"captcha_action\"]')||{value:'?'}).value",
                     return_by_value=True))
-                if n > 20 and ca == "login":
-                    signin_tok = await _get_full_token(tab)
+                # Fix: also check __cf_captured_token (postMessage cache)
+                try:
+                    _pm = _s(await tab.execute_script(
+                        "window.__cf_captured_token||''", return_by_value=True))
+                except Exception:
+                    _pm = ''
+                if (n > 20 or len(_pm) > 20) and ca == "login":
+                    signin_tok = (await _get_full_token(tab) if n > 20
+                                  else _pm)
                     _log(f"  [{email}] signin token at round={_bypass_round+1} i={i+1}s len={n} action={ca}")
                     break
                 if i % 5 == 4:
-                    _log(f"  [{email}]   [r{_bypass_round+1} {i+1}s] waiting signin tok len={n} action={ca}")
+                    _log(f"  [{email}]   [r{_bypass_round+1} {i+1}s] waiting signin tok input={n} pm={len(_pm)} action={ca}")
             if signin_tok:
                 break
 
@@ -387,6 +407,11 @@ async def login_one(email: str, password: str, headless: bool = True,
                     "(document.querySelector('[name=\"captcha_action\"]')||{value:'?'}).value",
                     return_by_value=True))
                 _log(f"  [{email}] fallback token len={n} action={ca}")
+            elif len(_s(await tab.execute_script(
+                    "window.__cf_captured_token||''", return_by_value=True))) > 20:
+                signin_tok = _s(await tab.execute_script(
+                    "window.__cf_captured_token||''", return_by_value=True))
+                _log(f"  [{email}] fallback pm token len={len(signin_tok)}")
 
         if not signin_tok:
             return {"ok": False, "email": email, "reason": "turnstile_token_empty"}
