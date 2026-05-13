@@ -5220,7 +5220,7 @@ async function runAutoCheck(): Promise<void> {
       id: number; email: string;
       token: string | null; refresh_token: string | null; tags: string | null;
     }>(
-      "SELECT id,email,token,refresh_token,tags FROM accounts WHERE platform='outlook' AND status='active' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' AND COALESCE(tags,'') NOT LIKE '%token_invalid%' ORDER BY updated_at ASC"
+      "SELECT id,email,token,refresh_token,tags FROM accounts WHERE platform='outlook' AND status='active' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' ORDER BY updated_at ASC"
     );
     logger.info({ total: accounts.length }, "[auto-check] 开始检测全部 active 账号");
     for (let i = 0; i < accounts.length; i += BATCH) {
@@ -5266,7 +5266,10 @@ async function runAutoCheck(): Promise<void> {
           );
           const gd = await gr.json() as { error?: { code?: string } };
           if (gr.ok) {
-            valid++; await addTag(acc.id, "inbox_verified");
+            valid++;
+            // clear stale bad tags on successful re-verify
+            await execute(`UPDATE accounts SET tags=(SELECT NULLIF(array_to_string(ARRAY(SELECT DISTINCT trim(t) FROM unnest(string_to_array(COALESCE(tags,''),',')) AS t WHERE trim(t)<>'' AND trim(t)<>'token_invalid' AND trim(t)<>'needs_oauth_manual'),','),'')) WHERE id=$1`,[acc.id]);
+            await addTag(acc.id, "inbox_verified");
           } else {
             const code = gd.error?.code ?? "";
             if (gr.status === 403 || code === "AccessDenied") { banned++; await addTag(acc.id, "abuse_mode", "suspended"); }
@@ -5300,7 +5303,7 @@ router.post("/tools/outlook/auto-check", async (req, res) => {
       return;
     }
     const totalRow = await query<{ cnt: string }>(
-      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' AND COALESCE(tags,'') NOT LIKE '%token_invalid%'"
+      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%'"
     );
     const total = parseInt(totalRow[0]?.cnt ?? "0", 10);
     runAutoCheck().catch(() => {});
