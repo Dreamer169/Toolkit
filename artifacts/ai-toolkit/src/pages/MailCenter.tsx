@@ -114,6 +114,7 @@ function hasTag(acc: Account, tag: string): boolean {
 
 export default function MailCenter() {
   const [accounts, setAccounts]         = useState<Account[]>([]);
+  const [accTotal, setAccTotal]           = useState(0);
   const [selAccount, setSelAccount]     = useState<Account | null>(null);
   const [folder, setFolder]             = useState("inbox");
   const [messages, setMessages]         = useState<MailMsg[]>([]);
@@ -188,7 +189,11 @@ export default function MailCenter() {
 
   const batchPollRef                      = useRef<ReturnType<typeof setInterval> | null>(null);
   const retokenPollRef                    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const accSearchTimerRef                   = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [liveVerify, setLiveVerify]         = useState<{ enabled: boolean; lastRun: string | null; lastStats: { total: number; clicked: number; skipped: number; failed: number } } | null>(null);
+  // auto-fix 实时状态：从后端 /tools/accounts/auto-fix-status 5s 轮询
+  const [autoFixIds, setAutoFixIds] = useState<{ pendingIds: Set<number>; waitingIds: Set<number> }>({ pendingIds: new Set(), waitingIds: new Set() });
+  const autoFixPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const searchRef = useRef(search);
   useEffect(() => { searchRef.current = search; }, [search]);
   const [autoRefreshError, setAutoRefreshError] = useState("");
@@ -286,12 +291,42 @@ export default function MailCenter() {
       setCheckBusy(false);
     }
   };
-  const loadAccounts = useCallback(async () => {
-    const d = await fetch(`${API}/tools/outlook/accounts`).then(r => r.json()).catch(() => ({}));
-    if (d.success) setAccounts(d.accounts ?? []);
+  const loadAccounts = useCallback(async (opts?: { search?: string; status?: string }) => {
+    const qs = new URLSearchParams({ limit: '300' });
+    if (opts?.search) qs.set('search', opts.search);
+    if (opts?.status && opts.status !== 'all') qs.set('status', opts.status);
+    const d = await fetch(API + '/tools/outlook/accounts?' + qs).then(r => r.json()).catch(() => ({}));
+    if (d.success) { setAccounts(d.accounts ?? []); setAccTotal(d.total ?? 0); }
   }, []);
 
   useEffect(() => { loadAccounts(); }, [loadAccounts]);
+
+  // auto-fix 实时轮询：每 5s 从后端拉取 pending/waiting 账号 ID，覆盖本地状态展示
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const d = await fetch(API + "/tools/accounts/auto-fix-status").then(r => r.json()).catch(() => ({}));
+        if (d.success) {
+          setAutoFixIds({
+            pendingIds: new Set<number>(d.pendingIds ?? []),
+            waitingIds: new Set<number>(d.waitingIds ?? []),
+          });
+        }
+      } catch {}
+    };
+    poll();
+    autoFixPollRef.current = setInterval(poll, 5_000);
+    return () => { if (autoFixPollRef.current) clearInterval(autoFixPollRef.current); };
+  }, []);
+
+  // Debounce accSearch + statusFilter -> server-side reload
+  useEffect(() => {
+    if (accSearchTimerRef.current) clearTimeout(accSearchTimerRef.current);
+    accSearchTimerRef.current = setTimeout(() => {
+      loadAccounts({ search: accSearch, status: statusFilter });
+    }, 400);
+    return () => { if (accSearchTimerRef.current) clearTimeout(accSearchTimerRef.current); };
+  }, [accSearch, statusFilter, loadAccounts]);
 
   // ── 实时验证轮询：加载状态 (v8.15 修复 toggle 覆盖) ─────────────────────
   // 用 ref 保存 toggle 后的"静默期"截止时间戳：toggle 后 5 秒内不接受
@@ -650,6 +685,8 @@ export default function MailCenter() {
     if (autoCompleteLogRef.current)  clearInterval(autoCompleteLogRef.current);
     if (reauthManualLogRef.current)  clearInterval(reauthManualLogRef.current);
     if (idleEventsPollRef.current)   clearInterval(idleEventsPollRef.current);
+    if (autoFixPollRef.current)       clearInterval(autoFixPollRef.current);
+
   }, []);
 
   // ── 批量设备码 OAuth 授权 ─────────────────────────────────────────────────
@@ -1123,7 +1160,7 @@ export default function MailCenter() {
           {/* 状态过滤标签栏 */}
           <div className="px-2 py-1 border-b border-[#21262d] shrink-0 flex gap-1 flex-wrap">
             {([
-              { key: "all",       label: "全部",   count: accounts.length },
+              { key: "all",       label: "全部",   count: accTotal || accounts.length },
               { key: "active",    label: "活跃",   count: accounts.filter(a => a.status === "active").length },
               { key: "suspended", label: "🔴 被封", count: accounts.filter(a => a.status === "suspended").length },
               { key: "noauth",    label: "⚠ 未授权", count: accounts.filter(a => !hasOAuth(a) && !hasImap(a)).length },
@@ -1167,13 +1204,15 @@ export default function MailCenter() {
                 <button onClick={() => setAccSearch("")} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 text-xs">✕</button>
               )}
             </div>
-            {accSearch && (
+            {accSearch ? (
               <p className="text-[10px] text-gray-600 mt-0.5 px-0.5">
-                {accounts
-                  .filter(a => { if (statusFilter==="active") return a.status==="active"; if (statusFilter==="suspended") return a.status==="suspended"; if (statusFilter==="noauth") return !hasOAuth(a)&&!hasImap(a); if (statusFilter==="autofix") return a.status==="needs_oauth"&&!a.tags?.includes("needs_oauth_manual"); return true; })
-                  .filter(a => a.email.toLowerCase().includes(accSearch.toLowerCase())).length} / {accounts.length} 个
+                搜索到 {accounts.length} / {accTotal} 个
               </p>
-            )}
+            ) : accTotal > accounts.length ? (
+              <p className="text-[10px] text-gray-500 mt-0.5 px-0.5">
+                已加载 {accounts.length} / {accTotal} 个 · 搜索可精确查找
+              </p>
+            ) : null}
           </div>
           <div className="flex-1 overflow-y-auto">
           {accounts.length === 0 && (
@@ -1193,8 +1232,8 @@ export default function MailCenter() {
             const isSuspended  = acc.status === "suspended";
             const isNeedsOAuth   = acc.status === "needs_oauth" || acc.status === "needs_oauth_pending";
             const accTags      = tagsOf(acc);
-            const isAutoPending  = acc.status === "needs_oauth" && !accTags.includes("needs_oauth_manual");  // healthcheck 将自动修复
-            const isOAuthPending = acc.status === "needs_oauth_pending";  // healthcheck 正在处理中
+            const isAutoPending  = (acc.status === "needs_oauth" && !accTags.includes("needs_oauth_manual")) || autoFixIds.waitingIds.has(acc.id);  // healthcheck 将自动修复
+            const isOAuthPending = acc.status === "needs_oauth_pending" || autoFixIds.pendingIds.has(acc.id);  // healthcheck 正在处理中
             const isAbuse      = accTags.includes("abuse_mode");
             const isOAuth      = hasOAuth(acc) && !isSuspended;
             const isImap       = hasImap(acc) && !isSuspended;
