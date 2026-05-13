@@ -142,7 +142,7 @@ export default function MailCenter() {
   const [verifying, setVerifying]         = useState(false);
   const [purging,   setPurging]           = useState(false);
   const [purgeStats, setPurgeStats]       = useState<{ valid: number; purged: number; kept: number } | null>(null);
-  const [statusFilter, setStatusFilter]   = useState<"all"|"active"|"suspended"|"noauth"|"autofix">("all");
+  const [statusFilter, setStatusFilter]   = useState<"all"|"active"|"suspended"|"noauth"|"autofix">("active");
   const [bulkDelBusy, setBulkDelBusy]     = useState(false);
   const [bulkDelResult, setBulkDelResult] = useState("");
   const [batchOAuth, setBatchOAuth]       = useState<BatchOAuthState | null>(null);
