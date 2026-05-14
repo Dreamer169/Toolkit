@@ -44,7 +44,8 @@ module.exports = {
       "restart_delay": 5000,
       "max_restarts": 20,
       "watch": false,
-      "autorestart": true
+      "autorestart": true,
+      "env": { "PORT": "3000" }
     },
     {
       "name": "openai-pool",
