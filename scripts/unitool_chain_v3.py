@@ -680,6 +680,28 @@ def db_get_all_ref_codes() -> list:
         if used < MAX_REF_SLOTS:
             available.append({"id": acc_id, "email": acc_email,
                                "ref_code": rc, "used": used})
+        else:
+            # BUG FIX: api_conv >= 10 but high_balance not set → promote now
+            if "unitool_high_balance" not in (tags or ""):
+                try:
+                    _pr_conn = db_connect(); _pr_cur = _pr_conn.cursor()
+                    _new_tags = ((tags or "").rstrip(",") + ",unitool_high_balance").strip(",")
+                    _pr_cur.execute(
+                        "UPDATE accounts SET tags=%s, updated_at=NOW() WHERE id=%s",
+                        (_new_tags, acc_id))
+                    _pr_conn.commit(); _pr_conn.close()
+                    log(f"[ref] HB-promote id={acc_id} {acc_email} conv={used}/{MAX_REF_SLOTS} -> high_balance")
+                    # notify proxy in-memory pool
+                    try:
+                        import urllib.request as _ureq2
+                        _hb2 = json.dumps({"email": acc_email}).encode()
+                        _ureq2.urlopen(_ureq2.Request(
+                            f"http://localhost:{PROXY_PORT}/mark-high-balance",
+                            data=_hb2, headers={"Content-Type": "application/json"}), timeout=2)
+                    except Exception:
+                        pass
+                except Exception as _pre:
+                    log(f"[ref] HB-promote err id={acc_id}: {_pre}")
 
     # 去重：同一 ref_code 可能被多个账号记录，保留 used 最大的那条（最保守估计）
     dedup: dict = {}
@@ -1427,8 +1449,14 @@ def main():
         log(f"[main] ✅ ref_code 激活: {new_ref_code} → 下一轮可用")
         print(f"[CHAIN_OK] {email}|{ssid}...|{ref_code}|{new_ref_code}", flush=True)
     else:
-        log(f"[main] ⚠ 未能获取 ref_code（代理创建={created_code or 'FAIL'}，reflink 也失败）")
-        print(f"[OK] {email}|{ssid}...|{ref_code}|no_ref_code", flush=True)
+        if created_code:
+            # BUG FIX: QuarkIP/proxy created ref_code but run_reflink failed → save directly
+            db_save_ref_code(account_id, created_code)
+            log(f"[main] ref_code saved directly (reflink fallback): {created_code}")
+            print(f"[CHAIN_OK] {email}|{ssid}...|{ref_code}|{created_code}(direct)", flush=True)
+        else:
+            log(f"[main] no ref_code: proxy=FAIL reflink=FAIL")
+            print(f"[OK] {email}|{ssid}...|{ref_code}|no_ref_code", flush=True)
 
     # ── Step 7b: 在被注册账号 notes 写 via_ref=（监控统计用）────────────────────
     if ref_code:

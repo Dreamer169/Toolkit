@@ -1933,6 +1933,27 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._json(500, {"error": str(e)})
 
+        # v5.41: real-time high_balance promotion from chain_v3 Step 7d
+        if p == "/mark-high-balance":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body   = json.loads(self.rfile.read(length))
+                email  = body.get("email", "").strip().lower()
+                if not email:
+                    return self._json(400, {"error": "email required"})
+                updated = 0
+                with _lock:
+                    for e in _pool:
+                        e_email = (e.get("_email") or _label_to_email(e.get("label", ""))).lower()
+                        if e_email == email:
+                            if not e.get("high_balance"):
+                                e["high_balance"] = True
+                                updated += 1
+                                print(f"[HB] {e['label']} -> high_balance=True (via /mark-high-balance)", flush=True)
+                return self._json(200, {"ok": True, "email": email, "updated": updated})
+            except Exception as e:
+                return self._json(500, {"error": str(e)})
+
         # v5.34: manually evict a service from maintenance cache
         if p in ("/v1/svc-status/clear", "/v1/svc-status/clear/"):
             try:
