@@ -396,3 +396,31 @@ API server (Node.js) 使用 PostgreSQL  表的  函数：
 - ：其余（ip2free residential、proxyscrape）
 
 每次  会同时更新 SQLite 和 PostgreSQL。
+
+---
+
+## 12. QuarkIP 代理（2026-05-14 新增）
+
+### 用途
+专用于 unitool.ai ref_code 创建，提供全新未标记出口 IP。
+
+### 配置
+| 参数 | 值 |
+|------|-----|
+| 主机 | pool-us.quarkip.io |
+| 端口 | 7777 |
+| 账号 | j4eOruul5w |
+| 密码 | A1enIA12wwBGSKB |
+| 类型 | HTTP CONNECT（支持 HTTPS 隧道）|
+| 切换IP | http://change.quarkip.io?username=j4eOruul5w&password=A1enIA12wwBGSKB |
+
+### 与现有代理的区别
+| 代理 | HTTPS支持 | ref_code 可用 | 说明 |
+|------|-----------|--------------|------|
+| RESI 10851-10859 | ✅ | ❌ 已全部标记 | 出口IP耗尽 |
+| Webshare | ✅ | ❌ 已全部标记 | 出口IP耗尽 |
+| proxyscrape | ❌ | ⚠️ 理论可用 | 不支持HTTPS CONNECT |
+| **QuarkIP** | ✅ | ✅ 全新IP | **当前唯一可用方案** |
+
+### 相关脚本
+-  — 批量创建 ref_code
