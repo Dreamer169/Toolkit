@@ -1853,6 +1853,36 @@ class Handler(BaseHTTPRequestHandler):
                 "ssid_len":    len(top["ssid"]) if top else 0,
             })
 
+        # v5.41: high-balance pool real-time status
+        if p in ("/high-balance-status", "/high-balance-status/"):
+            _reload_pool_if_needed()
+            now = time.time()
+            with _lock:
+                hb_all  = [e for e in _pool if e.get("high_balance")]
+                hb_live = [e for e in hb_all if e["dead_until"] <= now]
+                hb_dead = [e for e in hb_all if e["dead_until"] > now]
+                normal_live = [e for e in _pool if not e.get("high_balance") and e["dead_until"] <= now]
+                accounts = []
+                for e in sorted(hb_all, key=lambda x: x.get("_last_released", 0)):
+                    accounts.append({
+                        "label":       e["label"],
+                        "email":       e.get("_email", ""),
+                        "ssid_prefix": e["ssid"][:16] + "...",
+                        "live":        e["dead_until"] <= now,
+                        "active":      e.get("_active", 0),
+                        "idle_secs":   round(now - e["_last_released"], 1) if e.get("_last_released") else None,
+                        "dead_reason": e.get("dead_reason", "") or None,
+                        "dead_until":  int(e["dead_until"]) if e["dead_until"] > now else None,
+                    })
+            return self._json(200, {
+                "high_balance_total": len(hb_all),
+                "high_balance_live":  len(hb_live),
+                "high_balance_dead":  len(hb_dead),
+                "normal_live":        len(normal_live),
+                "scheduling":         "high_balance first → idle-longest" if hb_live else "normal pool (no hb live)",
+                "accounts":           accounts,
+            })
+
         # v5.34: service health status endpoint
         if p in ("/v1/svc-status", "/v1/svc-status/"):
             now = time.time()
