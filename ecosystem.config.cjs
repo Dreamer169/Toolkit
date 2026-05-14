@@ -633,6 +633,20 @@ module.exports = {
       "max_restarts": 999,
       "watch": false,
       "autorestart": true
+    },{
+      "name": "token-stats-daily",
+      "script": "/data/Toolkit/scripts/unitool_token_stats.py",
+      "interpreter": "python3",
+      "cwd": "/data/Toolkit/scripts",
+      "cron_restart": "0 3 * * *",
+      "autorestart": false,
+      "watch": false,
+      "env": {
+        "DATABASE_URL": "postgresql://postgres:postgres@localhost/toolkit",
+        "PYTHONUNBUFFERED": "1"
+      },
+      "out_file": "/tmp/unitool_token_stats_out.log",
+      "error_file": "/tmp/unitool_token_stats_err.log"
     }
   ]
 };

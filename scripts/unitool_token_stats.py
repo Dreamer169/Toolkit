@@ -1,29 +1,33 @@
 #!/usr/bin/env python3
 """
-unitool_token_stats.py — 查询所有 unitool 账号的 AI chat token 余额
-====================================================================
-调用 /api/user/billing-accounts 获取:
-  - product_id="regular"  → 主力 token 余额
-  - product_id="bonus"    → 赠送 token 余额（同样可开新对话）
-
-优先走 Xray SOCKS5 居民代理，失败后 fallback 直连。
+unitool_token_stats.py v2.0
+===========================
+- 20线程并发，全量扫描约 2 分钟（原串行 42 分钟）
+- 仅扫 pool 中 is_valid=true 的账号（JOIN unitool_ssids）
+- 扫描后自动踢出 bonus < HB_THRESHOLD 的高余额池账号
 """
-import argparse, json, re, subprocess, time
+import json, subprocess, time, threading
 import psycopg2
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-DB_URL      = "postgresql://postgres:postgres@localhost/toolkit"
-CACHE_FILE  = "/tmp/unitool_token_cache.json"
-CACHE_TTL   = 14400   # 4 hours
-AUTH_COOKIE = "__Secure-unitool-ssid"
-UA          = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+DB_URL       = "postgresql://postgres:postgres@localhost/toolkit"
+CACHE_FILE   = "/tmp/unitool_token_cache.json"
+CACHE_TTL    = 14400
+AUTH_COOKIE  = "__Secure-unitool-ssid"
+UA           = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+WORKERS      = 20
+HB_THRESHOLD = 10.1
 
-RESI_PORTS = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
-_resi_idx  = 0
+RESI_PORTS  = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
+_port_idx   = 0
+_port_lock  = threading.Lock()
+_cache_lock = threading.Lock()
 
 def _next_resi_port():
-    global _resi_idx
-    port = RESI_PORTS[_resi_idx % len(RESI_PORTS)]
-    _resi_idx += 1
+    global _port_idx
+    with _port_lock:
+        port = RESI_PORTS[_port_idx % len(RESI_PORTS)]
+        _port_idx += 1
     return port
 
 def load_cache():
@@ -34,23 +38,21 @@ def load_cache():
 
 def save_cache(c):
     try:
-        open(CACHE_FILE, "w").write(json.dumps(c))
+        with _cache_lock:
+            open(CACHE_FILE, "w").write(json.dumps(c))
     except Exception:
         pass
 
 def api_billing(ssid):
-    """GET /api/user/billing-accounts — 先走 SOCKS5，失败 fallback 直连。"""
     port = _next_resi_port()
     url  = "https://unitool.ai/api/user/billing-accounts"
-    base_args = [
-        "-b", AUTH_COOKIE + "=" + ssid,
-        "-H", "Accept: application/json",
-        "-H", "User-Agent: " + UA,
-    ]
+    base = ["-b", AUTH_COOKIE + "=" + ssid,
+            "-H", "Accept: application/json",
+            "-H", "User-Agent: " + UA]
     attempts = [
         ["curl", "-s", "--socks5-hostname", "127.0.0.1:" + str(port),
-         "--max-time", "12"] + base_args + [url],
-        ["curl", "-s", "--max-time", "10"] + base_args + [url],
+         "--max-time", "12"] + base + [url],
+        ["curl", "-s", "--max-time", "10"] + base + [url],
     ]
     for cmd in attempts:
         try:
@@ -65,101 +67,127 @@ def api_billing(ssid):
             continue
     return None
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--refresh", action="store_true", help="忽略缓存强制刷新")
-    ap.add_argument("--limit",   type=int, default=0, help="只处理前 N 个账号")
-    args = ap.parse_args()
+def scan_one(row, cache, now):
+    acc_id, email, ssid = row
+    key   = str(acc_id)
+    entry = cache.get(key, {})
+    if entry and (now - entry.get("ts", 0)) < CACHE_TTL:
+        return key, entry, True
+    accounts        = api_billing(ssid)
+    regular         = 0
+    bonus           = 0
+    expires_regular = ""
+    expires_bonus   = ""
+    if accounts:
+        for acct in accounts:
+            pid = acct.get("product_id", "")
+            val = round(float(acct.get("value") or 0), 4)
+            exp = acct.get("expires_at", "")
+            if pid == "regular":
+                regular = val; expires_regular = exp
+            elif pid == "bonus":
+                bonus = val; expires_bonus = exp
+    return key, {
+        "regular": regular, "bonus": bonus,
+        "expires_regular": expires_regular,
+        "expires_bonus":   expires_bonus,
+        "ts":     now,
+        "api_ok": accounts is not None,
+    }, False
 
+def kick_high_balance(kick_ids):
+    if not kick_ids:
+        return
+    conn = psycopg2.connect(DB_URL)
+    cur  = conn.cursor()
+    for aid in kick_ids:
+        cur.execute(
+            "UPDATE accounts SET tags = TRIM(BOTH ',' FROM REPLACE("
+            "REGEXP_REPLACE(tags, '(,|^)unitool_high_balance(,|$)', ',', 'g'),"
+            "',\,',',')) WHERE id = %s",
+            (aid,)
+        )
+    conn.commit()
+    conn.close()
+    print(f"[HB] 已踢出 {len(kick_ids)} 个 bonus<{HB_THRESHOLD} 账号", flush=True)
+
+def main():
     conn = psycopg2.connect(DB_URL)
     cur  = conn.cursor()
     cur.execute("""
-        SELECT id, email, notes, tags FROM accounts
-        WHERE platform='outlook'
-          AND tags LIKE '%unitool_registered%'
-          AND notes LIKE '%unitool_ssid=%'
-        ORDER BY id DESC
+        SELECT DISTINCT ON (a.id) a.id, a.email, us.ssid
+        FROM accounts a
+        JOIN unitool_ssids us
+          ON LOWER(TRIM(a.email)) = LOWER(TRIM(us.source_email))
+        WHERE us.is_valid = true
+          AND us.ssid IS NOT NULL AND LENGTH(us.ssid) > 50
+          AND a.platform = 'outlook'
+        ORDER BY a.id DESC
     """)
-    rows = cur.fetchall()
+    rows  = cur.fetchall()
     conn.close()
+    total = len(rows)
+    print(f"[SCAN] pool 有效账号: {total} 个，启动 {WORKERS} 线程...", flush=True)
 
-    if args.limit:
-        rows = rows[:args.limit]
+    cache    = load_cache()
+    now      = time.time()
+    results  = {}
+    done_cnt = [0]
+    cnt_lock = threading.Lock()
 
-    cache   = {} if args.refresh else load_cache()
-    results = []
-    now     = time.time()
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        futures = {ex.submit(scan_one, row, cache, now): row for row in rows}
+        for fut in as_completed(futures):
+            try:
+                key, entry, was_cached = fut.result()
+                results[key] = entry
+                if not was_cached:
+                    with _cache_lock:
+                        cache[key] = entry
+                    save_cache(cache)
+            except Exception as e:
+                print(f"[SCAN] err: {e}", flush=True)
+            with cnt_lock:
+                done_cnt[0] += 1
+                done = done_cnt[0]
+            if done % 100 == 0:
+                bp = sum(1 for v in results.values() if float(v.get("bonus") or 0) > 0)
+                print(f"  {done}/{total}  bonus>0: {bp}  elapsed: {int(time.time()-now)}s",
+                      flush=True)
 
-    for acc_id, email, notes, tags in rows:
-        ssid_m = re.search(r"unitool_ssid=([0-9a-f]{40,})", notes or "")
-        if not ssid_m:
-            continue
-        ssid = ssid_m.group(1)
-        key  = str(acc_id)
+    bonus_pos   = [v for v in results.values() if float(v.get("bonus") or 0) > 0]
+    bonus_zero  = [v for v in results.values() if float(v.get("bonus") or 0) <= 0]
+    api_fail    = sum(1 for v in results.values() if not v.get("api_ok", True))
+    total_bonus = round(sum(float(v.get("bonus") or 0) for v in bonus_pos), 4)
+    print(f"\n完成! {total} 个账号，耗时 {int(time.time()-now)}s", flush=True)
+    print(f"bonus>0:   {len(bonus_pos)} 个", flush=True)
+    print(f"bonus=0:   {len(bonus_zero)} 个", flush=True)
+    print(f"bonus合计:  {total_bonus}", flush=True)
+    print(f"API失败:    {api_fail}", flush=True)
 
-        role = "registered"
-        if "unitool_ref_master"      in (tags or ""): role = "master"
-        elif "unitool_ref_activated" in (tags or ""): role = "activated"
+    # 踢出 bonus < HB_THRESHOLD 的高余额池账号
+    conn2 = psycopg2.connect(DB_URL)
+    cur2  = conn2.cursor()
+    cur2.execute(
+        "SELECT a.id, a.email FROM accounts a "
+        "WHERE a.tags LIKE '%unitool_high_balance%' AND a.platform = 'outlook'"
+    )
+    hb_accounts = cur2.fetchall()
+    conn2.close()
 
-        entry  = cache.get(key, {})
-        cached = bool(entry) and (now - entry.get("ts", 0)) < CACHE_TTL
+    kick_ids = []
+    for acc_id, email in hb_accounts:
+        entry = results.get(str(acc_id)) or cache.get(str(acc_id))
+        if entry:
+            bon = float(entry.get("bonus") or 0)
+            if bon < HB_THRESHOLD:
+                kick_ids.append(acc_id)
+                print(f"[HB] kick: id={acc_id}  {email}  bonus={bon:.4f}", flush=True)
 
-        if not cached:
-            accounts        = api_billing(ssid)
-            time.sleep(1.5)
-            regular         = 0; bonus = 0
-            expires_regular = ""; expires_bonus = ""
-            if accounts:
-                for acct in accounts:
-                    pid = acct.get("product_id", "")
-                    val = round(float(acct.get("value") or 0), 4)
-                    exp = acct.get("expires_at", "")
-                    if pid == "regular":
-                        regular = val; expires_regular = exp
-                    elif pid == "bonus":
-                        bonus = val;   expires_bonus   = exp
-            entry = {
-                "regular":         regular,
-                "bonus":           bonus,
-                "expires_regular": expires_regular,
-                "expires_bonus":   expires_bonus,
-                "ts":              now,
-                "api_ok":          accounts is not None,
-            }
-            cache[key] = entry
-            save_cache(cache)   # 增量保存，中断不丢数据
-
-        results.append({
-            "id":              acc_id,
-            "email":           email,
-            "role":            role,
-            "regular":         entry.get("regular", 0),
-            "bonus":           entry.get("bonus",   0),
-            "total":           entry.get("regular", 0) + entry.get("bonus", 0),
-            "expires_regular": entry.get("expires_regular", ""),
-            "expires_bonus":   entry.get("expires_bonus",   ""),
-            "api_ok":          entry.get("api_ok",  False),
-            "cached":          cached,
-        })
-
-    total_regular = sum(r["regular"] for r in results)
-    total_bonus   = sum(r["bonus"]   for r in results)
-    zero_count    = sum(1 for r in results if r["regular"] == 0)
-    api_fail      = sum(1 for r in results if not r["api_ok"])
-
-    output = {
-        "generated_at": int(now),
-        "summary": {
-            "total_accounts": len(results),
-            "total_regular":  total_regular,
-            "total_bonus":    total_bonus,
-            "total_all":      total_regular + total_bonus,
-            "zero_regular":   zero_count,
-            "api_fail":       api_fail,
-        },
-        "accounts": results,
-    }
-    print(json.dumps(output, ensure_ascii=False, indent=2))
+    if kick_ids:
+        kick_high_balance(kick_ids)
+    else:
+        print(f"[HB] 所有高余额池账号 bonus >= {HB_THRESHOLD}，无需踢出", flush=True)
 
 if __name__ == "__main__":
     main()
