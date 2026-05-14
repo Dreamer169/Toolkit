@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool_chain_v3.py — 端到端全自动链路 v3.2
+unitool_chain_v3.py — 端到端全自动链路 v3.3
 ============================================
 整合所有子脚本，闭环实现完整链路：
   outlook_register.py（水位补充）
@@ -123,6 +123,9 @@ WATERMARK       = 5     # fresh 账号低于此值时触发 outlook 补充
 REPLENISH_CNT   = 5     # 单次补充目标数量
 COOLDOWN_S      = 300   # 水位补充冷却（15 分钟）
 LOCK_FILE       = "/tmp/unitool_chain_replenish.lock"
+_REPAIR_COOLDOWN_FILE = "/tmp/ssid_repair_cooldown.json"  # v3.3
+_REPAIR_BONUS_MIN     = 5.0   # v3.3: only repair bonus >= 5 accounts
+
 
 CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"   # reg_v2 用的 MS OAuth client
 
@@ -826,6 +829,85 @@ def replenish_if_needed():
         log(f"[watermark] ❌ 请求异常: {e}")
 
 # ── 资源检查 ──────────────────────────────────────────────────────────────────
+def db_get_ssid_repair_account():
+    """v3.3: pick highest-bonus registered account with no valid SSID."""
+    conn = db_connect(); cur = conn.cursor()
+    cur.execute("""
+        SELECT a.id, a.email, a.password
+        FROM accounts a
+        WHERE a.platform = 'outlook'
+          AND a.tags LIKE '%%unitool_registered%%'
+          AND a.status = 'active'
+          AND a.password IS NOT NULL AND LENGTH(a.password) >= 8
+          AND NOT EXISTS (
+              SELECT 1 FROM unitool_ssids us
+              WHERE LOWER(TRIM(us.source_email)) = LOWER(TRIM(a.email))
+                AND us.is_valid = true
+          )
+    """)
+    rows = cur.fetchall(); conn.close()
+    if not rows:
+        return None
+    try:
+        cache = json.loads(open("/tmp/unitool_token_cache.json").read())
+    except Exception:
+        cache = {}
+    try:
+        cd_raw = json.loads(open(_REPAIR_COOLDOWN_FILE).read())
+    except Exception:
+        cd_raw = {}
+    now_ts = time.time()
+    active_cd = {int(k) for k, ts in cd_raw.items() if now_ts - float(ts) < 86400}
+    enriched = []
+    for acc_id, email, pw in rows:
+        if acc_id in active_cd:
+            continue
+        bonus = float((cache.get(str(acc_id)) or {}).get("bonus") or 0)
+        if bonus >= _REPAIR_BONUS_MIN:
+            enriched.append((acc_id, email, pw, bonus))
+    if not enriched:
+        return None
+    enriched.sort(key=lambda x: -x[3])
+    return enriched[0]  # (id, email, password, bonus)
+
+
+def run_ssid_repair():
+    """v3.3: re-login to get fresh SSID for highest-bonus no-SSID account."""
+    row = db_get_ssid_repair_account()
+    if not row:
+        return
+    acc_id, email, password, bonus = row
+    log(f"[repair] v3.3 bonus={bonus:.2f} {email} id={acc_id}")
+    ssid = run_login(email, password)
+    if ssid:
+        db_save_ssid_full(acc_id, email, ssid)
+        persist_ssid(email, ssid)
+        log(f"[repair] OK {email} ssid_len={len(ssid)}")
+        # hot-push high_balance to proxy if bonus qualifies
+        try:
+            _hd = json.dumps({"email": email}).encode()
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    f"http://localhost:{PROXY_PORT}/mark-high-balance",
+                    data=_hd,
+                    headers={"Content-Type": "application/json"}),
+                timeout=3)
+            log(f"[repair] HB push OK {email}")
+        except Exception:
+            pass
+    else:
+        log(f"[repair] FAIL {email} -> 24h cooldown")
+        try:
+            try:
+                cd = json.loads(open(_REPAIR_COOLDOWN_FILE).read())
+            except Exception:
+                cd = {}
+            cd[str(acc_id)] = time.time()
+            open(_REPAIR_COOLDOWN_FILE, "w").write(json.dumps(cd))
+        except Exception as e:
+            log(f"[repair] cooldown write err: {e}")
+
+
 def check_resources(max_wait: int = 300, interval: int = 30) -> bool:
     """v5.15: 内存>=700MB 且 Chrome主进程<=2个。
     内部轮询等待直到满足条件或超时（默认最多等 5 分钟）。
@@ -1341,6 +1423,12 @@ def main():
         _check_na_daily()
     except Exception as e:
         log(f"[na_probe] 异常(忽略): {e}")
+
+    # ── Step 0d: v3.3 SSID repair for high-bonus accounts ─────────────────
+    try:
+        run_ssid_repair()
+    except Exception as e:
+        log(f"[repair] exception (ignored): {e}")
 
     # ── Step 0a: 模块隔离 — 清理卡死 processing（>30min 自动解锁）─────────────
     try:
