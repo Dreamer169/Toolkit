@@ -1104,10 +1104,11 @@ router.get("/data/unitool-stats", async (req, res) => {
       const { readFileSync: rfs_t } = await import("fs");
       tokenCache = JSON.parse(rfs_t("/tmp/unitool_token_cache.json", "utf8"));
     } catch {}
-    const tokenRegular  = Object.values(tokenCache).reduce((s, v) => s + Math.max(0, v.regular ?? 0), 0);
-    const tokenBonus    = Object.values(tokenCache).reduce((s, v) => s + Math.max(0, v.bonus ?? 0), 0);
-    const tokenZeroRegular = Object.values(tokenCache).filter(v => (v.regular ?? 0) <= 0 && (v.bonus ?? 0) > 0).length;
-    const tokenZeroAccs  = Object.values(tokenCache).filter(v => (v.regular ?? 0) + (v.bonus ?? 0) === 0).length;
+    // regular 在 unitool 体系中始终为 0，无需计算
+    const tokenBonus      = Object.values(tokenCache).reduce((s, v) => s + Math.max(0, v.bonus ?? 0), 0);
+    // bonus>0: 可使用高端模型（gpt-5.5/claude-opus 等）; bonus=0: 仅限免费模型（gpt-4o-mini）
+    const tokenBonusAccts = Object.values(tokenCache).filter(v => (v.bonus ?? 0) > 0).length;
+    const tokenBonusZero  = Object.values(tokenCache).filter(v => (v.bonus ?? 0) <= 0).length;
 
     // Read rotation index
     let rotateIdx = 0;
@@ -1269,7 +1270,7 @@ router.get("/data/unitool-stats", async (req, res) => {
       }),
       chain:        { status: chainStatus, last_run: chainLastRun, brief: chainBrief },
       fail_reasons: failReasons.map(r => ({ reason: r.reason, count: Number(r.cnt) })),
-      token: { total_regular: tokenRegular, total_bonus: tokenBonus, total_all: tokenRegular + tokenBonus, zero_regular: tokenZeroRegular, zero_accounts: tokenZeroAccs, cached_accounts: Object.keys(tokenCache).length },
+      token: { total_bonus: tokenBonus, bonus_accounts: tokenBonusAccts, bonus_zero: tokenBonusZero, cached_accounts: Object.keys(tokenCache).length },
       ts: new Date().toISOString(),
     });
   } catch (e) { res.status(500).json({ success: false, error: String(e) }); }
