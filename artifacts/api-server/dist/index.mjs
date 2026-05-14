@@ -79187,8 +79187,8 @@ router3.get("/data/unitool-stats", async (req, res) => {
     } catch {
     }
     const tokenRegular = Object.values(tokenCache).reduce((s, v) => s + Math.max(0, v.regular ?? 0), 0);
-    const tokenBonus = Object.values(tokenCache).reduce((s, v) => s + (v.bonus ?? 0), 0);
-    const tokenZeroRegular = Object.values(tokenCache).filter((v) => (v.regular ?? 0) <= 0).length;
+    const tokenBonus = Object.values(tokenCache).reduce((s, v) => s + Math.max(0, v.bonus ?? 0), 0);
+    const tokenZeroRegular = Object.values(tokenCache).filter((v) => (v.regular ?? 0) <= 0 && (v.bonus ?? 0) > 0).length;
     const tokenZeroAccs = Object.values(tokenCache).filter((v) => (v.regular ?? 0) + (v.bonus ?? 0) === 0).length;
     let rotateIdx = 0;
     try {
@@ -79221,7 +79221,7 @@ router3.get("/data/unitool-stats", async (req, res) => {
     const curCode = availableCodes[rotateIdx % Math.max(1, availableCodes.length)];
     currentRefCode = curCode?.code ?? (codeList[0]?.code ?? "");
     currentRefUsed = curCode?.used ?? 0;
-    let pool2 = { total: 0, live: 0, dead: 0, ssid_len: 0 };
+    let pool2 = { total: 0, live: 0, dead: 0, with_balance: 0, ssid_len: 0 };
     try {
       const { get } = await import("http");
       const poolRaw = await new Promise((resolve, reject) => {
@@ -79244,7 +79244,11 @@ router3.get("/data/unitool-stats", async (req, res) => {
         }
       } catch {
       }
-      pool2 = { total: pd.pool_size, live: pd.live, dead: pd.pool_size - pd.live, ssid_len };
+      const now = Date.now() / 1e3;
+      const accs = pd.accounts ?? [];
+      const deadCount = accs.filter((a) => a.dead || a.dead_until > now).length;
+      const withBalance = accs.filter((a) => !a.dead && a.dead_until <= now && typeof a.balance === "number" && a.balance > 0).length;
+      pool2 = { total: pd.pool_size, live: pd.live, dead: deadCount, with_balance: withBalance, ssid_len };
     } catch {
     }
     const recent = await query(

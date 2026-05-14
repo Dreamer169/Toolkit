@@ -1105,8 +1105,8 @@ router.get("/data/unitool-stats", async (req, res) => {
       tokenCache = JSON.parse(rfs_t("/tmp/unitool_token_cache.json", "utf8"));
     } catch {}
     const tokenRegular  = Object.values(tokenCache).reduce((s, v) => s + Math.max(0, v.regular ?? 0), 0);
-    const tokenBonus    = Object.values(tokenCache).reduce((s, v) => s + (v.bonus   ?? 0), 0);
-    const tokenZeroRegular = Object.values(tokenCache).filter(v => (v.regular ?? 0) <= 0).length;
+    const tokenBonus    = Object.values(tokenCache).reduce((s, v) => s + Math.max(0, v.bonus ?? 0), 0);
+    const tokenZeroRegular = Object.values(tokenCache).filter(v => (v.regular ?? 0) <= 0 && (v.bonus ?? 0) > 0).length;
     const tokenZeroAccs  = Object.values(tokenCache).filter(v => (v.regular ?? 0) + (v.bonus ?? 0) === 0).length;
 
     // Read rotation index
