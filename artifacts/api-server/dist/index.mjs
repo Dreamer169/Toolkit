@@ -79186,22 +79186,9 @@ router3.get("/data/unitool-stats", async (req, res) => {
       tokenCache = JSON.parse(rfs_t("/tmp/unitool_token_cache.json", "utf8"));
     } catch {
     }
-    const _now = Date.now();
-    const _effBonus = (v) => {
-      const bon = v.bonus ?? 0;
-      if (bon <= 0) return 0;
-      if (v.expires_bonus) {
-        try {
-          if (new Date(v.expires_bonus).getTime() < _now) return 0;
-        } catch {
-        }
-      }
-      return bon;
-    };
-    const tokenRegular = Object.values(tokenCache).reduce((s, v) => s + Math.max(0, v.regular ?? 0), 0);
-    const tokenBonus = Object.values(tokenCache).reduce((s, v) => s + _effBonus(v), 0);
-    const tokenZeroRegular = Object.values(tokenCache).filter((v) => (v.regular ?? 0) <= 0 && _effBonus(v) > 0).length;
-    const tokenZeroAccs = Object.values(tokenCache).filter((v) => (v.regular ?? 0) + _effBonus(v) === 0).length;
+    const tokenBonus = Object.values(tokenCache).reduce((s, v) => s + Math.max(0, v.bonus ?? 0), 0);
+    const tokenBonusAccts = Object.values(tokenCache).filter((v) => (v.bonus ?? 0) > 0).length;
+    const tokenBonusZero = Object.values(tokenCache).filter((v) => (v.bonus ?? 0) <= 0).length;
     let rotateIdx = 0;
     try {
       const { readFileSync: rfs2 } = await import("fs");
@@ -79354,7 +79341,7 @@ router3.get("/data/unitool-stats", async (req, res) => {
       }),
       chain: { status: chainStatus, last_run: chainLastRun, brief: chainBrief },
       fail_reasons: failReasons.map((r) => ({ reason: r.reason, count: Number(r.cnt) })),
-      token: { total_regular: tokenRegular, total_bonus: tokenBonus, total_all: tokenRegular + tokenBonus, zero_regular: tokenZeroRegular, zero_accounts: tokenZeroAccs, cached_accounts: Object.keys(tokenCache).length },
+      token: { total_bonus: tokenBonus, bonus_accounts: tokenBonusAccts, bonus_zero: tokenBonusZero, cached_accounts: Object.keys(tokenCache).length },
       ts: (/* @__PURE__ */ new Date()).toISOString()
     });
   } catch (e) {
