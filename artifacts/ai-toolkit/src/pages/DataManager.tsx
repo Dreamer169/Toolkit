@@ -46,7 +46,7 @@ interface UnitoolStats {
   chain:        { status: string; last_run: string; brief: string };
   fail_reasons: { reason: string; count: number }[];
   token?:       { total_bonus: number; bonus_accounts: number; bonus_zero: number; cached_accounts: number };
-  high_balance?: { accounts: number; ssids: number };
+  high_balance?: { accounts: number; ssids: number; live?: number };
   ts:           string;
 }
 
@@ -256,14 +256,20 @@ function StatsPanel() {
                 <h3 className="text-sm font-semibold text-gray-300 mb-3">⭐ 高余额池（ref×10）</h3>
                 <div className="space-y-2">
                   <div className="flex justify-between text-xs">
-                    <span className="text-gray-500">高余额账号数</span>
+                    <span className="text-gray-500">入池账号数（total）</span>
                     <span className="text-amber-400 font-bold">{uStats.high_balance.accounts}</span>
                   </div>
                   <div className="flex justify-between text-xs">
-                    <span className="text-gray-500">高余额 SSID 入池数</span>
-                    <span className="text-amber-400 font-bold">{uStats.high_balance.ssids}</span>
+                    <span className="text-gray-500">存活账号（live）</span>
+                    <span className={`font-bold ${(uStats.high_balance.live ?? uStats.high_balance.ssids) > 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      {uStats.high_balance.live ?? uStats.high_balance.ssids}
+                    </span>
                   </div>
-                  <div className="text-xs text-gray-600 mt-1">ref_code 被用满 10 次即升入此池，调度时优先选取</div>
+                  <div className="flex justify-between text-xs">
+                    <span className="text-gray-500">门槛（bonus ≥ 10.1 + 有效 SSID）</span>
+                    <span className="text-gray-400">每日 3:00 自动升格</span>
+                  </div>
+                  <div className="text-xs text-gray-600 mt-1">bonus ≥ 10.1 且有有效 SSID 的账号自动升入此池，调度时优先选取</div>
                 </div>
               </div>
             )}

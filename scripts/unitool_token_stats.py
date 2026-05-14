@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-unitool_token_stats.py v2.0
+unitool_token_stats.py v2.1
 ===========================
 - 20线程并发，全量扫描约 2 分钟（原串行 42 分钟）
 - 仅扫 pool 中 is_valid=true 的账号（JOIN unitool_ssids）
 - 扫描后自动踢出 bonus < HB_THRESHOLD 的高余额池账号
+- v2.1: 自动升格 bonus >= HB_THRESHOLD 且有有效 SSID 的账号为 unitool_high_balance
+- v2.1: 踢出或升格后触发 proxy /reload-ssids 立即生效
 """
-import json, subprocess, time, threading
+import json, subprocess, time, threading, urllib.request
 import psycopg2
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -17,6 +19,7 @@ AUTH_COOKIE  = "__Secure-unitool-ssid"
 UA           = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 WORKERS      = 20
 HB_THRESHOLD = 10.1
+PROXY_PORT   = 8089
 
 RESI_PORTS  = [10851, 10853, 10854, 10857, 10859, 10870, 10872, 10878, 10879]
 _port_idx   = 0
@@ -111,6 +114,70 @@ def kick_high_balance(kick_ids):
     conn.close()
     print(f"[HB] 已踢出 {len(kick_ids)} 个 bonus<{HB_THRESHOLD} 账号", flush=True)
 
+def promote_high_balance(results, cache):
+    """
+    v2.1: 把 bonus >= HB_THRESHOLD 且有有效 SSID 但未打标的账号升格为 unitool_high_balance。
+    返回升格的账号数量。
+    """
+    # 找出 results+cache 中 bonus >= HB_THRESHOLD 的账号 id
+    all_data = {**cache, **results}  # results 覆盖 cache（更新）
+    candidate_ids = [
+        int(k) for k, v in all_data.items()
+        if float(v.get("bonus") or 0) >= HB_THRESHOLD
+    ]
+    if not candidate_ids:
+        print(f"[HB] promote: 无 bonus>={HB_THRESHOLD} 候选", flush=True)
+        return 0
+
+    conn = psycopg2.connect(DB_URL)
+    cur  = conn.cursor()
+
+    # 查哪些候选账号：有有效 SSID + 未打 HB 标 + platform=outlook
+    cur.execute("""
+        SELECT DISTINCT ON (a.id) a.id, a.email, a.tags
+        FROM accounts a
+        JOIN unitool_ssids us
+            ON LOWER(TRIM(a.email)) = LOWER(TRIM(us.source_email))
+            AND us.is_valid = true
+            AND LENGTH(us.ssid) > 50
+        WHERE a.id = ANY(%s)
+          AND a.platform = 'outlook'
+          AND (a.tags IS NULL OR a.tags NOT LIKE '%%unitool_high_balance%%')
+        ORDER BY a.id
+    """, (candidate_ids,))
+    to_promote = cur.fetchall()
+
+    if not to_promote:
+        print(f"[HB] promote: 所有 bonus>={HB_THRESHOLD} 账号已是 HB 或无有效 SSID", flush=True)
+        conn.close()
+        return 0
+
+    promoted = 0
+    for acc_id, email, tags in to_promote:
+        new_tags = ((tags or "").rstrip(",") + ",unitool_high_balance").lstrip(",")
+        cur.execute("UPDATE accounts SET tags=%s WHERE id=%s", (new_tags, acc_id))
+        bonus_val = float((all_data.get(str(acc_id)) or {}).get("bonus") or 0)
+        print(f"[HB] promote: id={acc_id}  {email}  bonus={bonus_val:.4f}", flush=True)
+        promoted += 1
+
+    conn.commit()
+    conn.close()
+    print(f"[HB] 已升格 {promoted} 个账号为 unitool_high_balance", flush=True)
+    return promoted
+
+def reload_proxy_pool():
+    """通知 unitool-proxy 重建 SSID 池，使踢出/升格立即生效。"""
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{PROXY_PORT}/reload-ssids",
+            method="GET"
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode()
+            print(f"[HB] proxy reload: {body}", flush=True)
+    except Exception as e:
+        print(f"[HB] proxy reload failed (non-fatal): {e}", flush=True)
+
 def main():
     conn = psycopg2.connect(DB_URL)
     cur  = conn.cursor()
@@ -165,7 +232,7 @@ def main():
     print(f"bonus合计:  {total_bonus}", flush=True)
     print(f"API失败:    {api_fail}", flush=True)
 
-    # 踢出 bonus < HB_THRESHOLD 的高余额池账号
+    # ── 1. 踢出 bonus < HB_THRESHOLD 的高余额池账号 ──────────────────────────
     conn2 = psycopg2.connect(DB_URL)
     cur2  = conn2.cursor()
     cur2.execute(
@@ -188,6 +255,24 @@ def main():
         kick_high_balance(kick_ids)
     else:
         print(f"[HB] 所有高余额池账号 bonus >= {HB_THRESHOLD}，无需踢出", flush=True)
+
+    # ── 2. v2.1: 升格 bonus >= HB_THRESHOLD 且有 SSID 的新账号 ──────────────
+    promoted = promote_high_balance(results, cache)
+
+    # ── 3. 如有踢出或升格，通知 proxy 重建池 ────────────────────────────────
+    if kick_ids or promoted > 0:
+        reload_proxy_pool()
+
+    # ── 4. 打印最终 HB 池摘要 ────────────────────────────────────────────────
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{PROXY_PORT}/high-balance-status", timeout=6
+        ) as resp:
+            hbs = json.loads(resp.read())
+            print(f"\n[HB] 最终池状态: total={hbs['high_balance_total']}  "
+                  f"live={hbs['high_balance_live']}  dead={hbs['high_balance_dead']}", flush=True)
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     main()
