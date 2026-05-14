@@ -71,7 +71,7 @@ def _load_json(path: Path, default):
         return default
 
 def _save_json(path: Path, obj):
-    tmp = path.with_suffix(".tmp")
+    tmp = path.parent / (path.stem + f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(obj, ensure_ascii=False, default=str), "utf-8")
     tmp.replace(path)
 
@@ -174,7 +174,7 @@ def _get_graph_token(refresh_tok: str) -> tuple[str, str]:
         except RuntimeError as e:
             err = str(e)
             # 旧账号的 refresh_token 只接受 Thunderbird client_id
-            if "unauthorized_client" in err or "AADSTS700016" in err or "invalid_grant" in err:
+            if "unauthorized_client" in err or "AADSTS700016" in err or "invalid_grant" in err or "AADSTS900144" in err:
                 return _exchange_token(refresh_tok, GRAPH_SCOPE, THUNDERBIRD_CLIENT_ID)
             raise
     return _exchange_token(refresh_tok, GRAPH_SCOPE, THUNDERBIRD_CLIENT_ID)
@@ -197,6 +197,8 @@ def _graph_request(path: str, token: str) -> dict:
         return json.loads(urlopen(req, timeout=20).read())
     except HTTPError as e:
         raise RuntimeError(f"Graph {e.code}: {e.read()[:80]}")
+    except (TimeoutError, OSError) as e:
+        raise RuntimeError(f"Graph timeout/network: {e}")
 
 def _fetch_graph_new(token: str, since_dt: str | None, top: int = 10) -> list[dict]:
     params = {
