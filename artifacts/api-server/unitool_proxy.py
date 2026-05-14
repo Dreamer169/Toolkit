@@ -238,6 +238,22 @@ def _save_to_db(label: str, ssid: str):
     except Exception as e:
         print(f"[DB] save error: {e}", flush=True)
 
+def _delete_ssid_file(label: str):
+    """v5.41: Delete SSID file(s) so _scan_files never resurrects a dead ssid."""
+    email = _label_to_email(label)
+    candidates = set()
+    for lbl in (label, email):
+        s = re.sub(r"[^a-zA-Z0-9@._-]", "_", lbl)
+        candidates.add(os.path.join(SSID_DIR, f"{s}.txt"))
+        candidates.add(os.path.join(TMP_DIR,  f"{s}.txt"))
+    for p in candidates:
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+                print(f"[FILE] removed dead ssid file: {p}", flush=True)
+        except Exception as ex:
+            print(f"[FILE] failed to remove {p}: {ex}", flush=True)
+
 def _invalidate_in_db(label: str):
     try:
         conn = psycopg2.connect(DB_URL)
@@ -247,6 +263,7 @@ def _invalidate_in_db(label: str):
         conn.close()
     except Exception:
         pass
+    _delete_ssid_file(label)  # v5.41: also remove file to prevent dead-ssid resurrection
 
 def _save_to_file(label: str, ssid: str):
     safe = re.sub(r"[^a-zA-Z0-9@._-]", "_", label)
@@ -284,7 +301,19 @@ def _rebuild_pool():
     # v5.40: load high_balance SSID set for priority scheduling
     _hb_ssids = _db_get_high_balance_ssids()
     sources: dict[str, str] = {}
+    # v5.41: load invalid emails from DB to filter out stale files on rebuild
+    try:
+        _inv_conn = psycopg2.connect(DB_URL)
+        _inv_cur  = _inv_conn.cursor()
+        _inv_cur.execute("SELECT source_email FROM unitool_ssids WHERE is_valid = false")
+        _invalid_emails: set = {_label_to_email(r[0]) for r in _inv_cur.fetchall()}
+        _inv_conn.close()
+    except Exception:
+        _invalid_emails = set()
     for (label, ssid) in _scan_files():
+        if _label_to_email(label) in _invalid_emails:
+            _delete_ssid_file(label)  # clean up stale ghost file
+            continue
         if ssid not in sources:
             sources[ssid] = label
     for (label, ssid) in _load_from_db():
