@@ -580,6 +580,48 @@ def create_ref_code_via_proxy(ssid: str, email: str, port_hint: int = 0) -> str:
     except Exception as _ext_top:
         log(f"[ext_proxy] top err: {_ext_top}")
 
+    # QuarkIP final fallback - ONLY for POST /api/ref-codes
+    # WARNING: QuarkIP has only 200MB quota. NEVER use QUARK_PROXY elsewhere.
+    try:
+        import urllib.request as _ureq, time as _qt
+        _QUARK_PROXY = "http://j4eOruul5w:A1enIA12wwBGSKB@pool-us.quarkip.io:7777"
+        _QUARK_FLIP  = "http://change.quarkip.io?username=j4eOruul5w&password=A1enIA12wwBGSKB"
+        try:
+            _ureq.urlopen(_ureq.Request(_QUARK_FLIP, headers={"User-Agent": "curl/7.88"}), timeout=6)
+        except Exception:
+            pass  # timeout ok, IP still switches
+        _qt.sleep(4)
+        _qk_cmd = [
+            "curl", "-s", "--max-time", "20",
+            "--proxy", _QUARK_PROXY,
+            "-b", f"__Secure-unitool-ssid={ssid}",
+            "-X", "POST",
+            "-H", "Content-Type: application/json",
+            "-H", "Accept: application/json",
+            "https://unitool.ai/api/ref-codes",
+        ]
+        _qk_proc = subprocess.Popen(_qk_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            _qk_out, _ = _qk_proc.communicate(timeout=25)
+            _qk_raw = _qk_out.decode("utf-8", errors="ignore").strip()
+        except subprocess.TimeoutExpired:
+            _qk_proc.kill(); _qk_proc.communicate(); _qk_raw = ""
+        if _qk_raw:
+            _qk_d = json.loads(_qk_raw)
+            _qk_code = _qk_d.get("code", "")
+            _qk_err  = _qk_d.get("error", "")
+            if _qk_code:
+                log(f"[quarkip] ref_code={_qk_code} email={email}")
+                return _qk_code
+            elif _qk_err == "ip-already-existed":
+                log(f"[quarkip] ip-already-existed (IP switch failed) email={email}")
+            else:
+                log(f"[quarkip] err={_qk_err}")
+        else:
+            log(f"[quarkip] empty response email={email}")
+    except Exception as _qke:
+        log(f"[quarkip] exc={_qke}")
+
     return ""
 
 
