@@ -1099,15 +1099,25 @@ router.get("/data/unitool-stats", async (req, res) => {
       convCache = JSON.parse(rfs("/tmp/unitool_ref_code_cache.json", "utf8"));
     } catch {}
     // Read token balance cache (populated by unitool_token_stats.py)
-    let tokenCache: Record<string, { regular?: number; bonus?: number }> = {};
+    let tokenCache: Record<string, { regular?: number; bonus?: number; expires_regular?: string; expires_bonus?: string }> = {};
     try {
       const { readFileSync: rfs_t } = await import("fs");
       tokenCache = JSON.parse(rfs_t("/tmp/unitool_token_cache.json", "utf8"));
     } catch {}
+    // unitool API 过期 bonus 不自动归零，前端读 cache 时二次校验
+    const _now = Date.now();
+    const _effBonus = (v: { bonus?: number; expires_bonus?: string }) => {
+      const bon = v.bonus ?? 0;
+      if (bon <= 0) return 0;
+      if (v.expires_bonus) {
+        try { if (new Date(v.expires_bonus).getTime() < _now) return 0; } catch {}
+      }
+      return bon;
+    };
     const tokenRegular  = Object.values(tokenCache).reduce((s, v) => s + Math.max(0, v.regular ?? 0), 0);
-    const tokenBonus    = Object.values(tokenCache).reduce((s, v) => s + Math.max(0, v.bonus ?? 0), 0);
-    const tokenZeroRegular = Object.values(tokenCache).filter(v => (v.regular ?? 0) <= 0 && (v.bonus ?? 0) > 0).length;
-    const tokenZeroAccs  = Object.values(tokenCache).filter(v => (v.regular ?? 0) + (v.bonus ?? 0) === 0).length;
+    const tokenBonus    = Object.values(tokenCache).reduce((s, v) => s + _effBonus(v), 0);
+    const tokenZeroRegular = Object.values(tokenCache).filter(v => (v.regular ?? 0) <= 0 && _effBonus(v) > 0).length;
+    const tokenZeroAccs  = Object.values(tokenCache).filter(v => (v.regular ?? 0) + _effBonus(v) === 0).length;
 
     // Read rotation index
     let rotateIdx = 0;

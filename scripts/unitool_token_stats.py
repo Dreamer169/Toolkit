@@ -118,6 +118,15 @@ def main():
                         regular = val; expires_regular = exp
                     elif pid == "bonus":
                         bonus = val;   expires_bonus   = exp
+            # unitool API 不自动归零过期 bonus，需手动校验
+            if expires_bonus:
+                try:
+                    from datetime import datetime, timezone
+                    exp_dt = datetime.fromisoformat(expires_bonus.replace("Z", "+00:00"))
+                    if exp_dt.timestamp() < now:
+                        bonus = 0.0   # 过期即视为 0，不计入余额
+                except Exception:
+                    pass
             entry = {
                 "regular":         regular,
                 "bonus":           bonus,
