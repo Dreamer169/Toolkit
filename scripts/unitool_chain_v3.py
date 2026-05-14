@@ -544,11 +544,16 @@ def create_ref_code_via_proxy(ssid: str, email: str, port_hint: int = 0) -> str:
         if os.path.exists(_ext_file):
             _ext_list = list(_jext.loads(open(_ext_file).read()).get("proxies", []))
             _rnd.shuffle(_ext_list)
-            for _ext_proxy in _ext_list[:8]:
+            for _ext_proxy in _ext_list[:20]:
                 try:
+                    # 自动检测代理格式: HTTP(s)://... 用 --proxy，否则 socks5-hostname
+                    if _ext_proxy.startswith("http://") or _ext_proxy.startswith("https://"):
+                        _ep_proxy_args = ["--proxy", _ext_proxy]
+                    else:
+                        _ep_proxy_args = ["--socks5-hostname", _ext_proxy]
                     _ep_cmd = [
                         "curl", "-s", "--max-time", "15",
-                        "--socks5-hostname", _ext_proxy,
+                    ] + _ep_proxy_args + [
                         "-b", f"__Secure-unitool-ssid={ssid}",
                         "-X", "POST",
                         "-H", "Content-Type: application/json",
