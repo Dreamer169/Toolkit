@@ -79300,20 +79300,23 @@ router3.get("/data/unitool-stats", async (req, res) => {
          AND updated_at > NOW()-INTERVAL '24 hours'
        GROUP BY 1 ORDER BY 2 DESC`
     );
-    let hbAccounts = 0, hbSsids = 0;
+    let hbAccounts = 0, hbSsids = 0, hbLive = 0;
     try {
-      const hbRow = await queryOne(
-        `SELECT
-          COUNT(DISTINCT a.id) as hb_accounts,
-          COUNT(us.ssid)       as hb_ssids
-         FROM accounts a
-         LEFT JOIN unitool_ssids us
-           ON LOWER(TRIM(a.email)) = LOWER(TRIM(us.source_email))
-           AND us.is_valid = true AND LENGTH(us.ssid) > 50
-         WHERE a.tags LIKE '%unitool_high_balance%'`
-      );
-      hbAccounts = Number(hbRow?.hb_accounts ?? 0);
-      hbSsids = Number(hbRow?.hb_ssids ?? 0);
+      const hbRaw = await new Promise((resolve, reject) => {
+        const { get } = __require("http");
+        const r = get({ host: "127.0.0.1", port: 8089, path: "/high-balance-status", timeout: 3e3 }, (res2) => {
+          let d = "";
+          res2.on("data", (c) => {
+            d += c;
+          });
+          res2.on("end", () => resolve(d));
+        });
+        r.on("error", reject);
+      });
+      const hbd = JSON.parse(hbRaw);
+      hbAccounts = hbd.high_balance_total ?? 0;
+      hbSsids = hbd.high_balance_total ?? 0;
+      hbLive = hbd.high_balance_live ?? 0;
     } catch {
     }
     res.json({
@@ -79327,7 +79330,7 @@ router3.get("/data/unitool-stats", async (req, res) => {
       },
       ref: { master: refMasterEmail, ref_code: currentRefCode, used: currentRefUsed, limit: 10, pool_total: refPoolTotal, pool_available: refPoolAvailable, pool_exhausted: refPoolExhausted, total_slots: refTotalSlots },
       pool: pool2,
-      high_balance: { accounts: hbAccounts, ssids: hbSsids },
+      high_balance: { accounts: hbAccounts, ssids: hbSsids, live: hbLive },
       recent: recent.map((r) => {
         const m2 = r.notes?.match(/unitool_ssid=([a-f0-9]+)/);
         const ssidLen = ssidLenMap[r.email] ?? (m2?.[1]?.length ?? 0);

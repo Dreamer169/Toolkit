@@ -219,22 +219,27 @@ def _load_from_db() -> list[tuple[str, str]]:
         return []
 
 def _save_to_db(label: str, ssid: str):
+    # v5.42: normalize label to canonical email before upsert (prevents duplicate rows)
     try:
-        conn = psycopg2.connect(DB_URL)
-        cur  = conn.cursor()
-        cur.execute("SELECT id FROM unitool_ssids WHERE source_email=%s LIMIT 1", (label,))
+        email = _label_to_email(label)
+        conn  = psycopg2.connect(DB_URL)
+        cur   = conn.cursor()
+        cur.execute(
+            "SELECT id FROM unitool_ssids WHERE LOWER(TRIM(source_email))=LOWER(TRIM(%s)) AND is_valid=true ORDER BY collected_at DESC LIMIT 1",
+            (email,)
+        )
         row = cur.fetchone()
         if row:
             cur.execute("UPDATE unitool_ssids SET ssid=%s, is_valid=true, collected_at=NOW() WHERE id=%s",
                         (ssid, row[0]))
         else:
-            cur.execute("""
-                INSERT INTO unitool_ssids (source_email, ssid, is_valid, collected_at)
-                VALUES (%s, %s, true, NOW())
-            """, (label, ssid))
+            cur.execute(
+                "INSERT INTO unitool_ssids (source_email, ssid, is_valid, collected_at) VALUES (%s, %s, true, NOW())",
+                (email, ssid)
+            )
         conn.commit()
         conn.close()
-        print(f"[DB] saved ssid for {label}", flush=True)
+        print(f"[DB] saved ssid for {email}", flush=True)
     except Exception as e:
         print(f"[DB] save error: {e}", flush=True)
 
@@ -305,7 +310,12 @@ def _rebuild_pool():
     try:
         _inv_conn = psycopg2.connect(DB_URL)
         _inv_cur  = _inv_conn.cursor()
-        _inv_cur.execute("SELECT source_email FROM unitool_ssids WHERE is_valid = false")
+        # v5.42: only block emails that have NO valid record (prevents false-positive on duplicate rows)
+        _inv_cur.execute(
+            "SELECT source_email FROM unitool_ssids WHERE is_valid = false "
+            "AND LOWER(TRIM(source_email)) NOT IN "
+            "(SELECT LOWER(TRIM(source_email)) FROM unitool_ssids WHERE is_valid = true)"
+        )
         _invalid_emails: set = {_label_to_email(r[0]) for r in _inv_cur.fetchall()}
         _inv_conn.close()
     except Exception:
