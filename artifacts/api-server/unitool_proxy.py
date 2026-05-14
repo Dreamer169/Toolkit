@@ -260,10 +260,16 @@ def _delete_ssid_file(label: str):
             print(f"[FILE] failed to remove {p}: {ex}", flush=True)
 
 def _invalidate_in_db(label: str):
+    # v5.43: normalize label to canonical email (same as _save_to_db) before WHERE clause
+    # prevents dead-account SSID from being missed when label is legacy underscore-encoded
     try:
-        conn = psycopg2.connect(DB_URL)
-        cur  = conn.cursor()
-        cur.execute("UPDATE unitool_ssids SET is_valid=false WHERE source_email=%s", (label,))
+        email = _label_to_email(label)
+        conn  = psycopg2.connect(DB_URL)
+        cur   = conn.cursor()
+        cur.execute(
+            "UPDATE unitool_ssids SET is_valid=false WHERE LOWER(TRIM(source_email))=LOWER(TRIM(%s))",
+            (email,)
+        )
         conn.commit()
         conn.close()
     except Exception:
