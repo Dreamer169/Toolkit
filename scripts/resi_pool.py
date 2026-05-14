@@ -21,7 +21,7 @@ FAIL_THRESHOLD  = 3
 BLACKLIST_TTL   = 300
 SESSION_TTL     = 1800  # 30 min sticky binding
 EXTERNAL_FILE   = "/tmp/resi_pool_external.json"
-MAX_EXTERNALS   = 40
+MAX_EXTERNALS   = 100
 
 # ProxyRef: int = local xray port, str = "host:port" external
 ProxyRef = Union[int, str]
@@ -120,6 +120,14 @@ def _load_externals_file() -> None:
     except Exception:
         pass
 
+
+
+def reload_externals() -> int:
+    """Re-read external proxy file; merge new entries into live pool.
+    Safe to call repeatedly. Returns count of newly added proxies."""
+    old_count = len(_externals)
+    _load_externals_file()
+    return len(_externals) - old_count
 
 def _save_externals_file() -> None:
     try:

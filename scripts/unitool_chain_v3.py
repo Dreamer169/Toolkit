@@ -28,7 +28,10 @@ _sys_rp.path.insert(0, "/data/Toolkit/scripts") if "/data/Toolkit/scripts" not i
 import resi_pool as _rpool
 
 # ── 常量 ──────────────────────────────────────────────────────────────────────
-LOG            = "/tmp/unitool_chain_v3.log"
+WORKER_ID    = int(os.environ.get("WORKER_ID",    "0"))
+CHROME_LIMIT = int(os.environ.get("CHROME_LIMIT", "4"))
+STARTUP_DELAY= int(os.environ.get("STARTUP_DELAY","0"))
+LOG            = f"/tmp/unitool_chain_v3_w{WORKER_ID}.log"
 DB_URL         = "postgresql://postgres:postgres@localhost/toolkit"
 SCRIPTS        = "/data/Toolkit/scripts"
 REGISTER_PY    = f"{SCRIPTS}/unitool_register.py"
@@ -131,6 +134,7 @@ CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"   # reg_v2 用的 MS OAuth cl
 
 # 全局状态（供 atexit 使用）
 _account_id   = None
+_account_email = None   # Fix: release_session on SIGTERM
 _success_flag = False
 
 os.makedirs(SSID_DIR, exist_ok=True)
@@ -150,6 +154,10 @@ def log(msg):
 def _atexit_handler():
     if not _account_id or _success_flag:
         return
+    # Fix: release sticky session so retry gets a fresh IP
+    if _account_email:
+        try: _rpool.release_session(_account_email)
+        except Exception: pass
     try:
         conn = psycopg2.connect(DB_URL)
         cur  = conn.cursor()
@@ -375,7 +383,7 @@ def db_save_ref_code(account_id, ref_code):
     log(f"[DB] ref_code 保存 id={account_id} ref_code={ref_code}")
 
 REF_CODE_CACHE_FILE = "/tmp/unitool_ref_code_cache.json"
-REF_CODE_CACHE_TTL  = 1800  # 30 分钟
+REF_CODE_CACHE_TTL  = 10800  # 3 小时 (Fix: 1800s 每半小时触发 351×API 全量扫，改为 3h 降低扫描频率)
 ROTATE_FILE         = "/tmp/unitool_ref_rotate.json"  # 轮转索引持久化
 
 def _load_ref_cache() -> dict:
@@ -635,6 +643,34 @@ def db_get_all_ref_codes() -> list:
     返回: [{"id": int, "email": str, "ref_code": str, "used": int}, ...]
     按 used 升序排列（余量多的在前）。
     """
+    # -- shared pool cache fast-path (2026-05-14) --
+    # w0 completes full API scan once and saves result as _pool_cache;
+    # w1/w2 read cache on startup and skip the entire 342-account loop (~8.5 min).
+    _pc = _load_ref_cache()
+    _pe = _pc.get("_pool_cache", {})
+    if _pe and (time.time() - _pe.get("ts", 0)) < REF_CODE_CACHE_TTL:
+        _pool_data = _pe.get("data", [])
+        _age_min = (time.time() - _pe["ts"]) / 60
+        log(f"[ref] pool-cache HIT: {len(_pool_data)} codes age={_age_min:.1f}min, skip full scan")
+        return _pool_data
+    # scan mutex: if another worker started scanning < 15 min ago, wait
+    _scan_started = _pe.get("scan_ts", 0) if _pe else 0
+    if _scan_started and (time.time() - _scan_started) < 900:
+        log(f"[ref] another worker scanning ({(time.time()-_scan_started):.0f}s ago), waiting for cache...")
+        for _wi in range(20):  # wait up to 600s
+            time.sleep(30)
+            _wc = _load_ref_cache()
+            _wp = _wc.get("_pool_cache", {})
+            if _wp.get("ts", 0) > _scan_started:
+                _pool_data = _wp.get("data", [])
+                log(f"[ref] pool-cache ready after {(_wi+1)*30}s wait: {len(_pool_data)} codes")
+                return _pool_data
+        log("[ref] wait timeout 600s, scanning ourselves")
+    # mark scan-in-progress so other workers wait instead of duplicating work
+    _pc["_pool_cache"] = dict(_pe) if _pe else {}
+    _pc["_pool_cache"]["scan_ts"] = time.time()
+    _save_ref_cache(_pc)
+    # -- end shared pool cache fast-path --
     conn = db_connect(); cur = conn.cursor()
     cur.execute("""
         SELECT id, email, notes, tags FROM accounts
@@ -717,6 +753,14 @@ def db_get_all_ref_codes() -> list:
     available.sort(key=lambda x: x["used"], reverse=True)
     log(f"[ref] 可用 ref_code 池: {len(available)} 个 → " +
         ", ".join(f"{r['ref_code']}({r['used']}/{MAX_REF_SLOTS})" for r in available))
+    # save completed pool to shared disk cache for w1/w2 fast-path
+    try:
+        _fc = _load_ref_cache()
+        _fc["_pool_cache"] = {"data": available, "ts": time.time()}
+        _save_ref_cache(_fc)
+        log(f"[ref] pool-cache saved: {len(available)} codes -> {REF_CODE_CACHE_FILE}")
+    except Exception as _fce:
+        log(f"[ref] pool-cache save failed (ignored): {_fce}")
     return available
 
 
@@ -947,7 +991,7 @@ def check_resources(max_wait: int = 300, interval: int = 30) -> bool:
         log(f"[res] 内存={mb}MB  Chrome主进程数={n}")
 
         mem_ok    = mb >= 700
-        chrome_ok = n < 3
+        chrome_ok = n < CHROME_LIMIT
 
         if mem_ok and chrome_ok:
             return True
@@ -1409,9 +1453,9 @@ def db_get_ssid_from_notes(account_id):
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────
 def main():
-    global _account_id, _success_flag
+    global _account_id, _account_email, _success_flag
 
-    global _account_id, _success_flag
+    global _account_id, _account_email, _success_flag
     _account_id = None
     _success_flag = False
     open(LOG, "w").write("")
@@ -1463,7 +1507,8 @@ def main():
         time.sleep(300); return
 
     account_id, email, password, refresh_token = row
-    _account_id = account_id
+    _account_id    = account_id
+    _account_email = email   # Fix: allow atexit to release sticky session
     log(f"\n{'─'*60}")
     log(f"[main] 账号: {email}  id={account_id}  ref_code={ref_code}")
     db_lock_account(account_id)   # 立即锁定，防 OOM 后重复选
@@ -1624,8 +1669,15 @@ def main():
 
 if __name__ == "__main__":
     import time as _loop_time
+    if STARTUP_DELAY > 0:
+        print("[loop] worker " + str(WORKER_ID) + ": startup delay " + str(STARTUP_DELAY) + "s", flush=True)
+        _loop_time.sleep(STARTUP_DELAY)
     while True:
         try:
+            # Fix Bug1: hot-reload external proxies injected by proxy_refresh
+            _added = _rpool.reload_externals()
+            if _added > 0:
+                print(f"[loop] hot-loaded {_added} new external proxies", flush=True)
             main()
         except (KeyboardInterrupt, SystemExit):
             break
