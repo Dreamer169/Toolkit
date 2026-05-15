@@ -555,7 +555,6 @@ def _api_check_ref_code(ssid: str, account_id: int = 0) -> tuple:
             try: _rc_proc.kill(); _rc_proc.communicate()
             except Exception: pass
             return ("", -1)
-        raw = raw
         if raw == "null":
             # v5.15: server returned explicit null → SSID expired → mark invalid in DB
             try:
@@ -1505,7 +1504,8 @@ def run_login(email, password):
     return ""
 
 def run_inline_verify(email: str, password: str, refresh_token: str,
-                      max_wait: int = 90, after_ts: float = 0.0) -> str:
+                      max_wait: int = 90, after_ts: float = 0.0,
+                      account_id: int = 0) -> str:
     # Graph Only（无 IMAP）: after_ts=注册时刻，仅处理之后到达的邮件。
     # settle: 找到首个 verify_url 后多等 SETTLE_SECONDS，确认无更新邮件才点击。
     SETTLE_SECONDS = 6
@@ -1877,7 +1877,8 @@ def main():
     # Step 5b: 注册成功无 ssid -> 内联等待验证邮件（90s），避免立即入 verify_rescue 队列
     if not ssid and reg_result.get("ok"):
         log("[ssid] 注册成功无 ssid -> 内联等待验证邮件（90s）...")
-        ssid = run_inline_verify(email, password, refresh_token, max_wait=90, after_ts=reg_ts)
+        ssid = run_inline_verify(email, password, refresh_token, max_wait=90, after_ts=reg_ts,
+                                 account_id=account_id)
         if ssid:
             log(f"[ssid] inline_verify ssid len={len(ssid)}")
         else:
@@ -1889,10 +1890,17 @@ def main():
         else:
             log("[ssid] \u8d44\u6e90\u4e0d\u8db3\uff0c\u8df3\u8fc7\u767b\u5f55\u5c3c\u5e95")
 
+    # Bug 2 fix: __AADSTS70000__ is truthy, must check BEFORE `if not ssid`
+    # otherwise it gets saved to DB as a real SSID
+    if ssid == "__AADSTS70000__":
+        log("[main] ⛔ AADSTS70000 已处理，跳出（不进 verify_pending）")
+        _done_account(account_id)
+        return
+
     if not ssid:
-        if ssid == "__AADSTS70000__" or ssid is None:
+        if ssid is None:
             # already marked abuse_mode+unitool_fail inside run_inline_verify
-            log("[main] ⛔ AADSTS70000 已处理，跳出（不进 verify_pending）")
+            log("[main] ⛔ None ssid 已处理，跳出")
         elif reg_result.get("ok"):
             log("[main] ⚠ email_sent OK but no ssid -> unitool_verify_pending")
             db_mark_fail(account_id, "verify_email_not_found")
@@ -2068,6 +2076,7 @@ if __name__ == "__main__":
                             print(f"[loop:w0] 过滤失败: {_fe}", flush=True)
                         _proxy_filter_ts = _loop_time.time()
                 main()
+                _stats_ok += 1  # Bug 3 fix: was never incremented
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception as _loop_e:
