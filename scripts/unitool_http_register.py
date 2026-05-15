@@ -491,7 +491,7 @@ async def _pydoll_register(
         "--no-sandbox", "--disable-dev-shm-usage", "--window-size=1440,900",
         "--disable-gpu", "--lang=en-US",
         "--disable-blink-features=AutomationControlled",
-        f"--proxy-server=socks5://127.0.0.1:{port}",
+        (f"--proxy-server=socks5://127.0.0.1:{port}" if isinstance(port, int) else f"--proxy-server=socks5://{port}"),
     ]:
         opt.add_argument(arg)
 
@@ -565,9 +565,9 @@ async def _pydoll_register(
                     return pm
             return ""
 
-        # Phase 1: Invisible auto-solve (good RESI IPs, ~30s)
-        log(f"  [{label}] [phase1] waiting natural token 30s...")
-        tok = await _poll_token(30)
+        # Phase 1: Invisible auto-solve (good RESI IPs, ~45s) [bypass_v9_applied]
+        log(f"  [{label}] [phase1] waiting natural token 45s...")
+        tok = await _poll_token(45)
         if tok:
             log(f"  [{label}] natural token len={len(tok)}")
             return True
@@ -585,17 +585,53 @@ async def _pydoll_register(
             if ni > 0:
                 log(f"  [{label}] CF iframe at {_wi+1}s")
                 break
-        for rnd in range(2):
+        for rnd in range(3):  # bypass_v9_applied: 2→3 rounds
             try:
                 _t0bp = time.time()
-                await tab._bypass_cloudflare({}, time_to_wait_captcha=20)
+                await tab._bypass_cloudflare({}, time_to_wait_captcha=30)
                 log(f"  [{label}] bypass click rnd={rnd+1} took={time.time()-_t0bp:.1f}s")
             except Exception as _be:
                 log(f"  [{label}] bypass click rnd={rnd+1} err: {_be}")
-            tok = await _poll_token(15)
+            tok = await _poll_token(20)
             if tok:
                 log(f"  [{label}] managed token rnd={rnd+1} len={len(tok)}")
                 return True
+            # bypass_v9_applied: OOPIF CDP fixed-coord click fallback
+            if rnd >= 1:
+                try:
+                    from pydoll.commands.input_commands import InputCommands
+                    from pydoll.constants import MouseEventType, MouseButton
+                    _targets = await tab._browser.get_targets() if hasattr(tab, '_browser') else []
+                    _cf_t = next((_t for _t in _targets
+                                  if 'challenges.cloudflare.com' in _t.get('url','')), None)
+                    if _cf_t:
+                        _cf_tid = _cf_t['targetId']
+                        _cf_tab = tab._browser._tabs_opened.get(_cf_tid)
+                        if not _cf_tab:
+                            from pydoll.browser.tab import Tab as _Tab
+                            _cf_tab = _Tab(tab._browser, target_id=_cf_tid,
+                                           connection_port=tab._connection_port)
+                            tab._browser._tabs_opened[_cf_tid] = _cf_tab
+                        for _cx, _cy in [(25, 32), (150, 32), (50, 40)]:
+                            await _cf_tab._execute_command(
+                                InputCommands.dispatch_mouse_event(MouseEventType.MOUSE_MOVED, _cx, _cy))
+                            import asyncio as _aio2; await _aio2.sleep(0.07)
+                            await _cf_tab._execute_command(
+                                InputCommands.dispatch_mouse_event(MouseEventType.MOUSE_PRESSED,
+                                    _cx, _cy, button=MouseButton.LEFT, click_count=1))
+                            await _aio2.sleep(0.06)
+                            await _cf_tab._execute_command(
+                                InputCommands.dispatch_mouse_event(MouseEventType.MOUSE_RELEASED,
+                                    _cx, _cy, button=MouseButton.LEFT, click_count=1))
+                        log(f"  [{label}] OOPIF CDP click done (rnd={rnd+1})")
+                        tok = await _poll_token(10)
+                        if tok:
+                            log(f"  [{label}] OOPIF CDP token rnd={rnd+1} len={len(tok)}")
+                            return True
+                    else:
+                        log(f"  [{label}] OOPIF: no CF target found")
+                except Exception as _oopif_e:
+                    log(f"  [{label}] OOPIF CDP err (non-fatal): {_oopif_e}")
             log(f"  [{label}] rnd={rnd+1} no token, retry...")
 
         # Phase 3: reload fallback
@@ -609,7 +645,7 @@ async def _pydoll_register(
             await tab.execute_script(_PM_JS, return_by_value=True)
         except Exception as _re:
             log(f"  [{label}] reload err: {_re}")
-        tok = await _poll_token(20)
+        tok = await _poll_token(30)  # bypass_v9_applied: 20→30s
         if tok:
             log(f"  [{label}] reload natural token len={len(tok)}")
             return True
@@ -624,10 +660,10 @@ async def _pydoll_register(
             if ni > 0:
                 break
         try:
-            await tab._bypass_cloudflare({}, time_to_wait_captcha=25)
+            await tab._bypass_cloudflare({}, time_to_wait_captcha=35)  # bypass_v9_applied
         except Exception as _be:
             log(f"  [{label}] reload bypass err: {_be}")
-        tok = await _poll_token(20)
+        tok = await _poll_token(30)  # bypass_v9_applied: 20→30s
         if tok:
             log(f"  [{label}] reload managed token len={len(tok)}")
             return True
@@ -899,6 +935,17 @@ async def http_register_hybrid(
     # FIX: 使用 pick_sticky(email) 保证同账号全流程 IP 一致；
     # bypass 失败时 report_ref_failure → sticky 自动重新分配（不再手动换端口）
     _BYPASS_FAIL_ERRORS = ("bypass_failed", "token_empty_after_bypass")
+    # Fix-D: proxy/cert errors also warrant a port rotation retry
+    _PROXY_ERRORS_SUBSTR = (
+        "ERR_CERT_AUTHORITY_INVALID",
+        "ERR_CERT_COMMON_NAME_INVALID",
+        "ERR_TIMED_OUT",
+        "ERR_PROXY_CONNECTION_FAILED",
+        "ERR_SOCKS5_FAILED",
+        "ERR_NAME_NOT_RESOLVED",
+        "ERR_CONNECTION_REFUSED",
+        "ERR_CONNECTION_RESET",
+    )
     port = resi_port or (_rpool.pick_sticky(email) if _RESI else _pick_port(hash(email)))
     result = {}
     for _attempt in range(3):
@@ -917,8 +964,11 @@ async def http_register_hybrid(
             return result
         err = result.get("error_type") or result.get("error") or "unknown"
         log(f"[hybrid] ✗ 失败 attempt={_attempt+1}: {err}")
-        if err not in _BYPASS_FAIL_ERRORS:
+        _is_proxy_err = any(sub in str(err) for sub in _PROXY_ERRORS_SUBSTR)
+        if err not in _BYPASS_FAIL_ERRORS and not _is_proxy_err:
             break
+        if _is_proxy_err:
+            log(f"[hybrid] proxy/cert err, rotating port: {str(err)[:80]}")
         if result.get("digest") == "3453729035":
             log("[hybrid] token仍被拒绝，建议检查Xvfb/pydoll版本")
     return result
@@ -969,7 +1019,7 @@ async def http_login_hybrid(
     for arg in ["--no-sandbox", "--disable-dev-shm-usage", "--window-size=1440,900",
                  "--disable-gpu", "--lang=en-US",
                  "--disable-blink-features=AutomationControlled",
-                 f"--proxy-server=socks5://127.0.0.1:{port}"]:
+                 (f"--proxy-server=socks5://127.0.0.1:{port}" if isinstance(port, int) else f"--proxy-server=socks5://{port}")]:
         opt.add_argument(arg)
 
     result = {"email": email, "ok": False, "ssid": ""}
