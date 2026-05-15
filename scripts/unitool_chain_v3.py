@@ -20,7 +20,7 @@ PM2 模式：每次处理一个账号后退出，PM2 自动重启继续下一个
 
 日志：/tmp/unitool_chain_v3.log
 """
-import atexit, asyncio as _asyncio, glob, json, os, re, signal, subprocess, sys, time
+import atexit, asyncio as _asyncio, glob, json, os, re, signal, subprocess, sys, time, threading
 import urllib.parse, urllib.request
 import psycopg2
 import sys as _sys_rp
@@ -132,10 +132,26 @@ _REPAIR_BONUS_MIN     = 5.0   # v3.3: only repair bonus >= 5 accounts
 
 CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"   # reg_v2 用的 MS OAuth client
 
-# 全局状态（供 atexit 使用）
-_account_id   = None
-_account_email = None   # Fix: release_session on SIGTERM
-_success_flag = False
+# ─── 并发状态（thread-local + atexit registry）─────────────────────────────
+_thread_local    = threading.local()
+_active_lock     = threading.Lock()
+_active_registry = {}          # account_id -> {email, done}
+
+# init lock: 多 worker 并发时，只让一个 worker 执行初始化类操作
+_init_lock = threading.Lock()
+
+def _reg_account(account_id, email):
+    with _active_lock:
+        _active_registry[account_id] = {"email": email, "done": False}
+    _thread_local.account_id    = account_id
+    _thread_local.account_email = email
+
+def _done_account(account_id):
+    with _active_lock:
+        if account_id in _active_registry:
+            _active_registry[account_id]["done"] = True
+    _thread_local.account_id    = None
+    _thread_local.account_email = None
 
 os.makedirs(SSID_DIR, exist_ok=True)
 
@@ -144,51 +160,51 @@ def log(msg):
     ts   = time.strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
     print(line, flush=True)
+    _log_path = getattr(_thread_local, "log_path", LOG)
     try:
-        with open(LOG, "a") as f:
+        with open(_log_path, "a") as f:
             f.write(line + "\n")
     except Exception:
         pass
 
 # ── atexit：崩溃时解锁 ────────────────────────────────────────────────────────
 def _atexit_handler():
-    if not _account_id or _success_flag:
-        return
-    # Fix: release sticky session so retry gets a fresh IP
-    if _account_email:
-        try: _rpool.release_session(_account_email)
-        except Exception: pass
-    try:
-        conn = psycopg2.connect(DB_URL)
-        cur  = conn.cursor()
-        cur.execute("SELECT tags FROM accounts WHERE id=%s", (_account_id,))
-        row  = cur.fetchone()
-        tags = row[0] if row and row[0] else ""
-        if "unitool_registered" not in tags:
-            new_tags = re.sub(r",?unitool_processing", "", tags).strip(",")
-            new_tags = re.sub(r",?unitool_fail", "", new_tags).strip(",")  # 清除旧版遗留
-            # atexit: 崩溃时用 reg_retry 而非永久 fail
-            # already_registered 类账号 (unitool_already) 不加 reg_retry — 永久跳过
-            if ("unitool_reg_retry" not in new_tags
-                    and "unitool_registered" not in new_tags
-                    and "unitool_already" not in new_tags
-                    and "unitool_verify_pending" not in new_tags):
-                new_tags = (new_tags + ",unitool_reg_retry").strip(",")
-            import random as _rand
-            # abuse_mode = 微软永久封禁，注册无意义，直接跳过 reg_retry
-            if "abuse_mode" in new_tags and "unitool_reg_retry" in new_tags:
-                new_tags = re.sub(r",?unitool_reg_retry", "", new_tags).strip(",")
-                log(f"[atexit] abuse_mode账号跳过reg_retry id={_account_id}")
-            # 随机 30-60 分钟后重试（updated_at 设为未来时间，SQL 检查 updated_at < NOW()）
-            _retry_min = _rand.randint(30, 60)
-            cur.execute(
-                "UPDATE accounts SET tags=%s, updated_at=NOW() + INTERVAL '%s minutes' WHERE id=%s",
-                (new_tags, _retry_min, _account_id))
-            conn.commit()
-            log(f"[atexit] id={_account_id} → {new_tags}")
-        conn.close()
-    except Exception as e:
-        log(f"[atexit] err: {e}")
+    import random as _rand
+    with _active_lock:
+        items = list(_active_registry.items())
+    for _aid, _info in items:
+        if _info.get("done"):
+            continue
+        _aem = _info.get("email")
+        if _aem:
+            try: _rpool.release_session(_aem)
+            except Exception: pass
+        try:
+            conn = psycopg2.connect(DB_URL)
+            cur  = conn.cursor()
+            cur.execute("SELECT tags FROM accounts WHERE id=%s", (_aid,))
+            row  = cur.fetchone()
+            tags = row[0] if row and row[0] else ""
+            if "unitool_registered" not in tags:
+                new_tags = re.sub(r",?unitool_processing", "", tags).strip(",")
+                new_tags = re.sub(r",?unitool_fail", "", new_tags).strip(",")
+                if ("unitool_reg_retry" not in new_tags
+                        and "unitool_registered" not in new_tags
+                        and "unitool_already" not in new_tags
+                        and "unitool_verify_pending" not in new_tags):
+                    new_tags = (new_tags + ",unitool_reg_retry").strip(",")
+                if "abuse_mode" in new_tags and "unitool_reg_retry" in new_tags:
+                    new_tags = re.sub(r",?unitool_reg_retry", "", new_tags).strip(",")
+                    print(f"[atexit] abuse_mode跳过reg_retry id={_aid}", flush=True)
+                _retry_min = _rand.randint(30, 60)
+                cur.execute(
+                    "UPDATE accounts SET tags=%s, updated_at=NOW() + INTERVAL '%s minutes' WHERE id=%s",
+                    (new_tags, _retry_min, _aid))
+                conn.commit()
+                print(f"[atexit] id={_aid} → {new_tags}", flush=True)
+            conn.close()
+        except Exception as e:
+            print(f"[atexit] err id={_aid}: {e}", flush=True)
 
 atexit.register(_atexit_handler)
 
@@ -204,29 +220,60 @@ def db_connect():
     return psycopg2.connect(DB_URL)
 
 def db_get_fresh_account():
-    """取一个未注册过 unitool 的 outlook 账号（有密码 + refresh_token）"""
-    conn = db_connect(); cur = conn.cursor()
-    cur.execute("""
-        SELECT id, email, password, refresh_token FROM accounts
-        WHERE platform='outlook' AND status='active'
-          AND refresh_token IS NOT NULL AND refresh_token != ''
-          AND LENGTH(COALESCE(password,'')) >= 8
-          AND (tags IS NULL OR (
-               tags NOT LIKE '%%unitool_registered%%'
-           AND (tags NOT LIKE '%%unitool_fail%%' OR updated_at < NOW())
-           AND tags NOT LIKE '%%unitool_already%%'
-           AND (tags NOT LIKE '%%unitool_reg_retry%%' OR updated_at < NOW())
-           AND tags NOT LIKE '%%unitool_processing%%'
-           AND tags NOT LIKE '%%unitool_already%%'
-           AND tags NOT LIKE '%%unitool_rescue_dead%%'
-           AND tags NOT LIKE '%%unitool_verify_pending%%'
-           AND tags NOT LIKE '%%not_found%%'
-           AND tags NOT LIKE '%%abuse_mode%%'
-          ))
-        ORDER BY RANDOM() LIMIT 1
-    """)
-    row = cur.fetchone(); conn.close()
-    return row  # (id, email, password, refresh_token) or None
+    """原子选取并锁定一个未注册过 unitool 的 outlook 账号。
+    使用 SELECT FOR UPDATE SKIP LOCKED + 同事务内 UPDATE tags，
+    彻底消除多 worker 同时选到同一账号的 TOCTOU 竞态。
+    返回 (id, email, password, refresh_token) 或 None。
+    """
+    conn = db_connect()
+    conn.autocommit = False
+    cur = conn.cursor()
+    try:
+        # 1. 在事务内原子选取并行锁定候选行
+        cur.execute("""
+            SELECT id, email, password, refresh_token FROM accounts
+            WHERE platform='outlook' AND status='active'
+              AND refresh_token IS NOT NULL AND refresh_token != ''
+              AND LENGTH(COALESCE(password,'')) >= 8
+              AND (tags IS NULL OR (
+                   tags NOT LIKE '%%unitool_registered%%'
+               AND (tags NOT LIKE '%%unitool_fail%%' OR updated_at < NOW())
+               AND tags NOT LIKE '%%unitool_already%%'
+               AND (tags NOT LIKE '%%unitool_reg_retry%%' OR updated_at < NOW())
+               AND tags NOT LIKE '%%unitool_processing%%'
+               AND tags NOT LIKE '%%unitool_already%%'
+               AND tags NOT LIKE '%%unitool_rescue_dead%%'
+               AND tags NOT LIKE '%%unitool_verify_pending%%'
+               AND tags NOT LIKE '%%not_found%%'
+               AND tags NOT LIKE '%%abuse_mode%%'
+              ))
+            ORDER BY RANDOM() LIMIT 1
+            FOR UPDATE SKIP LOCKED
+        """)
+        row = cur.fetchone()
+        if not row:
+            conn.rollback()
+            conn.close()
+            return None
+        account_id = row[0]
+        # 2. 同事务内立即打上 unitool_processing 标签（原子锁）
+        cur.execute("""
+            UPDATE accounts
+            SET tags = TRIM(BOTH ',' FROM
+                            COALESCE(tags,'') || ',unitool_processing'),
+                updated_at = NOW()
+            WHERE id = %s
+              AND tags NOT LIKE '%%unitool_processing%%'
+        """, (account_id,))
+        conn.commit()
+        return row  # (id, email, password, refresh_token)
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        raise
+    finally:
+        try: conn.close()
+        except: pass
 
 def db_count_fresh():
     conn = db_connect(); cur = conn.cursor()
@@ -398,6 +445,82 @@ def _save_ref_cache(cache: dict) -> None:
     except Exception:
         pass
 
+def _verify_ssid_api(ssid: str, account_id: int = 0, max_attempts: int = 2) -> bool:
+    """
+    Step 6b: 用新账号 SSID 调 /api/user/billing-accounts 验证真实可用性。
+    返回 True  = SSID 有效且 API 可读（list 含数据）。
+    返回 False = SSID 无效（null / 空列表 / 错误）。
+    网络超时最多重试 max_attempts 次，最后兜底 CF Worker。
+    """
+    for attempt in range(max_attempts):
+        if attempt > 0:
+            log(f"[verify_ssid] retry {attempt}/{max_attempts-1} ...")
+            time.sleep(6)
+        try:
+            _hp = _get_healthy_resi_ports_chain()
+            _port = _hp[(hash(str(account_id)) + attempt) % len(_hp)]
+            cmd = [
+                "curl", "-s",
+                "--socks5-hostname", f"127.0.0.1:{_port}",
+                "-b", f"__Secure-unitool-ssid={ssid}",
+                "-H", "Accept: application/json",
+                "--max-time", "12",
+                "https://unitool.ai/api/user/billing-accounts",
+            ]
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                out, _ = proc.communicate(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill(); proc.communicate()
+                log(f"[verify_ssid] timeout attempt={attempt}")
+                continue
+            raw = out.decode("utf-8", errors="ignore").strip()
+            if not raw or raw == "null":
+                log(f"[verify_ssid] null/empty → SSID 不可用 id={account_id}")
+                return False
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                log(f"[verify_ssid] bad JSON attempt={attempt}: {raw[:60]}")
+                continue
+            # billing-accounts 返回 {"accounts":[...]} dict 格式
+            accts = []
+            if isinstance(data, dict):
+                accts = data.get("accounts", [])
+                if data.get("error"):
+                    log(f"[verify_ssid] API error={data.get('error')} → SSID 无效")
+                    return False
+            elif isinstance(data, list):
+                accts = data  # 兜底：旧版 list 格式
+            if isinstance(accts, list) and len(accts) > 0:
+                log(f"[verify_ssid] OK: {len(accts)} billing 账户 id={account_id}")
+                return True
+            if isinstance(accts, list) and len(accts) == 0:
+                log(f"[verify_ssid] 空账户列表 attempt={attempt}（新账号延迟？），重试")
+                continue
+            log(f"[verify_ssid] 意外响应: {raw[:80]}")
+            continue
+        except KeyboardInterrupt:
+            raise
+        except Exception as _e:
+            log(f"[verify_ssid] err attempt={attempt}: {_e}")
+            continue
+    # RESI 全失败 → CF Worker 兜底
+    try:
+        _cf_r = _cf_worker_api("https://unitool.ai/api/user/billing-accounts", "GET", ssid)
+        if _cf_r and _cf_r not in ("", "null"):
+            _cfd = json.loads(_cf_r)
+            cf_accts = _cfd.get("accounts", _cfd) if isinstance(_cfd, dict) else _cfd
+            if isinstance(cf_accts, list) and len(cf_accts) > 0:
+                log(f"[verify_ssid] OK via CF Worker id={account_id}")
+                return True
+        log(f"[verify_ssid] CF 兜底也失败 → SSID 不可用 id={account_id}")
+        return False
+    except Exception as _cfe:
+        log(f"[verify_ssid] CF err: {_cfe}")
+        return False
+
+
 def _api_check_ref_code(ssid: str, account_id: int = 0) -> tuple:
     """
     FIX G helper: 调 GET /api/user/ref-code 获取真实 conversions 计数。
@@ -482,53 +605,53 @@ def _api_check_ref_code(ssid: str, account_id: int = 0) -> tuple:
 
 def create_ref_code_via_proxy(ssid: str, email: str, port_hint: int = 0) -> str:
     """
-    FIX F: 通过 SOCKS5 代理调 POST /api/ref-codes，为账号生成专属邀请码。
-    unitool 限制同一 IP 只能创建一个 ref_code，必须通过住宅代理绕开。
-    成功返回 ref_code 字符串，失败返回 ""。
+    FIX F: 通过代理调 POST /api/ref-codes，为账号生成专属邀请码。
+    本地 RESI 端口出口 IP 已全部被 unitool 记录(ip-already-existed)，直接跳过。
+    优先级: 外部代理池 → QuarkIP(IP flip) → 空
     """
-    # 从 port_hint 偏移出发，分散 IP；v5.15: 跳过已知死端口
-    _hp2 = _get_healthy_resi_ports_chain()
-    _base = port_hint % len(_hp2)
-    _ports = _hp2[_base:] + _hp2[:_base]
-    for port in _ports:
+    # 本地 RESI 端口已全部 ip-already-existed，直接跳过
+    log(f"[ref_create] 跳过本地RESI端口(ip-already-existed)，直接用外部代理+QuarkIP ({email})")
+    # v9.45: Tor 优先 - 出口IP从未被CF Worker标记过，速度远超QuarkIP
+    _TOR_PORTS = [9050, 9052, 9053, 9054]
+    import random as _tor_rnd; _tor_rnd.shuffle(_TOR_PORTS)
+    for _tor_port in _TOR_PORTS:
         try:
-            # v5.13 fix: Popen+communicate to avoid KBI crash
-            _crf_cmd = [
-                "curl", "-s", "--max-time", "12",
-                "--socks5-hostname", f"127.0.0.1:{port}",
+            _tor_cmd = [
+                "curl", "-s", "--max-time", "20",
+                "--socks5-hostname", f"127.0.0.1:{_tor_port}",
                 "-b", f"__Secure-unitool-ssid={ssid}",
-                "-X", "POST",
-                "-H", "Content-Type: application/json",
+                "-X", "POST", "-H", "Content-Type: application/json",
                 "-H", "Accept: application/json",
                 "https://unitool.ai/api/ref-codes",
             ]
-            _crf_proc = subprocess.Popen(_crf_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            _tor_proc = subprocess.Popen(_tor_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
-                _crf_out, _ = _crf_proc.communicate(timeout=18)
-                _crf_stdout = _crf_out.decode("utf-8", errors="ignore")
-            except KeyboardInterrupt:
-                try: _crf_proc.kill(); _crf_proc.communicate()
-                except Exception: pass
-                raise
+                _tor_out, _ = _tor_proc.communicate(timeout=25)
+                _tor_raw = _tor_out.decode("utf-8", errors="ignore").strip()
             except subprocess.TimeoutExpired:
-                try: _crf_proc.kill(); _crf_proc.communicate()
-                except Exception: pass
-                _rpool.report_failure(port)
-                continue
-            if _crf_proc.returncode != 0 or not _crf_stdout.strip():
-                continue
-            data = json.loads(_crf_stdout)
-            if "code" in data:
-                _rpool.report_success(port)
-                log(f"[ref_create] ✅ port={port} → ref_code={data['code']} email={email}")
-                return data["code"]
-            err = data.get("error", "")
-            log(f"[ref_create] port={port} err={err} ({email})")
-            if err == "ip-already-existed":
-                continue
-        except Exception as _e:
-            log(f"[ref_create] port={port} exc={_e}")
-    log(f"[ref_create] ❌ 所有代理端口均失败 ({email})")
+                _tor_proc.kill(); _tor_proc.communicate()
+                log(f"[tor_ref] port={_tor_port} timeout"); continue
+            if not _tor_raw:
+                log(f"[tor_ref] port={_tor_port} empty"); continue
+            _tor_d = json.loads(_tor_raw)
+            _tor_code = _tor_d.get("code", "")
+            _tor_err  = _tor_d.get("error", "")
+            if _tor_code:
+                log(f"[tor_ref] ref_code={_tor_code} port={_tor_port} email={email}")
+                try:
+                    import subprocess as _sp
+                    _nn = _sp.run(
+                        ["python3", "/data/Toolkit/scripts/tor_newnym.py"],
+                        capture_output=True, timeout=8
+                    )
+                    log(f"[tor_ref] NEWNYM {'OK' if _nn.returncode == 0 else 'FAIL'}: "
+                        f"{_nn.stdout.decode().strip()}")
+                except Exception as _ne:
+                    log(f"[tor_ref] NEWNYM warn: {_ne}")
+                return _tor_code
+            log(f"[tor_ref] port={_tor_port} err={_tor_err}")
+        except Exception as _tor_e:
+            log(f"[tor_ref] port={_tor_port} exc={_tor_e}")
     # 全 RESI 端口失败 → CF Worker 底创建 ref_code（CF 边缘 IP）
     try:
         _cfc_body = _cf_worker_api(
@@ -591,45 +714,59 @@ def create_ref_code_via_proxy(ssid: str, email: str, port_hint: int = 0) -> str:
     except Exception as _ext_top:
         log(f"[ext_proxy] top err: {_ext_top}")
 
-    # QuarkIP final fallback - ONLY for POST /api/ref-codes
-    # WARNING: QuarkIP has only 200MB quota. NEVER use QUARK_PROXY elsewhere.
+    # QuarkIP fallback - ONLY for POST /api/ref-codes
+    # Integrated from quarkip_ref_create.py: flip IP before each attempt, retry up to 3x
+    # WARNING: QuarkIP 200MB quota only, do NOT use QUARK_PROXY outside this function
     try:
         import urllib.request as _ureq, time as _qt
         _QUARK_PROXY = "http://j4eOruul5w:A1enIA12wwBGSKB@pool-us.quarkip.io:7777"
         _QUARK_FLIP  = "http://change.quarkip.io?username=j4eOruul5w&password=A1enIA12wwBGSKB"
-        try:
-            _ureq.urlopen(_ureq.Request(_QUARK_FLIP, headers={"User-Agent": "curl/7.88"}), timeout=6)
-        except Exception:
-            pass  # timeout ok, IP still switches
-        _qt.sleep(4)
-        _qk_cmd = [
-            "curl", "-s", "--max-time", "20",
-            "--proxy", _QUARK_PROXY,
-            "-b", f"__Secure-unitool-ssid={ssid}",
-            "-X", "POST",
-            "-H", "Content-Type: application/json",
-            "-H", "Accept: application/json",
-            "https://unitool.ai/api/ref-codes",
-        ]
-        _qk_proc = subprocess.Popen(_qk_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        try:
-            _qk_out, _ = _qk_proc.communicate(timeout=25)
-            _qk_raw = _qk_out.decode("utf-8", errors="ignore").strip()
-        except subprocess.TimeoutExpired:
-            _qk_proc.kill(); _qk_proc.communicate(); _qk_raw = ""
-        if _qk_raw:
-            _qk_d = json.loads(_qk_raw)
-            _qk_code = _qk_d.get("code", "")
-            _qk_err  = _qk_d.get("error", "")
-            if _qk_code:
-                log(f"[quarkip] ref_code={_qk_code} email={email}")
-                return _qk_code
-            elif _qk_err == "ip-already-existed":
-                log(f"[quarkip] ip-already-existed (IP switch failed) email={email}")
+
+        def _quark_flip(wait=4):
+            try:
+                _ureq.urlopen(_ureq.Request(_QUARK_FLIP, headers={"User-Agent": "curl/7.88"}), timeout=6)
+            except Exception:
+                pass
+            _qt.sleep(wait)
+
+        def _quark_create_one(ssid_v, timeout=20):
+            """QuarkIP POST /api/ref-codes, returns (status, value)"""
+            _cmd = [
+                "curl", "-s", "--max-time", str(timeout),
+                "--proxy", _QUARK_PROXY,
+                "-b", f"__Secure-unitool-ssid={ssid_v}",
+                "-X", "POST",
+                "-H", "Content-Type: application/json",
+                "-H", "Accept: application/json",
+                "https://unitool.ai/api/ref-codes",
+            ]
+            _p = subprocess.Popen(_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                _o, _ = _p.communicate(timeout=timeout + 5)
+                _raw = _o.decode("utf-8", errors="ignore").strip()
+            except subprocess.TimeoutExpired:
+                _p.kill(); _p.communicate(); return "TIMEOUT", ""
+            if not _raw: return "EMPTY", ""
+            _d = json.loads(_raw)
+            _code = _d.get("code", "")
+            _err  = _d.get("error", "")
+            if _code: return "OK", _code
+            if _err == "ip-already-existed": return "USED", ""
+            return "ERR", _err[:80]
+
+        # Attempt up to 3 times, flip IP before each attempt
+        for _qattempt in range(3):
+            _quark_flip(wait=4 if _qattempt == 0 else 6)
+            _qstatus, _qval = _quark_create_one(ssid)
+            if _qstatus == "OK":
+                log(f"[quarkip] ref_code={_qval} email={email} attempt={_qattempt+1}")
+                return _qval
+            elif _qstatus == "USED":
+                log(f"[quarkip] ip-already-existed attempt={_qattempt+1}, retrying with new IP")
             else:
-                log(f"[quarkip] err={_qk_err}")
-        else:
-            log(f"[quarkip] empty response email={email}")
+                log(f"[quarkip] {_qstatus}={_qval} attempt={_qattempt+1}")
+                break
+        log(f"[quarkip] all 3 attempts failed email={email}")
     except Exception as _qke:
         log(f"[quarkip] exc={_qke}")
 
@@ -653,11 +790,11 @@ def db_get_all_ref_codes() -> list:
         _age_min = (time.time() - _pe["ts"]) / 60
         log(f"[ref] pool-cache HIT: {len(_pool_data)} codes age={_age_min:.1f}min, skip full scan")
         return _pool_data
-    # scan mutex: if another worker started scanning < 15 min ago, wait
+    # scan mutex: if another worker started scanning < 10 min ago, wait
     _scan_started = _pe.get("scan_ts", 0) if _pe else 0
-    if _scan_started and (time.time() - _scan_started) < 900:
+    if _scan_started and (time.time() - _scan_started) < 600:
         log(f"[ref] another worker scanning ({(time.time()-_scan_started):.0f}s ago), waiting for cache...")
-        for _wi in range(20):  # wait up to 600s
+        for _wi in range(20):  # wait up to 600s (30s × 20)
             time.sleep(30)
             _wc = _load_ref_cache()
             _wp = _wc.get("_pool_cache", {})
@@ -665,72 +802,79 @@ def db_get_all_ref_codes() -> list:
                 _pool_data = _wp.get("data", [])
                 log(f"[ref] pool-cache ready after {(_wi+1)*30}s wait: {len(_pool_data)} codes")
                 return _pool_data
+            # 检测原始 scanner 已挂（scan_ts 被覆盖/清除）→ 立即退出等待
+            cur_scan_ts = _wp.get("scan_ts", 0)
+            if cur_scan_ts and cur_scan_ts != _scan_started:
+                log(f"[ref] scan_ts changed ({_scan_started:.0f}→{cur_scan_ts:.0f}), original scanner died, aborting wait")
+                return []  # 返回空让上层重新调度
         log("[ref] wait timeout 600s, scanning ourselves")
     # mark scan-in-progress so other workers wait instead of duplicating work
     _pc["_pool_cache"] = dict(_pe) if _pe else {}
     _pc["_pool_cache"]["scan_ts"] = time.time()
     _save_ref_cache(_pc)
     # -- end shared pool cache fast-path --
+    # ── 智能扫描 v2：两阶段快速选码，不做全量 API 扫描 ──────────────────────
+    # Phase 1: 只查已被用过的码（notes 含 ref_registered=），数量 < 200，API 验真实 conversions
+    # Phase 2: 若 Phase 1 无可用码，取最新 20 个账号的码，本地计数=0，直接用
     conn = db_connect(); cur = conn.cursor()
+
+    # Phase 1: 已被用过的 ref_code（本地有 ref_registered= 记录）
     cur.execute("""
         SELECT id, email, notes, tags FROM accounts
         WHERE platform='outlook'
           AND notes LIKE '%%unitool_ref_code=%%'
+          AND notes LIKE '%%ref_registered=%%'
           AND (tags LIKE '%%unitool_ref_master%%' OR tags LIKE '%%unitool_ref_activated%%')
-        ORDER BY updated_at ASC
+        ORDER BY updated_at DESC
     """)
-    rows = cur.fetchall(); conn.close()
+    used_rows = cur.fetchall()
+    log(f"[ref] Phase1: {len(used_rows)} 个已用过的 ref_code 账号，逐个 API 验证")
 
     available = []
-    for acc_id, acc_email, notes, tags in rows:
+
+    def _process_row(acc_id, acc_email, notes, tags, force_local=False):
         if not notes:
-            continue
+            return
         m = re.search(r"unitool_ref_code=(?!ref_code=)([A-Za-z0-9_-]+)", notes)
         if not m:
-            continue
+            return
         rc = m.group(1)
         local_used = len(re.findall(r"ref_registered=", notes))
-
-        ssid_m = re.search(r"unitool_ssid=([0-9a-f]{40,})", notes)
-        if ssid_m:
-            api_rc, api_conv = _api_check_ref_code(ssid_m.group(1), acc_id)
-            if api_conv < 0:
-                used = local_used  # API 失败，保守降级
-                log(f"[ref] id={acc_id} {acc_email} API failed, fallback local={local_used}")
-            elif not api_rc:
-                # API=null: ssid 可能过期或账号无自己的码
-                # unitool_ref_activated = 脚本显式 POST 创建，可信（ssid 过期不等于码不存在）
-                # unitool_ref_master (without ref_activated) = 旧脏数据路径，跳过
-                if "unitool_ref_activated" in (tags or "") and "unitool_ref_master" not in (tags or ""):
-                    used = local_used  # ssid 过期，信任 DB 码 + 本地计数
-                    log(f"[ref] id={acc_id} {acc_email} ssid_expired/null but ref_activated, local={local_used}")
-                else:
-                    log(f"[ref] id={acc_id} {acc_email} API=null + ref_master, skip dirty inviter code")
-                    continue
-            else:
-                if api_rc != rc:
-                    log(f"[ref] id={acc_id} API rc={api_rc} != DB rc={rc}, use API")
-                    rc = api_rc
-                used = api_conv
-                log(f"[ref] id={acc_id} {acc_email} rc={rc} conversions={api_conv}/{MAX_REF_SLOTS}")
-        else:
+        if force_local:
             used = local_used
-
-        if used < MAX_REF_SLOTS:
-            available.append({"id": acc_id, "email": acc_email,
-                               "ref_code": rc, "used": used})
         else:
-            # BUG FIX: api_conv >= 10 but high_balance not set → promote now
+            ssid_m = re.search(r"unitool_ssid=([0-9a-f]{40,})", notes)
+            if ssid_m:
+                api_rc, api_conv = _api_check_ref_code(ssid_m.group(1), acc_id)
+                if api_conv < 0:
+                    used = local_used
+                    log(f"[ref] id={acc_id} {acc_email} API failed, fallback local={local_used}")
+                elif not api_rc:
+                    if "unitool_ref_activated" in (tags or "") and "unitool_ref_master" not in (tags or ""):
+                        used = local_used
+                        log(f"[ref] id={acc_id} {acc_email} ssid_expired/null but ref_activated, local={local_used}")
+                    else:
+                        log(f"[ref] id={acc_id} {acc_email} API=null + ref_master, skip")
+                        return
+                else:
+                    if api_rc != rc:
+                        log(f"[ref] id={acc_id} API rc={api_rc} != DB rc={rc}, use API")
+                        rc = api_rc
+                    used = api_conv
+                    log(f"[ref] id={acc_id} {acc_email} rc={rc} conversions={api_conv}/{MAX_REF_SLOTS}")
+            else:
+                used = local_used
+        if used < MAX_REF_SLOTS:
+            available.append({"id": acc_id, "email": acc_email, "ref_code": rc, "used": used})
+        else:
+            # HB-promote
             if "unitool_high_balance" not in (tags or ""):
                 try:
                     _pr_conn = db_connect(); _pr_cur = _pr_conn.cursor()
                     _new_tags = ((tags or "").rstrip(",") + ",unitool_high_balance").strip(",")
-                    _pr_cur.execute(
-                        "UPDATE accounts SET tags=%s, updated_at=NOW() WHERE id=%s",
-                        (_new_tags, acc_id))
+                    _pr_cur.execute("UPDATE accounts SET tags=%s, updated_at=NOW() WHERE id=%s", (_new_tags, acc_id))
                     _pr_conn.commit(); _pr_conn.close()
-                    log(f"[ref] HB-promote id={acc_id} {acc_email} conv={used}/{MAX_REF_SLOTS} -> high_balance")
-                    # notify proxy in-memory pool
+                    log(f"[ref] HB-promote id={acc_id} {acc_email} conv={used}/{MAX_REF_SLOTS}")
                     try:
                         import urllib.request as _ureq2
                         _hb2 = json.dumps({"email": acc_email}).encode()
@@ -742,18 +886,39 @@ def db_get_all_ref_codes() -> list:
                 except Exception as _pre:
                     log(f"[ref] HB-promote err id={acc_id}: {_pre}")
 
-    # 去重：同一 ref_code 可能被多个账号记录，保留 used 最大的那条（最保守估计）
+    for acc_id, acc_email, notes, tags in used_rows:
+        _process_row(acc_id, acc_email, notes, tags, force_local=False)
+
+    if not available:
+        # Phase 2: 没有可用的已用码 → 取最新 20 个账号的 ref_code，本地计数，不调 API
+        log("[ref] Phase1 无可用码，Phase2: 取最新 20 个账号 ref_code（本地计数=0）")
+        cur.execute("""
+            SELECT id, email, notes, tags FROM accounts
+            WHERE platform='outlook'
+              AND notes LIKE '%%unitool_ref_code=%%'
+              AND (tags LIKE '%%unitool_ref_master%%' OR tags LIKE '%%unitool_ref_activated%%')
+            ORDER BY updated_at DESC
+            LIMIT 20
+        """)
+        fresh_rows = cur.fetchall()
+        for acc_id, acc_email, notes, tags in fresh_rows:
+            _process_row(acc_id, acc_email, notes, tags, force_local=True)
+        log(f"[ref] Phase2: 得到 {len(available)} 个可用码")
+
+    conn.close()
+
+    # 去重：同一 ref_code 保留 used 最大那条
     dedup: dict = {}
     for r in available:
         rc = r["ref_code"]
         if rc not in dedup or r["used"] > dedup[rc]["used"]:
             dedup[rc] = r
     available = list(dedup.values())
-    # 填满优先：used 最多的排前面，优先用完 10 个再换下一个
-    available.sort(key=lambda x: x["used"], reverse=True)
+    # 填满优先：used 多的排前；used 相同时 id 大（更新）的排前
+    available.sort(key=lambda x: (x["used"], x["id"]), reverse=True)
     log(f"[ref] 可用 ref_code 池: {len(available)} 个 → " +
-        ", ".join(f"{r['ref_code']}({r['used']}/{MAX_REF_SLOTS})" for r in available))
-    # save completed pool to shared disk cache for w1/w2 fast-path
+        ", ".join(f"{r['ref_code']}({r['used']}/{MAX_REF_SLOTS})" for r in available[:10]))
+    # 保存缓存
     try:
         _fc = _load_ref_cache()
         _fc["_pool_cache"] = {"data": available, "ts": time.time()}
@@ -764,11 +929,60 @@ def db_get_all_ref_codes() -> list:
     return available
 
 
+def _pool_cache_increment_used(used_ref_code: str) -> None:
+    """
+    每次注册成功后立即更新 pool-cache：把 used_ref_code 的 used +1。
+    若达到 MAX_REF_SLOTS 则从 pool 中剔除，避免缓存期内继续被选中浪费注册次数。
+    同时重置 _api_check_ref_code 的单账号缓存，使下次扫描得到真实值。
+    """
+    try:
+        fc = _load_ref_cache()
+        pc = fc.get("_pool_cache", {})
+        data = pc.get("data", [])
+        updated = False
+        new_data = []
+        for entry in data:
+            if entry.get("ref_code") == used_ref_code:
+                entry = dict(entry)
+                new_used = entry.get("used", 0) + 1
+                # 反漂移：pool-cache 不能比个人 API 真实值高超过 3
+                # （允许 3 个在途注册尚未被 unitool 计入 conversion）
+                acc_key = str(entry.get("id", ""))
+                ind_entry = fc.get(acc_key, {})
+                ind_conv = ind_entry.get("conversions") if isinstance(ind_entry, dict) else None
+                if isinstance(ind_conv, int) and ind_conv >= 0 and new_used > ind_conv + 3:
+                    log(f"[ref] pool-cache drift: {used_ref_code} pool={new_used} api={ind_conv}, cap→{ind_conv + 1}")
+                    new_used = ind_conv + 1
+                entry["used"] = new_used
+                updated = True
+                if entry["used"] >= MAX_REF_SLOTS:
+                    log(f"[ref] pool-cache: {used_ref_code} used={entry['used']}/{MAX_REF_SLOTS} → 剔除")
+                    # 同时清除该账号的单账号 API 缓存（让下次扫描重新查 API）
+                    acc_key = str(entry.get("id", ""))
+                    if acc_key and acc_key in fc:
+                        del fc[acc_key]
+                    continue  # 从池中移除
+                new_data.append(entry)
+            else:
+                new_data.append(entry)
+        if updated:
+            # 重新排序：填满优先（used 降序）
+            new_data.sort(key=lambda x: x["used"], reverse=True)
+            pc["data"] = new_data
+            fc["_pool_cache"] = pc
+            _save_ref_cache(fc)
+            log(f"[ref] pool-cache updated: {used_ref_code} +1, 剩余可用池 {len(new_data)} 个")
+        else:
+            log(f"[ref] pool-cache: {used_ref_code} not found in cache (may be new or already evicted)")
+    except Exception as _pce:
+        log(f"[ref] pool-cache increment err: {_pce}")
+
+
 def pick_rotating_ref_code(pool: list) -> dict | None:
     """
     填满优先：pool 已按 used 降序排列，始终选 pool[0]。
-    当前码用满 10 个后，db_get_all_ref_codes 会自动将其排除，
-    pool[0] 自然切换到下一个待填满的码。
+    当前码用满 10 个后，_pool_cache_increment_used 会立即将其剔除，
+    pool[0] 自然切换到下一个待填满的码（无需等待 3h 缓存过期）。
     """
     if not pool:
         return None
@@ -823,15 +1037,18 @@ def replenish_if_needed():
     if fresh >= WATERMARK:
         return
 
-    # 冷却检查
-    try:
-        data = json.loads(open(LOCK_FILE).read())
-        ts = float(data.get("ts", 0))
-        if time.time() - ts < COOLDOWN_S:
-            remaining = int(COOLDOWN_S - (time.time() - ts))
-            log(f"[watermark] 冷却中 {remaining}s，跳过补充"); return
-    except Exception:
-        pass
+    # 冷却检查（fresh=0 紧急状态：绕过冷却，立即补充；fresh>0 时正常检查）
+    if fresh > 0:
+        try:
+            data = json.loads(open(LOCK_FILE).read())
+            ts = float(data.get("ts", 0))
+            if time.time() - ts < COOLDOWN_S:
+                remaining = int(COOLDOWN_S - (time.time() - ts))
+                log(f"[watermark] 冷却中 {remaining}s，跳过补充"); return
+        except Exception:
+            pass
+    else:
+        log("[watermark] ⚠ fresh=0 紧急状态，绕过冷却立即补充")
 
     # 内存检查（outlook 注册每 worker 约 400-600 MB）
     try:
@@ -1188,8 +1405,34 @@ def run_register_fast(email, ref_code):
                                      "already_use", "user with like email")):
             log(f"[http_reg] ❌ 永久失败 (already): {err}")
             return {"ok": False, "ssid": "", "reason": err_s}
-        # 暂态失败：降级全浏览器
-        log(f"[http_reg] ⚠ 暂态失败: {err} → 降级全浏览器 unitool_register.py")
+        # 暂态失败: bypass/CF 类错误先换 IP 重试一次再降级全浏览器 [chain_v3_v9_applied]
+        _is_bypass_err = any(p in err_s for p in (
+            "bypass_failed", "token_empty", "bypass", "cf_", "cloudflare",
+            "timeout", "connection", "proxy", "socks"))
+        if _is_bypass_err:
+            log(f"[http_reg] ⚠ 暂态bypass失败: {err} → 换IP重试一次")
+            try:
+                # 释放当前 sticky IP，强制 pick_sticky 分配新 IP
+                if hasattr(_rpool, 'release_session'):
+                    _rpool.release_session(email)
+                elif hasattr(_rpool, '_sticky') and email in _rpool._sticky:
+                    del _rpool._sticky[email]
+            except Exception as _re:
+                log(f"[http_reg] release IP err(non-fatal): {_re}")
+            try:
+                result2 = _run_http_reg_with_pw(email, ref_code)
+            except KeyboardInterrupt:
+                raise
+            except Exception as e2:
+                log(f"[http_reg] 重试异常: {e2}")
+                result2 = {"ok": False, "error": str(e2)}
+            if result2.get("ok"):
+                log(f"[http_reg] ✅ 换IP重试成功 method={result2.get('method','?')}")
+                return {"ok": True, "ssid": "", "reason": ""}
+            err2 = str(result2.get("error_type") or result2.get("error") or "")
+            log(f"[http_reg] 换IP重试失败: {err2} → 降级全浏览器")
+        else:
+            log(f"[http_reg] ⚠ 暂态失败: {err} → 降级全浏览器 unitool_register.py")
     else:
         log(f"[main] ▶ http_register 不可用 → 直接全浏览器")
 
@@ -1261,11 +1504,11 @@ def run_login(email, password):
     log(f"[login] 未拿到 ssid rc={rc}")
     return ""
 
-def run_inline_verify(email: str, password: str, refresh_token: str, max_wait: int = 90) -> str:
-    # 注册成功后立即内联等待验证邮件（max_wait 秒，每 30s 轮询一次），
-    # 找到后 curl 点击 -> 必要时 run_login() 拿 ssid。
-    # 比 verify_rescue 更快: 无需等下一个 PM2 周期; 同一进程内完成全链路。
-    # 返回: ssid 字符串（成功则非空，失败或超时返回空字符串）
+def run_inline_verify(email: str, password: str, refresh_token: str,
+                      max_wait: int = 90, after_ts: float = 0.0) -> str:
+    # Graph Only（无 IMAP）: after_ts=注册时刻，仅处理之后到达的邮件。
+    # settle: 找到首个 verify_url 后多等 SETTLE_SECONDS，确认无更新邮件才点击。
+    SETTLE_SECONDS = 6
     if not refresh_token:
         log("[inline_verify] 无 refresh_token -> 跳过"); return ""
 
@@ -1315,59 +1558,90 @@ def run_inline_verify(email: str, password: str, refresh_token: str, max_wait: i
     if not access_token:
         return ""
 
+    import json as _jjv
+    import datetime as _dt
     headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
     verify_url = ""
-    polls = max(1, max_wait // 30)
-    for i in range(polls):
-        time.sleep(30)
+    # 时间过滤: 只取注册之后收到的邮件，防止复用旧 token（容差 -30s）
+    _after_iso = ""
+    if after_ts > 0:
+        _after_iso = _dt.datetime.utcfromtimestamp(after_ts - 30).strftime("%Y-%m-%dT%H:%M:%SZ")
+        log(f"[inline_verify] 时间过滤 receivedDateTime >= {_after_iso}")
+    _poll_schedule = [5, 10, 10, 15, 15, 15, 15]
+    _elapsed_poll = 0
+    _settle_until = 0.0
+    for _pi, _pw in enumerate(_poll_schedule):
+        if _elapsed_poll >= max_wait:
+            break
+        _sleep_now = min(_pw, max_wait - _elapsed_poll)
+        time.sleep(_sleep_now)
+        _elapsed_poll += _sleep_now
+        _found_new = False
         for folder in ("JunkEmail", "Inbox", "Clutter", "DeletedItems"):
             try:
-                _filter = "from/emailAddress/address%20eq%20%27noreply%40unitool.ai%27"
-                _url = (f"https://graph.microsoft.com/v1.0/me/mailFolders/"
-                        f"{folder}/messages?$filter={_filter}"
-                        f"&$top=10&$select=subject,body,receivedDateTime")
+                _f_parts = ["from/emailAddress/address eq 'noreply@unitool.ai'"]
+                if _after_iso:
+                    _f_parts.append(f"receivedDateTime ge {_after_iso}")
+                _filter = urllib.parse.quote(" and ".join(_f_parts))
+                _url = (f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder}/messages"
+                        f"?$filter={_filter}"
+                        f"&$top=5&$select=subject,body,receivedDateTime,uniqueBody")
                 _rq = urllib.request.Request(_url, headers=headers)
-                import json as _jj2
-                msgs = _jj2.loads(urllib.request.urlopen(_rq, timeout=15).read()).get("value", [])
-                log(f"[inline_verify] {folder}: {len(msgs)} messages")
+                msgs = _jjv.loads(urllib.request.urlopen(_rq, timeout=15).read()).get("value", [])
+                log(f"[inline_verify] {folder}: {len(msgs)} msgs")
                 for m in msgs:
-                    body = m.get("body", {}).get("content", "")
+                    body = (m.get("uniqueBody") or m.get("body") or {}).get("content", "")
                     links = re.findall(
-                        r"https://[^\s\"'<>]*unitool\.ai/api/auth/email[^\s\"'<>]*",
-                        body,
-                    )
+                        r"https://[^\s\"'<>]*unitool\.ai/api/auth/email[^\s\"'<>]*", body)
                     if not links:
                         links = re.findall(
-                            r"https://unitool\.ai[^\s\"'<>]*token=[^\s\"'<>]*",
-                            body,
-                        )
-                    if links:
+                            r"https://unitool\.ai[^\s\"'<>]*token=[^\s\"'<>]*", body)
+                    if links and links[0] != verify_url:
                         verify_url = links[0]
-                        log(f"[inline_verify] found at {(i+1)*30}s in {folder}: {verify_url[:80]}")
+                        _settle_until = time.time() + SETTLE_SECONDS
+                        log(f"[inline_verify] 新url @{_elapsed_poll}s {folder}: {verify_url[:80]}")
+                        _found_new = True
                         break
-                if verify_url:
+                if _found_new:
                     break
             except Exception as e:
                 log(f"[inline_verify] {folder} err: {e}")
         if verify_url:
+            _remain = _settle_until - time.time()
+            if _remain > 0.3:
+                log(f"[inline_verify] settle {_remain:.1f}s — 等待确认最新 token...")
+                continue
             break
-        log(f"[inline_verify] [{(i+1)*30}s] not found")
+        log(f"[inline_verify] [{_elapsed_poll}s] not found")
 
     if not verify_url:
         log(f"[inline_verify] {max_wait}s 内未收到验证邮件 -> 交 verify_rescue 处理")
         return ""
 
-    ck  = "/tmp/unitool_chain_ck.txt"
-    hdr = "/tmp/unitool_chain_hdr.txt"
+    _ekey = re.sub(r"[^a-z0-9]", "_", email.lower())[:24]
+    ck  = f"/tmp/unitool_ck_{_ekey}.txt"
+    hdr = f"/tmp/unitool_hdr_{_ekey}.txt"
     for f in [ck, hdr]:
         try: os.remove(f)
         except: pass
-    # FIX: 验证链接点击必须通过同一 RESI 代理，否则 unitool 看到 IP 切换会失效
+    # FIX A: pick_sticky 可返回外部代理字符串，需 isinstance 区分 (同 Bug 1)
     _verify_port = _rpool.pick_sticky(email)
+    # Bug F fix: 外部 SOCKS5 代理无法正确返回 HTTPS Set-Cookie → 降级到 RESI 端口
+    if not isinstance(_verify_port, int):
+        _hp_v = _get_healthy_resi_ports_chain()
+        if _hp_v:
+            _verify_port = _hp_v[hash(email) % len(_hp_v)]
+            log(f"[inline_verify] Bug-F: ext proxy → RESI fallback port={_verify_port}")
     log(f"[inline_verify] 通过代理 port={_verify_port} 点击验证链接")
+    if isinstance(_verify_port, int):
+        _verify_proxy_args = ["--socks5-hostname", f"127.0.0.1:{_verify_port}"]
+    elif _verify_port.startswith("http://") or _verify_port.startswith("https://"):
+        _verify_proxy_args = ["--proxy", _verify_port]
+    else:
+        _verify_proxy_args = ["--socks5-hostname", _verify_port]
     _curl = [
         "curl", "-sS", "-L", "--max-redirs", "8",
-        "--socks5-hostname", f"127.0.0.1:{_verify_port}",
+    ] + _verify_proxy_args + [
         "-c", ck, "-b", ck, "-D", hdr,
         "-H", "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0.0.0",
         "-H", "Accept: text/html,application/xhtml+xml,*/*;q=0.9",
@@ -1403,10 +1677,85 @@ def run_inline_verify(email: str, password: str, refresh_token: str, max_wait: i
         log(f"[inline_verify] ssid from curl Set-Cookie len={len(ssid)}")
         return ssid
 
-    log("[inline_verify] email verified, ssid httpOnly -> run_login()")
-    if check_resources():
-        return run_login(email, password)
-    log("[inline_verify] 资源不足，跳过 run_login"); return ""
+    # FIX C: curl无ssid -> 5s等待DB传播，再run_login；若仍失败则重poll 60s找新验证邮件
+    log("[inline_verify] curl无ssid -> 等5s后run_login()")
+    time.sleep(5)
+    if not check_resources():
+        log("[inline_verify] 资源不足，跳过 run_login"); return ""
+    _first_ssid = run_login(email, password)
+    if _first_ssid:
+        return _first_ssid
+    # run_login 失败 -> 尝试重新 poll 收件箱（token 可能被 Outlook 预消费）
+    log("[inline_verify] run_login失败 -> 再等60s重poll收件箱")
+    _new_verify_url = ""
+    for _ri in range(6):
+        time.sleep(10)
+        for _rfolder in ("JunkEmail", "Inbox", "Clutter"):
+            try:
+                _rf_parts = ["from/emailAddress/address eq 'noreply@unitool.ai'"]
+                if _after_iso:
+                    _rf_parts.append(f"receivedDateTime ge {_after_iso}")
+                _rf2 = urllib.parse.quote(" and ".join(_rf_parts))
+                _rurl = (f"https://graph.microsoft.com/v1.0/me/mailFolders/{_rfolder}/messages"
+                         f"?$filter={_rf2}"
+                         f"&$top=10&$select=subject,body,receivedDateTime,uniqueBody")
+                _rq2 = urllib.request.Request(_rurl, headers=headers)
+                _rmsgs = _jjv.loads(urllib.request.urlopen(_rq2, timeout=15).read()).get("value", [])
+                for _rm in _rmsgs:
+                    _rb = (_rm.get("uniqueBody") or _rm.get("body") or {}).get("content", "")
+                    _rls = re.findall(
+                        r"https://[^\s\"'<>]*unitool\.ai/api/auth/email[^\s\"'<>]*", _rb)
+                    if not _rls:
+                        _rls = re.findall(
+                            r"https://unitool\.ai[^\s\"'<>]*token=[^\s\"'<>]*", _rb)
+                    for _rl in _rls:
+                        if _rl != verify_url:
+                            _new_verify_url = _rl
+                            log(f"[inline_verify] repoll新url +{10*(1+_ri)}s: {_rl[:80]}")
+                            break
+                if _new_verify_url:
+                    break
+            except Exception as _re:
+                log(f"[inline_verify] repoll {_rfolder} err: {_re}")
+        if _new_verify_url:
+            break
+        log(f"[inline_verify] retry_poll [{10*(1+_ri)}s] no new url")
+    if _new_verify_url:
+        _nck = f"/tmp/unitool_ck2_{_ekey}.txt"; _nhdr = f"/tmp/unitool_hdr2_{_ekey}.txt"
+        for _f2 in [_nck, _nhdr]:
+            try: os.remove(_f2)
+            except: pass
+        _ncurl = ["curl", "-sS", "-L", "--max-redirs", "8"] + _verify_proxy_args + [
+            "-c", _nck, "-b", _nck, "-D", _nhdr,
+            "-H", "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0.0.0",
+            "-H", "Accept: text/html,application/xhtml+xml,*/*;q=0.9",
+            "--max-time", "30", _new_verify_url,
+        ]
+        try:
+            _np = subprocess.Popen(_ncurl, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try: _np.communicate(timeout=35)
+            except subprocess.TimeoutExpired: _np.kill(); _np.communicate()
+            _nraw = open(_nhdr, encoding="utf-8", errors="ignore").read() if os.path.exists(_nhdr) else ""
+            _nssid = ""
+            for _nl in _nraw.splitlines():
+                if "unitool-ssid" in _nl.lower() and "set-cookie" in _nl.lower():
+                    _nm = re.search(r"unitool-ssid=([^;\s]+)", _nl, re.I)
+                    if _nm: _nssid = _nm.group(1)
+            if not _nssid and os.path.exists(_nck):
+                for _nl2 in open(_nck, encoding="utf-8", errors="ignore"):
+                    if "unitool-ssid" in _nl2.lower():
+                        _nssid = _nl2.strip().split("\t")[-1]; break
+            log(f"[inline_verify] new_click ssid={len(_nssid) if _nssid else 0}")
+            if _nssid:
+                return _nssid
+        except Exception as _ne:
+            log(f"[inline_verify] new_click err: {_ne}")
+        time.sleep(3)
+        if check_resources():
+            return run_login(email, password)
+    else:
+        log("[inline_verify] 60s内无新验证邮件 -> 交 verify_rescue 处理")
+    return ""
 
 
 def run_reflink(email, _retries=3, _wait=30):
@@ -1453,38 +1802,36 @@ def db_get_ssid_from_notes(account_id):
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────
 def main():
-    global _account_id, _account_email, _success_flag
-
-    global _account_id, _account_email, _success_flag
-    _account_id = None
-    _success_flag = False
-    open(LOG, "w").write("")
+    _thread_local.account_id    = None
+    _thread_local.account_email = None
+    _log_path = getattr(_thread_local, "log_path", LOG)
+    open(_log_path, "w").write("")
     log("=" * 60)
     log("=== unitool_chain_v3 start ===")
 
-    # ── Step 0c: NA 哈希监控（每天一次，无阻塞）───────────────────────
-    try:
-        _check_na_daily()
-    except Exception as e:
-        log(f"[na_probe] 异常(忽略): {e}")
-
-    # ── Step 0d: v3.3 SSID repair for high-bonus accounts ─────────────────
-    try:
-        run_ssid_repair()
-    except Exception as e:
-        log(f"[repair] exception (ignored): {e}")
-
-    # ── Step 0a: 模块隔离 — 清理卡死 processing（>30min 自动解锁）─────────────
-    try:
-        cleanup_stale_processing(30)
-    except Exception as e:
-        log(f"[stale] 异常(忽略): {e}")
-
-    # ── Step 0b: 水位检查（非阻塞） ────────────────────────────────────────────
-    try:
-        replenish_if_needed()
-    except Exception as e:
-        log(f"[watermark] 异常(忽略): {e}")
+    # ── Step 0: 初始化（多 worker 并发时只让第一个进入的 worker 执行）──────────
+    if _init_lock.acquire(blocking=False):
+        try:
+            try:
+                _check_na_daily()
+            except Exception as e:
+                log(f"[na_probe] 异常(忽略): {e}")
+            try:
+                run_ssid_repair()
+            except Exception as e:
+                log(f"[repair] exception (ignored): {e}")
+            try:
+                cleanup_stale_processing(30)
+            except Exception as e:
+                log(f"[stale] 异常(忽略): {e}")
+            try:
+                replenish_if_needed()
+            except Exception as e:
+                log(f"[watermark] 异常(忽略): {e}")
+        finally:
+            _init_lock.release()
+    else:
+        log("[main] 其他 worker 正在执行初始化，本轮跳过")
 
     # ── Step 1: 资源检查 ───────────────────────────────────────────────────────
     if not check_resources():
@@ -1507,11 +1854,11 @@ def main():
         time.sleep(300); return
 
     account_id, email, password, refresh_token = row
-    _account_id    = account_id
-    _account_email = email   # Fix: allow atexit to release sticky session
     log(f"\n{'─'*60}")
     log(f"[main] 账号: {email}  id={account_id}  ref_code={ref_code}")
-    db_lock_account(account_id)   # 立即锁定，防 OOM 后重复选
+    db_lock_account(account_id)   # 二次保险（db_get_fresh_account 已原子锁定）
+    _reg_account(account_id, email)  # 注册到 atexit 清理注册表
+    reg_ts = time.time()             # 注册开始时刻，用于过滤旧验证邮件
 
     # ── Step 4: 注册 unitool（带 ref_code）──────────────────────────────────────
     reg_result = run_register_fast(email, ref_code)
@@ -1530,7 +1877,7 @@ def main():
     # Step 5b: 注册成功无 ssid -> 内联等待验证邮件（90s），避免立即入 verify_rescue 队列
     if not ssid and reg_result.get("ok"):
         log("[ssid] 注册成功无 ssid -> 内联等待验证邮件（90s）...")
-        ssid = run_inline_verify(email, password, refresh_token, max_wait=90)
+        ssid = run_inline_verify(email, password, refresh_token, max_wait=90, after_ts=reg_ts)
         if ssid:
             log(f"[ssid] inline_verify ssid len={len(ssid)}")
         else:
@@ -1559,7 +1906,25 @@ def main():
     db_save_ssid_full(account_id, email, ssid)  # DB 全长保存（修复 80/200 字截断）
     persist_ssid(email, ssid)                   # /data/ + /tmp/ + proxy 热推
 
-    _success_flag = True  # 告知 atexit 不需要标 fail
+    # ── Step 6b: SSID API 真实验证 ─────────────────────────────────────────────
+    # 用 billing-accounts 接口确认该 SSID 真的能调 API，才算真正成功注册
+    log(f"[main] ▶ Step6b: SSID API 验证 (billing-accounts)...")
+    if not _verify_ssid_api(ssid, account_id):
+        log(f"[main] ❌ SSID 获取但 API 不可用 → token_invalid, 转 verify_rescue")
+        try:
+            _tc = db_connect(); _tcur = _tc.cursor()
+            _tcur.execute(
+                "UPDATE accounts SET tags = COALESCE(tags,'') || ',token_invalid' "
+                "WHERE id=%s AND (tags IS NULL OR tags NOT LIKE '%%token_invalid%%')",
+                (account_id,))
+            _tc.commit(); _tc.close()
+        except Exception as _te:
+            log(f"[main] token_invalid tag err: {_te}")
+        db_mark_fail(account_id, "ssid_api_unverified")
+        return
+    log(f"[main] ✅ Step6b SSID API 验证通过 → 继续建立 ref_code")
+
+    _done_account(account_id)  # 告知 atexit 此账号成功，无需清理
 
     # ── Step 7: 为该账号生成专属 ref_code，并激活到 DB ─────────────────────────
     # FIX F: 先通过代理 POST /api/ref-codes 为新账号创建专属码，再 run_reflink 读取保存
@@ -1627,6 +1992,8 @@ def main():
                 conn.commit()
             conn.close()
             log(f"[ref] master({ref_master_email}) +1 referral → {email}")
+            # 立即更新 pool-cache：避免缓存期内 ref_code 被重复超量选用
+            _pool_cache_increment_used(ref_code)
         except Exception as e:
             log(f"[ref] track referral err: {e}")
 
@@ -1669,18 +2036,59 @@ def main():
 
 if __name__ == "__main__":
     import time as _loop_time
-    if STARTUP_DELAY > 0:
-        print("[loop] worker " + str(WORKER_ID) + ": startup delay " + str(STARTUP_DELAY) + "s", flush=True)
-        _loop_time.sleep(STARTUP_DELAY)
-    while True:
+
+    # N_WORKERS: 进程内并发数，替代 PM2 多进程 w0/w1/w2
+    # 使用: export N_WORKERS=3 → 单 PM2 进程内启 3 个并发 worker 线程
+    N_WORKERS = int(os.environ.get("N_WORKERS", "1"))
+
+    def _worker_loop(worker_idx: int):
+        _thread_local.log_path = f"/tmp/unitool_chain_v3_w{worker_idx}.log"
+        _delay = STARTUP_DELAY if worker_idx == 0 else worker_idx * 15
+        if _delay > 0:
+            print(f"[loop:w{worker_idx}] stagger {_delay}s", flush=True)
+            _loop_time.sleep(_delay)
+        _stats_ok = 0; _stats_fail = 0
+        _stats_hour_ts = _loop_time.time()
+        _proxy_filter_ts = _loop_time.time()
+        while True:
+            try:
+                if worker_idx == 0:
+                    _added = _rpool.reload_externals()
+                    if _added > 0:
+                        print(f"[loop:w0] hot-loaded {_added} external proxies", flush=True)
+                    if _loop_time.time() - _proxy_filter_ts >= 3600:
+                        print("[loop:w0] 每小时代理探活过滤...", flush=True)
+                        try:
+                            _before = len(_rpool._externals)
+                            _rpool._externals = [p for p in _rpool._externals
+                                if _rpool._probe_external(p)]
+                            _rpool._save_externals_file()
+                            print(f"[loop:w0] {_before}→{len(_rpool._externals)} 存活", flush=True)
+                        except Exception as _fe:
+                            print(f"[loop:w0] 过滤失败: {_fe}", flush=True)
+                        _proxy_filter_ts = _loop_time.time()
+                main()
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as _loop_e:
+                print(f"[loop:w{worker_idx}] uncaught: {_loop_e}", flush=True)
+                _stats_fail += 1
+                _loop_time.sleep(5)
+            if _loop_time.time() - _stats_hour_ts >= 3600:
+                _total = _stats_ok + _stats_fail
+                _rate = f"{100*_stats_ok//_total}%" if _total else "N/A"
+                print(f"[stats:w{worker_idx}] ok={_stats_ok} fail={_stats_fail} rate={_rate}", flush=True)
+                _stats_ok = 0; _stats_fail = 0
+                _stats_hour_ts = _loop_time.time()
+
+    if N_WORKERS > 1:
+        print(f"[main] 启动 {N_WORKERS} 并发 worker", flush=True)
+        _threads = [threading.Thread(target=_worker_loop, args=(i,),
+                    daemon=True, name=f"chain-w{i}") for i in range(N_WORKERS)]
+        for _t in _threads: _t.start()
         try:
-            # Fix Bug1: hot-reload external proxies injected by proxy_refresh
-            _added = _rpool.reload_externals()
-            if _added > 0:
-                print(f"[loop] hot-loaded {_added} new external proxies", flush=True)
-            main()
+            for _t in _threads: _t.join()
         except (KeyboardInterrupt, SystemExit):
-            break
-        except Exception as _loop_e:
-            print(f"[loop] uncaught: {_loop_e}", flush=True)
-            _loop_time.sleep(5)
+            pass
+    else:
+        _worker_loop(WORKER_ID)
