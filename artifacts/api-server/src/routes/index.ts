@@ -10,6 +10,7 @@ import gatewayRouter from "./gateway.js";
 import adminRouter from "./admin.js";
 import unifiedDbRouter from "./unified-db.js";
 import cfEmailRouter from "./cf-email.js";
+import bypassStatsRouter from "./bypass-stats.js";
 
 const router: IRouter = Router();
 
@@ -24,5 +25,6 @@ router.use("/gateway", gatewayRouter);
 router.use("/gateway", adminRouter);
 router.use(unifiedDbRouter);
 router.use(cfEmailRouter);
+router.use(bypassStatsRouter);
 
 export default router;
