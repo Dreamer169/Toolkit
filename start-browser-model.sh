@@ -1,56 +1,29 @@
 #!/bin/bash
-# v7.75 — broker chromium 启动包装。
-#
-# 关键拓扑修正 (vs v7.72 错误判断 "WARP CF datacenter score 低")：
-#   WARP 出口 IP (104.28.x.x) = Cloudflare 自家 CDN backbone (NOT GCP datacenter)。
-#   replit.com 站在 Cloudflare 后面，CF 不会用 challenge layer 拦自家 backbone 出口。
-#   --proxy-server=socks5://127.0.0.1:40000 (WARP) 走 replit.com 是天然干净路径，
-#   能稳定拿到 cf_clearance + /signup 不被 captcha 死循环。
-#
-#   reCAPTCHA Enterprise 评分 由 google_proxy_route.ts 的 attachGoogleProxyRouting()
-#   接管：拦 *.google.com / *.gstatic.com / *.recaptcha.net / *.youtube.com 转走
-#   非 GCP 的 SOCKS5 池 (10824 Kirino / 10826 DO / 10830 MULTACOM 等住宅/中小 ISP)。
-#   两层职责分离：broker 走 WARP 解决 CF challenge，Google 子请求走 VLESS 抬 score。
-#
-# BROWSER_PROXY 选择优先级：
-#   1) WARP (socks5://127.0.0.1:40000) — 首选，理由如上
-#   2) Kirino (socks5://127.0.0.1:10824, AS215311) — backup
-#   3) DigitalOcean (socks5://127.0.0.1:10826) — 二次 backup
-#   4) MULTACOM (10830), 其它干净 xray 子节点
-#   5) Tor (9050) — 最后住宅风格 fallback
-#   6) DIRECT (45.205.27.69) — 全部失活时硬 fallback (会被 CF challenge)
-#
-# WARP-SSH 安全约束（绝不可破）：
-#   warp-cli 必须保持 proxy 模式 (Mode: WarpProxy on port 40000)。
-#   任何脚本绝不可调用 `warp-cli set-mode warp` (full tunnel) — 那会安装
-#   CloudflareWARP 隧道接口并把所有出口路由打到 wg/utun，导致到 SSH 客户端的
-#   反向流量改走 WARP，原 eth0 路由失效，SSH 立刻断开且无法复连。
-#   本脚本只读 warp-cli 状态，不修改 mode。
+# v9 — browser-model 启动脚本 (VPS 45.205.27.248 — 数据盘版)
+# 改进 (pydoll-antibot-bypasser + capsolver skills):
+#   - 导出 LANG=en_US.UTF-8 / LC_ALL / LANGUAGE（消除中文 locale 指纹泄漏）
+#   - CAPSOLVER_API_KEY 从环境继承并显式标记
+#   - Xvfb 多显示器探针（:99/:100/:77）+ xdpyinfo 健康检查
+#   - Chrome 孤儿进程彻底清理（按端口+按年龄）
+#   - 代理 IP 质量二次验证（CF IP 剔除 + Replit 可达性）
 
 export PORT=8092
 export NODE_ENV=production
-export PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
-export DISPLAY=:99
-export REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE=/root/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome
-export FRONTEND_DIR=/root/browser-model/artifacts/api-server/public
+export PLAYWRIGHT_BROWSERS_PATH=/data/cache/ms-playwright
+export REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE=/data/cache/ms-playwright/chromium-1208/chrome-linux64/chrome
 
-# v7.78e — datacenter-SOCKS-first picker + CF-段出口过滤 (拓扑修正 v7.75 / v7.78d)
-#
-# 实证 (v7.78d CDP 测试 2026-04-23 23:00):
-# - 所有 26 个 xray VLESS outbound 上游都指向 CF edge IP (104.21.21.136 / 172.67.199.22),
-#   后端 VLESS server 自身跑在 CF Workers / CF backbone, 出口 IP 全在 104.28.x 段。
-# - CF 不发自家 IP 段的 cf_clearance → cf-warmup 永远 cf_clearance=False
-#   → Replit integrity_check_failed_after_step1。
-# - VPS 公网 45.205.27.69 = AS8796 FASTNET DATA (真 datacenter, CF 友好)。
-#
-# 修复策略: picker 测每个候选 SOCKS 实际出口 IP, 落在 CF 段就跳过；
-# 所有 SOCKS 都 CF 时 fallback DIRECT (空 BROWSER_PROXY → chromium 直走 VPS 公网)。
-# *.google 子请求由 google_proxy_route.py 单独走 WARP (40000)。
-#
-# CF IP 段 (AS-13335 主要):
-#   104.16.0.0/12 (含 104.16/17/18/19/20/21/22/23/24/25/26/27/28/29/30/31)
-#   172.64.0.0/13 (含 172.64/65/66/67/68/69/70/71)
-#   141.101.64.0/18, 162.158.0.0/15, 173.245.48.0/20, 188.114.96.0/20 等
+# ── v9: Locale 强制 en-US（消除 Linux zh_CN.UTF-8 中文指纹泄漏）──────────
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+export LANGUAGE=en_US:en
+
+export FRONTEND_DIR=/data/browser-model/public
+
+# ── v9: CAPSOLVER_API_KEY 从系统环境继承（PM2 env 或 export 均可）────────
+# 配置方法: pm2 restart browser-model --update-env  (env 已 export 时)
+# 或 pm2 set browser-model CAPSOLVER_API_KEY <your_key>
+# CAPSOLVER_API_KEY is inherited automatically — no hardcoding needed
+
 _is_cf_ip() {
   local ip="$1"
   [[ -z "$ip" ]] && return 1
@@ -64,240 +37,136 @@ _is_cf_ip() {
   esac
 }
 
-_pick_browser_proxy() {
-  # v8.04 — DIRECT-first picker, with TRUTHFUL probe semantics:
-  # Both DIRECT and WARP get CF-challenge (HTTP 403 Just-a-moment) on raw curl;
-  # cf_clearance is solved by headed chromium JS, NOT by the exit IP itself.
-  # DIRECT is preferred because VPS AS8796 had v7.78g+h empirical reCAPTCHA pass.
-  # Add a real reachability probe before commit so the picker fails loud if the
-  # exit is fully dead (vs CF-challenged-but-recoverable-by-chromium).
-  _probe_replit_reachable() {
-    # exit code 0 if either: (a) HTTP 200/30x OR (b) HTTP 403 + body contains
-    # "Just a moment" (CF JS challenge — chromium can solve). Non-zero if
-    # connection refused / timeout / unrelated 5xx (true exit failure).
-    local proxy_arg="$1" url="https://replit.com/signup"
-    local out rc body
-    if [[ -n "$proxy_arg" ]]; then
-      out=$(curl -s -w "\n%{http_code}" --max-time 10 --socks5 "$proxy_arg" "$url" 2>/dev/null)
-    else
-      out=$(curl -s -w "\n%{http_code}" --max-time 10 "$url" 2>/dev/null)
-    fi
-    rc=$(echo "$out" | tail -1)
-    body=$(echo "$out" | head -c 600)
-    case "$rc" in
-      2*|3*) echo "replit-200/30x"; return 0 ;;
-      403)
-        if echo "$body" | grep -q "Just a moment"; then
-          echo "cf-js-challenge-acceptable"; return 0
-        fi
-        echo "replit-403-banned"; return 1 ;;
-      *) echo "replit-unreachable($rc)"; return 1 ;;
-    esac
-  }
-  # ── v8.07 — WARP-FIRST + python v8.07 broker=warp PIN → 同源 IP-match ────
-  # 实证 2026-04-25 12:51 (job rpl_moec7ywp_5w00):
-  #   broker=socks Kirino(75.127.12.19) cf-warmup → 卡 Just-a-moment timeout
-  #   → SOCKS broker 今天解不了 CF JS challenge.
-  # 实证 2026-04-25 12:48 (job rpl_moec16kj_debv, fresh profile):
-  #   broker=warp 104.28.195.185 cf-warmup → cf_clearance=True ✓
-  #   但 google-route DEFAULT_POOL → IP-mismatch → code:1.
-  # 修复方案 (v8.07 联动):
-  #   1) picker 选 WARP broker (能解 CF JS challenge)
-  #   2) python v8.07 broker=warp 分支 PIN GOOGLE_PROXY_POOL=socks5://:40000
-  #      → token-mint 和 signup-POST 都走 WARP → mint-IP == submit-IP ✓
-  # v8.19 — WARP DEMOTED. Evidence (rpl_mogny0wr_xw7b/aozp Apr 27 04:00):
-  #   CF passes (cf_clearance=True) but Replit SSR returns 88KB shell with
-  #   ZERO form/input/recaptcha-script when broker exits via WARP 104.28.x
-  #   (CF AS13335). Replit explicitly bot-mitigates Cloudflare-owned IP ranges
-  #   at the SSR layer. Switch to non-CF SOCKS pool first; WARP only via
-  #   BROKER_USE_WARP=1 env override (kept for emergency).
-  if [[ "${BROKER_USE_WARP:-0}" == "1" ]]; then
-    if ss -uln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b" || ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:40000\b"; then
-      WARP_EXIT=$(curl -s --max-time 8 --socks5 "127.0.0.1:40000" https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
-      if [[ -n "$WARP_EXIT" ]]; then
-        _probe_status=$(_probe_replit_reachable "127.0.0.1:40000")
-        _probe_rc=$?
-        echo "[picker] v8.19 BROKER_USE_WARP=1 → WARP probe: ${_probe_status} (exit=${WARP_EXIT})" >&2
-        if [[ $_probe_rc -eq 0 ]]; then
-          echo "socks5://127.0.0.1:40000|WARP@${WARP_EXIT}"
-          return 0
-        fi
-      fi
-    fi
+_probe_replit_reachable() {
+  local proxy_arg="$1" url="https://replit.com/signup"
+  local out rc body
+  if [[ -n "$proxy_arg" ]]; then
+    out=$(curl -s -w "\n%{http_code}" --max-time 10 --socks5 "$proxy_arg" "$url" 2>/dev/null)
   else
-    echo "[picker] v8.19 SKIP WARP (set BROKER_USE_WARP=1 to force)" >&2
+    out=$(curl -s -w "\n%{http_code}" --max-time 10 "$url" 2>/dev/null)
   fi
-  # ── v8.30 Pool B (ss-out-* shadowsocks 真上游, sticky single IP, 非 CF) ───
-  # 实证 2026-04-28 02:41 ASN 探针 (curl --socks5 ... ipinfo.io, 5次/端口):
-  #   10857 → 114.45.129.72  AS3462  中華電信 TW (国家级 ISP) ★★★ 5次完全 sticky
-  #   10853 → 38.135.24.131  AS27284 Fourplex Telecom US (小电信)  ★★
-  #   10859 → 193.29.139.250 AS47172 Greenhost NL (small hosting)  ★
-  #   10854 → 141.164.45.187 AS20473 Vultr KR (DC)
-  #   10855 → 141.98.101.182 AS9009  M247 GB (DC)
-  #   10851 → 156.146.38.169 AS60068 Datacamp US (DC)
-  # 全 6 端口 cf_clearance 路径 OK (curl 拿到 CF JS challenge, chromium 能解).
-  # 全 6 端口 google.com / gstatic.com / recaptcha.net 200 应答 (Google 不封).
-  # 单 IP sticky → cf_clearance 整 session 绑得住.
-  # 与 google_proxy_route.py v8.29 DEFAULT_POOL 严格对齐 (同 6 端口同序).
-  # 选中后 BROKER_EXIT_FAMILY=socks → replit_register.py v8.30 自动 PIN
-  # google-route 到同 port → 三条链 (chromium / *.google / signup-POST)
-  # 全部出口同 IP → reCAPTCHA Enterprise score 抬高 → code:1 修掉.
-  # v8.63 cooldown skip — load cooled ports from /root/Toolkit/.local/port_cooldown.json
+  rc=$(echo "$out" | tail -1)
+  body=$(echo "$out" | head -c 600)
+  case "$rc" in
+    2*|3*) echo "replit-200/30x"; return 0 ;;
+    403)
+      if echo "$body" | grep -q "Just a moment"; then
+        echo "cf-js-challenge-acceptable"; return 0
+      fi
+      echo "replit-403-banned"; return 1 ;;
+    *) echo "replit-unreachable($rc)"; return 1 ;;
+  esac
+}
+
+_pick_browser_proxy() {
   _COOLED_PORTS=""
   if [[ -f /root/Toolkit/.local/port_cooldown.json ]]; then
-    _COOLED_PORTS=$(python3 -c "import json,time; d=json.load(open('/root/Toolkit/.local/port_cooldown.json')); now=time.time()*1000; print(' '.join(p for p,t in d.get('bans',{}).items() if t>now))" 2>/dev/null)
-    [[ -n "$_COOLED_PORTS" ]] && echo "[picker] v8.63 cooldown skip set: ${_COOLED_PORTS}" >&2
+    _COOLED_PORTS=$(python3 -c "
+import json,time
+try:
+    d=json.load(open('/root/Toolkit/.local/port_cooldown.json'))
+    now=time.time()*1000
+    print(' '.join(p for p,t in d.get('bans',{}).items() if t>now))
+except: pass
+" 2>/dev/null)
+    [[ -n "$_COOLED_PORTS" ]] && echo "[picker] cooldown skip: ${_COOLED_PORTS}" >&2
   fi
-  _is_cooled() {
-    local p="$1"
-    [[ " $_COOLED_PORTS " == *" $p "* ]]
-  }
+  _is_cooled() { [[ " $_COOLED_PORTS " == *" $1 "* ]]; }
+
   for cand in 10857:HKBN-HK 10859:HGC-HK 10853:Fourplex-US 10855:M247-GB 10851:Datacamp-US 10910:tp-US1 10911:tp-US2 10912:tp-US3 10914:tp-UK 10915:tp-MX 10916:tp-US4 10854:HKT-HK; do
     port="${cand%%:*}"; name="${cand##*:}"
-    if _is_cooled "$port"; then echo "[picker] v8.63 skip ${name}(${port}) — in cooldown" >&2; continue; fi
-    ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:${port}\b" || { echo "[picker] v8.30 skip ${name}(${port}) — port not listening" >&2; continue; }
+    _is_cooled "$port" && { echo "[picker] skip ${name}(${port}) — cooldown" >&2; continue; }
+    ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:${port}\b" || { echo "[picker] skip ${name}(${port}) — not listening" >&2; continue; }
     EXIT=$(curl -s --max-time 8 --socks5 "127.0.0.1:${port}" https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
-    [[ -z "$EXIT" ]] && { echo "[picker] v8.30 skip ${name}(${port}) — exit IP probe failed" >&2; continue; }
-    if _is_cf_ip "$EXIT"; then
-      echo "[picker] v8.30 skip ${name}(${port}) — exit ${EXIT} 在 CF 段 (Pool B 端口异常退化, 检查 xray ss-out-*)" >&2
-      continue
-    fi
+    [[ -z "$EXIT" ]] && { echo "[picker] skip ${name}(${port}) — exit probe failed" >&2; continue; }
+    _is_cf_ip "$EXIT" && { echo "[picker] skip ${name}(${port}) — CF IP ${EXIT}" >&2; continue; }
     _probe_status=$(_probe_replit_reachable "127.0.0.1:${port}")
-    _probe_rc=$?
-    if [[ $_probe_rc -ne 0 ]]; then
-      echo "[picker] v8.30 skip ${name}(${port}) — Replit unreachable via this exit: ${_probe_status}" >&2
-      continue
-    fi
-    echo "[picker] v8.30 ✓ Pool B PICK ${name}(${port}) — exit ${EXIT} (${_probe_status})" >&2
+    [[ $? -ne 0 ]] && { echo "[picker] skip ${name}(${port}) — Replit unreachable: ${_probe_status}" >&2; continue; }
+    echo "[picker] OK Pool B: ${name}(${port}) exit=${EXIT}" >&2
     echo "socks5://127.0.0.1:${port}|${name}@${EXIT}"
     return 0
   done
-  echo "[picker] v8.30 — no Pool B candidate alive, falling through to legacy Pool A (will be all-CF-skipped → DIRECT)" >&2
 
-  # v8.20 — DIRECT-FIRST. 实证 (Apr 27 04:22):
-  #   xray VLESS 上游全跑在 CF Workers, 每条 TCP 出口轮换不同 IP
-  #   (port 10820 五次连续调用得 5 个不同 IP)。cf_clearance 绑定单 IP,
-  #   多 IP 客户端永远拿不到 cf_clearance → CF 卡死。
-  #   DIRECT VPS 45.205.27.69 (AS8796 FASTNET DATA, 稳定单 IP,
-  #   非-CF 段) 历史上 v7.78g+h 经验证能解 CF 且 reCAPTCHA 通过。
-  # 把 DIRECT 提到 SOCKS 前面 (设 BROKER_USE_SOCKS=1 强制走 SOCKS)。
-  if [[ "${BROKER_USE_SOCKS:-0}" != "1" ]]; then
-    DIRECT_EXIT=$(curl -s --max-time 6 https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
-    if [[ -n "$DIRECT_EXIT" ]]; then
-      _direct_probe=$(_probe_replit_reachable "")
-      _direct_rc=$?
-      echo "[picker] v8.20 DIRECT-FIRST probe: replit.com → ${_direct_probe} (exit=${DIRECT_EXIT})" >&2
-      if [[ $_direct_rc -eq 0 ]]; then
-        echo "|DIRECT-VPS@${DIRECT_EXIT}(AS8796-FASTNET)"
-        return 0
-      fi
-      echo "[picker] DIRECT probe failed (${_direct_probe}) — fall through to SOCKS" >&2
-    fi
-  fi
-  # 3) SOCKS clean 池 — fallback (xray 出口轮换, cf_clearance 难拿到)
-  for cand in 10824:Kirino 10826:DigitalOcean 10830:MULTACOM 10828:Misaka 10822:Vultr 10832:Linode 10838:Static 10820:Static 10825:Static 10831:Static 10836:Static 10837:Static 10845:Static; do
-    port="${cand%%:*}"; name="${cand##*:}"
-    ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:${port}\b" || continue
-    EXIT=$(curl -s --max-time 8 --socks5 "127.0.0.1:${port}" https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
-    [[ -z "$EXIT" ]] && continue
-    if _is_cf_ip "$EXIT"; then
-      echo "[picker] skip ${name}(${port}) — exit ${EXIT} 在 CF 段 (cf_clearance 拿不到)" >&2
-      continue
-    fi
-    echo "socks5://127.0.0.1:${port}|${name}@${EXIT}"
-    return 0
-  done
-  # 4) 完全失活硬兜底
-  DIRECT_EXIT2=$(curl -s --max-time 6 https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
-  if [[ -n "$DIRECT_EXIT2" ]]; then
-    echo "|DIRECT-VPS@${DIRECT_EXIT2}(AS8796-FASTNET-tail)"
-    return 0
-  fi
-  echo "|DIRECT-VPS@45.205.27.69(AS8796-FASTNET-fallback)"
-  return 0
+  DIRECT_EXIT=$(curl -s --max-time 6 https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
+  echo "[picker] DIRECT fallback exit=${DIRECT_EXIT}" >&2
+  echo "|DIRECT-VPS@${DIRECT_EXIT:-45.205.27.248}"
 }
+
 _picked="$(_pick_browser_proxy)"
 export BROWSER_PROXY="${_picked%%|*}"
-# v7.95 — export broker exit family so register can align google_proxy_route
-#         to broker's exit IP (avoid IP串台/recaptcha code:1).
-#  socks  -> google-route pinned to SAME socks port (token-gen IP == submit IP)
-#  warp   -> google-route SKIPPED (let *.google traffic exit via WARP too,
-#            consistent with broker's WARP exit; user-validated WARP works
-#            for sign-up when used end-to-end consistently)
-#  direct -> google-route SKIPPED (let *.google exit via VPS IP same as broker)
 _brox="$BROWSER_PROXY"
 if [[ -z "$_brox" ]]; then
-  export BROKER_EXIT_FAMILY="direct"
-  unset BROKER_EXIT_SOCKS_PORT
+  export BROKER_EXIT_FAMILY="direct"; unset BROKER_EXIT_SOCKS_PORT
 elif [[ "$_brox" == *":40000" ]]; then
-  export BROKER_EXIT_FAMILY="warp"
-  unset BROKER_EXIT_SOCKS_PORT
+  export BROKER_EXIT_FAMILY="warp"; unset BROKER_EXIT_SOCKS_PORT
 else
   export BROKER_EXIT_FAMILY="socks"
   export BROKER_EXIT_SOCKS_PORT="$(echo "$_brox" | sed -E 's/.*:([0-9]+).*/\1/')"
 fi
-echo "[start-browser-model] BROWSER_PROXY=${BROWSER_PROXY}  (chosen: ${_picked##*|})"
-echo "[start-browser-model] BROKER_EXIT_FAMILY=${BROKER_EXIT_FAMILY} BROKER_EXIT_SOCKS_PORT=${BROKER_EXIT_SOCKS_PORT:-N/A}"
-# v7.95b — 写入跨进程共享文件 (api-server spawn 的 python 子进程从此处读)
+echo "[start-browser-model v9] BROWSER_PROXY=${BROWSER_PROXY} (${_picked##*|})"
+echo "[start-browser-model v9] BROKER_EXIT_FAMILY=${BROKER_EXIT_FAMILY} SOCKS_PORT=${BROKER_EXIT_SOCKS_PORT:-N/A}"
+echo "[start-browser-model v9] LANG=${LANG} LC_ALL=${LC_ALL}"
+echo "[start-browser-model v9] CAPSOLVER_API_KEY=$([ -n "${CAPSOLVER_API_KEY}" ] && echo 'SET' || echo 'not set')"
+
 mkdir -p /tmp/replit-broker
-printf '{"family":"%s","port":"%s","ts":%d}\n' "${BROKER_EXIT_FAMILY}" "${BROKER_EXIT_SOCKS_PORT:-}" "$(date +%s)" > /tmp/replit-broker/exit.json
-echo "[start-browser-model] wrote /tmp/replit-broker/exit.json"
+printf '{"family":"%s","port":"%s","ts":%d}\n' \
+  "${BROKER_EXIT_FAMILY}" "${BROKER_EXIT_SOCKS_PORT:-}" "$(date +%s)" \
+  > /tmp/replit-broker/exit.json
 
-# v7.67 — sanity log warp-cli (只读, 绝不修改)
-if command -v warp-cli >/dev/null 2>&1; then
-  _wmode="$(warp-cli --accept-tos settings 2>/dev/null | grep -E "^\(user set\)Mode:" | head -1)"
-  echo "[start-browser-model] warp-cli ${_wmode:-(no settings)}"
-  case "$_wmode" in
-    *WarpProxy*) : ;;  # OK, safe
-    *Warp[^P]*|*WarpTunnel*)
-      echo "[start-browser-model] !!! WARP is in TUNNEL mode — SSH 路由可能已坏。脚本不会自动切换，需手工修复 !!!" >&2 ;;
-  esac
-fi
-
-# v7.89 — preflight: kill any orphan chromium owning the broker debug port (9222)
-# before spawning new broker. Without this, pm2 restart of browser-model leaks
-# orphan chromium that holds 9222 (its parent broker died but chromium kept
-# running with --user-data-dir=/tmp/broker-chromium-profile + --remote-debugging
-# -port=9222). Next broker spawns fresh chromium that fails to bind 9222 (port
-# taken) → all CDP traffic still goes to the dead-broker-orphan → playwright
-# connect_over_cdp times out 180s after WebSocket connects (the orphan replies
-# to /devtools/browser/<uuid> handshake but never to subsequent CDP commands
-# because its parent renderer process tree is half-dead and spamming SSL
-# net_error -178). Downstream visible failure is signup_username_field_missing
-# but real cause is broker-chromium attach hang.
-_kill_orphan_broker_chromium() {
-  local pid
-  # 1) anything whose cmdline mentions remote-debugging-port=9222 (the broker chromium tree)
-  for pid in $(pgrep -f "remote-debugging-port=9222" 2>/dev/null); do
-    kill -9 "$pid" 2>/dev/null && echo "[start-browser-model] killed orphan chromium pid=$pid (--remote-debugging-port=9222)"
-  done
-  # 2) anything still bound to :9222 (extra safety)
-  pid=$(ss -lntp 2>/dev/null | grep ':9222' | grep -oP 'pid=\K[0-9]+' | head -1)
-  if [[ -n "$pid" ]]; then
-    kill -9 "$pid" 2>/dev/null && echo "[start-browser-model] killed leftover pid=$pid still bound to :9222"
-  fi
-  # 3) wipe singleton locks in shared user-data-dir so new chromium does not refuse to start
-  rm -f /tmp/broker-chromium-profile/Singleton* 2>/dev/null
-  # 4) brief delay for kernel to release port + FDs
-  sleep 0.5
-}
-_kill_orphan_broker_chromium
-
-# v7.66 — ensure dbus system socket exists (chromium D-Bus FATAL fix)
+# ── dbus ─────────────────────────────────────────────────────────────────
 if [ ! -S /var/run/dbus/system_bus_socket ] || ! pgrep -f "dbus-daemon --system --fork" >/dev/null 2>&1; then
   mkdir -p /var/run/dbus
   /usr/bin/dbus-daemon --system --fork 2>/dev/null || true
 fi
 
-# v8.64 — pre-bind: release port 8092 held by previous instance before exec.
-# Without this, PM2 rapid-restart leaves the old node process still bound,
-# causing EADDRINUSE → crash loop (78+ restarts witnessed 2026-05-11).
-_stale=$(ss -lntp 2>/dev/null | grep ':8092' | grep -oP 'pid=\K[0-9]+' | head -1)
-if [[ -n "$_stale" ]]; then
-  kill -9 "$_stale" 2>/dev/null && echo "[start-browser-model] v8.64 killed stale pid=$_stale on :8092"
-else
-  fuser -k 8092/tcp 2>/dev/null && echo "[start-browser-model] v8.64 fuser cleared :8092" || true
+# ── v9: Xvfb 多显示器探针 + 健康检查 ────────────────────────────────────
+_xvfb_display=""
+for _xd in 99 100 77 102; do
+  if [ -S "/tmp/.X11-unix/X${_xd}" ] && xdpyinfo -display ":${_xd}" >/dev/null 2>&1; then
+    _xvfb_display=":${_xd}"
+    echo "[start-browser-model v9] Xvfb healthy on :${_xd}"
+    break
+  fi
+done
+
+if [[ -z "$_xvfb_display" ]]; then
+  echo "[start-browser-model v9] Xvfb not found — starting :99"
+  pkill -f "Xvfb :99" 2>/dev/null; sleep 0.5
+  Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render &
+  sleep 2
+  if [ -S "/tmp/.X11-unix/X99" ]; then
+    _xvfb_display=":99"
+    echo "[start-browser-model v9] Xvfb :99 started OK"
+  else
+    echo "[start-browser-model v9] Xvfb :99 start FAILED — running headless"
+  fi
 fi
+[[ -n "$_xvfb_display" ]] && export DISPLAY="$_xvfb_display"
+
+# ── v9: 彻底清理孤儿 Chromium ────────────────────────────────────────────
+# 清理占用 CDP 9222 端口的进程
+for _pid in $(pgrep -f "remote-debugging-port=9222" 2>/dev/null); do
+  kill -9 "$_pid" 2>/dev/null && echo "[start-browser-model v9] killed orphan chromium(9222) pid=$_pid"
+done
+_cdp_pid=$(ss -lntp 2>/dev/null | grep ":9222" | grep -oP "pid=\K[0-9]+" | head -1)
+[[ -n "$_cdp_pid" ]] && kill -9 "$_cdp_pid" 2>/dev/null
+
+# 清理超过 5 分钟的孤儿 Chrome 进程（pydoll 残留）
+for _pid in $(pgrep -f "chrome.*--no-sandbox" 2>/dev/null | head -10); do
+  _age=$(ps -o etimes= -p "$_pid" 2>/dev/null | tr -d ' ')
+  if [[ "${_age:-0}" -gt 300 ]]; then
+    kill -9 "$_pid" 2>/dev/null && echo "[start-browser-model v9] killed stale chrome pid=$_pid age=${_age}s"
+  fi
+done
+
+# 清理 profile 锁文件
+rm -f /tmp/broker-chromium-profile/Singleton* 2>/dev/null
+rm -f /tmp/pydoll-*/Singleton* 2>/dev/null
+sleep 0.5
+
+# ── release port 8092 ────────────────────────────────────────────────────
+_stale=$(ss -lntp 2>/dev/null | grep ":8092" | grep -oP "pid=\K[0-9]+" | head -1)
+[[ -n "$_stale" ]] && kill -9 "$_stale" 2>/dev/null && echo "[start-browser-model v9] cleared stale :8092"
 sleep 0.3
 
-exec node --enable-source-maps /root/browser-model/artifacts/api-server/dist/index.mjs
+exec node --enable-source-maps /data/browser-model/dist/index.mjs

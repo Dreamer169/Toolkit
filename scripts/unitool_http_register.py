@@ -600,7 +600,10 @@ async def _pydoll_register(
             if rnd >= 1:
                 try:
                     from pydoll.commands.input_commands import InputCommands
-                    from pydoll.constants import MouseEventType, MouseButton
+                    try:
+                        from pydoll.protocol.input.types import MouseEventType, MouseButton
+                    except ImportError:
+                        from pydoll.constants import MouseEventType, MouseButton
                     _targets = await tab._browser.get_targets() if hasattr(tab, '_browser') else []
                     _cf_t = next((_t for _t in _targets
                                   if 'challenges.cloudflare.com' in _t.get('url','')), None)
