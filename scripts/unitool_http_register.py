@@ -475,6 +475,24 @@ async def _pydoll_register(
 
     # FIX: 使用 pick_sticky(email) 确保同一账号全流程使用同一 IP
     port = resi_port or (_rpool.pick_sticky(email) if _RESI else _pick_port(hash(email)))
+
+    # PROXY HEALTH CHECK: 在Chrome启动前探测SOCKS5端口连通性，死端口立即返回
+    # 避免因代理不通导致浏览器挂起白等240s
+    _ck_host = "127.0.0.1" if isinstance(port, int) else str(port).rsplit(":", 1)[0]
+    _ck_port = port if isinstance(port, int) else int(str(port).rsplit(":", 1)[-1])
+    try:
+        _ck_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        _ck_s.settimeout(4)
+        _ck_err = _ck_s.connect_ex((_ck_host, _ck_port))
+        _ck_s.close()
+        if _ck_err != 0:
+            log(f"[pydoll] ✗ 代理端口不通 port={port} errno={_ck_err} → 快速失败")
+            return {"ok": False, "error": "proxy_unreachable", "port": port}
+        log(f"[pydoll] ✓ 代理端口可达 port={port}")
+    except Exception as _ck_e:
+        log(f"[pydoll] 代理探测异常: {_ck_e} → 快速失败")
+        return {"ok": False, "error": f"proxy_unreachable:{_ck_e}", "port": port}
+
     log(f"[pydoll] 启动 Chrome RESI={port} email={email}")
 
     opt = ChromiumOptions()
@@ -565,9 +583,9 @@ async def _pydoll_register(
                     return pm
             return ""
 
-        # Phase 1: Invisible auto-solve (good RESI IPs, ~45s) [bypass_v9_applied]
-        log(f"  [{label}] [phase1] waiting natural token 45s...")
-        tok = await _poll_token(45)
+        # Phase 1: Invisible auto-solve (good RESI IPs) — 20s (实测好IP <15s出token)
+        log(f"  [{label}] [phase1] waiting natural token 20s...")
+        tok = await _poll_token(20)
         if tok:
             log(f"  [{label}] natural token len={len(tok)}")
             return True
@@ -585,14 +603,14 @@ async def _pydoll_register(
             if ni > 0:
                 log(f"  [{label}] CF iframe at {_wi+1}s")
                 break
-        for rnd in range(3):  # bypass_v9_applied: 2→3 rounds
+        for rnd in range(2):  # 3→2 rounds，降低总超时
             try:
                 _t0bp = time.time()
-                await tab._bypass_cloudflare({}, time_to_wait_captcha=30)
+                await tab._bypass_cloudflare({}, time_to_wait_captcha=20)  # 30→20s
                 log(f"  [{label}] bypass click rnd={rnd+1} took={time.time()-_t0bp:.1f}s")
             except Exception as _be:
                 log(f"  [{label}] bypass click rnd={rnd+1} err: {_be}")
-            tok = await _poll_token(20)
+            tok = await _poll_token(12)  # 20→12s
             if tok:
                 log(f"  [{label}] managed token rnd={rnd+1} len={len(tok)}")
                 return True
@@ -645,7 +663,7 @@ async def _pydoll_register(
             await tab.execute_script(_PM_JS, return_by_value=True)
         except Exception as _re:
             log(f"  [{label}] reload err: {_re}")
-        tok = await _poll_token(30)  # bypass_v9_applied: 20→30s
+        tok = await _poll_token(15)  # 30→15s
         if tok:
             log(f"  [{label}] reload natural token len={len(tok)}")
             return True
@@ -660,10 +678,10 @@ async def _pydoll_register(
             if ni > 0:
                 break
         try:
-            await tab._bypass_cloudflare({}, time_to_wait_captcha=35)  # bypass_v9_applied
+            await tab._bypass_cloudflare({}, time_to_wait_captcha=25)  # 35→25s
         except Exception as _be:
             log(f"  [{label}] reload bypass err: {_be}")
-        tok = await _poll_token(30)  # bypass_v9_applied: 20→30s
+        tok = await _poll_token(15)  # 30→15s
         if tok:
             log(f"  [{label}] reload managed token len={len(tok)}")
             return True
@@ -934,7 +952,7 @@ async def http_register_hybrid(
     """
     # FIX: 使用 pick_sticky(email) 保证同账号全流程 IP 一致；
     # bypass 失败时 report_ref_failure → sticky 自动重新分配（不再手动换端口）
-    _BYPASS_FAIL_ERRORS = ("bypass_failed", "token_empty_after_bypass")
+    _BYPASS_FAIL_ERRORS = ("bypass_failed", "token_empty_after_bypass", "proxy_unreachable")
     # Fix-D: proxy/cert errors also warrant a port rotation retry
     _PROXY_ERRORS_SUBSTR = (
         "ERR_CERT_AUTHORITY_INVALID",
