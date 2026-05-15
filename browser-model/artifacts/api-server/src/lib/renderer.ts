@@ -1319,7 +1319,7 @@ async function newFreshContext(): Promise<BrowserContext> {
     hasTouch: false,
     locale: "en-US",
     timezoneId: _effectiveTz,
-    colorScheme: "dark",
+    colorScheme: "light",
     ignoreHTTPSErrors: true,
     extraHTTPHeaders: {
       "Accept-Language": "en-US,en;q=0.9",
@@ -1397,7 +1397,7 @@ async function getStickyContext(hostname: string): Promise<BrowserContext> {
     hasTouch: false,
     locale: "en-US",
     timezoneId: _effectiveTz,
-    colorScheme: "dark",
+    colorScheme: "light",
     ignoreHTTPSErrors: true,
     extraHTTPHeaders: {
       "Accept-Language": "en-US,en;q=0.9",

@@ -17,8 +17,15 @@
 
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import type { WebSocket } from "ws";
+import { existsSync as _fse } from "node:fs";
 import { logger } from "./logger.js";
 import { resolveGeoProfile, DEFAULT_GEO, type GeoProfile } from "./geo-resolver.js";
+
+/** True when the fingerprint-chromium binary is present on this host.
+ *  Used to conditionally skip JS-level GPU patches that would conflict with
+ *  kernel-level spoofing (fingerprint-chromium sets NVIDIA RTX; JS override to
+ *  Intel Mesa creates a worker/main-thread inconsistency caught by CreepJS). */
+const _USE_FP_CHROMIUM: boolean = _fse("/opt/fingerprint-chromium/squashfs-root/opt/ungoogled-chromium/chrome");
 
 type CDPSession = Awaited<ReturnType<BrowserContext["newCDPSession"]>>;
 
@@ -38,8 +45,8 @@ export const sessionRegistry = new Map<string, CdpSession_>();
  * / WebRTC IP 泄漏 / mediaDevices / Intl 时区一致性 / Function.toString 泄漏。
  */
 
-export const STEALTH_WORKER_BODY = "\n      try { Object.defineProperty(WorkerNavigator.prototype, 'hardwareConcurrency', { get: function(){return 8;}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'deviceMemory', { get: function(){return 8;}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'platform', { get: function(){return 'Linux x86_64';}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'language', { get: function(){return 'en-US';}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'languages', { get: function(){return ['en-US','en'];}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'userAgent', { get: function(){return 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36';}, configurable: true }); } catch (e) {}\n      try {\n        var brands = [{brand:'Chromium',version:'144'},{brand:'Not:A-Brand',version:'99'},{brand:'Google Chrome',version:'144'}];\n        var fullList = [{brand:'Chromium',version:'144.0.7559.132'},{brand:'Not:A-Brand',version:'99.0.0.0'},{brand:'Google Chrome',version:'144.0.7559.132'}];\n        var high = { architecture:'x86', bitness:'64', model:'', mobile:false, platform:'Linux', platformVersion:'6.8.0', uaFullVersion:'144.0.7559.132', wow64:false, formFactors:['Desktop'], fullVersionList:fullList, brands:brands };\n        var uaData = { brands: brands, mobile: false, platform: 'Linux',\n          getHighEntropyValues: function(hints){ var o={brands:brands, mobile:false, platform:'Linux'}; (hints||[]).forEach(function(h){ if(h in high) o[h]=high[h]; }); return Promise.resolve(o); },\n          toJSON: function(){ return {brands:brands, mobile:false, platform:'Linux'}; }\n        };\n        Object.defineProperty(WorkerNavigator.prototype, 'userAgentData', { get: function(){return uaData;}, configurable: true });\n      } catch (e) {}\n      try {\n        if (typeof WebGLRenderingContext !== 'undefined') {\n          var gp = WebGLRenderingContext.prototype.getParameter;\n          WebGLRenderingContext.prototype.getParameter = function(p){ if(p===37445)return 'Google Inc. (Intel)'; if(p===37446)return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)'; return gp.apply(this, arguments); };\n        }\n        if (typeof WebGL2RenderingContext !== 'undefined') {\n          var gp2 = WebGL2RenderingContext.prototype.getParameter;\n          WebGL2RenderingContext.prototype.getParameter = function(p){ if(p===37445)return 'Google Inc. (Intel)'; if(p===37446)return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)'; return gp2.apply(this, arguments); };\n        }\n      } catch (e) {}\n      try {\n        var gtoOrig = Date.prototype.getTimezoneOffset;\n        Date.prototype.getTimezoneOffset = function(){ var v = gtoOrig.call(this); if (v === 0) { var m = this.getUTCMonth(); return (m>=2 && m<=10) ? 420 : 480; } return v; };\n      } catch (e) {}\n      try {\n        var roOrig = Intl.DateTimeFormat.prototype.resolvedOptions;\n        Intl.DateTimeFormat.prototype.resolvedOptions = function(){ var r = roOrig.apply(this, arguments); if (!r.timeZone || r.timeZone === 'UTC') r.timeZone = 'America/Los_Angeles'; if (!r.locale || /^(zh|en-GB|de|fr|ja|ru|ko)/.test(r.locale)) r.locale = 'en-US'; return r; };\n      } catch (e) {}\n      try {\n        var _wself = (typeof self !== 'undefined') ? self : this;\n        if (!_wself.chrome) _wself.chrome = {};\n        var _wmk=function(){return{addListener:function(){},removeListener:function(){},hasListener:function(){return false;},hasListeners:function(){return false;}};};\n        _wself.chrome.runtime={id:undefined,lastError:null,onConnect:_wmk(),onMessage:_wmk(),onInstalled:_wmk(),onStartup:_wmk(),getManifest:function(){return undefined;},getPlatformInfo:function(cb){var i={os:'linux',arch:'x86-64',nacl_arch:'x86-64'};if(cb)cb(i);return Promise.resolve(i);}};\n        var _wt0=Date.now()/1000-(Math.random()*0.3+0.1);\n        _wself.chrome.loadTimes=function(){return{requestTime:_wt0,startLoadTime:_wt0,commitLoadTime:_wt0+0.05,finishDocumentLoadTime:_wt0+0.4,finishLoadTime:_wt0+0.5,firstPaintTime:_wt0+0.15,firstPaintAfterLoadTime:0,navigationType:'Other',wasFetchedViaSpdy:true,wasNpnNegotiated:true,npnNegotiatedProtocol:'h2',wasAlternateProtocolAvailable:false,connectionInfo:'h2'};};\n        _wself.chrome.csi=function(){return{startE:Date.now(),onloadT:Date.now(),pageT:Math.random()*800+200,tran:15};};\n      } catch(e) {}\n      try {\n        if(typeof AudioBuffer!=='undefined'&&AudioBuffer.prototype.getChannelData){\n          var _wOrigGCD=AudioBuffer.prototype.getChannelData;\n          AudioBuffer.prototype.getChannelData=function(){var d=_wOrigGCD.apply(this,arguments);try{var f=1+(Math.random()-0.5)*1e-7;for(var i=0;i<Math.min(d.length,512);i++)d[i]=d[i]*f;}catch(ee){}return d;};\n        }\n      } catch(e) {}\n    ";
-export const STEALTH_WORKER_IIFE = '(function(){' + STEALTH_WORKER_BODY + '})();';
+export const STEALTH_WORKER_BODY = "\n      try { Object.defineProperty(WorkerNavigator.prototype, 'hardwareConcurrency', { get: function(){return 8;}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'deviceMemory', { get: function(){return 8;}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'platform', { get: function(){return 'Linux x86_64';}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'language', { get: function(){return 'en-US';}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'languages', { get: function(){return ['en-US','en'];}, configurable: true }); } catch (e) {}\n      try { Object.defineProperty(WorkerNavigator.prototype, 'userAgent', { get: function(){return 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36';}, configurable: true }); } catch (e) {}\n      try {\n        var brands = [{brand:'Chromium',version:'144'},{brand:'Not:A-Brand',version:'99'},{brand:'Google Chrome',version:'144'}];\n        var fullList = [{brand:'Chromium',version:'144.0.7559.132'},{brand:'Not:A-Brand',version:'99.0.0.0'},{brand:'Google Chrome',version:'144.0.7559.132'}];\n        var high = { architecture:'x86', bitness:'64', model:'', mobile:false, platform:'Linux', platformVersion:'6.8.0', uaFullVersion:'144.0.7559.132', wow64:false, formFactors:['Desktop'], fullVersionList:fullList, brands:brands };\n        var uaData = { brands: brands, mobile: false, platform: 'Linux',\n          getHighEntropyValues: function(hints){ var o={brands:brands, mobile:false, platform:'Linux'}; (hints||[]).forEach(function(h){ if(h in high) o[h]=high[h]; }); return Promise.resolve(o); },\n          toJSON: function(){ return {brands:brands, mobile:false, platform:'Linux'}; }\n        };\n        Object.defineProperty(WorkerNavigator.prototype, 'userAgentData', { get: function(){return uaData;}, configurable: true });\n      } catch (e) {}\n      try {\n        if (!__bmFpActive && typeof WebGLRenderingContext !== 'undefined') {\n          var gp = WebGLRenderingContext.prototype.getParameter;\n          WebGLRenderingContext.prototype.getParameter = function(p){ if(p===37445)return 'Google Inc. (Intel)'; if(p===37446)return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)'; return gp.apply(this, arguments); };\n        }\n        if (!__bmFpActive && typeof WebGL2RenderingContext !== 'undefined') {\n          var gp2 = WebGL2RenderingContext.prototype.getParameter;\n          WebGL2RenderingContext.prototype.getParameter = function(p){ if(p===37445)return 'Google Inc. (Intel)'; if(p===37446)return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)'; return gp2.apply(this, arguments); };\n        }\n      } catch (e) {}\n      try {\n        var gtoOrig = Date.prototype.getTimezoneOffset;\n        Date.prototype.getTimezoneOffset = function(){ var v = gtoOrig.call(this); if (v === 0) { var m = this.getUTCMonth(); return (m>=2 && m<=10) ? 420 : 480; } return v; };\n      } catch (e) {}\n      try {\n        var roOrig = Intl.DateTimeFormat.prototype.resolvedOptions;\n        Intl.DateTimeFormat.prototype.resolvedOptions = function(){ var r = roOrig.apply(this, arguments); if (!r.timeZone || r.timeZone === 'UTC') r.timeZone = 'America/Los_Angeles'; if (!r.locale || /^(zh|en-GB|de|fr|ja|ru|ko)/.test(r.locale)) r.locale = 'en-US'; return r; };\n      } catch (e) {}\n      try {\n        var _wself = (typeof self !== 'undefined') ? self : this;\n        if (!_wself.chrome) _wself.chrome = {};\n        var _wmk=function(){return{addListener:function(){},removeListener:function(){},hasListener:function(){return false;},hasListeners:function(){return false;}};};\n        _wself.chrome.runtime={id:undefined,lastError:null,onConnect:_wmk(),onMessage:_wmk(),onInstalled:_wmk(),onStartup:_wmk(),getManifest:function(){return undefined;},getPlatformInfo:function(cb){var i={os:'linux',arch:'x86-64',nacl_arch:'x86-64'};if(cb)cb(i);return Promise.resolve(i);}};\n        var _wt0=Date.now()/1000-(Math.random()*0.3+0.1);\n        _wself.chrome.loadTimes=function(){return{requestTime:_wt0,startLoadTime:_wt0,commitLoadTime:_wt0+0.05,finishDocumentLoadTime:_wt0+0.4,finishLoadTime:_wt0+0.5,firstPaintTime:_wt0+0.15,firstPaintAfterLoadTime:0,navigationType:'Other',wasFetchedViaSpdy:true,wasNpnNegotiated:true,npnNegotiatedProtocol:'h2',wasAlternateProtocolAvailable:false,connectionInfo:'h2'};};\n        _wself.chrome.csi=function(){return{startE:Date.now(),onloadT:Date.now(),pageT:Math.random()*800+200,tran:15};};\n      } catch(e) {}\n      try {\n        if(typeof AudioBuffer!=='undefined'&&AudioBuffer.prototype.getChannelData){\n          var _wOrigGCD=AudioBuffer.prototype.getChannelData;\n          AudioBuffer.prototype.getChannelData=function(){var d=_wOrigGCD.apply(this,arguments);try{var f=1+(Math.random()-0.5)*1e-7;for(var i=0;i<Math.min(d.length,512);i++)d[i]=d[i]*f;}catch(ee){}return d;};\n        }\n      } catch(e) {}\n    ";
+export const STEALTH_WORKER_IIFE = `(function(){var __bmFpActive=${_USE_FP_CHROMIUM};` + STEALTH_WORKER_BODY + '})();';
 
 const STEALTH_INIT = `
 (() => {
@@ -265,12 +272,13 @@ const STEALTH_INIT = `
     }
   } catch (_) {}
 
-  // Intl/timezone 一致性 —— 上下文 pin 了 LA 时区，加固 SPA bundles 在 init 之前的 Date 调用
+  // Intl/timezone 一致性 —— 跟随 session geo 动态时区（window.__bmTz 由 addInitScript 注入）
   try {
+    const _bmTz = (typeof window !== 'undefined' && (window as any).__bmTz) || "America/Los_Angeles";
     const origRO = Intl.DateTimeFormat.prototype.resolvedOptions;
     Intl.DateTimeFormat.prototype.resolvedOptions = function resolvedOptions() {
       const r = origRO.apply(this, arguments);
-      if (!r.timeZone || r.timeZone === "UTC") r.timeZone = "America/Los_Angeles";
+      if (!r.timeZone || r.timeZone === "UTC") r.timeZone = _bmTz;
       if (!r.locale || /^(zh|en-GB|de|fr|ja|ru|ko)/.test(r.locale)) r.locale = "en-US";
       return r;
     };
@@ -280,9 +288,27 @@ const STEALTH_INIT = `
     const origGTO = Date.prototype.getTimezoneOffset;
     Date.prototype.getTimezoneOffset = function getTimezoneOffset() {
       const v = origGTO.call(this);
+      // Only apply fallback when runtime claims UTC offset; use actual Intl to derive correct offset
       if (v === 0) {
-        const month = this.getUTCMonth();
-        return (month >= 2 && month <= 10) ? 420 : 480;
+        try {
+          const tz = (typeof window !== 'undefined' && (window as any).__bmTz) || "America/Los_Angeles";
+          const fmt = new (origRO.apply.bind(Intl.DateTimeFormat, [null, [{ timeZone: tz }]]) as any)();
+          const now = new Date();
+          const utcMs = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes(), now.getSeconds());
+          const localeStr = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour12: false,
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(now);
+          void fmt; void localeStr;
+          // Simpler: derive from known TZ offset via Intl
+          const diffMs = new Date(new Intl.DateTimeFormat('en-CA', { timeZone: tz, hour12: false,
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(now)).getTime() - utcMs;
+          return -Math.round(diffMs / 60000);
+        } catch (_) {
+          // fallback: America/Los_Angeles PDT/PST
+          const month = this.getUTCMonth();
+          return (month >= 2 && month <= 10) ? 420 : 480;
+        }
       }
       return v;
     };
@@ -486,11 +512,11 @@ const STEALTH_INIT = `
         Object.defineProperty(WorkerNavigator.prototype, 'userAgentData', { get: function(){return uaData;}, configurable: true });
       } catch (e) {}
       try {
-        if (typeof WebGLRenderingContext !== 'undefined') {
+        if (!__bmFpActive && typeof WebGLRenderingContext !== 'undefined') {
           var gp = WebGLRenderingContext.prototype.getParameter;
           WebGLRenderingContext.prototype.getParameter = function(p){ if(p===37445)return 'Google Inc. (Intel)'; if(p===37446)return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)'; return gp.apply(this, arguments); };
         }
-        if (typeof WebGL2RenderingContext !== 'undefined') {
+        if (!__bmFpActive && typeof WebGL2RenderingContext !== 'undefined') {
           var gp2 = WebGL2RenderingContext.prototype.getParameter;
           WebGL2RenderingContext.prototype.getParameter = function(p){ if(p===37445)return 'Google Inc. (Intel)'; if(p===37446)return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)'; return gp2.apply(this, arguments); };
         }
@@ -500,8 +526,9 @@ const STEALTH_INIT = `
         Date.prototype.getTimezoneOffset = function(){ var v = gtoOrig.call(this); if (v === 0) { var m = this.getUTCMonth(); return (m>=2 && m<=10) ? 420 : 480; } return v; };
       } catch (e) {}
       try {
+        var _bmTzW = (typeof __bmTz !== 'undefined' && __bmTz) || 'America/Los_Angeles';
         var roOrig = Intl.DateTimeFormat.prototype.resolvedOptions;
-        Intl.DateTimeFormat.prototype.resolvedOptions = function(){ var r = roOrig.apply(this, arguments); if (!r.timeZone || r.timeZone === 'UTC') r.timeZone = 'America/Los_Angeles'; if (!r.locale || /^(zh|en-GB|de|fr|ja|ru|ko)/.test(r.locale)) r.locale = 'en-US'; return r; };
+        Intl.DateTimeFormat.prototype.resolvedOptions = function(){ var r = roOrig.apply(this, arguments); if (!r.timeZone || r.timeZone === 'UTC') r.timeZone = _bmTzW; if (!r.locale || /^(zh|en-GB|de|fr|ja|ru|ko)/.test(r.locale)) r.locale = 'en-US'; return r; };
       } catch (e) {}
     }).toString() + ')();';
 
@@ -510,7 +537,7 @@ const STEALTH_INIT = `
         // module worker 不能用 importScripts，跳过（少见）
         if (opts && opts.type === 'module') return src;
         var urlStr = (src instanceof URL) ? src.href : String(src);
-        var body = STEALTH_WORKER + ";importScripts(" + JSON.stringify(urlStr) + ");";
+        var body = "var __bmFpActive=" + String(!!(window as any).__bmFpActive) + ";var __bmTz=" + JSON.stringify((window as any).__bmTz || 'America/Los_Angeles') + ";\n" + STEALTH_WORKER + ";importScripts(" + JSON.stringify(urlStr) + ");";
         var blob = new Blob([body], { type: 'application/javascript' });
         return URL.createObjectURL(blob);
       } catch (e) { return src; }
@@ -970,8 +997,8 @@ export class CdpSession {
       ...((_storageState !== undefined) ? { storageState: _storageState } : {}),
     });
     if (this.closed) { await this.ctx.close().catch(()=>{}); this.ctx = null; return; }
-    // inject per-session fingerprint seed BEFORE stealth script so Canvas/Audio RNG is stable
-    await this.ctx.addInitScript(`window.__bmFpSeed = ${this.fpSeed};`);
+    // inject per-session fingerprint seed, timezone, and fp-chromium flag BEFORE stealth script
+    await this.ctx.addInitScript(`window.__bmFpSeed = ${this.fpSeed}; window.__bmTz = ${JSON.stringify(geo.timezone)}; window.__bmFpActive = ${_USE_FP_CHROMIUM};`);
     await this.ctx.addInitScript({ content: STEALTH_INIT });
     // === 服务端拦截 ServiceWorker 主脚本: prepend stealth ===
     // SW spec 禁止 blob:/data: URL, 同源 Blob hook 必失败. 必须在 HTTP 响应层注入.
