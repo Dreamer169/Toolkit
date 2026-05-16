@@ -8,8 +8,8 @@ CF_IP_RANGES = [
     '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22',
 ]
 
-POOL_STATE_FILE = '/tmp/cf_pool_state.json'
-ARKOSE_STATS_FILE = '/tmp/cf_arkose_stats.json'
+POOL_STATE_FILE = '/var/lib/toolkit/cf_pool_state.json'
+ARKOSE_STATS_FILE = '/var/lib/toolkit/cf_arkose_stats.json'
 _pool_lock = threading.Lock()
 _available = []
 _in_use = {}
