@@ -415,32 +415,17 @@ class BaseController:
                             break
                     except Exception:
                         pass
-                    # v9.60: 全流程 handle_captcha 重试 (14s 和 28s 各一次)
-                    # patch6/Bug-B: 补全 v9.71 early_confirmed 守卫：
-                    # retry checkpoint 到达时若 CAPTCHA 仍在但 early_confirmed=True
-                    # → 上次是假阳性（Bug-A 30s 按压被拒但 px-captcha 短暂 empty）
-                    # → reset 后放行重试；真阳性时外层早已 break 不会到达此处
+                    # patch7: CAPTCHA仍在时不重跑handle_captcha，直接退出换CF IP (v7.78r行为)
+                    # 原patch6做法是在脏页面原地重跑handle_captcha，往往无效且浪费时间。
+                    # 现改为：14s内未消失 → 立即return False → 外层ban当前IP → 换新CF IP重试。
                     if _cc_i in (7, 14, 21) and _cap_retry_count < 3:
-                        _ec_now = getattr(self, '_captcha_early_confirmed', False)
-                        if _ec_now:
-                            self._captcha_early_confirmed = False
-                            print(f'[register] [captcha-clear] @{_cc_i*2}s early_confirmed 假阳性 reset → 放行重试', flush=True)
                         _cap_retry_count += 1
-                        print(f'[register] [captcha-clear] patch6 重试#{_cap_retry_count} at {_cc_i*2}s', flush=True)
+                        print(f'[register] [captcha-clear] patch7: CAPTCHA仍在 @{_cc_i*2}s → 直接退出换CF IP（不重跑handle_captcha）', flush=True)
                         try:
-                            _retry_ok = self.handle_captcha(page, blob_container)
-                            print(f'[register] [captcha-clear] 重试#{_cap_retry_count} -> {_retry_ok}', flush=True)
-                            _ur2 = page.url or ""
-                            if "signup.live.com" not in _ur2:
-                                _cap_text_cleared = True
-                                print(f'[register] [captcha-clear] 重试后跳离 -> {_ur2[:80]}', flush=True)
-                                break
-                            # patch6/Bug-B: 仍在 signup → 本次重试的 early_confirmed 也是假阳性 reset
-                            if getattr(self, '_captcha_early_confirmed', False):
-                                self._captcha_early_confirmed = False
-                                print(f'[register] [captcha-clear] 重试#{_cap_retry_count} 后仍在 signup → reset early_confirmed', flush=True)
-                        except Exception as _rte:
-                            print(f'[register] [captcha-clear] 重试#{_cap_retry_count} 异常: {_rte}', flush=True)
+                            page.screenshot(path=f"/tmp/outlook_captcha_exit_{email}_{_cc_i*2}s.png")
+                        except Exception:
+                            pass
+                        return False, f"验证码处理失败(patch7: {_cc_i*2}s仍在→换IP)", email
                     if _cc_i % 5 == 0:
                         print(f"[register] [captcha-clear] {_cc_i*2}s elapsed (retries={_cap_retry_count})", flush=True)
                     page.wait_for_timeout(2000)
@@ -3558,3 +3543,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
