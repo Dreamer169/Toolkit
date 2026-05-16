@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// xray-update-bestcfip.js v2.0
+// xray-update-bestcfip.js v2.1
 // 从 joname1/BestCFip 获取最优 CF IP
 // - 若 xray.json 有 VLESS 出口: 随机分配到出口地址（原逻辑）
 // - 若无 VLESS 出口: 把优选 IP 注入 cf_ip_pool + 触发 retest（新逻辑）
@@ -8,9 +8,9 @@ const https   = require("https");
 const fs      = require("fs");
 const { execSync, spawnSync } = require("child_process");
 
-const CFG         = "/root/Toolkit/xray.json";
-const POOL_STATE  = "/var/lib/toolkit/cf_pool_state.json";
-const POOL_API    = "/root/Toolkit/artifacts/api-server/cf_pool_api.py";
+const CFG        = "/root/Toolkit/xray.json";   // /root/Toolkit -> /data/Toolkit symlink, same on both servers
+const POOL_STATE = "/var/lib/toolkit/cf_pool_state.json";
+const POOL_API   = "/root/Toolkit/artifacts/api-server/cf_pool_api.py";
 
 const SOURCES = [
   "https://raw.githubusercontent.com/joname1/BestCFip/refs/heads/main/ipv4.txt",
@@ -18,7 +18,7 @@ const SOURCES = [
 ];
 
 function log(msg) {
-  const ts = new Date().toISOString().replace("T"," ").slice(0,19);
+  const ts = new Date().toISOString().replace("T", " ").slice(0, 19);
   console.log(`[${ts}] ${msg}`);
 }
 
@@ -44,7 +44,7 @@ function shuffle(arr) {
 async function fetchIPs() {
   for (const url of SOURCES) {
     try {
-      log(`正在从 ${url.split("/").slice(2,4).join("/")} 拉取...`);
+      log(`正在从 ${url.split("/").slice(2, 4).join("/")} 拉取...`);
       const text = await fetchUrl(url);
       const ips = text.split("\n")
         .map(l => l.trim())
@@ -62,30 +62,35 @@ async function fetchIPs() {
   return [];
 }
 
-// 把 BestCFip 优选 IP 合并入 cf_ip_pool，然后 retest 取得真实延迟
+function reloadXray() {
+  // cp 到备用路径（静默，目标不存在时跳过）
+  try { execSync("cp " + CFG + " /usr/local/etc/xray/config.json 2>/dev/null || true", { shell: true }); } catch (_) {}
+  // pm2 reload 独立执行
+  try {
+    execSync("pm2 reload xray 2>/dev/null || true", { shell: true });
+    log("✅ xray 已热重载");
+  } catch (e) {
+    log("⚠️  pm2 reload 失败: " + e.message);
+  }
+}
+
 function injectIntoPool(ips) {
   log(`注入 ${ips.length} 个优选IP 到 cf_ip_pool...`);
-
-  // 读现有 state
   let state = { available: [], used_history: [], banned: [] };
   try { state = JSON.parse(fs.readFileSync(POOL_STATE, "utf8")); } catch (_) {}
 
-  const banned  = new Set((state.banned  || []).map(x => typeof x === "string" ? x : x.ip));
-  const history = new Set((state.used_history || state.history || []));
+  const banned   = new Set((state.banned || []).map(x => typeof x === "string" ? x : x.ip));
   const existing = new Set((state.available || []).map(e => e.ip));
-
-  // 取随机 60 个（避免重复/已封禁）作为新候选，nominal latency=5ms（retest 会修正）
   const candidates = shuffle(ips.filter(ip => !banned.has(ip) && !existing.has(ip))).slice(0, 60);
   const newEntries = candidates.map(ip => ({ ip, latency: 5.0, proxy: `http://${ip}:443` }));
   state.available = [...(state.available || []), ...newEntries];
 
-  // 确保目录存在
-  const dir = require("path").dirname(POOL_STATE);
+  const path = require("path");
+  const dir = path.dirname(POOL_STATE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(POOL_STATE, JSON.stringify(state, null, 2));
   log(`✅ 写入 ${candidates.length} 个新候选IP（nominal 5ms）`);
 
-  // 触发 retest 取得真实延迟（去掉无效 IP）
   if (fs.existsSync(POOL_API)) {
     log("触发 cf_pool_api retest（threads=30, max-latency=400ms）...");
     const r = spawnSync("python3", [POOL_API, "retest",
@@ -94,15 +99,14 @@ function injectIntoPool(ips) {
     try {
       const res = JSON.parse(r.stdout || "{}");
       log(`retest 完成: 保留 ${res.kept}，移除 ${res.removed} 个无效IP`);
-    } catch(_) {
-      if (r.stdout) log("retest 输出: " + r.stdout.slice(0, 200));
+    } catch (_) {
+      if (r.stdout) log("retest: " + r.stdout.slice(0, 200));
     }
-    // 读最终 status
     const s = spawnSync("python3", [POOL_API, "status"], { encoding: "utf8" });
     try {
       const st = JSON.parse(s.stdout || "{}");
       log(`pool 最终: available=${st.available}, banned=${st.banned_total}`);
-    } catch(_) {}
+    } catch (_) {}
   }
 }
 
@@ -115,7 +119,6 @@ async function main() {
     process.exit(1);
   }
 
-  // 检查 xray.json 有无 VLESS 出口
   let outbounds = [];
   try {
     const cfg = JSON.parse(fs.readFileSync(CFG, "utf8"));
@@ -125,7 +128,6 @@ async function main() {
   }
 
   if (outbounds.length > 0) {
-    // ── 原逻辑: 随机分配到 VLESS 出口 ──
     const shuffled = shuffle([...ips]);
     const cfg = JSON.parse(fs.readFileSync(CFG, "utf8"));
     const allOut = cfg.outbounds.filter(o => o.settings && o.settings.vnext);
@@ -134,15 +136,10 @@ async function main() {
     fs.writeFileSync(CFG, JSON.stringify(cfg, null, 2));
     const newIPs = [...new Set(allOut.map(o => o.settings.vnext[0].address))];
     log(`旧IP (${oldIPs.length}个): ${oldIPs.join(", ")}`);
-    log(`新IP (${newIPs.length}个): ${newIPs.slice(0,8).join(", ")}${newIPs.length>8?" ...":""}`);
+    log(`新IP (${newIPs.length}个): ${newIPs.slice(0, 8).join(", ")}${newIPs.length > 8 ? " ..." : ""}`);
     log(`共更新 ${allOut.length} 个VLESS出口`);
-    try {
-      execSync("cp " + CFG + " /usr/local/etc/xray/config.json");
-      execSync("pm2 reload xray 2>/dev/null || true");
-      log("✅ xray 已热重载");
-    } catch (e) { log(`⚠️  重载失败: ${e.message}`); }
+    reloadXray();
   } else {
-    // ── 新逻辑: 无 VLESS 出口 → 注入 cf_ip_pool ──
     log("xray.json 无 VLESS 出口 → 改为注入 cf_ip_pool");
     injectIntoPool(ips);
   }
