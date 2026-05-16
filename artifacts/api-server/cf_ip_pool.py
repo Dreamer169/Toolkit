@@ -9,11 +9,13 @@ CF_IP_RANGES = [
 ]
 
 POOL_STATE_FILE = '/tmp/cf_pool_state.json'
+ARKOSE_STATS_FILE = '/tmp/cf_arkose_stats.json'
 _pool_lock = threading.Lock()
 _available = []
 _in_use = {}
 _used_history = []
 _banned_ips: set = set()
+_arkose_stats: dict = {}  # {'/20-net-str': {'ok': N, 'fail': N}}
 
 
 def _entry_ip(entry):
@@ -23,7 +25,7 @@ def _entry_ip(entry):
 def _normalise_available(items):
     out = []
     seen = set()
-    blocked = set(_used_history) | set(_banned_ips)
+    blocked = set(_banned_ips)  # v9.92: used_history removed — CF IPs are reusable across sessions
     for item in items or []:
         if not isinstance(item, dict):
             continue
@@ -56,7 +58,7 @@ def _save_state_nolock(extra_banned: list | None = None):
         import tempfile as _tmp, shutil as _shu
         if extra_banned:
             _banned_ips.update([x for x in extra_banned if x])
-        hist      = list(dict.fromkeys(_used_history))[-2000:]
+        hist      = list(dict.fromkeys(_used_history))[-500:]  # v9.92: reduced cap
         banned    = list(dict.fromkeys(_banned_ips))[-2000:]
         available = _normalise_available(_available)
         payload   = {
@@ -114,16 +116,96 @@ def get_pool_status() -> dict:
         }
 
 
+def _subnet20(ip: str) -> str:
+    """Return /20 network string for an IP (e.g. '104.16.0.0/20')."""
+    try:
+        from ipaddress import ip_address, ip_network as _ipn
+        addr = int(ip_address(ip))
+        base = addr & 0xFFFFF000  # mask to /20
+        b = [(base >> s) & 0xFF for s in (24, 16, 8, 0)]
+        return f"{b[0]}.{b[1]}.{b[2]}.{b[3]}/20"
+    except Exception:
+        return "unknown"
+
+
+def _load_arkose_stats():
+    global _arkose_stats
+    try:
+        if os.path.exists(ARKOSE_STATS_FILE):
+            with open(ARKOSE_STATS_FILE, "r") as f:
+                _arkose_stats = json.load(f)
+    except Exception:
+        _arkose_stats = {}
+
+
+def _save_arkose_stats():
+    try:
+        import tempfile as _tmp, shutil as _shu
+        fd, tmp = _tmp.mkstemp(dir=os.path.dirname(ARKOSE_STATS_FILE) or ".", suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
+            json.dump(_arkose_stats, f)
+        _shu.move(tmp, ARKOSE_STATS_FILE)
+    except Exception:
+        pass
+
+
+def record_arkose_result(ip: str, success: bool):
+    """v9.91: Record Arkose pass/fail for this IP's /20 subnet for weighted generation."""
+    subnet = _subnet20(ip)
+    with _pool_lock:
+        if subnet not in _arkose_stats:
+            _arkose_stats[subnet] = {"ok": 0, "fail": 0}
+        _arkose_stats[subnet]["ok" if success else "fail"] += 1
+        _save_arkose_stats()
+    result_str = "✅ok" if success else "❌fail"
+    print(f"[cf_pool] v9.91 Arkose subnet record: {subnet} → {result_str}  "
+          f"(ok={_arkose_stats[subnet]['ok']} fail={_arkose_stats[subnet]['fail']})", flush=True)
+
+
+def _net_arkose_weight(net) -> float:
+    """v9.91: Weight for sampling from this network, based on Arkose success history."""
+    from ipaddress import ip_network as _ipn
+    # Sample a few /20 subnets from this network and average their weights
+    try:
+        na = int(net.network_address)
+        # Check 4 /20 anchors within the network
+        weights = []
+        size = net.num_addresses
+        for frac in [0, 0.25, 0.5, 0.75]:
+            anchor_int = na + int(frac * min(size - 1, 65535))
+            anchor_int &= 0xFFFFF000  # snap to /20
+            b = [(anchor_int >> s) & 0xFF for s in (24, 16, 8, 0)]
+            sn = f"{b[0]}.{b[1]}.{b[2]}.{b[3]}/20"
+            stats = _arkose_stats.get(sn, {})
+            ok = stats.get("ok", 0)
+            fail = stats.get("fail", 0)
+            total = ok + fail
+            if total < 3:
+                w = 0.65  # unknown: slightly pessimistic to favour known-good
+            else:
+                rate = ok / total
+                w = max(0.05, rate)  # floor at 5% so no range is permanently excluded
+            weights.append(w)
+        return sum(weights) / len(weights)
+    except Exception:
+        return 0.65
+
+
+_load_arkose_stats()
+
+
 def generate_cf_ips(count: int = 60) -> list:
     networks = [ip_network(r, strict=False) for r in CF_IP_RANGES]
     with _pool_lock:
-        seen = set(_used_history) | set(_banned_ips) | {_entry_ip(x) for x in _available}
+        seen = set(_banned_ips) | {_entry_ip(x) for x in _available}  # v9.92: drop used_history filter
     seen.discard(None)
     ips = []
     attempts = 0
+    # v9.91: weight network selection by historical Arkose success rate
+    _net_weights = [_net_arkose_weight(n) for n in networks]
     while len(ips) < count and attempts < count * 30:
         attempts += 1
-        net = random.choice(networks)
+        net = random.choices(networks, weights=_net_weights, k=1)[0]
         offset = random.randint(1, min(net.num_addresses - 2, 65535))
         ip = str(net.network_address + offset)
         if ip not in seen:
@@ -172,7 +254,7 @@ def refresh_pool(generate_count: int = 60, target_valid: int = 20, threads: int 
     with _pool_lock:
         existing = {_entry_ip(x) for x in _available}
         for item in new_ips:
-            if item['ip'] not in existing and item['ip'] not in _banned_ips and item['ip'] not in _used_history:
+            if item['ip'] not in existing and item['ip'] not in _banned_ips:  # v9.92
                 _available.append(item)
                 existing.add(item['ip'])
         _available.sort(key=lambda x: x['latency'])
