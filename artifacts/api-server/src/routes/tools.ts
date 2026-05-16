@@ -1342,8 +1342,12 @@ router.get("/tools/outlook/imap-idle/status", async (req, res) => {
     if (_idleDaemonPid) {
       try { process.kill(_idleDaemonPid, 0); running = true; } catch { _idleDaemonPid = null; }
     }
-    let statusMap: Record<string, unknown> = {};
+    let statusMap: Record<string, { status: string }> = {};
     try { statusMap = JSON.parse(readFileSync("/tmp/imap_idle_status.json", "utf8")); } catch { /* no file yet */ }
+    // Detect externally-started daemon (pm2) via polling accounts in status file
+    if (!running) {
+      running = Object.values(statusMap).some(v => v.status === "polling");
+    }
     res.json({ success: true, running, pid: _idleDaemonPid, accounts: statusMap });
   } catch (e: unknown) {
     res.status(500).json({ success: false, error: String(e) });
@@ -2640,6 +2644,7 @@ router.post("/tools/proxy-request", async (req, res) => {
 
     const allowed = [
       "45.205.27.69",
+      "45.205.27.248",
       "sub2api.com", "cpa.io", "cpaapi.io", "oaifree.com", "api.x.ai",
       "api.anthropic.com", "api.openai.com", "api.deepseek.com",
       "generativelanguage.googleapis.com",
