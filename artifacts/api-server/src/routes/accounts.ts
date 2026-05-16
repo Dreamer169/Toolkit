@@ -345,7 +345,7 @@ async function spawnDynamicXray(bannedExitIp?: string): Promise<DynXray | null> 
       streamSettings: {
         network: "ws", security: "tls",
         tlsSettings: { serverName: "iam.jimhacker.eu.cc", fingerprint: "chrome" },   // fix: eu.cc primary (qzz.io daily quota)
-        wsSettings: { path: "/?ed=2048&p=proxyip.fxxk.dedyn.io%3A443&rm=no", host: "iam.jimhacker.eu.cc" },       // fix: working ProxyIP + eu.cc host
+        wsSettings: { path: "/?ed=2048&p=iam.jimhacker.us.ci%3A443&rm=no", host: "iam.jimhacker.eu.cc" },          // fix: self IAM Worker ProxyIP (us.ci), VLESS relay eu.cc
       },
     }],
   };

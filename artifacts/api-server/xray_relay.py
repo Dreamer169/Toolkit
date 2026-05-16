@@ -118,8 +118,9 @@ def _make_xray_config(proxy_ip: str, socks_port: int) -> dict:
     server_ip = proxy_ip
     # patch9: 12 ProxyIP regions (was 6: HK/US/NL/DE/SG/JP)
     _PROXYIP_REGIONS = [
-        "proxyip.fxxk.dedyn.io%3A443",
-    ]
+        "iam.jimhacker.eu.cc%3A443",
+        "iam.jimhacker.us.ci%3A443",
+    ]  # 用自己的 IAM Worker 作 ProxyIP（eu.cc+us.ci 同账号，qzz.io 配额耗尽不列入）
     _chosen_enc = random.choice(_PROXYIP_REGIONS)
     _chosen_label = _chosen_enc.replace("%3A443", "")
     path = f"/?ed=2048&p={_chosen_enc}&rm=no"
