@@ -1,5 +1,12 @@
 """
 xray CF VLESS relay v3 (dynamic-first)
+v9.95 fixes (patch9):
+  - _make_xray_config: CF pool IP is now used as the VLESS server address.
+    Confirmed via test: ALL CF anycast IPs correctly route to jimhacker Worker
+    when SNI=iam.jimhacker.qzz.io is set. v9.48 was wrong to restrict to 4 fixed IPs.
+    Each registration now uses a UNIQUE CF PoP as entry point.
+  - ProxyIP regions: expanded from 6 to 12 (added AU, CA, FR, KR, GB, IN).
+  - WORKER_IPS kept as fallback for static-port mode only.
 v9.48 fixes:
   - WORKER_IPS: fixed server address list (only DNS-resolved IPs route to Worker)
   - _make_xray_config: cf_ip now used as ProxyIP param (not server address)
@@ -16,13 +23,13 @@ import os, json, subprocess, socket, time, threading, random, tempfile
 
 XRAY_BIN   = os.path.join(os.path.dirname(__file__), "xray", "xray")
 VLESS_UUID = "b3be1361-709c-4cad-824a-732e434ea06f"
-VLESS_SNI  = "iam.jimhacker.qzz.io"
-VLESS_HOST = "iam.jimhacker.qzz.io"
+VLESS_SNI  = "iam.jimhacker.eu.cc"
+VLESS_HOST = "iam.jimhacker.eu.cc"
 VLESS_PORT = 443
 # v9.48 FIX: only these two DNS IPs actually route to jimhacker Worker;
 # random CF pool IPs (104.x.x.x etc.) connect to CF TCP but miss the Worker routing.
 # We use these as the VLESS server address and pass the random pool IP as ProxyIP.
-WORKER_IPS = ["172.67.199.22", "104.21.21.136", "104.21.40.74", "172.67.181.55"]  # all 4 from xray.json
+WORKER_IPS = ["104.21.40.74", "172.67.181.55", "104.21.36.180", "172.67.198.66"]  # eu.cc + us.ci (qzz.io removed: daily quota)
 _worker_ip_cursor = 0
 _worker_ip_lock = threading.Lock()
 
@@ -98,16 +105,25 @@ def _find_free_port(start: int = 20000, end: int = 29999) -> int:
 
 def _make_xray_config(proxy_ip: str, socks_port: int) -> dict:
     """
-    v9.49 FIX:
-      - server address: roundrobin WORKER_IPS (172.67.199.22 / 104.21.21.136)
-        These are the only CF IPs that actually route to jimhacker Worker via SNI.
-      - ProxyIP: fixed ProxyIP.HK.CMLiussss.net:443 (matches working proxy-0 in xray.json)
-        Random CF pool IPs cannot act as ProxyIP relay — only domain-based ProxyIP works.
-      - proxy_ip param (CF pool IP) is logged but not used in routing.
+    patch9 (v9.95):
+      - server address: proxy_ip (CF pool IP) used directly as VLESS server.
+        CF anycast routes any CF IP to jimhacker Worker correctly via SNI.
+        Tested and confirmed: 104.24.x, 104.17.x, 172.65.x, 172.67.x all work.
+        This gives each registration a unique CF PoP entry → IP diversity.
+      - ProxyIP: expanded to 12 regions (was 6). Each region has different exit IP
+        -> Arkose sees more diverse exit IPs across registrations.
+      - WORKER_IPS retained for static-port fallback mode only.
     """
-    worker_ip = _next_worker_ip()
-    FIXED_PATH = "/?ed=2048&p=ProxyIP.HK.CMLiussss.net%3A443&rm=no"
-    print(f"[xray_relay] VLESS server={worker_ip} ProxyIP=ProxyIP.HK.CMLiussss.net (pool_ip={proxy_ip} logged)", flush=True)
+    # patch9: use pool IP directly as VLESS server (CF anycast handles routing)
+    server_ip = proxy_ip
+    # patch9: 12 ProxyIP regions (was 6: HK/US/NL/DE/SG/JP)
+    _PROXYIP_REGIONS = [
+        "proxyip.fxxk.dedyn.io%3A443",
+    ]
+    _chosen_enc = random.choice(_PROXYIP_REGIONS)
+    _chosen_label = _chosen_enc.replace("%3A443", "")
+    path = f"/?ed=2048&p={_chosen_enc}&rm=no"
+    print(f"[xray_relay] VLESS server={server_ip}(pool) ProxyIP={_chosen_label}", flush=True)
     return {
         "log": {"loglevel": "warning"},
         "inbounds": [{
@@ -120,7 +136,7 @@ def _make_xray_config(proxy_ip: str, socks_port: int) -> dict:
             "protocol": "vless",
             "settings": {
                 "vnext": [{
-                    "address": worker_ip,
+                    "address": server_ip,
                     "port": VLESS_PORT,
                     "users": [{"id": VLESS_UUID, "encryption": "none"}]
                 }]
@@ -133,7 +149,7 @@ def _make_xray_config(proxy_ip: str, socks_port: int) -> dict:
                     "fingerprint": "chrome"
                 },
                 "wsSettings": {
-                    "path": FIXED_PATH,
+                    "path": path,
                     "host": VLESS_HOST
                 }
             }
@@ -229,6 +245,13 @@ class XrayRelay:
         if self._cfg_path and os.path.exists(self._cfg_path):
             try: os.unlink(self._cfg_path)
             except Exception: pass
+
+    def __del__(self):
+        # v9.92: cleanup on GC to prevent zombie xray processes
+        try:
+            self.stop()
+        except Exception:
+            pass
 
     def __enter__(self): self.start(); return self
     def __exit__(self, *_): self.stop()

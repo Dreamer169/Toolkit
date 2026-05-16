@@ -1,3 +1,6 @@
+import fs from "fs";
+import net from "net";
+import path from "path";
 import { Router } from "express";
 import { spawn } from "child_process";
 import path from "path";
@@ -77,7 +80,6 @@ const PORT_COOLDOWN_FILE = "/root/Toolkit/.local/port_cooldown.json";
 function _loadPortCooldown() {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const fs = require("fs") as typeof import("fs");
     if (!fs.existsSync(PORT_COOLDOWN_FILE)) return;
     const j = JSON.parse(fs.readFileSync(PORT_COOLDOWN_FILE, "utf8")) as { levels?: Record<string,number>; bans?: Record<string,number> };
     const now = Date.now();
@@ -95,9 +97,7 @@ function _loadPortCooldown() {
 function _savePortCooldown() {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const fs = require("fs") as typeof import("fs");
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const path = require("path") as typeof import("path");
     fs.mkdirSync(path.dirname(PORT_COOLDOWN_FILE), { recursive: true });
     const bans: Record<string, number> = {};
     const levels: Record<string, number> = {};
@@ -197,7 +197,7 @@ const rotatingCfIps = new Set<string>();
 const ROTATE_SCRIPT = [
   path.join(WORKSPACE_DIR, "artifacts/api-server/rotate_xray_ip.py"),
   "/root/Toolkit/artifacts/api-server/rotate_xray_ip.py",
-].find((p) => { try { require("fs").accessSync(p); return true; } catch { return false; } }) ?? "";
+].find((p) => { try { fs.accessSync(p); return true; } catch { return false; } }) ?? "";
 
 function rotateCfIpInXray(bannedIp: string) {
   if (!ROTATE_SCRIPT) { console.warn("[cf-rotate] rotate_xray_ip.py 未找到"); return; }
@@ -267,7 +267,7 @@ async function rebuildXrayPortMap() {
 
 // ── Dynamic per-attempt xray VLESS relay (fresh CF IP from pool each time) ────
 const XRAY_BIN_PATH = (() => {
-  const { existsSync } = require("fs");
+  const { existsSync } = fs;
   const candidates = [
     path.join(WORKSPACE_DIR, "artifacts/api-server/xray/xray"),
     "/root/Toolkit/artifacts/api-server/xray/xray",
@@ -282,7 +282,6 @@ const activeDynXrays = new Map<number, () => void>();
 
 function _findFreeLocalPort(start = 20000, end = 29999): Promise<number | null> {
   return new Promise(resolve => {
-    const net = require("net");
     let p = start + Math.floor(Math.random() * (end - start));
     const tryNext = (n: number) => {
       if (n > end) { resolve(null); return; }
@@ -297,7 +296,6 @@ function _findFreeLocalPort(start = 20000, end = 29999): Promise<number | null> 
 
 function _waitForPort(port: number, timeoutMs = 8000): Promise<boolean> {
   return new Promise(resolve => {
-    const net = require("net");
     const deadline = Date.now() + timeoutMs;
     const attempt = () => {
       if (Date.now() > deadline) { resolve(false); return; }
@@ -336,7 +334,7 @@ async function spawnDynamicXray(bannedExitIp?: string): Promise<DynXray | null> 
   if (!port) { console.warn("[dyn-xray] no free port"); return null; }
 
   // 3. Write temp config
-  const { writeFileSync, unlinkSync } = require("fs");
+  const { writeFileSync, unlinkSync } = fs;
   const cfgPath = `/tmp/xray_dyn_${port}.json`;
   const cfg = {
     log: { loglevel: "none" },
@@ -346,8 +344,8 @@ async function spawnDynamicXray(bannedExitIp?: string): Promise<DynXray | null> 
       settings: { vnext: [{ address: cfIp, port: 443, users: [{ id: "b3be1361-709c-4cad-824a-732e434ea06f", encryption: "none" }] }] },
       streamSettings: {
         network: "ws", security: "tls",
-        tlsSettings: { serverName: "iam.jimhacker.qzz.io", fingerprint: "chrome" },  // v9.47: no alpn (h2 breaks WS upgrade)
-        wsSettings: { path: "/?ed=2048&p=ProxyIP.HK.CMLiussss.net%3A443&rm=no", host: "iam.jimhacker.qzz.io" },  // v9.47: ProxyIP path + host field
+        tlsSettings: { serverName: "iam.jimhacker.eu.cc", fingerprint: "chrome" },   // fix: eu.cc primary (qzz.io daily quota)
+        wsSettings: { path: "/?ed=2048&p=proxyip.fxxk.dedyn.io%3A443&rm=no", host: "iam.jimhacker.eu.cc" },       // fix: working ProxyIP + eu.cc host
       },
     }],
   };
@@ -668,7 +666,6 @@ function _readBrokerExitEnv(): Record<string, string> {
   // (broker is a separate pm2 process), so without this injection python sees
   // empty env and v7.71-era fallback paths trigger SKIP wrongly.
   try {
-    const fs = require("fs") as typeof import("fs");
     const raw = fs.readFileSync("/tmp/replit-broker/exit.json", "utf8");
     const j = JSON.parse(raw) as { family?: string; port?: string | number };
     const fam = String(j.family || "").trim().toLowerCase();
