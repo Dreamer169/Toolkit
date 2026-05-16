@@ -29,7 +29,11 @@ VLESS_PORT = 443
 # v9.48 FIX: only these two DNS IPs actually route to jimhacker Worker;
 # random CF pool IPs (104.x.x.x etc.) connect to CF TCP but miss the Worker routing.
 # We use these as the VLESS server address and pass the random pool IP as ProxyIP.
-WORKER_IPS = ["104.21.40.74", "172.67.181.55", "104.21.36.180", "172.67.198.66"]  # eu.cc + us.ci (qzz.io removed: daily quota)
+WORKER_IPS = [
+    "172.67.199.22", "104.21.21.136",   # iam.jimhacker.qzz.io  (CF-ORIG-5; daily quota resets, IPs still valid CF anycast)
+    "104.21.40.74",  "172.67.181.55",   # iam.jimhacker.eu.cc   (unknown acct, confirmed diff from us.ci)
+    "104.21.36.180", "172.67.198.66",   # iam.jimhacker.us.ci   (CF-ORIG-1)
+]  # 6 CF anycast IPs；routing by SNI so all IPs reach any CF Worker regardless of quota
 _worker_ip_cursor = 0
 _worker_ip_lock = threading.Lock()
 
