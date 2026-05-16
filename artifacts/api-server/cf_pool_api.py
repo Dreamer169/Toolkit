@@ -4,7 +4,7 @@ import sys, json, argparse, os
 sys.path.insert(0, os.path.dirname(__file__))
 import cf_ip_pool
 
-POOL_STATE_FILE = '/tmp/cf_pool_state.json'
+POOL_STATE_FILE = '/var/lib/toolkit/cf_pool_state.json'
 
 
 def _read_state():
