@@ -41,7 +41,8 @@ fake = Faker("en_US")  # v8.19: 双语 selector 完成后切回 en_US (与 brows
 # 文本匹配 — 用 re.compile 实现 OR (Playwright get_by_text 接受 Pattern 对象)
 TXT_AGREE_CONTINUE = re.compile(r"^\s*(同意并继续|Agree and continue|Continue|Next)\s*$")
 TXT_USERNAME_TAKEN = re.compile(r"已被占用|该用户名不可用|username is taken|already (taken|exists|in use)|is not available|cannot be used|Someone already has", re.IGNORECASE)
-TXT_UNUSUAL_ACTIVITY = re.compile(r"一些异常活动|unusual activity|something went wrong", re.IGNORECASE)
+TXT_UNUSUAL_ACTIVITY = re.compile(r"一些异常活动|unusual activity", re.IGNORECASE)
+TXT_TRANSIENT_ERROR   = re.compile(r"something went wrong", re.IGNORECASE)
 TXT_SITE_MAINTENANCE = re.compile(r"此站点正在维护|currently (down|unavailable)|under maintenance|service is unavailable", re.IGNORECASE)
 TXT_CANCEL_BTN = re.compile(r"^\s*(取消|Cancel)\s*$")
 
@@ -357,7 +358,14 @@ class BaseController:
 
             if (page.get_by_text(TXT_UNUSUAL_ACTIVITY).count()
                     or page.get_by_text(TXT_SITE_MAINTENANCE).count()):
+                try: page.screenshot(path=f"/tmp/ratelimit_A_{email}.png")
+                except Exception: pass
                 return False, "当前IP注册频率过快", email
+            # v9.74 fix: "something went wrong" 是MS瞬时错误，同IP可重试，不ban
+            if page.get_by_text(TXT_TRANSIENT_ERROR).count():
+                try: page.screenshot(path=f"/tmp/transient_A_{email}.png")
+                except Exception: pass
+                return False, "页面暂时异常(something_went_wrong)，同IP可重试", email
 
             if page.locator("iframe#enforcementFrame").count() > 0:
                 return False, "验证码类型错误，非按压验证码", email
@@ -375,7 +383,7 @@ class BaseController:
             _cap_text_cleared = False
             _CAPTCHA_HINTS = ("let's prove you're human", "prove you're human", "press and hold the button")
             _cap_retry_count = 0
-            for _cc_i in range(23):  # 23x2s = 46s
+            for _cc_i in range(30):  # v9.76: 30x2s = 60s (was 23x2s = 46s)
                 try:
                     _cur_url = page.url or ""
                     if "signup.live.com" not in _cur_url:
@@ -408,20 +416,31 @@ class BaseController:
                     except Exception:
                         pass
                     # v9.60: 全流程 handle_captcha 重试 (14s 和 28s 各一次)
-                    # v9.71: 早期信号已确认时跳过（避免触发新挑战）
-                    if _cc_i in (7, 14) and _cap_retry_count < 2 and not getattr(self, '_captcha_early_confirmed', False):
+                    # patch6/Bug-B: 补全 v9.71 early_confirmed 守卫：
+                    # retry checkpoint 到达时若 CAPTCHA 仍在但 early_confirmed=True
+                    # → 上次是假阳性（Bug-A 30s 按压被拒但 px-captcha 短暂 empty）
+                    # → reset 后放行重试；真阳性时外层早已 break 不会到达此处
+                    if _cc_i in (7, 14, 21) and _cap_retry_count < 3:
+                        _ec_now = getattr(self, '_captcha_early_confirmed', False)
+                        if _ec_now:
+                            self._captcha_early_confirmed = False
+                            print(f'[register] [captcha-clear] @{_cc_i*2}s early_confirmed 假阳性 reset → 放行重试', flush=True)
                         _cap_retry_count += 1
-                        print(f"[register] [captcha-clear] v9.60 全流程重试#{_cap_retry_count} at {_cc_i*2}s", flush=True)
+                        print(f'[register] [captcha-clear] patch6 重试#{_cap_retry_count} at {_cc_i*2}s', flush=True)
                         try:
                             _retry_ok = self.handle_captcha(page, blob_container)
-                            print(f"[register] [captcha-clear] 重试#{_cap_retry_count} -> {_retry_ok}", flush=True)
+                            print(f'[register] [captcha-clear] 重试#{_cap_retry_count} -> {_retry_ok}', flush=True)
                             _ur2 = page.url or ""
                             if "signup.live.com" not in _ur2:
                                 _cap_text_cleared = True
-                                print(f"[register] [captcha-clear] 重试后跳离 -> {_ur2[:80]}", flush=True)
+                                print(f'[register] [captcha-clear] 重试后跳离 -> {_ur2[:80]}', flush=True)
                                 break
+                            # patch6/Bug-B: 仍在 signup → 本次重试的 early_confirmed 也是假阳性 reset
+                            if getattr(self, '_captcha_early_confirmed', False):
+                                self._captcha_early_confirmed = False
+                                print(f'[register] [captcha-clear] 重试#{_cap_retry_count} 后仍在 signup → reset early_confirmed', flush=True)
                         except Exception as _rte:
-                            print(f"[register] [captcha-clear] 重试#{_cap_retry_count} 异常: {_rte}", flush=True)
+                            print(f'[register] [captcha-clear] 重试#{_cap_retry_count} 异常: {_rte}', flush=True)
                     if _cc_i % 5 == 0:
                         print(f"[register] [captcha-clear] {_cc_i*2}s elapsed (retries={_cap_retry_count})", flush=True)
                     page.wait_for_timeout(2000)
@@ -430,12 +449,26 @@ class BaseController:
                     _cap_text_cleared = True
                     break
             if not _cap_text_cleared:
+                # v9.75: fido/passkey页接管时CAPTCHA文本残留但注册已完成，超时前先做救活检查
+                try:
+                    _v975_url = page.url or ""
+                    if "signup.live.com" not in _v975_url:
+                        print(f"[register] [captcha-clear] v9.75 超时但URL已离开signup → {_v975_url[:80]}", flush=True)
+                        _cap_text_cleared = True
+                    else:
+                        _v975_cks = {c.get("name", "").strip() for c in page.context.cookies()}
+                        if _v975_cks & set(SUCCESS_COOKIE_NAMES):
+                            print(f"[register] [captcha-clear] v9.75 cookie确认注册完成 → 继续post-captcha", flush=True)
+                            _cap_text_cleared = True
+                except Exception as _v975e:
+                    print(f"[register] [captcha-clear] v9.75 rescue err: {_v975e}", flush=True)
+            if not _cap_text_cleared:
                 try:
                     page.screenshot(path=f"/tmp/outlook_captcha_stuck_{email}.png")
                 except Exception:
                     pass
-                print(f"[register] CAPTCHA not cleared after 45s (retries={_cap_retry_count})", flush=True)
-                return False, "验证码处理失败(CAPTCHA内容45s未消失)", email
+                print(f"[register] CAPTCHA not cleared after 60s (retries={_cap_retry_count})", flush=True)
+                return False, "验证码处理失败(CAPTCHA内容60s未消失)", email
 
             # ── Post-CAPTCHA: detect phone-verification / stall page ──────────
             # MS sometimes shows a phone-number entry page after CAPTCHA instead
@@ -482,6 +515,26 @@ class BaseController:
                 for _pci in range(3):
                     if any(k in (page.url or "") for k in ("outlook.live.com", "account.live", "login.live.com/oauth")):
                         break  # already navigated away — done
+                    # v9.76: MS sometimes shows "Add your name" page after CAPTCHA.
+                    # Fill firstName/lastName before clicking Next, or validation blocks it.
+                    try:
+                        _fn_inp = page.locator('#firstNameInput')
+                        _ln_inp = page.locator('#lastNameInput')
+                        if _fn_inp.is_visible(timeout=800) or _ln_inp.is_visible(timeout=800):
+                            print(f"[register] [post-captcha] v9.76 检测到 Add your name 页，填写姓名", flush=True)
+                            try:
+                                if _fn_inp.is_visible(timeout=500):
+                                    _fn_inp.fill(firstname, timeout=3000)
+                            except Exception:
+                                pass
+                            try:
+                                if _ln_inp.is_visible(timeout=500):
+                                    _ln_inp.fill(lastname, timeout=3000)
+                            except Exception:
+                                pass
+                            page.wait_for_timeout(300)
+                    except Exception:
+                        pass
                     _pb_sel = '[data-testid="primaryButton"]'
                     try:
                         _pb = page.locator(_pb_sel).first
@@ -743,6 +796,8 @@ class PatchrightController(BaseController):
                     if (page.get_by_text(TXT_UNUSUAL_ACTIVITY).count()
                             or page.get_by_text(TXT_SITE_MAINTENANCE).count()):
                         return False
+                    if page.get_by_text(TXT_TRANSIENT_ERROR).count():
+                        return False  # 同IP可重试，外层不ban
                     print(f"[captcha] ✅ Enter键第{_t+1}次通过！", flush=True)
                     return True
             except Exception:
@@ -854,11 +909,19 @@ class PatchrightController(BaseController):
         page.mouse.down()
         # 按住期间小幅 jitter（每 180-360ms 一次微动）
         _hold_total = _r.randint(hold_ms_min, hold_ms_max)
-        _elapsed = 0
-        while _elapsed < _hold_total:
-            _wait = _r.randint(180, 360)
-            page.wait_for_timeout(_wait)
-            _elapsed += _wait
+        # patch6/Bug-A: 用墙钟 time.sleep() 替代 page.wait_for_timeout() 累加
+        # page.wait_for_timeout 在内存压力下被 OS 阻塞可达 30s+，
+        # _elapsed 只累加目标值 → 实际按住时间远超 Arkose 限制 → 拒绝
+        import time as _t_ph
+        _ph_t0 = _t_ph.time()
+        _ph_deadline = _ph_t0 + _hold_total / 1000.0
+        while True:
+            _ph_now = _t_ph.time()
+            if _ph_now >= _ph_deadline:
+                break
+            _remain_ms = (_ph_deadline - _ph_now) * 1000.0
+            _wait = min(_r.randint(180, 360), max(5, int(_remain_ms) - 5))
+            _t_ph.sleep(_wait / 1000.0)  # OS 级 sleep，不经过 Playwright 事件循环
             _jx = cx + _r.uniform(-2.2, 2.2)
             _jy = cy + _r.uniform(-2.2, 2.2)
             try:
@@ -866,6 +929,8 @@ class PatchrightController(BaseController):
             except Exception:
                 pass
         page.mouse.up()
+        _ph_actual = int((_t_ph.time() - _ph_t0) * 1000)
+        print(f'[captcha] press-hold actual={_ph_actual}ms target={_hold_total}ms', flush=True)
         return _hold_total
 
     def _try_accessibility_challenge(self, page) -> bool:
@@ -1529,6 +1594,7 @@ class PatchrightController(BaseController):
                 print("[captcha] ✅ .draw 已消失（Arkose 已处理 press）", flush=True)
             except Exception:
                 print("[captcha] .draw 未检测到/超时（继续）", flush=True)
+            _v985_false_positive = False  # v9.92 init
             try:
                 _early_solved_reason = None
                 # v8.19: 双语 Cancel 检测合并
@@ -1781,6 +1847,8 @@ class PatchrightController(BaseController):
                 if (page.get_by_text(TXT_UNUSUAL_ACTIVITY).count()
                         or page.get_by_text(TXT_SITE_MAINTENANCE).count()):
                     return False
+                if page.get_by_text(TXT_TRANSIENT_ERROR).count():
+                    return False  # 同IP可重试，外层不ban
             except Exception as nav_err:
                 if "context was destroyed" in str(nav_err).lower() or "navigation" in str(nav_err).lower():
                     print("[captcha] ✅ 页面已导航（上下文销毁），认为 CAPTCHA 通过", flush=True)
@@ -2777,6 +2845,7 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
     # 创建 browser context（统一参数：UA / 时区 / 屏幕 / sec-ch-ua headers）
     context = b.new_context(**context_kwargs(fp))
     # 注入完整指纹伪装脚本（canvas / WebGL / Audio / Battery / MachineID / navigator）
+    context._impl_obj.route_injecting = True  # disable patchright inject-route (ERR_SSL fix)
     apply_fingerprint_sync(context, fp)
     page = context.new_page()
     t0 = time.time()
@@ -2803,6 +2872,7 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
             if p:
                 _fp2 = gen_profile(locale="en-US")
                 _ctx2 = b.new_context(**context_kwargs(_fp2))
+                _ctx2._impl_obj.route_injecting = True  # disable patchright inject-route (ERR_SSL fix)
                 apply_fingerprint_sync(_ctx2, _fp2)
                 page = _ctx2.new_page()
                 t0 = time.time()
@@ -2858,6 +2928,7 @@ def register_one(ctrl, engine_name: str, headless: bool, planned_username: str =
                 fp = gen_profile(locale="en-US")
                 print(f"[register] 指纹: {profile_summary(fp)}", flush=True)
                 context = b.new_context(**context_kwargs(fp))
+                context._impl_obj.route_injecting = True  # disable patchright inject-route (ERR_SSL fix)
                 apply_fingerprint_sync(context, fp)
                 page = context.new_page()
                 t0 = time.time()
@@ -3399,11 +3470,14 @@ def main():
 
             # CAPTCHA/IP质量不佳/Timeout 失败时 ban 当前 CF IP，换新 IP 重试
             _err_str = r.get("error", "")
+            # v9.74 fix: 瞬时错误(something_went_wrong)换IP重试但不ban当前IP
+            _is_transient_err = "页面暂时异常(something_went_wrong)" in _err_str
             _should_retry = (
                 "验证码" in _err_str
                 or "CAPTCHA" in _err_str.upper()
                 or "IP质量不佳" in _err_str
                 or "频率过快" in _err_str
+                or _is_transient_err
                 or "ERR_TUNNEL_CONNECTION_FAILED" in _err_str
                 or ("Timeout" in _err_str and "注册界面" in _err_str)
                 # v8.77 Bug F: "等待同意按钮超时" 实证 = IP 被风控 (CF 节点 104.24.22.21 案例)
@@ -3422,12 +3496,15 @@ def main():
                     _reason = "CAPTCHA"
                 elif "频率过快" in _err_str:
                     _reason = "IP频率限制"
+                elif _is_transient_err:
+                    _reason = "页面瞬时异常(不ban IP)"
                 elif "ERR_TUNNEL_CONNECTION_FAILED" in _err_str:
                     _reason = "代理隧道断开"
                 else:
                     _reason = "IP质量/Timeout"
                 print(f"  ⚠ {_reason} 失败（IP={ip_info['ip']}），换新CF IP重试 ({cf_ip_retry}/{MAX_CF_IP_RETRIES})…", flush=True)
-                _cf_pool.ban_ip(ip_info["ip"])
+                if not _is_transient_err:  # v9.74: 瞬时错误不ban当前IP，换IP只为换环境
+                    _cf_pool.ban_ip(ip_info["ip"])
                 continue
             # v9.00 Webshare代理限速 — 换下一个未使用的备用代理重试
             if (not r["success"] and not use_cf_pool and proxy_list
