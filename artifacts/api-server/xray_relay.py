@@ -22,18 +22,14 @@ v9.47 fixes:
 import os, json, subprocess, socket, time, threading, random, tempfile
 
 XRAY_BIN   = os.path.join(os.path.dirname(__file__), "xray", "xray")
-VLESS_UUID = "b3be1361-709c-4cad-824a-732e434ea06f"
+VLESS_UUID = "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4"
 VLESS_SNI  = "iam.jimhacker.eu.cc"
 VLESS_HOST = "iam.jimhacker.eu.cc"
 VLESS_PORT = 443
 # v9.48 FIX: only these two DNS IPs actually route to jimhacker Worker;
 # random CF pool IPs (104.x.x.x etc.) connect to CF TCP but miss the Worker routing.
 # We use these as the VLESS server address and pass the random pool IP as ProxyIP.
-WORKER_IPS = [
-    "172.67.199.22", "104.21.21.136",   # iam.jimhacker.qzz.io  (CF-ORIG-5; daily quota resets, IPs still valid CF anycast)
-    "104.21.40.74",  "172.67.181.55",   # iam.jimhacker.eu.cc   (unknown acct, confirmed diff from us.ci)
-    "104.21.36.180", "172.67.198.66",   # iam.jimhacker.us.ci   (CF-ORIG-1)
-]  # 6 CF anycast IPs；routing by SNI so all IPs reach any CF Worker regardless of quota
+WORKER_IPS = ["172.67.199.22", "104.21.21.136", "104.21.40.74", "172.67.181.55"]  # all 4 from xray.json
 _worker_ip_cursor = 0
 _worker_ip_lock = threading.Lock()
 
@@ -120,15 +116,9 @@ def _make_xray_config(proxy_ip: str, socks_port: int) -> dict:
     """
     # patch9: use pool IP directly as VLESS server (CF anycast handles routing)
     server_ip = proxy_ip
-    # patch9: 12 ProxyIP regions (was 6: HK/US/NL/DE/SG/JP)
-    _PROXYIP_REGIONS = [
-        "iam.jimhacker.eu.cc%3A443",
-        "iam.jimhacker.us.ci%3A443",
-    ]  # 用自己的 IAM Worker 作 ProxyIP（eu.cc+us.ci 同账号，qzz.io 配额耗尽不列入）
-    _chosen_enc = random.choice(_PROXYIP_REGIONS)
-    _chosen_label = _chosen_enc.replace("%3A443", "")
-    path = f"/?ed=2048&p={_chosen_enc}&rm=no"
-    print(f"[xray_relay] VLESS server={server_ip}(pool) ProxyIP={_chosen_label}", flush=True)
+    # patch11: UUID 已更新为 3a4c71d0，路径不需要 p= 参数，Worker 内部处理 ProxyIP
+    path = "/?ed=2048"
+    print(f"[xray_relay] VLESS server={server_ip}(pool) path=/?ed=2048 uuid=3a4c71d0", flush=True)
     return {
         "log": {"loglevel": "warning"},
         "inbounds": [{
