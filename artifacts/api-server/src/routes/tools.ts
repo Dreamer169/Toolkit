@@ -2136,7 +2136,17 @@ function classifyToolJob(jobId: string) {
 
 router.get("/tools/jobs", async (_req, res) => {
   const allJobs = await jobQueue.list();
-  const jobs = allJobs.map(job => ({
+  const DONE_STATUSES = ["done", "stopped", "failed", "crashed"];
+  // 过滤0成功已完成任务，同时从内存中清除
+  const filtered = [];
+  for (const job of allJobs) {
+    if (DONE_STATUSES.includes(job.status) && (job.accounts?.length ?? 0) === 0) {
+      await jobQueue.remove(job.jobId);
+      continue;
+    }
+    filtered.push(job);
+  }
+  const jobs = filtered.map(job => ({
     id: job.jobId,
     ...classifyToolJob(job.jobId),
     status: job.status,
@@ -2144,6 +2154,7 @@ router.get("/tools/jobs", async (_req, res) => {
     logCount: job.logs.length,
     accountCount: job.accounts.length,
     exitCode: job.exitCode,
+    finishedAt: job.finishedAt ?? null,
     lastLog: job.logs.at(-1) ?? null,
   }));
   res.json({ success: true, jobs });
