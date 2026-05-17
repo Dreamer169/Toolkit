@@ -1053,18 +1053,23 @@ def replenish_if_needed():
     if fresh >= WATERMARK:
         return
 
-    # 冷却检查（fresh=0 紧急状态：绕过冷却，立即补充；fresh>0 时正常检查）
-    if fresh > 0:
-        try:
-            data = json.loads(open(LOCK_FILE).read())
-            ts = float(data.get("ts", 0))
-            if time.time() - ts < COOLDOWN_S:
-                remaining = int(COOLDOWN_S - (time.time() - ts))
-                log(f"[watermark] 冷却中 {remaining}s，跳过补充"); return
-        except Exception:
-            pass
-    else:
-        log("[watermark] ⚠ fresh=0 紧急状态，绕过冷却立即补充")
+    # 冷却检查：fresh=0 用短冷却(120s)，fresh>0 用正常冷却(COOLDOWN_S)
+    # Fix: 原逻辑 fresh=0 完全绕过冷却 → 3个内部线程依次各触发一次造成Chrome风暴
+    _cd = 120 if fresh == 0 else COOLDOWN_S
+    try:
+        data = json.loads(open(LOCK_FILE).read())
+        ts = float(data.get("ts", 0))
+        if time.time() - ts < _cd:
+            remaining = int(_cd - (time.time() - ts))
+            if fresh == 0:
+                log(f"[watermark] ⚠ fresh=0 但冷却中 {remaining}s，跳过（防止Chrome风暴）")
+            else:
+                log(f"[watermark] 冷却中 {remaining}s，跳过补充")
+            return
+    except Exception:
+        pass
+    if fresh == 0:
+        log("[watermark] ⚠ fresh=0 紧急状态，触发补充")
 
     # 内存检查（outlook 注册每 worker 约 400-600 MB）
     try:
@@ -1077,10 +1082,12 @@ def replenish_if_needed():
     except Exception:
         pass
 
-    log(f"[watermark] 🚀 触发 outlook 补充注册 fresh={fresh} batch={REPLENISH_CNT}")
+    # fresh=0 时按 N_WORKERS 动态扩大 batch，保证 3 个 worker 都有账号
+    _batch = max(REPLENISH_CNT, N_WORKERS) if fresh == 0 else REPLENISH_CNT
+    log(f"[watermark] 🚀 触发 outlook 补充注册 fresh={fresh} batch={_batch}")
     try:
         payload = json.dumps({
-            "count":     REPLENISH_CNT,
+            "count":     _batch,
             "headless":  True,
             "proxyMode": "cf",
             "engine":    "patchright",
@@ -1874,8 +1881,14 @@ def main():
     # ── Step 3: 取一个新鲜 outlook 账号 ────────────────────────────────────────
     row = db_get_fresh_account()
     if not row:
-        log("[main] 无可用账号 → sleep 300s")
-        time.sleep(300); return
+        log("[main] 无可用账号 → 轮询等待（最多300s，每30s检查一次）")
+        _waited = 0
+        while _waited < 300:
+            time.sleep(30); _waited += 30
+            if db_count_fresh() > 0:
+                log(f"[main] fresh 账号已就绪（等了 {_waited}s），立即重试")
+                return  # 返回让 _worker_loop 立即再调用 main()
+        log("[main] 等待超时（300s），继续下轮")        ; return
 
     account_id, email, password, refresh_token = row
     log(f"\n{'─'*60}")
