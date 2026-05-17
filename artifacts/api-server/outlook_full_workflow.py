@@ -131,7 +131,8 @@ def db_add_tags(account_id: int, *tags: str):
 def _get_cf_ip(job_id: str):
     """从 CF pool 取一个 IP，返回 ip_info dict 或 None。"""
     import cf_ip_pool
-    ip_info = cf_ip_pool.acquire_ip(job_id, auto_refresh=True,
+    # auto_refresh=False: 池空时不在注册任务中阻塞测速，由 api-server 后台维护器负责补充
+    ip_info = cf_ip_pool.acquire_ip(job_id, auto_refresh=False,
                                     log_cb=lambda m: log(f"   [cf_pool] {m}"))
     return ip_info
 
@@ -161,24 +162,36 @@ def run_register_and_oauth(
     返回 result dict（含 success, email, password, access_token, refresh_token,
     cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port, proxy_formatted）。
     """
-    from outlook_register import PatchrightController, register_one
+    import asyncio, concurrent.futures
 
-    ctrl = PatchrightController(
-        proxy=proxy,
-        wait_ms=11,          # 单位：秒（BOT_PROTECTION_WAIT=11s），不是毫秒！
-        max_captcha_retries=3,
-    )
-    result = register_one(
-        ctrl=ctrl,
-        engine_name="patchright",
-        headless=headless,
-        planned_username=planned_email,
-        planned_password=planned_password,
-        exit_ip=exit_ip,
-        proxy_port=proxy_port,
-        proxy_formatted=proxy,
-    )
-    return result
+    def _do_register():
+        from outlook_register import PatchrightController, register_one
+        ctrl = PatchrightController(
+            proxy=proxy,
+            wait_ms=11,
+            max_captcha_retries=9,
+        )
+        return register_one(
+            ctrl=ctrl,
+            engine_name="patchright",
+            headless=headless,
+            planned_username=planned_email,
+            planned_password=planned_password,
+            exit_ip=exit_ip,
+            proxy_port=proxy_port,
+            proxy_formatted=proxy,
+        )
+
+    # patch8: asyncio loop detection — run in thread to avoid sync_playwright conflict
+    _loop = None
+    try:
+        _loop = asyncio._get_running_loop()
+    except AttributeError:
+        pass
+    if _loop is not None and _loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+            return _pool.submit(_do_register).result(timeout=300)
+    return _do_register()
 
 
 # ── IMAP 开启 ────────────────────────────────────────────────────────────────
@@ -300,6 +313,13 @@ def run_one(
             "Timeout", "等待同意按钮", "Consent", "net::ERR",
         )):
             _ban_cf_ip(cur_exit)
+            # patch7/A: 记录Arkose子网失败统计
+            if cur_exit and any(kw in err for kw in ("验证码", "CAPTCHA")):
+                try:
+                    import cf_ip_pool as _cfp7a
+                    _cfp7a.record_arkose_result(cur_exit, False)
+                except Exception:
+                    pass
             result["_should_retry"] = True
         return result
 
@@ -383,6 +403,14 @@ def main():
                 cf_retry=cf_attempt,
             )
             if r.get("success"):
+                # v9.91b: 父进程层记录Arkose成功（subprocess模式下子进程不记录）
+                try:
+                    import cf_ip_pool as _cfp91fw
+                    _ok_ip = r.get("exit_ip", "")
+                    if _ok_ip:
+                        _cfp91fw.record_arkose_result(_ok_ip, True)
+                except Exception:
+                    pass
                 break
             if not r.get("_should_retry"):
                 break
