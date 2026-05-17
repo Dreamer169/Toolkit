@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 const API = import.meta.env.BASE_URL.replace(/\/$/, "") + "/api";
+const PM2_API = import.meta.env.BASE_URL.replace(/\/$/, "") + "/pm2-api";
 
 // ── 类型 ──────────────────────────────────────────────────────────────────────
 interface JobSummary {
@@ -39,6 +40,10 @@ interface MaintenanceStatus { ts: number; checked: number; banned: number; recyc
 interface DbStats { accounts: number; identities: number; temp_emails: number; proxies: number }
 interface RecentAccount { id: number; platform: string; email: string; status: string; created_at: string }
 interface ApiHealth { ok: boolean; latency: number }
+interface Pm2Process {
+  name: string; status: string; pid: number | null; pm_id: number;
+  uptime: number | null; restarts: number; cpu: number; memory: number;
+}
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────────
 function elapsed(ms: number, endMs?: number | null) {
@@ -90,6 +95,8 @@ export default function Monitor() {
   const [lastRefresh, setLastRefresh]   = useState(Date.now());
   const [paused, setPaused]             = useState(false);
   const [maintainStatus, setMaintainStatus] = useState<MaintenanceStatus | null>(null);
+  const [pm2Procs, setPm2Procs] = useState<Pm2Process[]>([]);
+  const [procLoading, setProcLoading] = useState<Record<string, string>>({});
 
   const logRef   = useRef<HTMLDivElement>(null);
   const sinceRef = useRef(0);
@@ -118,6 +125,22 @@ export default function Monitor() {
     } catch {}
   }, []);
 
+
+  const fetchPm2 = useCallback(async () => {
+    try {
+      const r = await fetch(`${PM2_API}/processes`).then(r => r.json());
+      if (r.success) setPm2Procs(r.processes ?? []);
+    } catch {}
+  }, []);
+
+  const controlProc = useCallback(async (action: "restart" | "stop" | "start", name: string) => {
+    setProcLoading(prev => ({ ...prev, [name]: action }));
+    try {
+      const r = await fetch(`${PM2_API}/${action}/${encodeURIComponent(name)}`, { method: "POST" }).then(r => r.json());
+      if (r.success) { setTimeout(() => fetchPm2(), 1500); }
+    } catch {}
+    setProcLoading(prev => { const n = { ...prev }; delete n[name]; return n; });
+  }, [fetchPm2]);
   // ── 拉取代理池统计 ─────────────────────────────────────────────────────────
   const fetchProxy = useCallback(async () => {
     try {
@@ -225,6 +248,7 @@ export default function Monitor() {
     fetchStats();
     fetchJobs();
     fetchMaintain();
+    fetchPm2();
   }, [checkHealth, fetchProxy, fetchStats, fetchJobs]);
 
   useEffect(() => {
@@ -243,9 +267,10 @@ export default function Monitor() {
       fetchProxy();
       checkHealth();
       fetchMaintain();
+      fetchPm2();
     }, 8000);
     return () => clearInterval(t);
-  }, [paused, fetchStats, fetchProxy, checkHealth, fetchMaintain]);
+  }, [paused, fetchStats, fetchProxy, checkHealth, fetchMaintain, fetchPm2]);
 
   // ── 停止任务 ──────────────────────────────────────────────────────────────
   async function stopJob(id: string) {
@@ -351,6 +376,49 @@ export default function Monitor() {
       </div>
 
       {/* ── 主体：任务列表 + 实时日志 ──────────────────────────────────── */}
+
+      {/* unitool chain stats panel */}
+      {unitoolStats && (
+        <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-gray-300">🔗 unitool.ai 流水线统计</h2>
+            <span className="text-xs text-gray-500">
+              链状态: <span className={unitoolStats.chain.status === "running" ? "text-blue-400" : "text-gray-400"}>{unitoolStats.chain.status}</span>
+              {" · "}上次运行: <span className="text-gray-300">{unitoolStats.chain.last_run}</span>
+            </span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs mb-3">
+            <div className="rounded-lg bg-[#0d1117] border border-emerald-900/40 p-3">
+              <div className="text-gray-500">已注册</div>
+              <div className="text-xl font-bold text-emerald-400 mt-1">{unitoolStats.outlook.registered}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">账号总数</div>
+              <div className="text-xl font-bold text-white mt-1">{unitoolStats.outlook.total}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-blue-900/40 p-3">
+              <div className="text-gray-500">处理中</div>
+              <div className="text-xl font-bold text-blue-400 mt-1">{unitoolStats.outlook.processing}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">池账号</div>
+              <div className="text-xl font-bold text-cyan-400 mt-1">{unitoolStats.pool.live}</div>
+              <div className="text-gray-600 mt-0.5">有余额 {unitoolStats.pool.with_balance}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-amber-900/40 p-3">
+              <div className="text-gray-500">总积分</div>
+              <div className="text-xl font-bold text-amber-400 mt-1">{unitoolStats.token.total_bonus.toFixed(0)}</div>
+              <div className="text-gray-600 mt-0.5">{unitoolStats.token.bonus_accounts} 账号有积分</div>
+            </div>
+          </div>
+          {unitoolStats.chain.brief && (
+            <div className="text-xs text-gray-600 bg-[#0d1117] rounded-lg px-3 py-2 font-mono truncate">
+              {unitoolStats.chain.brief}
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
 
         {/* 左：任务列表 */}
@@ -587,6 +655,163 @@ export default function Monitor() {
           </div>
         ) : (
           <div className="text-gray-600 text-sm animate-pulse">等待首次维护运行（启动后 20 秒）…</div>
+        )}
+      </div>
+
+      {/* CF 子网 Arkose 成功率 */}
+      {cfArkose && cfArkose.subnets.length > 0 && (
+        <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-gray-300">⚡ CF 子网 Arkose 成功率</h2>
+            <span className="text-xs text-gray-600">按使用量排序 · &lt;35% 为高风险子网 · 建议屏蔽</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-[#21262d]">
+                  {["子网 /20", "ok", "fail", "总次数", "Arkose成功率", "风险级"].map(h => (
+                    <th key={h} className="text-left px-3 py-2 text-gray-600 font-medium">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {cfArkose.subnets.map((s, i) => {
+                  const risk = s.rate < 20 ? "🔴 极高" : s.rate < 35 ? "🟠 高" : s.rate < 55 ? "🟡 中" : "🟢 低";
+                  const rateColor = s.rate < 20 ? "text-red-400" : s.rate < 35 ? "text-orange-400" : s.rate < 55 ? "text-amber-400" : "text-emerald-400";
+                  return (
+                    <tr key={s.subnet} className={`border-b border-[#1c2128] ${i % 2 === 0 ? "" : "bg-[#0d1117]/30"}`}>
+                      <td className="px-3 py-2 font-mono text-gray-300">{s.subnet}</td>
+                      <td className="px-3 py-2 text-emerald-400">{s.ok}</td>
+                      <td className="px-3 py-2 text-red-400">{s.fail}</td>
+                      <td className="px-3 py-2 text-gray-400">{s.total}</td>
+                      <td className="px-3 py-2">
+                        <div className="flex items-center gap-2">
+                          <div className="w-16 h-1.5 bg-[#21262d] rounded-full overflow-hidden">
+                            <div
+                              className={`h-full rounded-full ${s.rate < 35 ? "bg-red-500" : s.rate < 55 ? "bg-amber-500" : "bg-emerald-500"}`}
+                              style={{ width: `${s.rate}%` }}
+                            />
+                          </div>
+                          <span className={rateColor}>{s.rate}%</span>
+                        </div>
+                      </td>
+                      <td className="px-3 py-2">{risk}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+
+      {/* ── 注册流水线开关 ─────────────────────────────────────────────── */}
+      {pm2Procs.length > 0 && (() => {
+        const GROUPS = [
+          {
+            label: "Kiro 注册",
+            procs: ["kiro-chain"],
+          },
+          {
+            label: "Unitool 注册",
+            procs: ["unitool_chain_v3", "unitool_chain_v3_w1", "unitool_chain_v3_w2"],
+          },
+        ];
+        const procMap = Object.fromEntries(pm2Procs.map(p => [p.name, p]));
+        return (
+          <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4">
+            <h2 className="text-sm font-semibold text-gray-300 mb-3">⚙️ 注册流水线控制</h2>
+            <div className="flex flex-wrap gap-6">
+              {GROUPS.map(group => (
+                <div key={group.label} className="flex flex-col gap-2">
+                  <div className="text-xs text-gray-500 font-medium">{group.label}</div>
+                  {group.procs.map(name => {
+                    const proc = procMap[name];
+                    const isOnline = proc?.status === "online";
+                    const loading = procLoading[name];
+                    return (
+                      <div key={name} className="flex items-center gap-3">
+                        <button
+                          onClick={() => controlProc(isOnline ? "stop" : "start", name)}
+                          disabled={!!loading}
+                          title={isOnline ? "点击停止" : "点击启动"}
+                          className={"relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-200 disabled:opacity-40 disabled:cursor-not-allowed " + (isOnline ? "bg-emerald-500" : "bg-gray-600")}
+                        >
+                          <span className={"inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-200 " + (isOnline ? "translate-x-6" : "translate-x-1")} />
+                        </button>
+                        <div className="flex flex-col">
+                          <span className="text-xs font-mono text-gray-300">{name}</span>
+                          <span className={"text-xs " + (loading ? "text-blue-400" : isOnline ? "text-emerald-400" : proc ? "text-amber-400" : "text-gray-600")}>
+                            {loading ? (loading === "start" ? "启动中…" : "停止中…") : isOnline ? ("● 运行中" + (proc?.cpu ? " " + proc.cpu.toFixed(0) + "%" : "")) : proc ? "○ 已停止" : "未找到"}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── 进程状态总览 ─────────────────────────────────────────────────── */}
+      <div className="bg-[#161b22] border border-[#21262d] rounded-xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-[#21262d] flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-gray-300">🖥️ 所有进程状态</h2>
+          <span className="text-xs text-gray-600">PM2 共 {pm2Procs.length} 个进程</span>
+        </div>
+        {pm2Procs.length === 0 ? (
+          <div className="px-4 py-6 text-center text-gray-600 text-sm animate-pulse">加载进程列表…</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-[#21262d]">
+                  {["进程名", "状态", "PID", "CPU", "内存", "重启", "操作"].map(h => (
+                    <th key={h} className="text-left px-4 py-2 text-gray-600 font-medium">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {pm2Procs.map((proc) => (
+                  <tr key={proc.pm_id} className="border-b border-[#1c2128] hover:bg-[#0d1117]/30">
+                    <td className="px-4 py-2.5 font-mono text-gray-300">{proc.name}</td>
+                    <td className="px-4 py-2.5">
+                      <span className={proc.status === "online" ? "text-emerald-400" : proc.status === "stopped" ? "text-amber-400" : proc.status.startsWith("wait") ? "text-blue-400" : "text-red-400"}>
+                        {proc.status === "online" ? "● 在线" : proc.status === "stopped" ? "○ 停止" : proc.status === "waiting" || proc.status === "waiting…" ? "◌ 等待" : proc.status === "errored" ? "✗ 错误" : proc.status}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2.5 text-gray-600 font-mono">{proc.pid ?? "—"}</td>
+                    <td className="px-4 py-2.5 text-gray-400">{proc.cpu.toFixed(1)}%</td>
+                    <td className="px-4 py-2.5 text-gray-400">{(proc.memory / 1024 / 1024).toFixed(1)} MB</td>
+                    <td className="px-4 py-2.5 text-gray-400">{proc.restarts}</td>
+                    <td className="px-4 py-2.5">
+                      <div className="flex gap-1">
+                        <button
+                          onClick={() => controlProc("restart", proc.name)}
+                          disabled={!!procLoading[proc.name]}
+                          className="px-2 py-0.5 text-xs rounded bg-blue-900/40 text-blue-400 hover:bg-blue-800/60 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                        >
+                          {procLoading[proc.name] === "restart" ? "…" : "重启"}
+                        </button>
+                        {proc.status === "online" && (
+                          <button
+                            onClick={() => controlProc("stop", proc.name)}
+                            disabled={!!procLoading[proc.name]}
+                            className="px-2 py-0.5 text-xs rounded bg-red-900/40 text-red-400 hover:bg-red-800/60 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                          >
+                            {procLoading[proc.name] === "stop" ? "…" : "停止"}
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>
