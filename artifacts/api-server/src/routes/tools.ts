@@ -1515,7 +1515,7 @@ router.post("/tools/outlook/register", async (req, res) => {
     delay    = 2,
     engine   = "patchright",
     wait     = 11,
-    retries  = 2,
+    retries  = 4,
     autoProxy = false,
     proxyMode = "cf",             // "cf" = 使用 CF IP 池 + xray 中继
     cfPort    = 443,
@@ -1662,6 +1662,13 @@ router.post("/tools/outlook/register", async (req, res) => {
   const child = spawn("python3", args, { env: _spawnEnv });
   jobQueue.setChild(jobId, child);
 
+  // 持久化注册日志到文件（供监控中心实时查看 & 重启后可追溯）
+  const { createWriteStream: _cwsReg } = await import("fs");
+  const _regLogPath = "/root/.pm2/logs/reg-tasks-out.log";
+  const _regLogStream = _cwsReg(_regLogPath, { flags: "a" });
+  const _sep = "=".repeat(60);
+  _regLogStream.write(`\n${_sep}\nJOB ${jobId}  ${new Date().toISOString()}  count=${n}\n${_sep}\n`);
+
   // identityMap hoisted here so stdout AND close handlers share it
   const identityMap = new Map<string, {
     access_token: string; refresh_token: string;
@@ -1673,6 +1680,7 @@ router.post("/tools/outlook/register", async (req, res) => {
   let inJson  = false;
 
   child.stdout.on("data", (chunk: Buffer) => {
+    _regLogStream.write(chunk);
     const raw = chunk.toString();
     if (raw.includes("── JSON 结果 ──") || inJson) { inJson = true; jsonBuf += raw; }
 
@@ -1768,6 +1776,7 @@ router.post("/tools/outlook/register", async (req, res) => {
   });
 
   child.stderr.on("data", (chunk: Buffer) => {
+    _regLogStream.write(chunk);
     const msg = chunk.toString().trim();
     if (msg && !msg.includes("DeprecationWarning") && !msg.includes("FutureWarning") && !msg.includes("UserWarning")) {
       // only push meaningful stderr
@@ -1780,6 +1789,7 @@ router.post("/tools/outlook/register", async (req, res) => {
   });
 
   child.on("close", async (code) => {
+    _regLogStream.end(`=== JOB ${jobId} EXIT code=${code} ${new Date().toISOString()} ===\n`);
     try {
     // 解析 JSON 结果块
     // v8.20: identityMap declared above (before stdout handler) for cross-handler access
@@ -2155,10 +2165,19 @@ router.get("/tools/jobs/:jobId", async (req, res) => {
   });
 });
 
-router.delete("/tools/jobs/:jobId", (req, res) => {
-  const stopped = jobQueue.stop(req.params.jobId);
-  if (!stopped) { res.status(404).json({ success: false }); return; }
+router.delete("/tools/jobs/:jobId", async (req, res) => {
+  await jobQueue.remove(req.params.jobId);
   res.json({ success: true });
+});
+
+// POST /tools/jobs/purge-failed — 批量清除0成功已完成任务
+router.post("/tools/jobs/purge-failed", async (_req, res) => {
+  try {
+    const count = await jobQueue.bulkPurge({ onlyZeroAccounts: true });
+    res.json({ success: true, deleted: count });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
 });
 
 // 停止任务
@@ -6037,6 +6056,44 @@ router.get("/tools/outlook/emails-pool-check/status", (_req, res) => {
 });
 
 
+
+
+// ── 日志文件 tail API (供前端监控中心实时查看持久化日志) ─────────────────
+const _LOG_FILES: Record<string, string> = {
+  "reg-tasks":        "/root/.pm2/logs/reg-tasks-out.log",
+  "outlook-register": "/root/.pm2/logs/outlook-register-out.log",
+  "unitool-chain":    "/tmp/unitool_chain_v3_out.log",
+};
+
+router.get("/tools/logs/files", async (_req, res) => {
+  const { statSync } = await import("fs");
+  const result = Object.entries(_LOG_FILES).map(([name, path]) => {
+    try { const s = statSync(path); return { name, path, size: s.size, mtime: s.mtimeMs }; }
+    catch { return { name, path, size: 0, mtime: 0 }; }
+  });
+  res.json({ success: true, files: result });
+});
+
+// GET /api/tools/logs/tail?file=reg-tasks&offset=0
+// offset=0 → 返回文件最后 100KB；否则从 offset 处读取最多 128KB
+router.get("/tools/logs/tail", async (req, res) => {
+  const file = _LOG_FILES[req.query.file as string];
+  if (!file) { res.json({ success: false, error: "unknown file" }); return; }
+  const reqOffset = Math.max(0, Number(req.query.offset) || 0);
+  try {
+    const { statSync, openSync, readSync, closeSync } = await import("fs");
+    const size = statSync(file).size;
+    const startAt = reqOffset === 0 ? Math.max(0, size - 100 * 1024) : reqOffset;
+    if (size <= startAt) { res.json({ success: true, lines: [], offset: size }); return; }
+    const readSize = Math.min(size - startAt, 128 * 1024);
+    const buf = Buffer.alloc(readSize);
+    const fd = openSync(file, "r");
+    readSync(fd, buf, 0, readSize, startAt);
+    closeSync(fd);
+    const lines = buf.toString("utf8").split("\n").filter(l => l.trim().length > 0);
+    res.json({ success: true, lines, offset: startAt + readSize });
+  } catch { res.json({ success: true, lines: [], offset: 0 }); }
+});
 
 
 export default router;
