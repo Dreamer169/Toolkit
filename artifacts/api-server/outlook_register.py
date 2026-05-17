@@ -93,6 +93,7 @@ SUCCESS_URL_KEYWORDS = (
     "login.live.com/login.srf", "login.live.com/ppsecure",
     "consent.live.com", "signup.live.com/CreateAccount.aspx?id=",
     "/owa/", "hotmail.com/mail",
+    "login.microsoft.com/consumers/fido", "login.microsoft.com/consumers/device",
 )
 
 
@@ -364,6 +365,46 @@ class BaseController:
             if not captcha_ok:
                 return False, "验证码处理失败", email
 
+            # ── captcha-clear poll: 处理 early_confirmed 假阳性 (restored from b10n v9.83) ──
+            # handle_captcha 通过 px-captcha empty 早期返回 True 时，页面不一定已跳转。
+            # 轮询30s；若14s后 CAPTCHA iframe 仍在 → 假阳性，换CF IP重试。
+            _early_ok = getattr(self, '_captcha_early_confirmed', False)
+            self._captcha_early_confirmed = False
+            if _early_ok:
+                print(f"[register] [captcha-clear] early_confirmed: 轮询等待页面跳转(最多30s)", flush=True)
+                _cc_start = time.time()
+                _cc_navigated = False
+                while time.time() - _cc_start < 30:
+                    try:
+                        _cur_url = page.url
+                        _success_domains = ["account.live.com","account.microsoft.com",
+                                            "outlook.live.com","outlook.com/mail","login.live.com/login.srf",
+                                            "login.microsoft.com/consumers/fido","login.microsoft.com/consumers/device"]
+                        if any(x in _cur_url for x in _success_domains):
+                            print(f"[register] [captcha-clear] CAPTCHA cleared after {time.time()-_cc_start:.0f}s", flush=True)
+                            _cc_navigated = True
+                            break
+                        _elapsed = time.time() - _cc_start
+                        print(f"[register] [captcha-clear] {_elapsed:.0f}s elapsed (retries=0)", flush=True)
+                        if _elapsed > 14:
+                            _has_captcha = False
+                            try:
+                                _has_captcha = (page.locator("iframe#enforcementFrame").count() > 0
+                                    or page.locator('[src*="hsprotect.net"], [title*="challenge" i]').count() > 0)
+                            except Exception:
+                                pass
+                            if _has_captcha:
+                                print(f"[register] [captcha-clear] patch7: CAPTCHA仍在 @{_elapsed:.0f}s → 直接退出换CF IP（不重跑handle_captcha）", flush=True)
+                                return False, "CAPTCHA early_confirmed假阳性，换CF IP重试", email
+                        page.wait_for_timeout(2000)
+                    except Exception as _cc_e:
+                        if "TargetClosed" in type(_cc_e).__name__ or "Target page" in str(_cc_e):
+                            raise
+                        print(f"[register] [captcha-clear] poll error: {_cc_e}", flush=True)
+                        break
+                if _cc_navigated:
+                    return True, "注册成功", email
+
             # ── 验证注册真正完成（等待跳转到成功页）────────────────────
             # 微软成功页：account.live.com, outlook.com, login.live.com/login.srf
             # 只有页面实际跳转到这些域才算真正注册成功
@@ -375,10 +416,23 @@ class BaseController:
                         "outlook.live.com",
                         "outlook.com/mail",
                         "login.live.com/login.srf",
+                        "login.microsoft.com/consumers/fido",   # v9.84: passkey enrollment page
+                        "login.microsoft.com/consumers/device", # v9.84: device registration page
                     ]),
                     timeout=30000,
                 )
-                print("[register] ✅ 检测到成功跳转页", flush=True)
+                # v9.84: FIDO/passkey enrollment page → dismiss and re-check URL
+                _cur_after = page.url
+                if "login.microsoft.com/consumers" in _cur_after:
+                    print(f"[register] 🔍 检测到 FIDO/passkey 页: {_cur_after[:80]}", flush=True)
+                    try:
+                        _skip_ms_interrupts(page, label='post-captcha-fido')
+                        page.wait_for_timeout(3000)
+                        print(f"[register] ✅ FIDO页处理完成，当前: {page.url[:80]}", flush=True)
+                    except Exception as _fido_e:
+                        print(f"[register] FIDO dismiss error: {_fido_e}", flush=True)
+                else:
+                    print("[register] ✅ 检测到成功跳转页", flush=True)
             except Exception:
                 # 检查当前页面是否有成功标志（避免误判）
                 cur_url = page.url
@@ -1091,6 +1145,7 @@ class PatchrightController(BaseController):
             if _second_click_done:
                 page.wait_for_timeout(3500)  # 等待模式切换
                 _press_clicked = False
+                _press_again_used = False  # v9.84: 标记是否用了合法"再次按下"按钮
 
                 # 方法A：Arkose "再次按下"（frame2 + page 全局）
                 try:
@@ -1107,6 +1162,7 @@ class PatchrightController(BaseController):
                         _held = PatchrightController._human_press_hold(page, _cx2, _cy2, 4400, 5200)
                         print(f"[captcha] ✅ 再次按下已按住{_held/1000:.1f}s！（v7.62 人类化 Arkose press-and-hold）", flush=True)
                         _press_clicked = True
+                        _press_again_used = True  # v9.84: 合法按钮已使用
                     else:
                         print(f"[captcha]   再次按下 bounding_box 无效: {_box2}", flush=True)
                 except Exception as _e4:
@@ -1345,6 +1401,15 @@ class PatchrightController(BaseController):
                 print("[captcha] ✅ .draw 已消失（Arkose 已处理 press）", flush=True)
             except Exception:
                 print("[captcha] .draw 未检测到/超时（继续）", flush=True)
+
+            # v9.84: 合法"再次按下"按钮后 .draw 消失 → 立即 early_confirmed
+            # 这与 b10n 5/5 成功的机制一致：Arkose已处理 → captcha-clear poll 决定
+            # 成功(页面导航)或失败(CAPTCHA仍在 → 换CF IP重试)，无需等音频
+            if _press_again_used:
+                print("[captcha] ✅ v9.84 再次按下+.draw消失 → early_confirmed，跳过音频等待", flush=True)
+                self._captcha_early_confirmed = True
+                return True
+
             _v985_false_positive = False  # v9.92 init
             try:
                 _early_solved_reason = None
@@ -1381,8 +1446,6 @@ class PatchrightController(BaseController):
                                 _early_solved_reason = f"所有 hsprotect frame 已清空 (max bodyLen={max(_hsp_lens)}, n={len(_hsp_lens)})"
                         except Exception:
                             pass
-                # v7.93fix: px-captcha empty/iframe_hidden removed (false positive)
-
                 if _early_solved_reason:
                     print(f"[captcha] ✅ press-hold 后早期检测：CAPTCHA 已通过（{_early_solved_reason}）→ 跳过音频流程", flush=True)
                     self._captcha_early_confirmed = True  # v9.71: notify clear-wait
@@ -1416,6 +1479,7 @@ class PatchrightController(BaseController):
             # ── 按住后轮询等待音频加载（最多20s，每2s检查一次网络拦截URL）──
             print("[captcha] 轮询等待音频加载（最多20s）…", flush=True)
             _poll_audio_start = time.time()
+            self._px_empty_detected_at = None  # v9.83: reset per press-hold attempt
             while time.time() - _poll_audio_start < 20:
                 _net_now = getattr(self, '_net_audio_urls', [])
                 if _net_now:
@@ -1442,8 +1506,67 @@ class PatchrightController(BaseController):
                 if _fetch_done:
                     print(f"[captcha] ✅ fetching-volume 消失，音频元素已出现（等待{time.time()-_poll_audio_start:.1f}s）", flush=True)
                     break
+                # v9.83: 在每次音频轮询时检查页面URL（最直接的成功信号）
+                try:
+                    _poll_url_now = page.url
+                    if any(x in _poll_url_now for x in ["account.live.com","account.microsoft.com",
+                                                         "outlook.live.com","outlook.com/mail","login.live.com/login.srf",
+                                                         "login.microsoft.com/consumers/fido","login.microsoft.com/consumers/device"]):
+                        print(f"[captcha] ✅ v9.83 音频轮询中检测到成功页 → CAPTCHA已通过", flush=True)
+                        self._captcha_early_confirmed = True
+                        return True
+                except Exception:
+                    pass
+                # v9.83: 检查 px-captcha 是否已清空（在循环中检测，避免过早触发）
+                if not getattr(self, '_px_empty_detected_at', None):
+                    try:
+                        for _pf_poll_px in page.frames:
+                            _u_poll_px = getattr(_pf_poll_px, "url", "") or ""
+                            if "hsprotect.net" not in _u_poll_px:
+                                continue
+                            _px_poll = _pf_poll_px.evaluate("""() => {
+                                const root = document.getElementById("px-captcha");
+                                if (!root || root.children.length === 0) return "empty";
+                                return "present";
+                            }""")
+                            if _px_poll == "empty":
+                                import time as _t_px
+                                self._px_empty_detected_at = _t_px.time()
+                                print(f"[captcha] 🔍 v9.83 px-captcha 首次检测到empty，等4s确认…", flush=True)
+                                break
+                    except Exception:
+                        pass
+                elif time.time() - self._px_empty_detected_at >= 4.0:
+                    # 4s 后二次确认
+                    _px_confirmed = False
+                    try:
+                        for _pf_poll_px2 in page.frames:
+                            _u_pp2 = getattr(_pf_poll_px2, "url", "") or ""
+                            if "hsprotect.net" not in _u_pp2:
+                                continue
+                            _px_p2 = _pf_poll_px2.evaluate("""() => {
+                                const root = document.getElementById("px-captcha");
+                                if (!root || root.children.length === 0) return "empty";
+                                return "present";
+                            }""")
+                            if _px_p2 == "empty":
+                                _px_confirmed = True
+                                break
+                            else:
+                                self._px_empty_detected_at = None  # 重置，Arkose重填了
+                                break
+                    except Exception:
+                        pass
+                    if _px_confirmed:
+                        print(f"[captcha] ✅ v9.83 px-captcha 4s确认稳定: empty → 跳过音频", flush=True)
+                        self._px_empty_detected_at = None
+                        _early_solved_reason = "PerimeterX 外层 px-captcha 已清空(confirmed+body清空)"
+                        print(f"[captcha] ✅ press-hold 后早期检测：CAPTCHA 已通过（{_early_solved_reason}）→ 跳过音频流程", flush=True)
+                        self._captcha_early_confirmed = True
+                        return True
                 page.wait_for_timeout(1000)
             else:
+                self._px_empty_detected_at = None  # 重置
                 print("[captcha] ⚠ 20s内音频未加载完成（代理延迟或挑战仍在fetching）", flush=True)
 
             # v7.60 二次早期检测：20s 后若 CAPTCHA 已消失，跳过深度扫描+音频解析
@@ -1590,7 +1713,38 @@ class PatchrightController(BaseController):
                                 return True
                 except Exception:
                     pass
-                # v7.93fix: v7.64 px-captcha fallback removed (false positive)
+                # v9.83 restored: v7.64 终极兜底 with 4s stability
+                try:
+                    for _pf_px in page.frames:
+                        _u_px = getattr(_pf_px, "url", "") or ""
+                        if "hsprotect.net" not in _u_px:
+                            continue
+                        _px_state = _pf_px.evaluate("""() => {
+                            const root = document.getElementById("px-captcha");
+                            if (!root) return null;
+                            if (root.children.length === 0) return "empty";
+                            const inner = root.querySelector("iframe");
+                            if (inner) {
+                                const cs = window.getComputedStyle(inner);
+                                if (cs.display === "none" || cs.visibility === "hidden") return "iframe_hidden";
+                            }
+                            return null;
+                        }""")
+                        if _px_state in ("empty", "iframe_hidden"):
+                            try:
+                                page.wait_for_timeout(4000)
+                            except Exception:
+                                pass
+                            _px_state2 = _pf_px.evaluate("""() => {
+                                const root = document.getElementById("px-captcha");
+                                if (!root || root.children.length === 0) return "empty";
+                                return "present";
+                            }""")
+                            if _px_state2 == "empty":
+                                print("[captcha] ✅ v9.83 终极兜底：px-captcha 4s确认稳定 empty → CAPTCHA 通过", flush=True)
+                                return True
+                except Exception:
+                    pass
                 print("[captcha] ❌ CAPTCHA 仍然存在", flush=True)
                 return False
             except Exception:
