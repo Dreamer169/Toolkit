@@ -123,8 +123,8 @@ def _get_healthy_resi_ports_chain() -> list:
     """Delegate to resi_pool: parallel probe 29 ports, cached 5 min."""
     return _rpool.refresh()
 WATERMARK       = 5     # fresh 账号低于此值时触发 outlook 补充
-REPLENISH_CNT   = 5     # 单次补充目标数量
-COOLDOWN_S      = 300   # 水位补充冷却（15 分钟）
+REPLENISH_CNT   = 1     # 单次补充目标数量（降低Chrome并发）
+COOLDOWN_S      = 600   # 水位补充冷却（15 分钟）
 LOCK_FILE       = "/tmp/unitool_chain_replenish.lock"
 _REPAIR_COOLDOWN_FILE = "/tmp/ssid_repair_cooldown.json"  # v3.3
 _REPAIR_BONUS_MIN     = 5.0   # v3.3: only repair bonus >= 5 accounts
@@ -208,9 +208,19 @@ def _atexit_handler():
 
 atexit.register(_atexit_handler)
 
-# SIGTERM → sys.exit(0) so atexit fires cleanly when pm2 stops/restarts
+# SIGTERM → kill current child proc first, then sys.exit(0) so atexit fires cleanly
+_current_proc_lock = threading.Lock()
+_current_proc = None
+
 def _sigterm_handler(signum, frame):
-    log("[signal] SIGTERM received — exiting cleanly")
+    global _current_proc
+    log("[signal] SIGTERM received — killing child and exiting cleanly")
+    with _current_proc_lock:
+        if _current_proc is not None:
+            try:
+                _current_proc.kill()
+            except Exception:
+                pass
     sys.exit(0)
 signal.signal(signal.SIGTERM, _sigterm_handler)
 signal.signal(signal.SIGINT,  _sigterm_handler)  # PM2默认发 SIGINT
@@ -239,6 +249,7 @@ def db_get_fresh_account():
                    tags NOT LIKE '%%unitool_registered%%'
                AND (tags NOT LIKE '%%unitool_fail%%' OR updated_at < NOW())
                AND tags NOT LIKE '%%unitool_already%%'
+               AND tags NOT LIKE '%%ms_token_expired%%'
                AND (tags NOT LIKE '%%unitool_reg_retry%%' OR updated_at < NOW())
                AND tags NOT LIKE '%%unitool_processing%%'
                AND tags NOT LIKE '%%unitool_already%%'
@@ -286,7 +297,8 @@ def db_count_fresh():
                tags NOT LIKE '%%unitool_registered%%'
            AND (tags NOT LIKE '%%unitool_fail%%' OR updated_at < NOW())
            AND tags NOT LIKE '%%unitool_already%%'
-           AND (tags NOT LIKE '%%unitool_reg_retry%%' OR updated_at < NOW())
+           AND tags NOT LIKE '%%ms_token_expired%%'
+               AND (tags NOT LIKE '%%unitool_reg_retry%%' OR updated_at < NOW())
            AND tags NOT LIKE '%%unitool_processing%%'
            AND tags NOT LIKE '%%unitool_already%%'
            AND tags NOT LIKE '%%unitool_rescue_dead%%'
@@ -863,8 +875,10 @@ def db_get_all_ref_codes() -> list:
                     log(f"[ref] id={acc_id} {acc_email} rc={rc} conversions={api_conv}/{MAX_REF_SLOTS}")
             else:
                 used = local_used
-        if used < MAX_REF_SLOTS:
+        if used < MAX_REF_SLOTS and "unitool_high_balance" not in (tags or ""):
             available.append({"id": acc_id, "email": acc_email, "ref_code": rc, "used": used})
+        elif "unitool_high_balance" in (tags or "") and used < MAX_REF_SLOTS:
+            log(f"[ref] SKIP HB id={acc_id} {acc_email}: already HB, API used={used}/{MAX_REF_SLOTS}, excluded from pool")
         else:
             # HB-promote
             if "unitool_high_balance" not in (tags or ""):
@@ -1031,6 +1045,9 @@ def cleanup_stale_processing(max_age_min=30):
 # ── 水位检查 + 非阻塞 outlook 补充 ───────────────────────────────────────────
 def replenish_if_needed():
     """账号水位不足时，非阻塞触发 api-server 的 outlook 批量注册"""
+    # 只允许主进程(WORKER_ID=0)触发注册，避免 w1/w2 并发触发造成 Chrome 风暴
+    if WORKER_ID != 0:
+        return
     fresh = db_count_fresh()
     log(f"[watermark] fresh={fresh} watermark={WATERMARK}")
     if fresh >= WATERMARK:
@@ -1054,8 +1071,8 @@ def replenish_if_needed():
         for line in open("/proc/meminfo"):
             if "MemAvailable" in line:
                 mb = int(line.split()[1]) // 1024
-                if mb < 900:
-                    log(f"[watermark] 内存不足 {mb}MB < 900MB，跳过补充"); return
+                if mb < 2000:
+                    log(f"[watermark] 内存不足 {mb}MB < 2000MB，跳过补充"); return
                 break
     except Exception:
         pass
@@ -1069,7 +1086,7 @@ def replenish_if_needed():
             "engine":    "patchright",
             "wait":      11,
             "retries":   2,
-            "workers":   1,
+            "workers":   2,   # 显式指定2防止API自动升档到6
         }).encode()
         req  = urllib.request.Request(
             f"{API_BASE}/tools/outlook/register",
@@ -1278,12 +1295,19 @@ def _run(cmd, timeout=900, label=""):
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, env=env)
+        global _current_proc
+        with _current_proc_lock:
+            _current_proc = proc
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             proc.kill(); proc.communicate()
             log(f"[cmd] TIMEOUT {timeout}s: {label}")
             return "", "TIMEOUT", -1
+        finally:
+            with _current_proc_lock:
+                if _current_proc is proc:
+                    _current_proc = None
         return stdout, stderr, proc.returncode
     except KeyboardInterrupt:
         if proc:
