@@ -1481,9 +1481,29 @@ class PatchrightController(BaseController):
             # 这与 b10n 5/5 成功的机制一致：Arkose已处理 → captcha-clear poll 决定
             # 成功(页面导航)或失败(CAPTCHA仍在 → 换CF IP重试)，无需等音频
             if _press_again_used:
-                print("[captcha] ✅ v9.84 再次按下+.draw消失 → early_confirmed，跳过音频等待", flush=True)
-                self._captcha_early_confirmed = True
-                return True
+                print("[captcha] v11.1 press-hold+.draw -> 2s wait then hsprotect check (49/49 press-hold failed)", flush=True)
+                # v11.1: wait 2s then check hsprotect bodyLen. >1500=Arkose rejected -> immediate False
+                page.wait_for_timeout(2000)
+                _ph_hsp_lens = []
+                for _pf_ph in page.frames:
+                    try:
+                        _u_ph = getattr(_pf_ph, "url", "") or ""
+                        if "hsprotect.net" in _u_ph:
+                            _bl_ph = _pf_ph.evaluate("() => document.body ? document.body.innerHTML.length : -1")
+                            if _bl_ph is not None and _bl_ph > 0:
+                                _ph_hsp_lens.append(_bl_ph)
+                    except Exception:
+                        pass
+                if _ph_hsp_lens and max(_ph_hsp_lens) > 1500:
+                    print(f"[captcha] v11.1 press-hold 2s later: hsprotect still present (max={max(_ph_hsp_lens)}) -> Arkose rejected", flush=True)
+                    return False
+                elif _ph_hsp_lens:
+                    print(f"[captcha] v11.1 press-hold 2s later: hsprotect cleared (max={max(_ph_hsp_lens)}) -> CAPTCHA passed", flush=True)
+                    self._captcha_early_confirmed = True
+                    return True
+                else:
+                    print("[captcha] v11.1 press-hold 2s later: no hsprotect frames -> fall through", flush=True)
+                # fall through to standard early detection
 
             _v985_false_positive = False  # v9.92 init
             try:
@@ -1555,11 +1575,44 @@ class PatchrightController(BaseController):
             print("[captcha] 轮询等待音频加载（最多20s）…", flush=True)
             _poll_audio_start = time.time()
             self._px_empty_detected_at = None  # v9.83: reset per press-hold attempt
+            _audio_tab_clicked = False  # v11.0
             while time.time() - _poll_audio_start < 20:
                 _net_now = getattr(self, '_net_audio_urls', [])
                 if _net_now:
                     print(f"[captcha] ✅ 网络拦截到音频URL (等待{time.time()-_poll_audio_start:.1f}s): {_net_now[0][:80]}", flush=True)
                     break
+                # v11.0: 8s no audio URL -> actively click audio challenge tab
+                if not _audio_tab_clicked and time.time() - _poll_audio_start >= 8:
+                    print('[captcha] ℹ v11.0 8s无音频URL，主动找音频挑战按鈕', flush=True)
+                    _audio_tab_clicked = True
+                    for _atf in page.frames:
+                        try:
+                            _atu = getattr(_atf, 'url', '') or ''
+                            if 'hsprotect.net' not in _atu:
+                                continue
+                            _at_js = """
+                                (function() {
+                                    var sels = ['[data-cy="audio-challenge-tab"]','[aria-label*="audio" i]',
+                                                '[aria-label*="sound" i]','button[id*="audio"]',
+                                                '[class*="audio-challenge"]','[role="tab"]','.challenge-tab'];
+                                    for (var i=0;i<sels.length;i++) { var el=document.querySelector(sels[i]); if(el){el.click();return sels[i];} }
+                                    var tabs=Array.from(document.querySelectorAll('[role="tab"],[class*="tab"]'));
+                                    for (var j=0;j<tabs.length;j++) {
+                                        var txt=(tabs[j].textContent||tabs[j].getAttribute('aria-label')||'').toLowerCase();
+                                        if(txt.indexOf('audio')>=0||txt.indexOf('sound')>=0){tabs[j].click();return 'tab:'+txt.slice(0,20);}
+                                    }
+                                    return null;
+                                })()
+                            """
+                            _at_sel = _atf.evaluate(_at_js)
+                            if _at_sel:
+                                print(f'[captcha] ✅ v11.0 点击音频tab: {_at_sel} frame={_atu[:50]}', flush=True)
+                                page.wait_for_timeout(3000)
+                                _fr_net = getattr(self, '_net_audio_urls', [])
+                                if _fr_net:
+                                    print(f'[captcha] ✅ v11.0 点击后音频URL出现: {_fr_net[0][:80]}', flush=True)
+                        except Exception:
+                            pass
                 # 快速检测: passkey/enroll 或 interrupt 页面出现 → CAPTCHA 已通过，无需等音频
                 _passkey_found = any(
                     'interrupt' in getattr(_pf2, 'url', '') or 'passkey' in getattr(_pf2, 'url', '')
@@ -1660,9 +1713,9 @@ class PatchrightController(BaseController):
                             print(f"[captcha] ✅ v9.83 px-captcha 7s确认稳定: empty → 跳过音频", flush=True)
                             self._px_empty_detected_at = None
                             _early_solved_reason = "PerimeterX 外层 px-captcha 已清空(confirmed+body清空)"
-                            print(f"[captcha] ✅ press-hold 后早期检测：CAPTCHA 已通过（{_early_solved_reason}）→ 跳过音频流程", flush=True)
-                            self._captcha_early_confirmed = True
-                            return True
+                            print(f"[captcha] ℹ v11.0 px-captcha empty 但不是真正通过信号（{_early_solved_reason}）→ 转音频解析", flush=True)
+                            # v11.0: removed early_confirmed (false positive)
+                            break  # exit 20s poll, fall into audio solving
                 page.wait_for_timeout(1000)
             else:
                 self._px_empty_detected_at = None  # 重置
