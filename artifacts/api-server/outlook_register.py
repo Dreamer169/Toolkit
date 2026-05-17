@@ -388,6 +388,31 @@ class BaseController:
                             print(f"[register] [captcha-clear] ✅ 跳转成功 after {time.time()-_cc_start:.0f}s", flush=True)
                             _cc_navigated = True
                             break
+                        # v11.3: Add your name interrupt page in early_confirmed loop
+                        elif "signup.live.com" in _cur_url:
+                            try:
+                                _fn_cc = page.locator("#firstNameInput, #iFirstName").first
+                                _fn_vis_cc = False
+                                try: _fn_vis_cc = _fn_cc.is_visible(timeout=1500)
+                                except Exception: pass
+                                if _fn_vis_cc:
+                                    print(f"[register] [captcha-clear] Fix v11.3: Add your name page, filling {lastname}/{firstname}...", flush=True)
+                                    _ln_cc = page.locator("#lastNameInput, #iLastName").first
+                                    try: _ln_cc.fill(lastname, timeout=3000)
+                                    except Exception: pass
+                                    try: _fn_cc.fill(firstname, timeout=3000)
+                                    except Exception: pass
+                                    page.wait_for_timeout(400)
+                                    try:
+                                        _pb_cc = page.locator("[data-testid=primaryButton]").first
+                                        _pbv = False
+                                        try: _pbv = _pb_cc.is_visible(timeout=1500)
+                                        except Exception: pass
+                                        if _pbv:
+                                            _pb_cc.click(timeout=5000)
+                                            print("[register] [captcha-clear] v11.3: Add your name submitted", flush=True)
+                                    except Exception: pass
+                            except Exception: pass
                         _elapsed = time.time() - _cc_start
                         print(f"[register] [captcha-clear] {_elapsed:.0f}s elapsed url={page.url[:60]}", flush=True)
                         # v10.2: 14-22s 检测 hsprotect iframe 是否仍在
@@ -476,19 +501,59 @@ class BaseController:
                 cur_url = page.url
                 success_keywords = ["account.live", "account.microsoft", "outlook.live", "outlook.com/mail"]
                 if not any(k in cur_url for k in success_keywords):
-                    # 尝试等待页面出现 "你好" 或 "欢迎" 等完成标志
-                    try:
-                        page.wait_for_selector(
-                            '[data-testid="ocid-login"] , [aria-label="Outlook"] , .welcome-msg , #mectrl_headerPicture',
-                            timeout=5000,
-                        )
-                    except Exception:
-                        # 截图记录当前状态
+                    # v11.3: Add your name 中断页处理
+                    _add_name_ok = False
+                    if "signup.live.com" in cur_url:
                         try:
-                            page.screenshot(path=f"/tmp/outlook_captcha_done_{email}.png")
+                            _fn_w = page.locator("#firstNameInput, #iFirstName").first
+                            _fn_w_vis = False
+                            try: _fn_w_vis = _fn_w.is_visible(timeout=2500)
+                            except Exception: pass
+                            if _fn_w_vis:
+                                print(f"[register] v11.3: Add your name page, filling {lastname}/{firstname}", flush=True)
+                                _ln_w = page.locator("#lastNameInput, #iLastName").first
+                                try: _ln_w.fill(lastname, timeout=3000)
+                                except Exception: pass
+                                try: _fn_w.fill(firstname, timeout=3000)
+                                except Exception: pass
+                                page.wait_for_timeout(500)
+                                try:
+                                    _pb_w = page.locator("[data-testid=primaryButton]").first
+                                    _pbv = False
+                                    try: _pbv = _pb_w.is_visible(timeout=2000)
+                                    except Exception: pass
+                                    if _pbv:
+                                        _pb_w.click(timeout=5000)
+                                        print("[register] v11.3: Add your name submitted, waiting for redirect", flush=True)
+                                        try:
+                                            page.wait_for_url(
+                                                lambda u: any(x in u for x in [
+                                                    "account.live.com", "account.microsoft.com",
+                                                    "outlook.live.com", "login.live.com/login.srf",
+                                                ]),
+                                                timeout=25000,
+                                            )
+                                            print(f"[register] v11.3: Add your name redirect OK: {page.url[:70]}", flush=True)
+                                            _add_name_ok = True
+                                        except Exception as _ane:
+                                            print(f"[register] v11.3: Add your name redirect failed: {_ane}", flush=True)
+                                except Exception: pass
+                        except Exception: pass
+                    if _add_name_ok:
+                        pass  # handled, fall through to return True at line end
+                    else:
+                        # 尝试等待页面出现 "你好" 或 "欢迎" 等完成标志
+                        try:
+                            page.wait_for_selector(
+                                '[data-testid="ocid-login"] , [aria-label="Outlook"] , .welcome-msg , #mectrl_headerPicture',
+                                timeout=5000,
+                            )
                         except Exception:
-                            pass
-                        return False, f"CAPTCHA 已点击但页面未跳转到成功页（当前: {cur_url[:80]}）", email
+                            try:
+                                page.screenshot(path=f"/tmp/outlook_captcha_done_{email}.png")
+                            except Exception:
+                                pass
+                            return False, f"CAPTCHA 已点击但页面未跳转到成功页（当前: {cur_url[:80]}）", email
 
         except Exception as e:
             import traceback
