@@ -26,7 +26,7 @@ def _load_pool_from_disk():
         cf_ip_pool._used_history.extend([x for x in history if isinstance(x, str)])
         cf_ip_pool._banned_ips.clear()
         cf_ip_pool._banned_ips.update([x for x in banned if isinstance(x, str)])
-        blocked = set(cf_ip_pool._used_history) | set(cf_ip_pool._banned_ips)
+        blocked = set(cf_ip_pool._banned_ips)  # v9.92: used_history removed — CF IPs are reusable
         clean = []
         seen = set()
         for item in available:
@@ -52,7 +52,7 @@ def _persist_history():
             banned = list(dict.fromkeys(cf_ip_pool._banned_ips))[-2000:]
             available = []
             seen = set()
-            blocked = set(hist) | set(banned)
+            blocked = set(banned)  # v9.92: used_history removed — CF IPs are reusable
             for item in cf_ip_pool._available:
                 ip = item.get('ip') if isinstance(item, dict) else None
                 lat = item.get('latency') if isinstance(item, dict) else None
