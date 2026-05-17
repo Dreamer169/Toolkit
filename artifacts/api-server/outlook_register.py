@@ -315,6 +315,11 @@ class BaseController:
                 page.locator('[name="BirthMonth"]').select_option(value=month, timeout=1000)
                 page.wait_for_timeout(0.05 * self.wait_time)
                 page.locator('[name="BirthDay"]').select_option(value=day)
+                # fix: select_option may succeed but birthday+name may be on separate pages;
+                # only click primaryButton to advance if #lastNameInput isn't already visible.
+                page.wait_for_timeout(0.02 * self.wait_time)
+                if page.locator('#lastNameInput').count() == 0:
+                    page.locator('[data-testid="primaryButton"]').click(timeout=8000)
             except Exception:
                 # v9.30c: label#BirthMonthDropdown 遮挡按钮，用 force=True 绕过 pointer-events 检测
                 try:
@@ -385,7 +390,7 @@ class BaseController:
                             _cc_navigated = True
                             break
                         _elapsed = time.time() - _cc_start
-                        print(f"[register] [captcha-clear] {_elapsed:.0f}s elapsed (retries=0)", flush=True)
+                        print(f"[register] [captcha-clear] {_elapsed:.0f}s elapsed", flush=True)
                         if _elapsed > 14:
                             _has_captcha = False
                             try:
@@ -1026,6 +1031,7 @@ class PatchrightController(BaseController):
                     break
                 page.wait_for_timeout(150)
             _second_click_done = False
+            _press_again_used = False  # fix: initialize here so line below never NameErrors when _second_click_done stays False
             # 先检查 frame 数量是否增加（说明拼图已加载）
             _fr_count_now = len(page.frames)
             print(f"[captcha] 当前 frame 数: {_fr_count_now}", flush=True)
