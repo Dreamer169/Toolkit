@@ -1381,35 +1381,7 @@ class PatchrightController(BaseController):
                                 _early_solved_reason = f"所有 hsprotect frame 已清空 (max bodyLen={max(_hsp_lens)}, n={len(_hsp_lens)})"
                         except Exception:
                             pass
-                # v7.64 修复：PerimeterX press-hold 通过后，外层 px-captcha 容器仍在 DOM
-                #         （bodyLen 还有 4000+），但内部 challenge iframe 会被设为 display:none
-                #         或外层 div 内容清空。补上这两条强信号，避免无谓的 20s+5s 音频等待
-                #         以及随后徒劳的 Enter键法兜底（blob URL 已消费）造成整轮 CF IP 重试。
-                if not _early_solved_reason:
-                    try:
-                        for _pf_chk_px in page.frames:
-                            _u_px = getattr(_pf_chk_px, "url", "") or ""
-                            if "hsprotect.net" not in _u_px:
-                                continue
-                            _px_state = _pf_chk_px.evaluate("""() => {
-                                const root = document.getElementById("px-captcha");
-                                if (!root) return null;
-                                if (root.children.length === 0) return "empty";
-                                const inner = root.querySelector("iframe");
-                                if (inner) {
-                                    const cs = window.getComputedStyle(inner);
-                                    if (cs.display === "none" || cs.visibility === "hidden") return "iframe_hidden";
-                                }
-                                return null;
-                            }""")
-                            if _px_state == "empty":
-                                _early_solved_reason = "PerimeterX 外层 px-captcha 已清空"
-                                break
-                            if _px_state == "iframe_hidden":
-                                _early_solved_reason = "PerimeterX 内部挑战 iframe 已隐藏 (display:none)"
-                                break
-                    except Exception:
-                        pass
+                # v7.93fix: px-captcha empty/iframe_hidden removed (false positive)
 
                 if _early_solved_reason:
                     print(f"[captcha] ✅ press-hold 后早期检测：CAPTCHA 已通过（{_early_solved_reason}）→ 跳过音频流程", flush=True)
@@ -1618,34 +1590,7 @@ class PatchrightController(BaseController):
                                 return True
                 except Exception:
                     pass
-                # v7.64 终极兜底：press-hold 通过后 PerimeterX 可能保留 px-captcha 外壳但
-                # （a）外层 div 内容清空，或（b）内部 challenge iframe 设为 display:none。
-                # 这两种状态 bodyLen 仍 >1500（因为 <script> 体），v7.61 检测捕捉不到，
-                # 但视觉上 captcha 已通过——这是 g4ljon 类型 job 浪费 CF IP 的根因。
-                try:
-                    for _pf_px in page.frames:
-                        _u_px = getattr(_pf_px, "url", "") or ""
-                        if "hsprotect.net" not in _u_px:
-                            continue
-                        _px_state = _pf_px.evaluate("""() => {
-                            const root = document.getElementById("px-captcha");
-                            if (!root) return null;
-                            if (root.children.length === 0) return "empty";
-                            const inner = root.querySelector("iframe");
-                            if (inner) {
-                                const cs = window.getComputedStyle(inner);
-                                if (cs.display === "none" || cs.visibility === "hidden") return "iframe_hidden";
-                            }
-                            return null;
-                        }""")
-                        if _px_state == "empty":
-                            print("[captcha] ✅ v7.64 终极兜底：PerimeterX 外层 px-captcha 已清空 → CAPTCHA 通过", flush=True)
-                            return True
-                        if _px_state == "iframe_hidden":
-                            print("[captcha] ✅ v7.64 终极兜底：PerimeterX 内部挑战 iframe 已隐藏 (display:none) → CAPTCHA 通过", flush=True)
-                            return True
-                except Exception:
-                    pass
+                # v7.93fix: v7.64 px-captcha fallback removed (false positive)
                 print("[captcha] ❌ CAPTCHA 仍然存在", flush=True)
                 return False
             except Exception:
