@@ -145,7 +145,12 @@ def gen_email_username():
         fn.lower() + rc + n3,                   # karenabc347  (很少被占)
         fn[0].lower() + ln.lower() + rc,        # kramirezabc   (极少被占)
     ]
-    return random.choice(patterns), fn, ln
+    _picked = random.choice(patterns)
+    _alpha_pos = [i for i, c in enumerate(_picked) if c.isalpha()]
+    if _alpha_pos:
+        for _ui in random.sample(_alpha_pos, random.randint(1, min(2, len(_alpha_pos)))):
+            _picked = _picked[:_ui] + _picked[_ui].upper() + _picked[_ui+1:]
+    return _picked, fn, ln
 
 
 # ─── 基础控制器 ───────────────────────────────────────────────────────────────
@@ -471,89 +476,98 @@ class BaseController:
             # ── 验证注册真正完成（等待跳转到成功页）────────────────────
             # 微软成功页：account.live.com, outlook.com, login.live.com/login.srf
             # 只有页面实际跳转到这些域才算真正注册成功
-            try:
-                page.wait_for_url(
-                    lambda u: any(x in u for x in [
-                        "account.live.com",
-                        "account.microsoft.com",
-                        "outlook.live.com",
-                        "outlook.com/mail",
-                        "login.live.com/login.srf",
-                        "login.microsoft.com/consumers/fido",   # v9.84: passkey enrollment page
-                        "login.microsoft.com/consumers/device", # v9.84: device registration page
-                    ]),
-                    timeout=30000,
-                )
-                # v9.84: FIDO/passkey enrollment page → dismiss and re-check URL
-                _cur_after = page.url
-                if "login.microsoft.com/consumers" in _cur_after:
-                    print(f"[register] 🔍 检测到 FIDO/passkey 页: {_cur_after[:80]}", flush=True)
-                    try:
-                        _skip_ms_interrupts(page, label='post-captcha-fido')
-                        page.wait_for_timeout(3000)
-                        print(f"[register] ✅ FIDO页处理完成，当前: {page.url[:80]}", flush=True)
-                    except Exception as _fido_e:
-                        print(f"[register] FIDO dismiss error: {_fido_e}", flush=True)
-                else:
-                    print("[register] ✅ 检测到成功跳转页", flush=True)
-            except Exception:
-                # 检查当前页面是否有成功标志（避免误判）
-                cur_url = page.url
-                success_keywords = ["account.live", "account.microsoft", "outlook.live", "outlook.com/mail"]
-                if not any(k in cur_url for k in success_keywords):
-                    # v11.3: Add your name 中断页处理
-                    _add_name_ok = False
-                    if "signup.live.com" in cur_url:
+            def _has_success_ck():
+                try:
+                    return any((c.get("name","")).strip() in SUCCESS_COOKIE_NAMES for c in page.context.cookies())
+                except Exception:
+                    return False
+            if _has_success_ck():
+                print(f"[register] ✅ pre-wait cookie预检命中，跳过wait_for_url (passkey情形节省~30s) url={page.url[:80]}", flush=True)
+            else:
+                try:
+                    page.wait_for_url(
+                        lambda u: any(x in u for x in [
+                            "account.live.com",
+                            "account.microsoft.com",
+                            "outlook.live.com",
+                            "outlook.com/mail",
+                            "login.live.com/login.srf",
+                            "login.microsoft.com/consumers/fido",   # v9.84: passkey enrollment page
+                            "login.microsoft.com/consumers/device", # v9.84: device registration page
+                        ]),
+                        timeout=30000,
+                    )
+                    # v9.84: FIDO/passkey enrollment page → dismiss and re-check URL
+                    _cur_after = page.url
+                    if "login.microsoft.com/consumers" in _cur_after:
+                        print(f"[register] 🔍 检测到 FIDO/passkey 页: {_cur_after[:80]}", flush=True)
                         try:
-                            _fn_w = page.locator("#firstNameInput, #iFirstName").first
-                            _fn_w_vis = False
-                            try: _fn_w_vis = _fn_w.is_visible(timeout=2500)
-                            except Exception: pass
-                            if _fn_w_vis:
-                                print(f"[register] v11.3: Add your name page, filling {lastname}/{firstname}", flush=True)
-                                _ln_w = page.locator("#lastNameInput, #iLastName").first
-                                try: _ln_w.fill(lastname, timeout=3000)
-                                except Exception: pass
-                                try: _fn_w.fill(firstname, timeout=3000)
-                                except Exception: pass
-                                page.wait_for_timeout(500)
-                                try:
-                                    _pb_w = page.locator("[data-testid=primaryButton]").first
-                                    _pbv = False
-                                    try: _pbv = _pb_w.is_visible(timeout=2000)
-                                    except Exception: pass
-                                    if _pbv:
-                                        _pb_w.click(timeout=5000)
-                                        print("[register] v11.3: Add your name submitted, waiting for redirect", flush=True)
-                                        try:
-                                            page.wait_for_url(
-                                                lambda u: any(x in u for x in [
-                                                    "account.live.com", "account.microsoft.com",
-                                                    "outlook.live.com", "login.live.com/login.srf",
-                                                ]),
-                                                timeout=25000,
-                                            )
-                                            print(f"[register] v11.3: Add your name redirect OK: {page.url[:70]}", flush=True)
-                                            _add_name_ok = True
-                                        except Exception as _ane:
-                                            print(f"[register] v11.3: Add your name redirect failed: {_ane}", flush=True)
-                                except Exception: pass
-                        except Exception: pass
-                    if _add_name_ok:
-                        pass  # handled, fall through to return True at line end
+                            _skip_ms_interrupts(page, label='post-captcha-fido')
+                            page.wait_for_timeout(3000)
+                            print(f"[register] ✅ FIDO页处理完成，当前: {page.url[:80]}", flush=True)
+                        except Exception as _fido_e:
+                            print(f"[register] FIDO dismiss error: {_fido_e}", flush=True)
                     else:
-                        # 尝试等待页面出现 "你好" 或 "欢迎" 等完成标志
-                        try:
-                            page.wait_for_selector(
-                                '[data-testid="ocid-login"] , [aria-label="Outlook"] , .welcome-msg , #mectrl_headerPicture',
-                                timeout=5000,
-                            )
-                        except Exception:
+                        print("[register] ✅ 检测到成功跳转页", flush=True)
+                except Exception:
+                    # 检查当前页面是否有成功标志（避免误判）
+                    cur_url = page.url
+                    success_keywords = ["account.live", "account.microsoft", "outlook.live", "outlook.com/mail"]
+                    # cookie fallback：cookie已存在即视为成功
+                    if _has_success_ck():
+                        pass  # 成功，fall through to return True
+                    elif not any(k in cur_url for k in success_keywords):
+                        # v11.3: Add your name 中断页处理
+                        _add_name_ok = False
+                        if "signup.live.com" in cur_url:
                             try:
-                                page.screenshot(path=f"/tmp/outlook_captcha_done_{email}.png")
+                                _fn_w = page.locator("#firstNameInput, #iFirstName").first
+                                _fn_w_vis = False
+                                try: _fn_w_vis = _fn_w.is_visible(timeout=2500)
+                                except Exception: pass
+                                if _fn_w_vis:
+                                    print(f"[register] v11.3: Add your name page, filling {lastname}/{firstname}", flush=True)
+                                    _ln_w = page.locator("#lastNameInput, #iLastName").first
+                                    try: _ln_w.fill(lastname, timeout=3000)
+                                    except Exception: pass
+                                    try: _fn_w.fill(firstname, timeout=3000)
+                                    except Exception: pass
+                                    page.wait_for_timeout(500)
+                                    try:
+                                        _pb_w = page.locator("[data-testid=primaryButton]").first
+                                        _pbv = False
+                                        try: _pbv = _pb_w.is_visible(timeout=2000)
+                                        except Exception: pass
+                                        if _pbv:
+                                            _pb_w.click(timeout=5000)
+                                            print("[register] v11.3: Add your name submitted, waiting for redirect", flush=True)
+                                            try:
+                                                page.wait_for_url(
+                                                    lambda u: any(x in u for x in [
+                                                        "account.live.com", "account.microsoft.com",
+                                                        "outlook.live.com", "login.live.com/login.srf",
+                                                    ]),
+                                                    timeout=25000,
+                                                )
+                                                print(f"[register] v11.3: Add your name redirect OK: {page.url[:70]}", flush=True)
+                                                _add_name_ok = True
+                                            except Exception as _ane:
+                                                print(f"[register] v11.3: Add your name redirect failed: {_ane}", flush=True)
+                                    except Exception: pass
+                            except Exception: pass
+                        if not _add_name_ok:
+                            # 尝试等待页面出现 "你好" 或 "欢迎" 等完成标志
+                            try:
+                                page.wait_for_selector(
+                                    '[data-testid="ocid-login"] , [aria-label="Outlook"] , .welcome-msg , #mectrl_headerPicture',
+                                    timeout=5000,
+                                )
                             except Exception:
-                                pass
-                            return False, f"CAPTCHA 已点击但页面未跳转到成功页（当前: {cur_url[:80]}）", email
+                                try:
+                                    page.screenshot(path=f"/tmp/outlook_captcha_done_{email}.png")
+                                except Exception:
+                                    pass
+                                return False, f"CAPTCHA 已点击但页面未跳转到成功页（当前: {cur_url[:80]}）", email
 
         except Exception as e:
             import traceback
