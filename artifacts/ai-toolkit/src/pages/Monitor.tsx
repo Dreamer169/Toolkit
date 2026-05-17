@@ -714,6 +714,10 @@ export default function Monitor() {
             procs: ["kiro-chain"],
           },
           {
+            label: "Outlook 注册",
+            procs: ["outlook-register"],
+          },
+          {
             label: "Unitool 注册",
             procs: ["unitool_chain_v3", "unitool_chain_v3_w1", "unitool_chain_v3_w2"],
           },
