@@ -11,6 +11,7 @@ export interface JobSnapshot {
   logs: Array<{ type: string; message: string }>;
   accounts: Array<{ email: string; password: string; username?: string; token?: string }>;
   exitCode: number | null;
+  finishedAt?: number | null;
 }
 
 export class PersistenceManager {
@@ -26,24 +27,27 @@ export class PersistenceManager {
         logs JSONB NOT NULL DEFAULT '[]',
         accounts JSONB NOT NULL DEFAULT '[]',
         exit_code INT,
+        finished_at BIGINT,
         updated_at TIMESTAMPTZ DEFAULT NOW()
       )
     `);
+    await execute(`ALTER TABLE job_snapshots ADD COLUMN IF NOT EXISTS finished_at BIGINT`).catch(()=>{});
     this.initialized = true;
   }
 
   static async save(job: JobSnapshot): Promise<void> {
     await this.init();
     await execute(
-      `INSERT INTO job_snapshots (job_id, status, started_at, logs, accounts, exit_code, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW())
+      `INSERT INTO job_snapshots (job_id, status, started_at, logs, accounts, exit_code, finished_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
        ON CONFLICT (job_id) DO UPDATE SET
          status = EXCLUDED.status,
          logs = EXCLUDED.logs,
          accounts = EXCLUDED.accounts,
          exit_code = EXCLUDED.exit_code,
+         finished_at = EXCLUDED.finished_at,
          updated_at = NOW()`,
-      [job.jobId, job.status, job.startedAt, JSON.stringify(job.logs), JSON.stringify(job.accounts), job.exitCode]
+      [job.jobId, job.status, job.startedAt, JSON.stringify(job.logs), JSON.stringify(job.accounts), job.exitCode, job.finishedAt ?? null]
     );
   }
 
@@ -62,6 +66,7 @@ export class PersistenceManager {
       logs: r.logs as JobSnapshot['logs'],
       accounts: r.accounts as JobSnapshot['accounts'],
       exitCode: r.exit_code as number | null,
+      finishedAt: r.finished_at ? Number(r.finished_at) : null,
     };
   }
 
@@ -77,6 +82,7 @@ export class PersistenceManager {
       logs: r.logs as JobSnapshot['logs'],
       accounts: r.accounts as JobSnapshot['accounts'],
       exitCode: r.exit_code as number | null,
+      finishedAt: r.finished_at ? Number(r.finished_at) : null,
     }));
   }
 
