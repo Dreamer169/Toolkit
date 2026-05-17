@@ -65,8 +65,9 @@ class JobQueue {
   async finish(jobId: string, exitCode: number, status = 'done'): Promise<void> {
     const job = this.jobs.get(jobId);
     if (!job) return;
-    job.status  = status;
-    job.exitCode = exitCode;
+    job.status     = status;
+    job.exitCode   = exitCode;
+    job.finishedAt = Date.now();
     await PersistenceManager.save(job);
     this.emit('status_change', job);
     this.emit('done', job);
@@ -99,6 +100,32 @@ class JobQueue {
     job.logs.push({ type: 'warn', message: '⚠ 用户停止了任务' });
     PersistenceManager.save(job).catch(() => {});
     return true;
+  }
+
+  /** 彻底删除任务（内存 + DB） */
+  async remove(jobId: string): Promise<boolean> {
+    const job = this.jobs.get(jobId);
+    if (job) {
+      try { (job as Job & { _child?: { kill(): void } })._child?.kill(); } catch {}
+      this.jobs.delete(jobId);
+    }
+    await PersistenceManager.delete(jobId).catch(() => {});
+    return true;
+  }
+
+  /** 批量删除0成功的已完成任务 */
+  async bulkPurge(opts: { onlyZeroAccounts?: boolean } = {}): Promise<number> {
+    const all = await this.list();
+    let count = 0;
+    for (const job of all) {
+      const isDone = ["done","stopped","failed","crashed"].includes(job.status);
+      const isZero = (job.accounts?.length ?? 0) === 0;
+      if (isDone && (!opts.onlyZeroAccounts || isZero)) {
+        await this.remove(job.jobId);
+        count++;
+      }
+    }
+    return count;
   }
 
   setChild(jobId: string, child: { kill: () => void }): void {
