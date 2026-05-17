@@ -345,292 +345,58 @@ class BaseController:
 
             page.locator('[data-testid="primaryButton"]').click(timeout=5000)
 
-            # v9.72: MS 新版 UI 在所有页面保留 Privacy Statement 链接，
-            # 等它消失不再可靠。改为等待 CAPTCHA iframe 出现（正向信号）。
-            # 若 25s 内未出现（稀有情况），继续往后做 unusual-activity 检查。
-            try:
-                page.wait_for_selector(SEL_IFRAME_CHALLENGE, state="attached", timeout=25000)
-                print("[register] CAPTCHA iframe 已出现", flush=True)
-            except Exception:
-                print("[register] CAPTCHA iframe 25s 未出现，继续检查页面状态", flush=True)
+            # 等待隐私链接消失 → CAPTCHA 出现
+            page.locator(
+                'span > [href="https://go.microsoft.com/fwlink/?LinkID=521839"]'
+            ).wait_for(state="detached", timeout=22000)
 
             page.wait_for_timeout(400)
 
-            if (page.get_by_text(TXT_UNUSUAL_ACTIVITY).count()
-                    or page.get_by_text(TXT_SITE_MAINTENANCE).count()):
-                try: page.screenshot(path=f"/tmp/ratelimit_A_{email}.png")
-                except Exception: pass
+            if (page.get_by_text("一些异常活动").count()
+                    or page.get_by_text("此站点正在维护，暂时无法使用，请稍后重试。").count()):
                 return False, "当前IP注册频率过快", email
-            # v9.74 fix: "something went wrong" 是MS瞬时错误，同IP可重试，不ban
-            if page.get_by_text(TXT_TRANSIENT_ERROR).count():
-                try: page.screenshot(path=f"/tmp/transient_A_{email}.png")
-                except Exception: pass
-                return False, "页面暂时异常(something_went_wrong)，同IP可重试", email
 
             if page.locator("iframe#enforcementFrame").count() > 0:
                 return False, "验证码类型错误，非按压验证码", email
 
             # ── CAPTCHA ──────────────────────────────────────────────────
-            self._captcha_early_confirmed = False  # v9.71: reset per round
             captcha_ok = self.handle_captcha(page, blob_container)
             if not captcha_ok:
                 return False, "验证码处理失败", email
 
-            # ── v9.60 CAPTCHA-content-clear wait (重构: 120s空转→45s+两次完整重试) ──
-            # 原 v9.41/v9.42 问题: handle_captcha 乐观返回 True 但 Arkose 已重置挑战,
-            # 之后只在 30s 做一次弱 Patch-H(找 #px-captcha 不存在) 就空转到 120s.
-            # 修复: 上限改为 45s, 在 14s 和 28s 各做一次完整 handle_captcha() 重试.
-            _cap_text_cleared = False
-            _CAPTCHA_HINTS = ("let's prove you're human", "prove you're human", "press and hold the button")
-            _cap_retry_count = 0
-            for _cc_i in range(30):  # v9.76: 30x2s = 60s (was 23x2s = 46s)
-                try:
-                    _cur_url = page.url or ""
-                    if "signup.live.com" not in _cur_url:
-                        _cap_text_cleared = True
-                        print(f"[register] [captcha-clear] page left signup URL -> {_cur_url[:80]}", flush=True)
-                        break
-                    try:
-                        _cc_body = (page.inner_text("body") or "").lower()
-                    except Exception:
-                        _cap_text_cleared = True
-                        break
-                    if not any(h in _cc_body for h in _CAPTCHA_HINTS):
-                        _cap_text_cleared = True
-                        print(f"[register] [captcha-clear] CAPTCHA cleared after {_cc_i*2}s", flush=True)
-                        break
-                    # v9.71: Cancel按钮/passkey frame 快速出口
-                    try:
-                        if page.get_by_text(TXT_CANCEL_BTN).count() > 0:
-                            _cap_text_cleared = True
-                            print(f"[register] [captcha-clear] Cancel按钮已出现 ({_cc_i*2}s)", flush=True)
-                            break
-                        _cc_passkey = any(
-                            'interrupt' in getattr(_pf3, 'url', '') or 'passkey' in getattr(_pf3, 'url', '')
-                            for _pf3 in page.frames
-                        )
-                        if _cc_passkey:
-                            _cap_text_cleared = True
-                            print(f"[register] [captcha-clear] passkey/interrupt frame已出现 ({_cc_i*2}s)", flush=True)
-                            break
-                    except Exception:
-                        pass
-                    # patch7: CAPTCHA仍在时不重跑handle_captcha，直接退出换CF IP (v7.78r行为)
-                    # 原patch6做法是在脏页面原地重跑handle_captcha，往往无效且浪费时间。
-                    # 现改为：14s内未消失 → 立即return False → 外层ban当前IP → 换新CF IP重试。
-                    if _cc_i in (7, 14, 21) and _cap_retry_count < 3:
-                        _cap_retry_count += 1
-                        print(f'[register] [captcha-clear] patch7: CAPTCHA仍在 @{_cc_i*2}s → 直接退出换CF IP（不重跑handle_captcha）', flush=True)
-                        try:
-                            page.screenshot(path=f"/tmp/outlook_captcha_exit_{email}_{_cc_i*2}s.png")
-                        except Exception:
-                            pass
-                        return False, f"验证码处理失败(patch7: {_cc_i*2}s仍在→换IP)", email
-                    if _cc_i % 5 == 0:
-                        print(f"[register] [captcha-clear] {_cc_i*2}s elapsed (retries={_cap_retry_count})", flush=True)
-                    page.wait_for_timeout(2000)
-                except Exception as _cce:
-                    print(f"[register] [captcha-clear] poll error: {_cce}", flush=True)
-                    _cap_text_cleared = True
-                    break
-            if not _cap_text_cleared:
-                # v9.75: fido/passkey页接管时CAPTCHA文本残留但注册已完成，超时前先做救活检查
-                try:
-                    _v975_url = page.url or ""
-                    if "signup.live.com" not in _v975_url:
-                        print(f"[register] [captcha-clear] v9.75 超时但URL已离开signup → {_v975_url[:80]}", flush=True)
-                        _cap_text_cleared = True
-                    else:
-                        _v975_cks = {c.get("name", "").strip() for c in page.context.cookies()}
-                        if _v975_cks & set(SUCCESS_COOKIE_NAMES):
-                            print(f"[register] [captcha-clear] v9.75 cookie确认注册完成 → 继续post-captcha", flush=True)
-                            _cap_text_cleared = True
-                except Exception as _v975e:
-                    print(f"[register] [captcha-clear] v9.75 rescue err: {_v975e}", flush=True)
-            if not _cap_text_cleared:
-                try:
-                    page.screenshot(path=f"/tmp/outlook_captcha_stuck_{email}.png")
-                except Exception:
-                    pass
-                print(f"[register] CAPTCHA not cleared after 60s (retries={_cap_retry_count})", flush=True)
-                return False, "验证码处理失败(CAPTCHA内容60s未消失)", email
-
-            # ── Post-CAPTCHA: detect phone-verification / stall page ──────────
-            # MS sometimes shows a phone-number entry page after CAPTCHA instead
-            # of completing registration.  Detect and fail explicitly so the
-            # retry logic can pick a new IP instead of logging a ghost account.
+            # ── 验证注册真正完成（等待跳转到成功页）────────────────────
+            # 微软成功页：account.live.com, outlook.com, login.live.com/login.srf
+            # 只有页面实际跳转到这些域才算真正注册成功
             try:
-                _post_cap_url = page.url or ""
-                _post_cap_body = (page.inner_text("body") or "").lower()
-                print(f"[register] [post-captcha] url={_post_cap_url[:120]}", flush=True)
-                print(f"[register] [post-captcha] body={_post_cap_body[:300]}", flush=True)
-                _phone_page = (
-                    page.locator('input[type="tel"], input[name="PhoneNumber"], input[id*="phone" i]').count() > 0
-                    or any(k in _post_cap_body for k in (
-                        "add your phone number", "phone number", "add a phone",
-                        "enter your phone", "mobile number", "verify with phone",
-                        "添加手机号", "手机号码", "电话号码",
-                    ))
-                )
-                if _phone_page:
-                    try:
-                        page.screenshot(path=f"/tmp/outlook_phone_page_{email}.png")
-                    except Exception:
-                        pass
-                    print(f"[register] ⚠ 注册后出现手机验证页，当前IP被MS要求手机验证，放弃此次注册", flush=True)
-                    return False, "phone_verification_required", email
-            except Exception as _ppex:
-                print(f"[register] phone-page check err (ignored): {_ppex}", flush=True)
-
-            # ── v9.40 Post-CAPTCHA submit: Arkose 通过后尝试点击 primaryButton ──────
-            # Arkose px-captcha 清空 = PerimeterX check passed,  but the MS SPA signup
-            # form may still be on the last field page waiting for a manual "Next/Submit"
-            # click.  Try up to 3 times with 2s gaps before entering the 60s URL wait.
-            try:
-                _pcap_url_before = page.url or ""
-                _pcap_body_before = ""
-                try:
-                    _pcap_body_before = (page.inner_text("body") or "")[:400].lower()
-                except Exception:
-                    pass
-                print(f"[register] [post-captcha] url={_pcap_url_before[:120]}", flush=True)
-                print(f"[register] [post-captcha] body={_pcap_body_before[:300]}", flush=True)
-                # If page is still on signup.live.com, try clicking the primary button
-                # to advance the form (handles "review" / last-step pages)
-                for _pci in range(3):
-                    if any(k in (page.url or "") for k in ("outlook.live.com", "account.live", "login.live.com/oauth")):
-                        break  # already navigated away — done
-                    # v9.76: MS sometimes shows "Add your name" page after CAPTCHA.
-                    # Fill firstName/lastName before clicking Next, or validation blocks it.
-                    try:
-                        _fn_inp = page.locator('#firstNameInput')
-                        _ln_inp = page.locator('#lastNameInput')
-                        if _fn_inp.is_visible(timeout=800) or _ln_inp.is_visible(timeout=800):
-                            print(f"[register] [post-captcha] v9.76 检测到 Add your name 页，填写姓名", flush=True)
-                            try:
-                                if _fn_inp.is_visible(timeout=500):
-                                    _fn_inp.fill(firstname, timeout=3000)
-                            except Exception:
-                                pass
-                            try:
-                                if _ln_inp.is_visible(timeout=500):
-                                    _ln_inp.fill(lastname, timeout=3000)
-                            except Exception:
-                                pass
-                            page.wait_for_timeout(300)
-                    except Exception:
-                        pass
-                    _pb_sel = '[data-testid="primaryButton"]'
-                    try:
-                        _pb = page.locator(_pb_sel).first
-                        if _pb.is_visible(timeout=1500):
-                            _pb.click(timeout=3000)
-                            print(f"[register] [post-captcha] clicked primaryButton (attempt {_pci+1})", flush=True)
-                            page.wait_for_timeout(2000)
-                        else:
-                            break
-                    except Exception as _pbe:
-                        print(f"[register] [post-captcha] primaryButton attempt {_pci+1}: {_pbe}", flush=True)
-                        break
-                # Detect phone-verification page (both inline signup and post-signup)
-                try:
-                    _pp_body = (page.inner_text("body") or "").lower()
-                    _pp_inp = page.locator('input[type="tel"], input[name="PhoneNumber"], input[id*="phone" i]').count() > 0
-                    _pp_txt = any(k in _pp_body for k in (
-                        "add your phone number", "phone number", "add a phone",
-                        "enter your phone", "mobile number", "verify with phone",
-                        "phone verification", "verify your phone",
-                        "we need a bit more info", "more information",
-                        "添加手机号", "手机号码", "电话号码", "手机验证",
-                    ))
-                    if _pp_inp or _pp_txt:
-                        try:
-                            page.screenshot(path=f"/tmp/outlook_phone_page_{email}.png")
-                        except Exception:
-                            pass
-                        print(f"[register] ⚠ 注册后出现手机验证页(inline), url={page.url[:80]}", flush=True)
-                        return False, "phone_verification_required", email
-                except Exception as _pp2e:
-                    print(f"[register] inline phone-page check err: {_pp2e}", flush=True)
-            except Exception as _pcape:
-                print(f"[register] post-captcha-submit err: {_pcape}", flush=True)
-
-            # ── 验证注册真正完成 ── v8.22 CAPTCHA 误判修复 (POST_NAV_TIMEOUT) ──
-            # 微软注册成功后链路: captcha-pass → consent/terms → account.live → outlook.live/mail
-            # 在 datacenter ASN + xray/CF/SOCKS 加层下整链路常 25-50s, 30s 不够.
-            # 三种正向证据任意命中即视为成功 (避免把已成功账号误判为失败):
-            #   1. URL 命中 SUCCESS_URL_KEYWORDS
-            #   2. context cookies 出现 SUCCESS_COOKIE_NAMES (RPSAuth/MSPAuth 等)
-            #   3. DOM 出现登录/个人中心标记
-            def _has_success_cookie() -> bool:
-                try:
-                    cks = page.context.cookies()
-                    for c in cks:
-                        nm = (c.get("name") or "").strip()
-                        if nm in SUCCESS_COOKIE_NAMES:
-                            return True
-                except Exception:
-                    pass
-                return False
-
-            def _is_success_now() -> bool:
-                if any(k in page.url for k in SUCCESS_URL_KEYWORDS):
-                    return True
-                if _has_success_cookie():
-                    return True
-                return False
-
-            ok_signal = False
-            try:
-                # 第一层: 等 URL 跳转 (POST_NAV_TIMEOUT)
                 page.wait_for_url(
-                    lambda u: any(x in u for x in SUCCESS_URL_KEYWORDS),
-                    timeout=POST_NAV_TIMEOUT,
+                    lambda u: any(x in u for x in [
+                        "account.live.com",
+                        "account.microsoft.com",
+                        "outlook.live.com",
+                        "outlook.com/mail",
+                        "login.live.com/login.srf",
+                    ]),
+                    timeout=30000,
                 )
-                print(f"[register] ✅ 检测到成功跳转页: {page.url[:100]}", flush=True)
-                ok_signal = True
+                print("[register] ✅ 检测到成功跳转页", flush=True)
             except Exception:
-                # 第二层: cookie 正向证据 (微软已下发 auth cookie → 后端账号已建好, 仅是前端壳没渲染)
-                if _has_success_cookie():
-                    print(f"[register] ✅ URL 未跳转但已检出成功 cookie (后端注册已完成)", flush=True)
-                    ok_signal = True
-                else:
-                    # 第三层: DOM 标记 (兼容老版终端 UI)
+                # 检查当前页面是否有成功标志（避免误判）
+                cur_url = page.url
+                success_keywords = ["account.live", "account.microsoft", "outlook.live", "outlook.com/mail"]
+                if not any(k in cur_url for k in success_keywords):
+                    # 尝试等待页面出现 "你好" 或 "欢迎" 等完成标志
                     try:
                         page.wait_for_selector(
-                            '[data-testid="ocid-login"] , [aria-label="Outlook"] , '
-                            '.welcome-msg , #mectrl_headerPicture , '
-                            '[data-testid="appConsentPrimaryButton"] , #idSIButton9 , '
-                            '#KmsiCheckboxField , [data-task="consent"] , #appName',
-                            timeout=8000,
+                            '[data-testid="ocid-login"] , [aria-label="Outlook"] , .welcome-msg , #mectrl_headerPicture',
+                            timeout=5000,
                         )
-                        print("[register] ✅ DOM 出现登录/同意标记", flush=True)
-                        ok_signal = True
                     except Exception:
-                        pass
-                    # 第四层: 短暂再等一次 cookie/URL (重定向链可能在 wait_for_selector 期间继续)
-                    if not ok_signal:
+                        # 截图记录当前状态
                         try:
-                            page.wait_for_timeout(2500)
-                            if _is_success_now():
-                                print(f"[register] ✅ 二次轮询命中: {page.url[:100]}", flush=True)
-                                ok_signal = True
+                            page.screenshot(path=f"/tmp/outlook_captcha_done_{email}.png")
                         except Exception:
                             pass
-
-            if not ok_signal:
-                cur_url = page.url
-                try:
-                    page.screenshot(path=f"/tmp/outlook_captcha_done_{email}.png")
-                except Exception:
-                    pass
-                _body_snip = ""
-                try:
-                    _body_snip = (page.inner_text("body") or "")[:200].replace("\n", " ")
-                except Exception:
-                    pass
-                print(f"[register] [stuck] url={cur_url} body={_body_snip[:200]}", flush=True)
-                return False, f"注册后页面未跳转到成功页（url={cur_url[:80]}）body={_body_snip[:80]}", email
+                        return False, f"CAPTCHA 已点击但页面未跳转到成功页（当前: {cur_url[:80]}）", email
 
         except Exception as e:
             import traceback
