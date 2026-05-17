@@ -235,7 +235,7 @@ class BaseController:
             page.get_by_text(TXT_AGREE_CONTINUE).wait_for(timeout=30000)
             start_time = time.time()
             page.wait_for_timeout(0.1 * self.wait_time)
-            page.get_by_text(TXT_AGREE_CONTINUE).click(timeout=30000)
+            self._human_click(page, page.get_by_text(TXT_AGREE_CONTINUE), timeout=30000)
         except Exception as e:
             return False, f"等待同意按钮(zh:同意并继续/en:Continue)超时(可能是 IP 被风控或页面未加载): {e}", email
 
@@ -247,8 +247,8 @@ class BaseController:
             email_input.click()
             email_input.type(email, delay=max(20, 0.006 * self.wait_time), timeout=15000)
             page.keyboard.press("Tab")
-            page.wait_for_timeout(0.02 * self.wait_time)
-            page.locator('[data-testid="primaryButton"]').click(timeout=8000)
+            page.wait_for_timeout(max(600, 0.05 * self.wait_time) + random.randint(0, 400))
+            self._human_click(page, page.locator('[data-testid="primaryButton"]'), timeout=8000)
             page.wait_for_timeout(max(3000, 0.05 * self.wait_time))
 
             # 检测用户名是否被占用 → 重新生成（最多 8 次，超过可能触发异常活动检测）
@@ -278,7 +278,7 @@ class BaseController:
                     email_input.type(picked, delay=max(30, 0.008 * self.wait_time))
                     page.keyboard.press("Tab")
                     page.wait_for_timeout(0.03 * self.wait_time)
-                    page.locator('[data-testid="primaryButton"]').click(timeout=8000)
+                    self._human_click(page, page.locator('[data-testid="primaryButton"]'), timeout=8000)
                     page.wait_for_timeout(max(4000, 0.06 * self.wait_time))
                 else:
                     # 既没有"被占用"也没有密码框 → 再等 2 秒
@@ -304,22 +304,17 @@ class BaseController:
             pwd_loc.wait_for(state="visible", timeout=35000)
             pwd_loc.click()
             pwd_loc.type(password, delay=0.004 * self.wait_time, timeout=35000)
-            page.wait_for_timeout(0.02 * self.wait_time)
-            page.locator('[data-testid="primaryButton"]').click(timeout=8000)
+            page.wait_for_timeout(max(700, 0.07 * self.wait_time) + random.randint(0, 500))
+            self._human_click(page, page.locator('[data-testid="primaryButton"]'), timeout=8000)
 
             # 生日
-            page.wait_for_timeout(0.03 * self.wait_time)
+            page.wait_for_timeout(max(800, 0.08 * self.wait_time) + random.randint(0, 600))
             page.locator('[name="BirthYear"]').fill(year, timeout=20000)
             try:
                 page.wait_for_timeout(0.02 * self.wait_time)
                 page.locator('[name="BirthMonth"]').select_option(value=month, timeout=1000)
                 page.wait_for_timeout(0.05 * self.wait_time)
                 page.locator('[name="BirthDay"]').select_option(value=day)
-                # fix: select_option may succeed but birthday+name may be on separate pages;
-                # only click primaryButton to advance if #lastNameInput isn't already visible.
-                page.wait_for_timeout(0.02 * self.wait_time)
-                if page.locator('#lastNameInput').count() == 0:
-                    page.locator('[data-testid="primaryButton"]').click(timeout=8000)
             except Exception:
                 # v9.30c: label#BirthMonthDropdown 遮挡按钮，用 force=True 绕过 pointer-events 检测
                 try:
@@ -335,21 +330,21 @@ class BaseController:
                     page.evaluate('document.querySelector("[name=BirthDay]").click()')
                 page.wait_for_timeout(0.03 * self.wait_time)
                 page.locator(date_option_selector(day, "日", is_month=False)).first.click(force=True)
-                page.locator('[data-testid="primaryButton"]').click(timeout=5000)
+                self._human_click(page, page.locator('[data-testid="primaryButton"]'), timeout=5000)
 
             # 姓名
             page.locator('#lastNameInput').wait_for(state="visible", timeout=20000)
             page.locator('#lastNameInput').type(
-                lastname, delay=0.002 * self.wait_time, timeout=20000)
-            page.wait_for_timeout(0.02 * self.wait_time)
-            page.locator('#firstNameInput').fill(firstname, timeout=20000)
+                lastname, delay=max(50, 0.006 * self.wait_time), timeout=20000)
+            page.wait_for_timeout(max(500, 0.05 * self.wait_time) + random.randint(0, 400))
+            page.locator('#firstNameInput').type(firstname, delay=max(50, 0.006 * self.wait_time), timeout=20000)
 
             # 等满 bot_protection_wait 再点下一步
             elapsed = time.time() - start_time
             if elapsed < self.wait_time / 1000:
                 page.wait_for_timeout((self.wait_time / 1000 - elapsed) * 1000)
 
-            page.locator('[data-testid="primaryButton"]').click(timeout=5000)
+            self._human_click(page, page.locator('[data-testid="primaryButton"]'), timeout=5000)
 
             # 等待隐私链接消失 → CAPTCHA 出现
             page.locator(
@@ -368,6 +363,8 @@ class BaseController:
             # ── CAPTCHA ──────────────────────────────────────────────────
             captcha_ok = self.handle_captcha(page, blob_container)
             if not captcha_ok:
+                try: page.screenshot(path=f"/tmp/outlook_captcha_fail_{email}.png")
+                except Exception: pass
                 return False, "验证码处理失败", email
 
             # ── captcha-clear poll: 处理 early_confirmed 假阳性 (restored from b10n v9.83) ──
@@ -379,28 +376,46 @@ class BaseController:
                 print(f"[register] [captcha-clear] early_confirmed: 轮询等待页面跳转(最多30s)", flush=True)
                 _cc_start = time.time()
                 _cc_navigated = False
-                while time.time() - _cc_start < 30:
+                _success_domains = ["account.live.com","account.microsoft.com",
+                                    "outlook.live.com","outlook.com/mail","login.live.com/login.srf",
+                                    "login.microsoft.com/consumers/fido","login.microsoft.com/consumers/device"]
+                # v10.0: px-captcha 4s已确认清空→CAPTCHA真实通过；只需等微软后台处理完毕(最多60s)
+                # 不再做假阳性早退判断：enforcementFrame残留不代表失败，只是MS处理延迟
+                while time.time() - _cc_start < 60:
                     try:
                         _cur_url = page.url
-                        _success_domains = ["account.live.com","account.microsoft.com",
-                                            "outlook.live.com","outlook.com/mail","login.live.com/login.srf",
-                                            "login.microsoft.com/consumers/fido","login.microsoft.com/consumers/device"]
                         if any(x in _cur_url for x in _success_domains):
-                            print(f"[register] [captcha-clear] CAPTCHA cleared after {time.time()-_cc_start:.0f}s", flush=True)
+                            print(f"[register] [captcha-clear] ✅ 跳转成功 after {time.time()-_cc_start:.0f}s", flush=True)
                             _cc_navigated = True
                             break
                         _elapsed = time.time() - _cc_start
-                        print(f"[register] [captcha-clear] {_elapsed:.0f}s elapsed", flush=True)
-                        if _elapsed > 14:
-                            _has_captcha = False
+                        print(f"[register] [captcha-clear] {_elapsed:.0f}s elapsed url={page.url[:60]}", flush=True)
+                        # v10.2: 14-22s 检测 hsprotect iframe 是否仍在
+                        # 实测规律：Arkose接受press-hold → 立即撤销hsprotect iframe (<5s)
+                        #           Arkose拒绝press-hold → hsprotect iframe持续存在60s+
+                        # 14s时若hsprotect仍在 → 100%假阳性，立即放弃节省约46s
+                        if 14 < _elapsed < 22:
+                            _hsp_at_14 = False
                             try:
-                                _has_captcha = (page.locator("iframe#enforcementFrame").count() > 0
-                                    or page.locator('[src*="hsprotect.net"], [title*="challenge" i]').count() > 0)
+                                for _cfr14 in page.frames:
+                                    if "hsprotect.net" in (getattr(_cfr14, "url", "") or ""):
+                                        _hsp_at_14 = True
+                                        break
                             except Exception:
                                 pass
-                            if _has_captcha:
-                                print(f"[register] [captcha-clear] patch7: CAPTCHA仍在 @{_elapsed:.0f}s → 直接退出换CF IP（不重跑handle_captcha）", flush=True)
-                                return False, "CAPTCHA early_confirmed假阳性，换CF IP重试", email
+                            if _hsp_at_14:
+                                print(f"[register] [captcha-clear] ⚡ @{_elapsed:.0f}s hsprotect仍在→Arkose已拒绝，提前放弃(节约{60-_elapsed:.0f}s)", flush=True)
+                                break
+                            else:
+                                print(f"[register] [captcha-clear] ✅ @{_elapsed:.0f}s hsprotect已撤销→真实通过，等待MS后台", flush=True)
+                        # v10.0: 30s后尝试点击 primaryButton 触发页面推进（避免MS卡住不跳转）
+                        if 28 < _elapsed < 32:
+                            try:
+                                _nb = page.locator('[data-testid="primaryButton"]').first
+                                if _nb.is_visible(timeout=1000) and _nb.is_enabled(timeout=1000):
+                                    _nb.click(timeout=3000)
+                                    print(f"[register] [captcha-clear] @30s 点击primaryButton触发跳转", flush=True)
+                            except Exception: pass
                         page.wait_for_timeout(2000)
                     except Exception as _cc_e:
                         if "TargetClosed" in type(_cc_e).__name__ or "Target page" in str(_cc_e):
@@ -409,6 +424,24 @@ class BaseController:
                         break
                 if _cc_navigated:
                     return True, "注册成功", email
+                # v10.1: poll 超时 → 截图 + 检查 hsprotect frame 是否还在（诊断用）
+                if not _cc_navigated:
+                    try:
+                        _ss_path = f"/tmp/captcha_poll_timeout_{email}.png"
+                        page.screenshot(path=_ss_path, timeout=3000)
+                        print(f"[register] [captcha-clear] ⏱ 60s超时截图: {_ss_path}", flush=True)
+                    except Exception:
+                        pass
+                    # 检查 hsprotect frame 是否仍存在（若存在说明CAPTCHA未被MS接受）
+                    _hsp_still = False
+                    try:
+                        for _fr in page.frames:
+                            if "hsprotect" in (_fr.url or ""):
+                                _hsp_still = True
+                                break
+                    except Exception:
+                        pass
+                    print(f"[register] [captcha-clear] hsprotect仍存在={_hsp_still} → {'CAPTCHA被MS拒绝' if _hsp_still else 'MS处理中'}", flush=True)
 
             # ── 验证注册真正完成（等待跳转到成功页）────────────────────
             # 微软成功页：account.live.com, outlook.com, login.live.com/login.srf
@@ -467,6 +500,43 @@ class BaseController:
             return False, f"加载超时或触发机器人检测: {e}", email
 
         return True, "注册成功", email
+
+    @staticmethod
+    def _human_click(page, locator, timeout: int = 8000):
+        """人类化点击：先漂移鼠标到元素附近悬停，再点击，模拟 PerimeterX 无法区分的自然操作。"""
+        import random as _r
+        try:
+            locator.wait_for(state="visible", timeout=timeout)
+            box = locator.bounding_box(timeout=5000)
+            if box:
+                # 元素中心 + 微小随机偏移（避免总是精确命中正中心）
+                cx = box["x"] + box["width"]  * (_r.uniform(0.3, 0.7))
+                cy = box["y"] + box["height"] * (_r.uniform(0.35, 0.65))
+                # 从屏幕上随机位置出发，平滑移动到按钮附近
+                ox = cx + _r.uniform(-180, 180) * _r.choice([-1, 1])
+                oy = cy + _r.uniform(-120, 120) * _r.choice([-1, 1])
+                ox = max(10, min(ox, 1200))
+                oy = max(10, min(oy, 750))
+                page.mouse.move(ox, oy)
+                # 分 6-10 步平滑接近
+                steps = _r.randint(6, 10)
+                for s in range(steps):
+                    t = (s + 1) / steps
+                    # easeInOut 曲线
+                    ease = t * t * (3 - 2 * t)
+                    mx = ox + (cx - ox) * ease + _r.uniform(-3, 3)
+                    my = oy + (cy - oy) * ease + _r.uniform(-3, 3)
+                    page.mouse.move(mx, my)
+                    page.wait_for_timeout(_r.randint(18, 45))
+                # hover 停留：人类在按钮上确认一下再点（80-200ms）
+                page.mouse.move(cx, cy)
+                page.wait_for_timeout(_r.randint(80, 220))
+                page.mouse.click(cx, cy)
+                return
+        except Exception:
+            pass
+        # fallback: 普通点击
+        locator.click(timeout=timeout)
 
     def handle_captcha(self, page, blob_container=None):
         raise NotImplementedError
@@ -1031,7 +1101,6 @@ class PatchrightController(BaseController):
                     break
                 page.wait_for_timeout(150)
             _second_click_done = False
-            _press_again_used = False  # fix: initialize here so line below never NameErrors when _second_click_done stays False
             # 先检查 frame 数量是否增加（说明拼图已加载）
             _fr_count_now = len(page.frames)
             print(f"[captcha] 当前 frame 数: {_fr_count_now}", flush=True)
@@ -1564,12 +1633,36 @@ class PatchrightController(BaseController):
                     except Exception:
                         pass
                     if _px_confirmed:
-                        print(f"[captcha] ✅ v9.83 px-captcha 4s确认稳定: empty → 跳过音频", flush=True)
-                        self._px_empty_detected_at = None
-                        _early_solved_reason = "PerimeterX 外层 px-captcha 已清空(confirmed+body清空)"
-                        print(f"[captcha] ✅ press-hold 后早期检测：CAPTCHA 已通过（{_early_solved_reason}）→ 跳过音频流程", flush=True)
-                        self._captcha_early_confirmed = True
-                        return True
+                        # v10.1: Arkose 拒绝后重置需要 3-8s，4s 窗口可能漏判；额外等 3s 再确认
+                        try:
+                            page.wait_for_timeout(3000)
+                        except Exception:
+                            pass
+                        _px_final_empty = True
+                        try:
+                            for _pff in page.frames:
+                                if "hsprotect.net" not in (getattr(_pff, "url", "") or ""):
+                                    continue
+                                _pfv = _pff.evaluate(
+                                    "() => { const r = document.getElementById('px-captcha');"
+                                    " return r ? r.children.length : -1; }"
+                                )
+                                if _pfv > 0:
+                                    _px_final_empty = False
+                                    print(f"[captcha] ⚠ v10.1 3s后重填(children={_pfv})→Arkose重置，非真实通过", flush=True)
+                                    self._px_empty_detected_at = None
+                                break
+                        except Exception:
+                            pass
+                        if not _px_final_empty:
+                            pass  # Arkose 已重置，继续音频流程
+                        else:
+                            print(f"[captcha] ✅ v9.83 px-captcha 7s确认稳定: empty → 跳过音频", flush=True)
+                            self._px_empty_detected_at = None
+                            _early_solved_reason = "PerimeterX 外层 px-captcha 已清空(confirmed+body清空)"
+                            print(f"[captcha] ✅ press-hold 后早期检测：CAPTCHA 已通过（{_early_solved_reason}）→ 跳过音频流程", flush=True)
+                            self._captcha_early_confirmed = True
+                            return True
                 page.wait_for_timeout(1000)
             else:
                 self._px_empty_detected_at = None  # 重置
