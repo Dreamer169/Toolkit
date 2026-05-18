@@ -44,7 +44,7 @@ PROXY_PORT     = 8089                    # unitool_proxy.py 监听端口
 API_BASE       = "http://localhost:8081/api"  # api-server 地址
 
 MAX_REF_SLOTS   = 10    # unitool 每个 ref_code 最多邀请人数
-RESI_PORTS = list(range(10851, 10860))  # v3.2: 9 live candidates (10870-10889 dead, removed Fix-5a)
+RESI_PORTS = list(range(10820, 10846))  # Fix-6: in-socks VLESS/CF ports work for unitool.ai, old ss-in 10851-10859 blocked by CF
 
 # -- cfmail config -------------------------------------------------------------
 CFMAIL_INSTANCES = [
@@ -94,9 +94,9 @@ def _cfmail_load_d1_creds():
                 inst["d1_token"] = tok
                 inst["d1_acc"]   = acc
                 inst["d1_db"]    = cf_svc["d1_id"]
-        log("[cfmail] D1 creds loaded from credentials.json OK")
+        print("[cfmail] D1 creds loaded from credentials.json OK")
     except Exception as _e:
-        log("[cfmail] WARNING: D1 creds load failed: " + str(_e))
+        print("[cfmail] WARNING: D1 creds load failed: " + str(_e))
 _cfmail_load_d1_creds()
 # cfmail 轮换状态文件
 _CFMAIL_ROTATE_FILE = "/tmp/cfmail_rotate_state.json"
