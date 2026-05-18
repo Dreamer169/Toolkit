@@ -1056,21 +1056,29 @@ def db_get_all_ref_codes() -> list:
     for acc_id, acc_email, notes, tags in used_rows:
         _process_row(acc_id, acc_email, notes, tags, force_local=False)
 
-    if not available:
-        # Phase 2: 没有可用的已用码 → 取最新 20 个账号的 ref_code，本地计数，不调 API
-        log("[ref] Phase1 无可用码，Phase2: 取最新 20 个账号 ref_code（本地计数=0）")
-        cur.execute("""
-            SELECT id, email, notes, tags FROM accounts
-            WHERE platform='outlook'
-              AND notes LIKE '%%unitool_ref_code=%%'
-              AND (tags LIKE '%%unitool_ref_master%%' OR tags LIKE '%%unitool_ref_activated%%')
-            ORDER BY updated_at DESC
-            LIMIT 20
-        """)
-        fresh_rows = cur.fetchall()
-        for acc_id, acc_email, notes, tags in fresh_rows:
+    # Phase 2: 始终运行 —— 把从未被用过的新鲜账号（used=0）并入 pool
+    # 原为 fallback，导致 1000+ 个有 ref_code 但 used=0 的账号永远看不到
+    # 改为无条件追加：fill-first 排序让 used>0 优先填满，used=0 在后候补
+    _phase1_ids = {r['id'] for r in available}
+    log(f"[ref] Phase2: 补充 used=0 新鲜 ref master（Phase1={len(available)} 个）")
+    cur.execute("""
+        SELECT id, email, notes, tags FROM accounts
+        WHERE platform='outlook'
+          AND notes LIKE '%%unitool_ref_code=%%'
+          AND notes NOT LIKE '%%ref_registered=%%'
+          AND tags NOT LIKE '%%abuse_mode%%'
+          AND tags LIKE '%%ssid_ok%%'
+          AND (tags LIKE '%%unitool_ref_master%%' OR tags LIKE '%%unitool_ref_activated%%')
+        ORDER BY updated_at DESC
+        LIMIT 500
+    """)
+    fresh_rows = cur.fetchall()
+    _p2_added = 0
+    for acc_id, acc_email, notes, tags in fresh_rows:
+        if acc_id not in _phase1_ids:
             _process_row(acc_id, acc_email, notes, tags, force_local=True)
-        log(f"[ref] Phase2: 得到 {len(available)} 个可用码")
+            _p2_added += 1
+    log(f"[ref] Phase2: 新增 {_p2_added} 个 used=0 候补 ref master，pool 合计={len(available)}")
 
     conn.close()
 
