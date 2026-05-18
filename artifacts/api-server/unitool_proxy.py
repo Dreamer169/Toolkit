@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.43
+unitool.ai → OpenAI 兼容反代 v5.44
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -260,7 +260,7 @@ def _delete_ssid_file(label: str):
             print(f"[FILE] failed to remove {p}: {ex}", flush=True)
 
 def _invalidate_in_db(label: str):
-    # v5.43: normalize label to canonical email (same as _save_to_db) before WHERE clause
+    # v5.44: normalize label to canonical email (same as _save_to_db) before WHERE clause
     # prevents dead-account SSID from being missed when label is legacy underscore-encoded
     try:
         email = _label_to_email(label)
@@ -688,24 +688,24 @@ def _balance_monitor_loop():
 #   perplexity-sonar-pro-search -> 真实 Perplexity AI ✓ CONFIRMED (probe v6.2)
 #                   自报"Perplexity AI"; 真实实时搜索; 知道 GPT-5 Aug7 2025, Claude Opus4 May22 2025
 NATIVE_SERVICES = {
-    # ChatGPT（实探 /api/services?parent_id=chatgpt 确认，含 minimum_balance）
+    # ChatGPT (probe 2026-05-18 /api/services?parent_id=chatgpt, all active=1)
     "gpt-5", "gpt-5.5", "gpt-5.4", "gpt-5-nano",
     "gpt5.1", "gpt5.2",
-    "gpt-4o", "gpt-4o-mini", "gpt-4-1", "gpt-4-5",  # v5.30: gpt-4-5 back (active=1 confirmed 2026-05-08)
-    # REMOVED (IMMEDIATE_FALLBACK): gpt-o1, gpt-o1-mini, gpt-o3, gpt-o3-mini, gpt-o3-pro, gpt-o4-mini
+    "gpt-4o", "gpt-4o-mini", "gpt-4-1", "gpt-4-5",
+    "gpt-o1", "gpt-o1-mini", "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini",
     # Gemini
     "gemini-3.1-pro", "gemini-3-pro",
     # xAI
     "grok",
-    # Claude (probe v6.2 backend identity)
-    "claude-sonnet",     # -> claude-3-5-sonnet-20240620 (Claude 3.5 Sonnet, cutoff Apr 2024) ✓
-    "claude-sonnet-4-5", # -> claude-3-5-sonnet-20241022 (Claude 3.5 Sonnet v2, cutoff Apr 2024) ✓
-    "claude-sonnet-4-6", # -> claude-sonnet-4-6 (Claude 4, early 2025 cutoff, newer) ✓
-    # REMOVED (IMMEDIATE_FALLBACK): claude-opus
-    "claude-opus-4-6",   # -> claude-opus-4-6 ✓ CONFIRMED (Replit model_returned exact match)
-    # REMOVED (IMMEDIATE_FALLBACK): claude-opus-4-7
-    # REMOVED (IMMEDIATE_FALLBACK): claude-haiku
-    # Perplexity (v5.39: confirmed active=1, 2026-05-12)
+    # Claude (probe 2026-05-18 /api/services?parent_id=claude, all active=1)
+    "claude-sonnet",     # title="Claude Sonnet 4.5" min_bal=1
+    "claude-sonnet-4-5", # title="Claude Sonnet 4.5" min_bal=1
+    "claude-sonnet-4-6", # title="Claude Sonnet 4.6" min_bal=1
+    "claude-opus",       # title="Claude Opus 4"     min_bal=10.1 (restored 2026-05-18: responds, needs balance)
+    "claude-opus-4-6",   # title="Claude Opus 4.6"   min_bal=10.1
+    "claude-opus-4-7",   # title="Claude Opus 4.7"   min_bal=10.1 (restored 2026-05-18)
+    "claude-haiku",      # title="Claude Haiku"       min_bal=1   (restored 2026-05-18)
+    # Perplexity
     "perplexity-sonar",             # Perplexity Sonar            min_bal=1
     "perplexity-sonar-pro",         # Perplexity Sonar Pro        min_bal=1
     "perplexity-sonar-pro-search",  # Perplexity Sonar Pro Search min_bal=3
@@ -732,11 +732,11 @@ FREE_SERVICES = {"gpt-4o-mini", "gpt-5-nano"}  # minimum_balance=0，余额耗�
 # _send_and_collect_core skips widget/stream for POLL_PRIMARY_SERVICES;
 # _STREAM_INTERCEPT_RU is a safety net for any unlisted intercepted services.
 POLL_PRIMARY_SERVICES = {
-    "gpt-5", "gpt-5.5", "gpt-5-nano", "gpt-4-1",  # gpt-5 stream broken 2026-05-13; poll reliable (same backend as gpt-5.5)
+    "gpt-5", "gpt-5.5", "gpt-5-nano", "gpt-4-1",  # gpt-5 stream broken 2026-05-13; poll reliable
     "gpt-4o", "gpt-4o-mini",  # v5.38: confirmed stream-intercepted 2026-05-09
-    "claude-sonnet", "claude-opus",
+    "claude-sonnet", "claude-opus", "claude-haiku",  # confirmed stream-intercepted
     "claude-sonnet-4-6",  # v5.38: confirmed stream-intercepted 2026-05-09
-    "claude-opus-4-6",   # v5.24: stream empty but poll returns CHERRY
+    "claude-opus-4-6", "claude-opus-4-7",  # v5.44: restored; poll-only (stream unreliable)
     "grok",              # v5.25: widget/stream embeds reasoning-block-marker div; poll clean
     # o-series reasoning models (v5.30): widget/stream unreliable; paginatedMessages returns clean answer
     "gpt-o1", "gpt-o1-mini",
@@ -746,7 +746,6 @@ POLL_PRIMARY_SERVICES = {
     # v5.35: gpt-5.4 stream intermittently empty; poll reliable
     "gpt-5.4",
     # v5.39: perplexity (poll safe default; stream untested)
-    # claude-opus-4-7 moved to IMMEDIATE_FALLBACK (v5.40: consistently timeouts >90s)
     "perplexity-sonar", "perplexity-sonar-pro", "perplexity-sonar-pro-search",
 }
 _STREAM_INTERCEPT_RU = "помогаю только"  # Russian restriction marker
@@ -836,24 +835,14 @@ MEDIA_ALIASES: dict[str, str] = {
 # The dict was dead code — never referenced after v5.31 — and has now been deleted.
 # Use IMMEDIATE_FALLBACK_SERVICES for fast-fail on broken services (no fallback).
 
-# v5.30: Services confirmed completely broken at unitool API level.
-# Requesting them causes a hang (no response ever arrives) rather than an
-# immediate service_error, so the proxy would waste ~90s before falling back.
-# When primary_id is in this set, _do_chat skips it and starts at fallback[0].
-# Confirmed broken 2026-05-08: all o-series (TypeError/no choices/404) +
-# gpt-5-nano (sends reasoning_effort but paginatedMessages never receives reply).
+# v5.44 (2026-05-18): All previously-blocked services restored after live probe:
+# Direct API test returned "Free tokens are over" (not "Unsupported service" or 404)
+# → services ARE active at unitool backend, just require account balance.
+# Only gpt-5-nano remains truly broken: unitool passes null reasoning_effort to
+# OpenAI, causing "400 Unsupported value: 'none' is not supported with gpt-5-nano".
 IMMEDIATE_FALLBACK_SERVICES: set[str] = {
-    # o-series: TypeError/no choices/404 — confirmed permanently broken at unitool
-    "gpt-o1", "gpt-o1-mini",
-    "gpt-o3", "gpt-o3-mini", "gpt-o3-pro", "gpt-o4-mini",
-    # permanently dead (400 Unsupported / API-level breaks):
-    "gpt-5-nano",  # 400 "Reasoning is mandatory" — hangs even with reasoning_effort
-    "claude-opus-4-7",  # v5.40 2026-05-13: consistently >90s timeout; use claude-opus-4-6
-    "claude-opus", # 400 max_tokens: 32768 > 32000 — unitool ignores chat_settings.max_tokens (confirmed 2026-05-08)
-    "gpt-4-5",     # 400 Unsupported service (confirmed dead 2026-05-08)
-    "claude-haiku",  # 404 not_found "model: claude-3-5-haiku-20241022" (probe confirmed 2026-05-08); model route broken at unitool
-    # NOTE: grok / gemini-3.1-pro / gemini-3-pro are NOT in IMMEDIATE_FALLBACK:
-    # maintenance errors → _mark_svc_dead 30min (v5.35), auto-recovers.
+    "gpt-5-nano",  # 400 "Unsupported value: 'none'" — unitool bug: null reasoning_effort (2026-05-18 probe)
+    # NOTE: grok/gemini-3.1-pro/gemini-3-pro NOT here — maintenance → _mark_svc_dead, auto-recovers.
 }
 
 # v5.37: Per-service extra fields merged into chat_settings at chat creation.
@@ -874,17 +863,16 @@ MODEL_ALIASES = {
     "gpt-4o-mini-2024-07-18": "gpt-4o-mini", "gpt-4o-mini-search": "gpt-4o-mini",
     "gpt-3.5-turbo": "gpt-4o-mini", "gpt-3.5-turbo-0613": "gpt-4o-mini",
     "gpt-3.5-turbo-16k": "gpt-4o-mini", "text-davinci-003": "gpt-4o-mini",
-    # v5.40: o-series unitool endpoints permanently broken → reroute to best working alternative
-    # gpt-5.5 = gpt-5-2025-08-07 (has reasoning_tokens, best available replacement)
-    "o1": "gpt-5.5", "o1-mini": "gpt-5.5", "o1-pro": "gpt-5.5",
-    "o1-preview": "gpt-5.5", "o3": "gpt-5.5", "o3-mini": "gpt-5.5",
-    "o4-mini": "gpt-5.4", "o4": "gpt-5.5",
-    "gpt-5-turbo": "gpt-5.5", "chatgpt-5": "gpt-5.5", "chatgpt-5-turbo": "gpt-5.5",  # v5.40: gpt-5 stream broken; gpt-5.5 same backend + reliable poll
+    # v5.44: o-series restored (probe 2026-05-18: all active=1, respond with "Free tokens are over")
+    "o1": "gpt-o1", "o1-mini": "gpt-o1-mini", "o1-pro": "gpt-o1",
+    "o1-preview": "gpt-o1", "o3": "gpt-o3", "o3-mini": "gpt-o3-mini",
+    "o4-mini": "gpt-o4-mini", "o4": "gpt-o3-pro",
+    "gpt-5-turbo": "gpt-5.5", "chatgpt-5": "gpt-5.5", "chatgpt-5-turbo": "gpt-5.5",
     "chatgpt-5.5": "gpt-5.5", "chatgpt-5.5-turbo": "gpt-5.5", "chatgpt": "gpt-5.5",
-    "claude-opus": "claude-opus-4-6", "claude-opus-4": "claude-opus-4-6",  # v5.40: claude-opus broken; redirect to working 4-6
+    "claude-opus-4": "claude-opus-4-7", "claude-opus-4-latest": "claude-opus-4-7",  # v5.44: restored; → latest 4-7
     "claude-opus-4-5": "claude-opus-4-6", "claude-opus-4.5": "claude-opus-4-6",
-    "claude-opus-4.6": "claude-opus-4-6", "claude-opus-4-latest": "claude-opus-4-6",  # v5.40: 4-7 broken → 4-6
-    "claude-opus-latest": "claude-opus-4-6",
+    "claude-opus-4.6": "claude-opus-4-6",
+    "claude-opus-latest": "claude-opus-4-7",
     "claude-3-opus": "claude-sonnet", "claude-3-opus-20240229": "claude-sonnet",
     "claude": "claude-sonnet", "claude-sonnet-4": "claude-sonnet",
     "claude-3-7-sonnet": "claude-sonnet", "claude-3-7-sonnet-20250219": "claude-sonnet",
@@ -967,7 +955,66 @@ _RP_EXPOSED = ["gpt-4o-mini-rp", "gpt-5.5-rp", "gpt-4-1-rp",
 _NT_EXPOSED = ["gpt-o3-mini-nothinking", "gpt-o3-nothinking", "gpt-o4-mini-nothinking",
                "gpt-o1-mini-nothinking", "gpt-o1-nothinking", "gpt-5-nothinking"]
 _MEDIA_EXPOSED = sorted(MEDIA_SERVICES | set(MEDIA_ALIASES.keys()))
-MODELS_LIST  = [{"id": m, "object": "model", "created": 1700000000, "owned_by": "unitool"}
+
+# v5.44: display name mapping (from unitool.ai /api/services title field, probe 2026-05-18)
+_MODEL_DISPLAY: dict[str, str] = {
+    # ChatGPT
+    "gpt-5":           "ChatGPT 5",
+    "gpt-5.5":         "ChatGPT 5.5",
+    "gpt-5.4":         "ChatGPT 5.4",
+    "gpt5.2":          "ChatGPT 5.2",
+    "gpt5.1":          "ChatGPT 5.1",
+    "gpt-4o":          "ChatGPT 4o",
+    "gpt-4o-mini":     "ChatGPT 4o Mini",
+    "gpt-4-1":         "ChatGPT 4.1",
+    "gpt-4-5":         "ChatGPT 4.5",
+    "gpt-o1":          "ChatGPT o1",
+    "gpt-o1-mini":     "ChatGPT o1 Mini",
+    "gpt-o3":          "ChatGPT o3",
+    "gpt-o3-mini":     "ChatGPT o3 Mini",
+    "gpt-o3-pro":      "ChatGPT o3 Pro",
+    "gpt-o4-mini":     "ChatGPT o4 Mini",
+    "gpt-5-nano":      "ChatGPT 5 Nano",
+    # Gemini
+    "gemini-3.1-pro":  "Gemini 3.1 Pro",
+    "gemini-3-pro":    "Gemini 3 Pro",
+    # xAI
+    "grok":            "Grok",
+    # Claude
+    "claude-sonnet":   "Claude Sonnet 4.5",
+    "claude-sonnet-4-5": "Claude Sonnet 4.5",
+    "claude-sonnet-4-6": "Claude Sonnet 4.6",
+    "claude-opus":     "Claude Opus 4",
+    "claude-opus-4-6": "Claude Opus 4.6",
+    "claude-opus-4-7": "Claude Opus 4.7",
+    "claude-haiku":    "Claude Haiku",
+    # Perplexity
+    "perplexity-sonar":            "Perplexity Sonar",
+    "perplexity-sonar-pro":        "Perplexity Sonar Pro",
+    "perplexity-sonar-pro-search": "Perplexity Sonar Pro Search",
+    # Image / Video / Audio
+    "gpt-image":        "GPT-Image 2.0",
+    "dalle-3":          "DALL-E 3",
+    "midjourney":       "Midjourney",
+    "stable-diffusion": "Stable Diffusion XL",
+    "flux":             "Flux",
+    "nanobanana":       "Nano Banana",
+    "luma":             "Luma Dream Machine",
+    "kling":            "Kling",
+    "sora2":            "Sora 2",
+    "veo3":             "Veo 3.1",
+    "hailuo":           "Hailuo",
+    "runwayml":         "Runway ML",
+    "elevenlabs":       "ElevenLabs TTS",
+    "suno":             "Suno Music",
+}
+
+def _make_model_entry(mid: str) -> dict:
+    display = _MODEL_DISPLAY.get(mid, mid)
+    return {"id": mid, "object": "model", "created": 1700000000,
+            "owned_by": "unitool", "display_name": display}
+
+MODELS_LIST  = [_make_model_entry(m)
                 for m in sorted(set(ALL_MODELS) | set(_RP_EXPOSED) | set(_NT_EXPOSED) | set(_MEDIA_EXPOSED))]
 
 # ─── 核心 API 调用 ────────────────────────────────────────────────────────────
@@ -1765,19 +1812,7 @@ def _do_chat(model: str, messages: list, ssid_override: str | None,
     # For confirmed-broken services, fail fast with clear error instead of 90s hang.
     if primary_id in IMMEDIATE_FALLBACK_SERVICES:
         _reasons = {
-            "gpt-o1":     "o-series TypeError/no-choices confirmed broken at unitool",
-            "gpt-o1-mini":"o-series TypeError/no-choices confirmed broken at unitool",
-            "gpt-o3":     "o-series TypeError/no-choices confirmed broken at unitool",
-            "gpt-o3-mini":"o-series TypeError/no-choices confirmed broken at unitool",
-            "gpt-o3-pro": "o-series TypeError/no-choices confirmed broken at unitool",
-            "gpt-o4-mini":"o-series TypeError/no-choices confirmed broken at unitool",
-            "gpt-5-nano": "400 'Reasoning is mandatory' — hangs even with reasoning_effort",
-            "claude-opus":"400 max_tokens: 32768 > 32000 — unitool ignores chat_settings.max_tokens",
-            "gpt-4-5":    "400 Unsupported service (permanently dead at unitool)",
-            "claude-haiku": "404 not_found model:claude-3-5-haiku-20241022 — route broken at unitool (probe confirmed 2026-05-08)",
-            "claude-opus-4-7": "consistently times out >90s (probe 2026-05-13); use claude-opus-4-6",
-            "claude-opus-4-7": "consistently times out >90s at unitool (probe 2026-05-13); use claude-opus-4-6",
-
+            "gpt-5-nano": "400 Unsupported value: 'none' — unitool passes null reasoning_effort to OpenAI (2026-05-18)",
         }
         reason = _reasons.get(primary_id, "confirmed permanently broken at unitool API level")
         print(f"[ERR] {primary_id} permanent-broken: {reason}", flush=True)
@@ -2156,9 +2191,9 @@ def _startup_resi_health_check():
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.43] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.44] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.43] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.44] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
@@ -2168,8 +2203,8 @@ if __name__ == "__main__":
     except (KeyboardInterrupt, SystemExit):
         pass  # PM2 SIGINT during startup — skip check, continue
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.43] balance monitor started", flush=True)
-    print("[unitool-proxy v5.43] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc|GrokReasoningStrip|GeminiMaintenance|GrokFallback|OSeriesFallback|NanoReasoning|SvcErrFallback|ImmediateFallback|OSeriesChainFix|ClaudeOpusFallback: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking|NoModelFallback|ClaudeOpusErrFix|SvcDeadCache24h|SvcStatusAPI|ProbeConfirmed2026-05-08|PollPrimaryGpt4o|RobustCookie2026-05-09|Perplexity3Svcs|ClaudeOpus47|ProbeConfirmed2026-05-12|Perplexity3Svcs|ClaudeOpus47|ProbeConfirmed2026-05-12", flush=True)
+    print("[unitool-proxy v5.44] balance monitor started", flush=True)
+    print("[unitool-proxy v5.44] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc|GrokReasoningStrip|GeminiMaintenance|GrokFallback|OSeriesFallback|NanoReasoning|SvcErrFallback|ImmediateFallback|OSeriesChainFix|ClaudeOpusFallback: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking|NoModelFallback|ClaudeOpusErrFix|SvcDeadCache24h|SvcStatusAPI|ProbeConfirmed2026-05-08|PollPrimaryGpt4o|RobustCookie2026-05-09|Perplexity3Svcs|ClaudeOpus47|ProbeConfirmed2026-05-12|Perplexity3Svcs|ClaudeOpus47|ProbeConfirmed2026-05-12|AllSvcsRestored2026-05-18|OSeriesRestored|ClaudeOpusRestored|ClaudeHaikuRestored|ModelDisplayNames", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
