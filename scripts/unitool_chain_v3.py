@@ -46,6 +46,160 @@ API_BASE       = "http://localhost:8081/api"  # api-server 地址
 MAX_REF_SLOTS   = 10    # unitool 每个 ref_code 最多邀请人数
 RESI_PORTS = list(range(10851, 10860))  # v3.2: 9 live candidates (10870-10889 dead, removed Fix-5a)
 
+# -- cfmail config -------------------------------------------------------------
+CFMAIL_INSTANCES = [
+    {
+        "host":       "mail-api.jonjim.eu.cc",
+        "domain":     "jonjim.eu.cc",
+        "site_auth":  "8GKNFyLCo0pL7drOqKZQ6jGB",
+        "admin_auth": "360cb32181e4ef281afb3b63",
+        # D1 凭证由 _cfmail_load_d1_creds() 在运行时从 /root/credentials.json 注入
+        "d1_token":   None,
+        "d1_acc":     None,
+        "d1_db":      None,
+    },
+    {
+        "host":       "mail-api.hackerjim.eu.cc",
+        "domain":     "hackerjim.eu.cc",
+        "site_auth":  "ak4yJVQ8szp8H5jS3Mx6Y1sm",
+        "admin_auth": "ufmTbatyzZ0jkKrDvYhIc281",
+        # D1 凭证由 _cfmail_load_d1_creds() 在运行时从 /root/credentials.json 注入
+        "d1_token":   None,
+        "d1_acc":     None,
+        "d1_db":      None,
+    },
+]
+# 运行时注入 D1 凭证（从 /root/credentials.json，不硬编码在源码里）
+def _cfmail_load_d1_creds():
+    import json as _jcred
+    _CRED_FILE = "/root/credentials.json"
+    _D1_MAP = {
+        "jonjim.eu.cc":    ("cf_services", "temp_email"),
+        "hackerjim.eu.cc": ("cf_services", "hackerjim_temp_email"),
+    }
+    try:
+        creds = _jcred.loads(open(_CRED_FILE).read())
+        for inst in CFMAIL_INSTANCES:
+            dom = inst["domain"]
+            if dom in _D1_MAP:
+                sec1, sec2 = _D1_MAP[dom]
+                cf_svc = creds[sec1][sec2]
+                # jonjim uses main token; hackerjim uses cf_accounts.CF-NEW-4.main_token
+                if dom == "jonjim.eu.cc":
+                    tok = creds["cloudflare_accounts"][2]["api_token"]  # CF-NEW-3
+                    acc = creds["cloudflare_accounts"][2]["account_id"]
+                else:
+                    tok = creds["cf_accounts"]["CF-NEW-4"]["main_token"]
+                    acc = creds["cf_accounts"]["CF-NEW-4"]["account_id"]
+                inst["d1_token"] = tok
+                inst["d1_acc"]   = acc
+                inst["d1_db"]    = cf_svc["d1_id"]
+        log("[cfmail] D1 creds loaded from credentials.json OK")
+    except Exception as _e:
+        log("[cfmail] WARNING: D1 creds load failed: " + str(_e))
+_cfmail_load_d1_creds()
+# cfmail 轮换状态文件
+_CFMAIL_ROTATE_FILE = "/tmp/cfmail_rotate_state.json"
+_cfmail_rotate_lock = __import__("threading").Lock()
+
+def _cfmail_pick_inst():
+    """
+    轮换策略：use_count 最少优先（round-robin）
+    fail_count>=3 且 disabled_until>now → 跳过（60s 冷却）
+    全部被禁 → 重置 fail_count 选 use_count 最少
+    """
+    import json as _jrot, time as _trot
+    now = _trot.time()
+    with _cfmail_rotate_lock:
+        try:
+            state = _jrot.loads(open(_CFMAIL_ROTATE_FILE).read())
+        except Exception:
+            state = {}
+        candidates = []
+        for _inst in CFMAIL_INSTANCES:
+            dom = _inst["domain"]
+            s = state.get(dom, {"use_count": 0, "fail_count": 0, "disabled_until": 0})
+            if s.get("fail_count", 0) >= 3 and now < s.get("disabled_until", 0):
+                continue
+            candidates.append((_inst, s))
+        if not candidates:
+            log("[cfmail_pick] all instances cooling, resetting")
+            for _inst in CFMAIL_INSTANCES:
+                dom = _inst["domain"]
+                state.setdefault(dom, {"use_count": 0, "fail_count": 0, "disabled_until": 0})
+                state[dom]["fail_count"] = 0
+                state[dom]["disabled_until"] = 0
+            candidates = [(i, state.get(i["domain"], {"use_count": 0, "fail_count": 0, "disabled_until": 0})) for i in CFMAIL_INSTANCES]
+        chosen_inst, chosen_s = min(candidates, key=lambda x: x[1].get("use_count", 0))
+        dom = chosen_inst["domain"]
+        state.setdefault(dom, {"use_count": 0, "fail_count": 0, "disabled_until": 0})
+        state[dom]["use_count"] = state[dom].get("use_count", 0) + 1
+        try:
+            open(_CFMAIL_ROTATE_FILE, "w").write(_jrot.dumps(state))
+        except Exception:
+            pass
+        log("[cfmail_pick] chose " + dom + " use=" + str(state[dom]["use_count"]) + " fail=" + str(state[dom]["fail_count"]))
+        return chosen_inst
+
+def _cfmail_mark_fail(inst):
+    """标记失败，fail_count>=3 禁用 60s"""
+    import json as _jrot, time as _trot
+    dom = inst["domain"]
+    with _cfmail_rotate_lock:
+        try:
+            state = _jrot.loads(open(_CFMAIL_ROTATE_FILE).read())
+        except Exception:
+            state = {}
+        s = state.setdefault(dom, {"use_count": 0, "fail_count": 0, "disabled_until": 0})
+        s["fail_count"] = s.get("fail_count", 0) + 1
+        if s["fail_count"] >= 3:
+            s["disabled_until"] = _trot.time() + 60
+            log("[cfmail_pick] " + dom + " fail=" + str(s["fail_count"]) + " -> disabled 60s")
+        try:
+            open(_CFMAIL_ROTATE_FILE, "w").write(_jrot.dumps(state))
+        except Exception:
+            pass
+
+def _cfmail_mark_ok(inst):
+    """成功 → 重置 fail_count"""
+    import json as _jrot
+    dom = inst["domain"]
+    with _cfmail_rotate_lock:
+        try:
+            state = _jrot.loads(open(_CFMAIL_ROTATE_FILE).read())
+        except Exception:
+            state = {}
+        s = state.setdefault(dom, {"use_count": 0, "fail_count": 0, "disabled_until": 0})
+        s["fail_count"] = 0
+        s["disabled_until"] = 0
+        try:
+            open(_CFMAIL_ROTATE_FILE, "w").write(_jrot.dumps(state))
+        except Exception:
+            pass
+# Real-name word lists for generating firstname.lastname<digits> addresses
+_CFMAIL_FIRST = [
+    "james","john","robert","michael","william","david","richard","joseph",
+    "thomas","charles","christopher","daniel","matthew","anthony","mark",
+    "donald","steven","paul","andrew","joshua","kevin","brian","george",
+    "edward","ronald","timothy","jason","jeffrey","ryan","jacob",
+    "gary","nicholas","eric","jonathan","stephen","larry","justin",
+    "scott","brandon","benjamin","samuel","raymond","gregory","frank",
+    "mary","patricia","jennifer","linda","barbara","susan","jessica",
+    "sarah","karen","lisa","nancy","betty","margaret","sandra",
+    "ashley","emily","kimberly","donna","michelle","carol","amanda",
+    "melissa","deborah","stephanie","rebecca","sharon","laura",
+]
+_CFMAIL_LAST = [
+    "smith","johnson","williams","brown","jones","garcia","miller",
+    "davis","rodriguez","martinez","hernandez","lopez","gonzalez",
+    "wilson","anderson","thomas","taylor","moore","jackson","martin",
+    "lee","perez","thompson","white","harris","sanchez","clark",
+    "ramirez","lewis","robinson","walker","young","allen","king",
+    "wright","scott","torres","nguyen","hill","flores","green",
+    "adams","nelson","baker","hall","rivera","campbell","mitchell",
+    "carter","roberts","turner","phillips","evans","diaz","parker",
+]
+
 # CF Worker 直连代理（proxy.jimjio.indevs.in），提供 CF 边缘 IP 多样性
 # 用于 ref-code API 查询/创建的 IP 分散（RESI 失败时自动降级）
 # v3.4: 4-Worker round-robin pool（CF 边缘 IP 多样性 + 自动故障转移）
@@ -1832,6 +1986,202 @@ def db_get_ssid_from_notes(account_id):
     return m.group(1) if m else ""
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────
+
+
+# =============================================================================
+# cfmail pipeline helpers
+# =============================================================================
+
+def _cfmail_gen_name():
+    import random as _rcf
+    first  = _rcf.choice(_CFMAIL_FIRST)
+    last   = _rcf.choice(_CFMAIL_LAST)
+    suffix = str(_rcf.randint(10, 9999)) if _rcf.random() > 0.10 else ""
+    return first + "." + last + suffix
+
+
+def _cfmail_create_addr(inst):
+    for _attempt in range(5):
+        name = _cfmail_gen_name()
+        url  = "https://" + inst["host"] + "/jimhacker/new_address"
+        cmd  = [
+            "curl", "-sS", "-X", "POST", url,
+            "-H", "x-custom-auth: " + inst["site_auth"],
+            "-H", "x-admin-auth: "  + inst["admin_auth"],
+            "-H", "Content-Type: application/json",
+            "-d", json.dumps({"name": name}),
+            "--max-time", "20",
+        ]
+        try:
+            out  = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=25)
+            data = json.loads(out)
+            if data.get("address") or data.get("email"):
+                email = data.get("address") or data.get("email") or (name + "@" + inst["domain"])
+                jwt   = data.get("jwt") or data.get("token") or ""
+                log("[cfmail] created " + email + "  jwt_len=" + str(len(jwt)))
+                return {"ok": True, "email": email, "jwt": jwt}
+            log("[cfmail] create fail attempt=" + str(_attempt+1) + ": " + str(data))
+        except Exception as _e:
+            log("[cfmail] create exc attempt=" + str(_attempt+1) + ": " + str(_e))
+        time.sleep(2)
+    return {"ok": False, "error": "create_failed_after_5_attempts"}
+
+
+def _cfmail_poll_d1(email_addr, inst, after_ts=0.0, max_wait=120):
+    import quopri as _qp
+    # BugFix: per-instance D1 凭证，不再硬编码 jonjim
+    _CF_TOKEN = inst["d1_token"]
+    _CF_ACC   = inst["d1_acc"]
+    _CF_DB    = inst["d1_db"]
+    _API      = ("https://api.cloudflare.com/client/v4/accounts/" + _CF_ACC
+                 + "/d1/database/" + _CF_DB + "/query")
+    log("[cfmail_poll] D1 target=" + inst["domain"] + " db=" + _CF_DB[:8] + "...")
+    SCHED   = [8, 10, 12, 15, 15, 15, 20, 20]
+    elapsed = 0
+    for _wait in SCHED:
+        if elapsed >= max_wait:
+            break
+        _sleep = min(_wait, max_wait - elapsed)
+        log("[cfmail_poll] wait " + str(_sleep) + "s (" + str(elapsed) + "/" + str(max_wait) + "s)...")
+        time.sleep(_sleep); elapsed += _sleep
+        _sql = ("SELECT raw FROM raw_mails WHERE address='" + email_addr + "' "
+                "ORDER BY id DESC LIMIT 3")
+        try:
+            _body = json.dumps({"sql": _sql}).encode()
+            _req  = urllib.request.Request(_API, data=_body, headers={
+                "Authorization": "Bearer " + _CF_TOKEN,
+                "Content-Type":  "application/json",
+            })
+            _resp = json.loads(urllib.request.urlopen(_req, timeout=20).read())
+            _rows = _resp["result"][0]["results"]
+            log("[cfmail_poll] D1 rows=" + str(len(_rows)))
+        except Exception as _e:
+            log("[cfmail_poll] D1 err: " + str(_e)); continue
+        for _row in _rows:
+            _raw = _row.get("raw", "")
+            if not _raw:
+                continue
+            try:
+                _decoded = _qp.decodestring(_raw.encode()).decode("utf-8", errors="replace")
+            except Exception:
+                _decoded = _raw
+            _urls = re.findall(
+                r"https://unitool\.ai/api/auth/email\?token=[A-Za-z0-9._\-]+", _decoded)
+            if not _urls:
+                _urls = re.findall(
+                    r"https://unitool\.ai[^\s\"'<>]*token=[^\s\"'<>]*", _decoded)
+            if _urls:
+                log("[cfmail_poll] found verify URL: " + _urls[0][:80])
+                return _urls[0]
+        log("[cfmail_poll] [" + str(elapsed) + "s] no mail yet")
+    log("[cfmail_poll] timeout " + str(max_wait) + "s")
+    return ""
+
+
+def run_cfmail_chain(ref_code):
+    # BugFix: 轮换策略选 inst，不再随机
+    inst = _cfmail_pick_inst()
+
+    addr = _cfmail_create_addr(inst)
+    if not addr["ok"]:
+        _cfmail_mark_fail(inst)
+        return {"ok": False, "email": "", "ssid": "", "reason": addr["error"]}
+    email = addr["email"]
+    jwt   = addr["jwt"]
+
+    account_id = 0
+    try:
+        _c = db_connect(); _cu = _c.cursor()
+        _cu.execute(
+            "INSERT INTO accounts "
+            "(platform, email, password, refresh_token, status, tags, created_at, updated_at) "
+            "VALUES ('cfmail', %s, 'Unitool@2024!', %s, 'active', 'unitool_processing', NOW(), NOW()) "
+            "ON CONFLICT (platform, email) DO UPDATE "
+            "  SET refresh_token = EXCLUDED.refresh_token, "
+            "      tags = 'unitool_processing', updated_at = NOW()",
+            (email, jwt))
+        _c.commit()
+        _cu.execute("SELECT id FROM accounts WHERE email=%s", (email,))
+        _r2 = _cu.fetchone()
+        account_id = _r2[0] if _r2 else 0
+        _c.close()
+        log("[cfmail] DB account_id=" + str(account_id))
+    except Exception as _e:
+        log("[cfmail] DB insert err: " + str(_e))
+
+    reg_ts = time.time()
+
+    reg = run_register_fast(email, ref_code)
+    if not reg["ok"]:
+        reason = reg.get("reason", "unknown")
+        log("[cfmail] reg fail: " + reason)
+        if account_id:
+            db_mark_fail(account_id, reason)
+        return {"ok": False, "email": email, "ssid": "", "reason": reason}
+    log("[cfmail] unitool register OK")
+
+    verify_url = _cfmail_poll_d1(email, inst, after_ts=reg_ts, max_wait=120)
+    if not verify_url:
+        _cfmail_mark_fail(inst)
+        if account_id:
+            db_mark_fail(account_id, "verify_email_not_found")
+        return {"ok": False, "email": email, "ssid": "", "reason": "verify_email_not_found"}
+
+    _ekey = re.sub(r"[^a-z0-9]", "_", email.lower())[:24]
+    _ck   = "/tmp/cfmail_ck_" + _ekey + ".txt"
+    _hdr  = "/tmp/cfmail_hdr_" + _ekey + ".txt"
+    for _f in [_ck, _hdr]:
+        try: os.remove(_f)
+        except: pass
+    _port = RESI_PORTS[hash(email) % len(RESI_PORTS)]
+    _cmd  = [
+        "curl", "-sS", "-L", "--max-redirs", "8",
+        "--socks5-hostname", "127.0.0.1:" + str(_port),
+        "-c", _ck, "-b", _ck, "-D", _hdr,
+        "-H", "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0.0.0",
+        "-H", "Accept: text/html,application/xhtml+xml,*/*;q=0.9",
+        "--max-time", "30",
+        verify_url,
+    ]
+    log("[cfmail] click verify port=" + str(_port))
+    ssid = ""
+    try:
+        _proc = subprocess.Popen(_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try: _proc.communicate(timeout=35)
+        except subprocess.TimeoutExpired: _proc.kill(); _proc.communicate()
+        if os.path.exists(_hdr):
+            for _ln in open(_hdr, encoding="utf-8", errors="ignore"):
+                if "unitool-ssid" in _ln.lower() and "set-cookie" in _ln.lower():
+                    _m = re.search(r"unitool-ssid=([^;\s]+)", _ln, re.I)
+                    if _m: ssid = _m.group(1); break
+        if not ssid and os.path.exists(_ck):
+            for _ln in open(_ck, encoding="utf-8", errors="ignore"):
+                if "unitool-ssid" in _ln.lower():
+                    _pts = _ln.strip().split("\t")
+                    ssid = _pts[-1] if _pts else ""; break
+    except Exception as _e:
+        log("[cfmail] curl err: " + str(_e))
+    log("[cfmail] ssid len=" + str(len(ssid)))
+
+    if not ssid:
+        _cfmail_mark_fail(inst)
+        if account_id:
+            db_mark_fail(account_id, "no_ssid_after_click")
+        return {"ok": False, "email": email, "ssid": "", "reason": "no_ssid_after_click"}
+
+    _cfmail_mark_ok(inst)
+    if account_id:
+        db_save_ssid_full(account_id, email, ssid)
+        try:
+            _c2 = db_connect(); _cu2 = _c2.cursor()
+            _cu2.execute(
+                "UPDATE accounts SET tags='unitool_registered', updated_at=NOW() WHERE id=%s",
+                (account_id,))
+            _c2.commit(); _c2.close()
+        except Exception: pass
+    persist_ssid(email, ssid)
+    return {"ok": True, "email": email, "ssid": ssid, "reason": ""}
+
 def main():
     _thread_local.account_id    = None
     _thread_local.account_email = None
@@ -1878,17 +2228,23 @@ def main():
         time.sleep(60); return
     log(f"[ref] ref_code={ref_code} master={ref_master_email} used={ref_used}/{MAX_REF_SLOTS}")
 
-    # ── Step 3: 取一个新鲜 outlook 账号 ────────────────────────────────────────
+    # -- Step 3: pick fresh outlook account (fallback to cfmail if none) ------
     row = db_get_fresh_account()
     if not row:
-        log("[main] 无可用账号 → 轮询等待（最多300s，每30s检查一次）")
+        log("[main] no outlook account -> trying cfmail pipeline")
+        cf_result = run_cfmail_chain(ref_code)
+        if cf_result["ok"]:
+            log("[main] cfmail OK email=" + cf_result["email"] + " ssid_len=" + str(len(cf_result["ssid"])))
+            _verify_ssid_api(cf_result["ssid"], 0)
+            return
+        log("[main] cfmail fail: " + cf_result["reason"] + " -> wait for outlook")
         _waited = 0
-        while _waited < 300:
+        while _waited < 120:
             time.sleep(30); _waited += 30
             if db_count_fresh() > 0:
-                log(f"[main] fresh 账号已就绪（等了 {_waited}s），立即重试")
-                return  # 返回让 _worker_loop 立即再调用 main()
-        log("[main] 等待超时（300s），继续下轮")        ; return
+                log("[main] fresh account ready after " + str(_waited) + "s, retry")
+                return
+        log("[main] wait timeout 120s, next round"); return
 
     account_id, email, password, refresh_token = row
     log(f"\n{'─'*60}")
