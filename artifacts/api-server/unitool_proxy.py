@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-unitool.ai → OpenAI 兼容反代 v5.44
+unitool.ai → OpenAI 兼容反代 v5.45
 =====================================
 v5.11 六大核心改造（来自 ds-free-api 深度分析 + unitool API 实探）：
 
@@ -750,84 +750,7 @@ POLL_PRIMARY_SERVICES = {
 }
 _STREAM_INTERCEPT_RU = "помогаю только"  # Russian restriction marker
 
-# ─── Media generation services (image/video/audio) v5.20 ──────────────────
-# These use job polling (not SSE). Result in paginatedMessages assistant.attachments
-# CONFIRMED (2026-05-08): gpt-image completes in ~15s, content="" attachments has URL
-# Response structure: {"role":"assistant","status":"ended","content":"","attachments":[
-#   {"uri":"https://media.unitool.ai/r2/....png","type":"png","width":1024,...}]}
-
-IMAGE_SERVICES = {
-    "gpt-image",         # GPT-Image 2.0  min_bal=1  output=0.0024/tok  CONFIRMED
-    "dalle-3",           # DALL-E 3        min_bal=6.74  output=3.6
-    "midjourney",        # Midjourney      min_bal=6.5   output=5
-    "stable-diffusion",  # SD XL           min_bal=6.74  output=3.6
-    "flux",              # FLUX.1          min_bal=6.74  output=0.8
-    "nanobanana",        # NanoBanana      min_bal=7     output=6.25
-    # sdxl image-editing sub-services (require image in attachments, parent=sdxl)
-    # REAL min_balance (2026-05-08 probe): remove-background=3.74, cleanup=3.74
-    #   uncrop=7.49, reimagine=7.49, image-to-video=37.49, upscaler=37.49
-    "remove-background", "uncrop", "reimagine", "upscaler", "image-to-video", "cleanup",
-}
-
-VIDEO_SERVICES = {
-    "luma",       # Dream Machine   min_bal=31.25  output=28.33
-    "kling",      # Kling           min_bal=80     output=10
-    "sora2",      # Sora 2          min_bal=19     output=10
-    "veo3",       # Google Veo 3    min_bal=59     output=16.6
-    "hailuo",     # Hailuo/Minimax  min_bal=50     output=10
-    "runwayml",   # Runway ML       min_bal=48     output=16
-    # CONFIRMED (2026-05-08): seedance/happyhorse are inactive shell services.
-    # /api/services returns active=None (null), no pricing/balance fields at all.
-    # Message submission -> {"error":"Unsupported service"}. Fast-fail with clear error.
-    "seedance",   # Seedance (ByteDance) — active=None, inactive placeholder
-    "happyhorse", # HappyHorse         — active=None, inactive placeholder
-}
-
-AUDIO_SERVICES = {
-    "suno",                  # Suno music      min_bal=15    output=14
-    "text-to-speech",        # ElevenLabs TTS  min_bal=2     output=0.0012
-    "voice-cloning",         # ElevenLabs clone     min_bal=8  (2026-05-08 confirmed)
-    "text-to-sound-effects", # ElevenLabs SFX
-    "library",               # ElevenLabs library
-}
-
-MEDIA_SERVICES: set[str] = IMAGE_SERVICES | VIDEO_SERVICES | AUDIO_SERVICES
-
-MEDIA_ALIASES: dict[str, str] = {
-    # Image aliases
-    "dall-e-3": "dalle-3",
-    "dall-e-2": "dalle-3",
-    "dalle-2": "dalle-3",
-    "image-generation": "gpt-image",
-    "gpt-image-1": "gpt-image",
-    "gpt-4o-image": "gpt-image",
-    "mj": "midjourney",
-    "midjourney-v6": "midjourney",
-    "midjourney-v7": "midjourney",
-    "sd": "stable-diffusion",
-    "stable-diffusion-xl": "stable-diffusion",
-    "flux-pro": "flux",
-    "flux-schnell": "flux",
-    "flux-dev": "flux",
-    # Video aliases
-    "luma-dream": "luma",
-    "dream-machine": "luma",
-    "runway": "runwayml",
-    "runway-gen4": "runwayml",
-    "sora": "sora2",
-    "veo": "veo3",
-    "google-veo3": "veo3",
-    "minimax-video": "hailuo",
-    "kling-v2": "kling",
-    # Audio aliases
-    "music-generation": "suno",
-    "suno-v4": "suno",
-    "suno-v3": "suno",
-    "tts": "text-to-speech",
-    "elevenlabs": "text-to-speech",
-    "elevenlabs-tts": "text-to-speech",
-    "text-to-audio": "text-to-sound-effects",
-}
+# v5.45: media generation (image/video/audio) removed — text generation only.
 
 
 # FALLBACK_CHAINS was removed in v5.40 (2026-05-13):
@@ -835,7 +758,7 @@ MEDIA_ALIASES: dict[str, str] = {
 # The dict was dead code — never referenced after v5.31 — and has now been deleted.
 # Use IMMEDIATE_FALLBACK_SERVICES for fast-fail on broken services (no fallback).
 
-# v5.44 (2026-05-18): All previously-blocked services restored after live probe:
+# v5.45 (2026-05-18): All previously-blocked services restored after live probe:
 # Direct API test returned "Free tokens are over" (not "Unsupported service" or 404)
 # → services ARE active at unitool backend, just require account balance.
 # Only gpt-5-nano remains truly broken: unitool passes null reasoning_effort to
@@ -907,8 +830,6 @@ MODEL_ALIASES = {
     "sonar-search": "perplexity-sonar-pro-search",
     "perplexity-search": "perplexity-sonar-pro-search",
     "perplexity-pro-search": "perplexity-sonar-pro-search",
-    "deepseek": "gpt-5.5", "deepseek-r1": "gpt-5.5", "deepseek-v3": "gpt-5.5",
-    "deepseek-chat": "gpt-5.5",
 }
 
 # v5.16: -rp suffix = Reduced Prompt mode (mirrors ds2api reducedPromptModelSuffix)
@@ -931,20 +852,12 @@ def _resolve_model(model: str) -> tuple[str, bool, bool]:
         model   = model[:-3]
         reduced = True
     if model in NATIVE_SERVICES:  return model, reduced, no_thinking
-    if model in MEDIA_SERVICES:   return model, reduced, no_thinking
     if model in MODEL_ALIASES:    return MODEL_ALIASES[model], reduced, no_thinking
-    if model in MEDIA_ALIASES:    return MEDIA_ALIASES[model], reduced, no_thinking
     m = model.lower()
-    if "claude" in m:   return "claude-sonnet", reduced, no_thinking
-    if "gemini" in m:   return "gemini-3.1-pro", reduced, no_thinking
-    if "grok" in m:         return "grok",              reduced, no_thinking
-    if "perplexity" in m:   return "perplexity-sonar",  reduced, no_thinking
-    if "deepseek" in m:     return "gpt-5.5",           reduced, no_thinking
-    if "dall" in m or ("image" in m and "gpt" in m): return "gpt-image", reduced, no_thinking
-    if "midjourney" in m: return "midjourney", reduced, no_thinking
-    if "suno" in m or "music-gen" in m: return "suno", reduced, no_thinking
-    if "flux" in m: return "flux", reduced, no_thinking
-    if "luma" in m or "dream-machine" in m: return "luma", reduced, no_thinking
+    if "claude" in m:     return "claude-sonnet",    reduced, no_thinking
+    if "gemini" in m:     return "gemini-3.1-pro",   reduced, no_thinking
+    if "grok" in m:       return "grok",             reduced, no_thinking
+    if "perplexity" in m: return "perplexity-sonar", reduced, no_thinking
     return "gpt-5.5", reduced, no_thinking
 
 ALL_MODELS   = sorted(NATIVE_SERVICES | set(MODEL_ALIASES.keys()))
@@ -954,9 +867,7 @@ _RP_EXPOSED = ["gpt-4o-mini-rp", "gpt-5.5-rp", "gpt-4-1-rp",
 # v5.19: -nothinking variants (reasoning models that support <no_thinking/>)
 _NT_EXPOSED = ["gpt-o3-mini-nothinking", "gpt-o3-nothinking", "gpt-o4-mini-nothinking",
                "gpt-o1-mini-nothinking", "gpt-o1-nothinking", "gpt-5-nothinking"]
-_MEDIA_EXPOSED = sorted(MEDIA_SERVICES | set(MEDIA_ALIASES.keys()))
-
-# v5.44: display name mapping (from unitool.ai /api/services title field, probe 2026-05-18)
+# v5.45: display name mapping (from unitool.ai /api/services title field, probe 2026-05-18)
 _MODEL_DISPLAY: dict[str, str] = {
     # ChatGPT
     "gpt-5":           "ChatGPT 5",
@@ -981,32 +892,17 @@ _MODEL_DISPLAY: dict[str, str] = {
     # xAI
     "grok":            "Grok",
     # Claude
-    "claude-sonnet":   "Claude Sonnet 4.5",
+    "claude-sonnet":     "Claude Sonnet 4.5",
     "claude-sonnet-4-5": "Claude Sonnet 4.5",
     "claude-sonnet-4-6": "Claude Sonnet 4.6",
-    "claude-opus":     "Claude Opus 4",
-    "claude-opus-4-6": "Claude Opus 4.6",
-    "claude-opus-4-7": "Claude Opus 4.7",
-    "claude-haiku":    "Claude Haiku",
+    "claude-opus":       "Claude Opus 4",
+    "claude-opus-4-6":   "Claude Opus 4.6",
+    "claude-opus-4-7":   "Claude Opus 4.7",
+    "claude-haiku":      "Claude Haiku",
     # Perplexity
     "perplexity-sonar":            "Perplexity Sonar",
     "perplexity-sonar-pro":        "Perplexity Sonar Pro",
     "perplexity-sonar-pro-search": "Perplexity Sonar Pro Search",
-    # Image / Video / Audio
-    "gpt-image":        "GPT-Image 2.0",
-    "dalle-3":          "DALL-E 3",
-    "midjourney":       "Midjourney",
-    "stable-diffusion": "Stable Diffusion XL",
-    "flux":             "Flux",
-    "nanobanana":       "Nano Banana",
-    "luma":             "Luma Dream Machine",
-    "kling":            "Kling",
-    "sora2":            "Sora 2",
-    "veo3":             "Veo 3.1",
-    "hailuo":           "Hailuo",
-    "runwayml":         "Runway ML",
-    "elevenlabs":       "ElevenLabs TTS",
-    "suno":             "Suno Music",
 }
 
 def _make_model_entry(mid: str) -> dict:
@@ -1014,8 +910,8 @@ def _make_model_entry(mid: str) -> dict:
     return {"id": mid, "object": "model", "created": 1700000000,
             "owned_by": "unitool", "display_name": display}
 
-MODELS_LIST  = [_make_model_entry(m)
-                for m in sorted(set(ALL_MODELS) | set(_RP_EXPOSED) | set(_NT_EXPOSED) | set(_MEDIA_EXPOSED))]
+MODELS_LIST = [_make_model_entry(m)
+               for m in sorted(set(ALL_MODELS) | set(_RP_EXPOSED) | set(_NT_EXPOSED))]
 
 # ─── 核心 API 调用 ────────────────────────────────────────────────────────────
 def _api(method: str, path: str, body=None, ssid: str = ""):
@@ -1598,183 +1494,11 @@ def _try_service(service_id: str, content: str, entries: list,
 
 
 
-def _do_media_job(model: str, service_id: str, prompt: str,
-                  ssid_override: str | None = None,
-                  chunk_cb=None, abort: "AbortFlag | None" = None) -> str:
-    """v5.21: Media generation job polling flow.
-    POST /api/chats -> POST /api/chats/{id}/messages -> paginatedMessages poll.
-    Returns markdown-formatted result: image URL, video URL, or audio URL.
-    Result is in assistant message: content (text) or attachments[0].uri (media).
-    Confirmed: gpt-image ~15s, seedance ~60s+; attachments[0].uri has the URL.
-
-    v5.21 fixes:
-      - BUG1: streaming mode now sends final_text via chunk_cb (was lost before)
-      - BUG2: _active counter now properly tracked (pool concurrency limiting works)
-      - BUG3: _record_rpm() called so RPM counter is accurate
-    v5.23 fixes:
-      - abort param: media job checks abort_flag so client disconnect stops the poll
-      - seedance/happyhorse fast-fail: raise clear error instead of 200s timeout
-      - sdxl min_balance corrected in comments (3.74/7.49/37.49, not 0.1)
-    """
-    if ssid_override and len(ssid_override) > 50:
-        entry = _make_entry(ssid_override, "header")
-        entries = [entry]
-    else:
-        _reload_pool_if_needed()
-        with _lock:
-            live = [e for e in _pool if e["dead_until"] <= time.time()]
-            entries = live or _pool[:]
-
-    if not entries:
-        raise Exception("ssid pool empty")
-
-    # v5.33: check service-level dead cache (maintenance → 24h block)
-    dead, remaining = _is_svc_dead(service_id)
-    if dead:
-        mins = remaining // 60
-        h, m = divmod(mins, 60)
-        eta  = f"{h}h{m:02d}m" if h else f"{m}m"
-        raise Exception(
-            f"service_maintenance: unitool.ai '{service_id}' is under maintenance — "
-            f"retry in ~{eta}"
-        )
-
-    entry = _pick_entry(entries)
-    ssid = entry["ssid"]
-
-    _record_rpm()  # v5.21: count media jobs in RPM stats
-    print(f"[MEDIA] {model}->{service_id} prompt={prompt[:60]!r}", flush=True)
-
-    # v5.21: track _active so MAX_CONCURRENCY_PER_SSID applies to media jobs too
-    with _lock:
-        entry["_active"] = entry.get("_active", 0) + 1
-
-    chat_id = None
-    try:
-        # 1. Create chat
-        chat = _api("POST", "/api/chats",
-                    body={"service_id": service_id, "title": ""},
-                    ssid=ssid)
-        chat_id = chat.get("id")
-        if not chat_id:
-            raise Exception(f"media job: cannot create chat for {service_id}: {chat}")
-
-        print(f"[MEDIA] {service_id} chat={chat_id}", flush=True)
-
-        # 2. Send prompt
-        result = _api("POST", f"/api/chats/{chat_id}/messages",
-                      body={"content": prompt, "attachments": [], "options": ""},
-                      ssid=ssid)
-        if result.get("error"):
-            err = result["error"]
-            bal = result.get("message", "")
-            # v5.23: seedance/happyhorse fast-fail (avoids 200s timeout)
-            if "Unsupported service" in err and service_id in {"seedance", "happyhorse"}:
-                raise Exception(
-                    f"{service_id}: service is inactive — active=None in /api/services "
-                    f"(no pricing/balance fields). This is a placeholder not yet deployed. "
-                    f"Use 'luma' for video generation as an alternative."
-                )
-            raise Exception(f"media_send_error: {err} {bal}")
-
-        user_msg_id = result.get("message", {}).get("id")
-        job_id = result.get("job", {}).get("id")
-        print(f"[MEDIA] job_id={job_id} msg_id={user_msg_id}", flush=True)
-
-        # 3. Poll paginatedMessages until status=ended
-        deadline = time.time() + 200  # 200s max (generous for slow services)
-        poll_interval = 2.0
-        while time.time() < deadline:
-            if abort and abort.is_set():
-                raise Exception("client_disconnected")
-            time.sleep(poll_interval)
-            msgs = _api_paginated(chat_id, ssid, limit=10)
-            for m in msgs:
-                if m.get("role") != "assistant":
-                    continue
-                if user_msg_id and m.get("reply_to") != user_msg_id:
-                    continue
-                status = m.get("status", "")
-                if status == "error":
-                    err_txt = m.get("content", "unknown error")
-                    raise Exception(f"media_job_error: {err_txt[:200]}")
-                if status == "ended":
-                    # Extract result
-                    content = m.get("content", "").strip()
-                    attachments = m.get("attachments", [])
-                    msg_type = m.get("type", "")
-                    cost = m.get("cost", 0)
-
-                    # Build response text
-                    parts = []
-                    if attachments:
-                        for att in attachments:
-                            uri = att.get("uri", "")
-                            att_type = att.get("type", "")
-                            name = att.get("name", "")
-                            w = att.get("width", 0)
-                            h = att.get("height", 0)
-                            if uri:
-                                if att_type in ("png", "jpg", "jpeg", "webp", "gif") or msg_type == "photo":
-                                    dim = f" ({w}x{h})" if w and h else ""
-                                    parts.append(f"![{name or service_id}{dim}]({uri})\n\n[Download]({uri})")
-
-
-                                elif att_type in ("mp4", "webm", "mov") or msg_type == "video":
-                                    parts.append(f"Video: [{name or service_id}]({uri})\n\n[Download]({uri})")
-
-
-                                elif att_type in ("mp3", "wav", "ogg") or msg_type == "audio":
-                                    parts.append(f"Audio: [{name or service_id}]({uri})\n\n[Download]({uri})")
-
-
-                                else:
-                                    parts.append(f"[{name or uri}]({uri})")
-                    if content and not parts:
-                        parts.append(content)
-                    if not parts:
-                        parts.append(f"[{service_id} job completed but no output returned]")
-
-                    final_text = "\n\n".join(parts)
-
-
-                    print(f"[MEDIA] done chat={chat_id} cost={cost} type={msg_type} len={len(final_text)}", flush=True)
-                    # v5.21 BUG FIX: send final_text via chunk_cb for streaming clients
-                    # Previously chunk_cb only got "[Generating...]" and image URL was lost!
-                    if chunk_cb:
-                        chunk_cb(final_text)
-                    return final_text
-            # Exponential poll backoff: 2s -> 3s -> 4s -> max 6s
-            poll_interval = min(poll_interval * 1.2, 6.0)
-
-        raise TimeoutError(f"media job timeout after 200s (chat={chat_id}, job={job_id})")
-    finally:
-        # v5.21: release _active + update _last_released (mirrors _send_and_collect)
-        with _lock:
-            entry["_active"] = max(0, entry.get("_active", 0) - 1)
-            entry["_last_released"] = time.time()
-        _pool_release_event.set()  # wake AcquireWait waiters
-        if chat_id:
-            _delete_chat(chat_id, ssid)
-
 
 
 def _do_chat(model: str, messages: list, ssid_override: str | None,
              chunk_cb=None, abort: AbortFlag | None = None) -> str:
     primary_id, reduced, no_thinking = _resolve_model(model)  # v5.19: 3-tuple
-    # v5.20: route media generation to job-polling path
-    if primary_id in MEDIA_SERVICES:
-        # Extract last user message content as prompt
-        prompt = next(
-            (m.get('content', '') for m in reversed(messages)
-             if m.get('role') == 'user'),
-            messages[-1].get('content', '') if messages else ''
-        )
-        if isinstance(prompt, list):  # vision content blocks
-            prompt = ' '.join(c.get('text', '') for c in prompt
-                              if isinstance(c, dict) and c.get('type') == 'text')
-        return _do_media_job(model, primary_id, prompt,
-                             ssid_override=ssid_override, chunk_cb=chunk_cb, abort=abort)
     max_turns  = RP_MAX_HISTORY if reduced else MAX_HISTORY_TURNS
     content    = _fmt(messages, max_turns=max_turns, no_thinking=no_thinking)
     _record_rpm()  # v5.13: RPM counter
@@ -1971,7 +1695,7 @@ class Handler(BaseHTTPRequestHandler):
                         "gpt-4o-mini", "claude-sonnet", "claude-sonnet-4-5",
                         "claude-sonnet-4-6", "claude-opus-4-6"]
 
-            all_svc_ids = sorted(NATIVE_SERVICES | MEDIA_SERVICES)
+            all_svc_ids = sorted(NATIVE_SERVICES)
             services_out = []
             maint_ids = {e["service"] for e in maintenance if e["status"] == "maintenance"}
             perm_ids  = IMMEDIATE_FALLBACK_SERVICES
@@ -2191,9 +1915,9 @@ def _startup_resi_health_check():
 
 
 if __name__ == "__main__":
-    print(f"[unitool-proxy v5.44] loading ssids...", flush=True)
+    print(f"[unitool-proxy v5.45] loading ssids...", flush=True)
     _rebuild_pool()
-    print(f"[unitool-proxy v5.44] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
+    print(f"[unitool-proxy v5.45] port={PORT} pool={len(_pool)} models={len(ALL_MODELS)}", flush=True)
     with _lock:
         for e in _pool:
             print(f"  pool: {e['label']} ssid={e['ssid'][:20]}...", flush=True)
@@ -2203,8 +1927,8 @@ if __name__ == "__main__":
     except (KeyboardInterrupt, SystemExit):
         pass  # PM2 SIGINT during startup — skip check, continue
     threading.Thread(target=_balance_monitor_loop, daemon=True).start()
-    print("[unitool-proxy v5.44] balance monitor started", flush=True)
-    print("[unitool-proxy v5.44] features|MediaJob|StreamFix|PoolTracking|AbortMedia|SeedanceFastFail|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc|GrokReasoningStrip|GeminiMaintenance|GrokFallback|OSeriesFallback|NanoReasoning|SvcErrFallback|ImmediateFallback|OSeriesChainFix|ClaudeOpusFallback: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking|NoModelFallback|ClaudeOpusErrFix|SvcDeadCache24h|SvcStatusAPI|ProbeConfirmed2026-05-08|PollPrimaryGpt4o|RobustCookie2026-05-09|Perplexity3Svcs|ClaudeOpus47|ProbeConfirmed2026-05-12|Perplexity3Svcs|ClaudeOpus47|ProbeConfirmed2026-05-12|AllSvcsRestored2026-05-18|OSeriesRestored|ClaudeOpusRestored|ClaudeHaikuRestored|ModelDisplayNames", flush=True)
+    print("[unitool-proxy v5.45] balance monitor started", flush=True)
+    print("[unitool-proxy v5.45] features|TextOnly|StreamFix|PoolTracking|PollPrimary|StreamIntercept|GeminiFallback|UpdatingHang|404Fallback|FixUnsupportedSvc|GrokReasoningStrip|GeminiMaintenance|GrokFallback|OSeriesFallback|NanoReasoning|SvcErrFallback|ImmediateFallback|OSeriesChainFix|ClaudeOpusFallback: GuardedChat|AbortFlag|IdleLongestFirst|ConnErrCount|SSEParser|HistTrunc|SnapshotRetry|SkipEmptyStream|RESIHealthMap|ExponentialBackoff|EmptyStreakGuard|RPMCounter|AcquireWait|EmailDedup|AutoContinue|StartupRESICheck|NoThinking|NoModelFallback|ClaudeOpusErrFix|SvcDeadCache24h|SvcStatusAPI|ProbeConfirmed2026-05-08|PollPrimaryGpt4o|RobustCookie2026-05-09|Perplexity3Svcs|ClaudeOpus47|ProbeConfirmed2026-05-12|Perplexity3Svcs|ClaudeOpus47|ProbeConfirmed2026-05-12|AllSvcsRestored2026-05-18|OSeriesRestored|ClaudeOpusRestored|ClaudeHaikuRestored|ModelDisplayNames|MediaRemoved|TextOnlyMode", flush=True)
 
     server = ThreadedServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
