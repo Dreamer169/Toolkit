@@ -13,7 +13,7 @@ from __future__ import annotations
 import subprocess, threading, time, concurrent.futures, json, os
 from typing import List, Dict, Tuple, Union
 
-RESI_CANDIDATE_PORTS: List[int] = list(range(10851, 10860))
+RESI_CANDIDATE_PORTS: List[int] = list(range(10820, 10846))  # Fix-6: use in-socks VLESS/CF ports (10820-10845), old ss-in 10851-10859 dead
 PROBE_TARGET    = "https://www.google.com/generate_204"
 PROBE_TIMEOUT   = 6
 PROBE_CACHE_TTL = 300
@@ -274,15 +274,19 @@ def _clean_expired_sessions() -> None:
 
 
 def _pick_any() -> ProxyRef:
+    # Bug G fix: 优先 RESI 端口，仅在 RESI 全不可用时降级外部代理
     global _rr_idx
     avail_local = _available()
+    if avail_local:
+        idx = _rr_idx % len(avail_local)
+        _rr_idx = (idx + 1) % len(avail_local)
+        return avail_local[idx]
     avail_ext = _available_externals()
-    combined = avail_local + avail_ext
-    if not combined:
-        return list(RESI_CANDIDATE_PORTS)[0]
-    idx = _rr_idx % len(combined)
-    _rr_idx = (idx + 1) % len(combined)
-    return combined[idx]
+    if avail_ext:
+        idx = _rr_idx % len(avail_ext)
+        _rr_idx = (idx + 1) % len(avail_ext)
+        return avail_ext[idx]
+    return list(RESI_CANDIDATE_PORTS)[0]
 
 
 def pick_sticky(session_key: str, ttl: int = SESSION_TTL) -> ProxyRef:
