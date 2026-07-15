@@ -3486,6 +3486,22 @@ router.get("/tools/outlook/accounts", async (req, res) => {
   }
 });
 
+// ── 给 Outlook 账号打标签（注册脚本用 replit_used）──────────────────────────
+router.post("/tools/outlook/accounts/:id/tag", async (req, res) => {
+  try {
+    const accountId = parseInt(req.params.id, 10);
+    const { tags, status } = req.body as { tags?: string[]; status?: string };
+    if (!accountId || !Array.isArray(tags) || tags.length === 0) {
+      res.status(400).json({ success: false, error: "需要 account id 和 tags 数组" });
+      return;
+    }
+    await addAccountTags(accountId, tags, status);
+    res.json({ success: true });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
 // ── 保存 Outlook refresh_token ─────────────────────────────────────────────
 router.post("/tools/outlook/save-token", async (req, res) => {
   const { email, token, refreshToken } = req.body as { email?: string; token?: string; refreshToken?: string };
