@@ -116,52 +116,75 @@ def _save_account(email, password):
             print("[persist] 写入失败: " + str(e), flush=True)
 
 def _restore_from_disk():
+    """启动时快速恢复3个账号，其余由后台线程慢速恢复，避免触发429速率限制"""
     global _seq
     saved = _load_accounts()
     if not saved:
         print("[persist] 无已保存账号，从头注册", flush=True)
         return 0
-    print("[persist] 从磁盘恢复 " + str(len(saved)) + " 个账号...", flush=True)
+    _seq = len(saved)
+    print("[persist] 发现 " + str(len(saved)) + " 个账号，快速恢复最后3个...", flush=True)
     ok_count = 0
-    # 只恢复最新30个（优先新鲜账号，避免大批量login触发429）
-    saved = saved[-30:]
-    for i, rec in enumerate(saved):
+    for rec in saved[-3:]:
         email = rec.get("email", "")
         pwd   = rec.get("password", PASSWORD)
-        # 直连登录（VPS直连yonoo.ai无限速，SOCKS大量失败）
-        for use_proxy in [False, True]:
-            sess = requests.Session()
-            if use_proxy:
-                sess.proxies.update(_next_proxy())
-            try:
-                r = sess.post(YONOO_LOGIN,
-                    json={"email": email, "password": pwd}, timeout=20)
-                if r.status_code == 200:
-                    d = r.json()
-                    if d.get("success") or d.get("user"):
-                        with _pool_lock:
-                            _pool.append(_make_slot(sess, email, pwd))
-                        ok_count += 1
-                        if i > 0 and i % 10 == 0:
-                            print("[persist] 恢复进度 " + str(ok_count) + "/" + str(i+1), flush=True)
-                        break
-                    else:
-                        print("[persist] " + email + " login nok: " + r.text[:40], flush=True)
-                        break
+        sess  = requests.Session()
+        try:
+            r = sess.post(YONOO_LOGIN, json={"email": email, "password": pwd}, timeout=20)
+            if r.status_code == 200:
+                d = r.json()
+                if d.get("success") or d.get("user"):
+                    with _pool_lock:
+                        _pool.append(_make_slot(sess, email, pwd))
+                    ok_count += 1
+                    print("[persist] 快速恢复 " + email, flush=True)
                 else:
-                    print("[persist] " + email + " login=" + str(r.status_code), flush=True)
-                    break
-            except Exception as e:
-                if not use_proxy:
-                    continue
-                print("[persist] " + email + " err: " + str(e)[:60], flush=True)
-        time.sleep(3.0)  # 避免触发Yonoo IP速率限制(429)
-    with _pool_lock:
-        _seq = len(saved)
-    print("[persist] 恢复完成: " + str(ok_count) + "/" + str(len(saved)), flush=True)
+                    print("[persist] skip " + email + ": " + r.text[:40], flush=True)
+            else:
+                print("[persist] skip " + email + " (" + str(r.status_code) + ")", flush=True)
+        except Exception as e:
+            print("[persist] err " + str(e)[:50], flush=True)
+        import time as _t; _t.sleep(2.0)
+    print("[persist] 快速恢复: " + str(ok_count) + "/3", flush=True)
+    import threading
+    threading.Thread(target=_background_restore, args=(saved[:-3],), daemon=True).start()
     return ok_count
 
-# ── 槽位构造 ──────────────────────────────────────────────────────────────────
+def _background_restore(accounts):
+    """后台慢速恢复账号，每15秒一个，达到10个active停止"""
+    import time as _t
+    ok = 0
+    for rec in reversed(accounts):
+        with _pool_lock:
+            cur = sum(1 for s in _pool if s.get("state") == "active")
+        if cur >= 10:
+            print("[persist] pool>=10，停止后台恢复", flush=True)
+            break
+        email = rec.get("email", "")
+        pwd   = rec.get("password", PASSWORD)
+        sess  = requests.Session()
+        try:
+            r = sess.post(YONOO_LOGIN, json={"email": email, "password": pwd}, timeout=20)
+            if r.status_code == 200:
+                d = r.json()
+                if d.get("success") or d.get("user"):
+                    with _pool_lock:
+                        _pool.append(_make_slot(sess, email, pwd))
+                    ok += 1
+                    print("[persist] +bg " + email, flush=True)
+                else:
+                    print("[persist] bg skip " + email, flush=True)
+            elif r.status_code == 429:
+                retry = r.json().get("retryAfter", 900)
+                print("[persist] bg 429, 暂停 " + str(retry) + "s", flush=True)
+                _t.sleep(min(retry, 900))
+                continue
+            else:
+                print("[persist] bg " + str(r.status_code) + " " + email, flush=True)
+        except Exception as e:
+            print("[persist] bg err " + str(e)[:50], flush=True)
+        _t.sleep(15.0)
+    print("[persist] 后台恢复完成: +" + str(ok), flush=True)
 
 def _make_slot(sess, email, password):
     return {
