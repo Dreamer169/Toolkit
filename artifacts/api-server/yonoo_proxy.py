@@ -238,7 +238,10 @@ def _register_one(idx):
             else:
                 print("[pool] #" + str(idx) + " reg " + str(r.status_code) + "(" + tag + "): " + r.text[:60], flush=True)
                 if r.status_code == 429:
-                    break  # 限速，不重试
+                    if not use_proxy:
+                        print("[pool] direct 429，改走代理", flush=True)
+                        continue  # 直连限速 → 尝试SOCKS代理
+                    break  # 代理也429，放弃
         except Exception as e:
             if not use_proxy:
                 continue  # 直连失败，尝试代理
