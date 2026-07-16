@@ -106,10 +106,12 @@ import { useState, useRef, useEffect } from "react";
   import WebshareRegister from "@/pages/WebshareRegister";
   import OxylabsRegister from "@/pages/OxylabsRegister";
 import GpRegister from "@/pages/GpRegister";
+import YnRegister from "@/pages/YnRegister";
+import Ip2freeProxy from "@/pages/Ip2freeProxy";
 
   const queryClient = new QueryClient();
 
-  type Tab = "vscode" | "turb-register" | "home" | "agent" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "machine-reset" | "fingerprint" | "outlook" | "mail-center" | "cursor-register" | "replit-register" | "sub2api" | "team-register" | "openai-pool" | "data-manager" | "full-workflow" | "monitor" | "sms-center" | "captcha" | "waf-bypass" | "unitool-login" | "webshare-register" | "oxylabs-register" | "general-tools" | "gratis-panel" | "gp-register";
+  type Tab = "vscode" | "turb-register" | "home" | "agent" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "machine-reset" | "fingerprint" | "outlook" | "mail-center" | "cursor-register" | "replit-register" | "sub2api" | "team-register" | "openai-pool" | "data-manager" | "full-workflow" | "monitor" | "sms-center" | "captcha" | "waf-bypass" | "unitool-login" | "webshare-register" | "oxylabs-register" | "general-tools" | "gratis-panel" | "gp-register" | "yn-register" | "ip2free-proxy";
 
   // ─── 主导航标签（常驻显示）───────────────────────────────────────────────────
   const PRIMARY_TABS: { id: Tab; label: string; icon: string }[] = [
@@ -122,6 +124,7 @@ import GpRegister from "@/pages/GpRegister";
     { id: "outlook",       label: "Outlook 工作流", icon: "📧" },
     { id: "gratis-panel",  label: "Gratis 账号池",  icon: "🆓" },
     { id: "gp-register",   label: "GPTree 注册",    icon: "🌲" },
+    { id: "yn-register",   label: "Yonoo 注册",     icon: "🌀" },
   ];
 
   // ─── 更多工具（折叠在下拉菜单中）─────────────────────────────────────────────
@@ -313,6 +316,8 @@ import GpRegister from "@/pages/GpRegister";
               {tab === "general-tools"     && <GeneralTools />}
               {tab === "gratis-panel"      && <GratisPanel />}
               {tab === "gp-register"      && <GpRegister />}
+              {tab === "yn-register"      && <YnRegister />}
+              {tab === "ip2free-proxy"    && <Ip2freeProxy />}
               {tab === "monitor"           && <Monitor />}
             </main>
           )}

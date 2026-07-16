@@ -6245,4 +6245,78 @@ router.post("/tools/gp-register", async (req, res) => {
 });
 
 
+
+
+// ── GET /tools/yonoo-pool-status ── yonoo-proxy 账号池状态 ─────────────────
+router.get("/tools/yonoo-pool-status", async (_req, res) => {
+  try {
+    const r = await fetch("http://127.0.0.1:3099/pool/status", { signal: AbortSignal.timeout(5000) });
+    if (!r.ok) { res.status(502).json({ error: "proxy not reachable" }); return; }
+    res.json(await r.json());
+  } catch (e) {
+    res.status(503).json({ error: String(e) });
+  }
+});
+
+// ── POST /tools/yn-register ── Yonoo.ai 账号批量注册（直连HTTP，无需浏览器）──
+// Body: { count?: number, updateProxy?: boolean }
+router.post("/tools/yn-register", async (req, res) => {
+  try {
+    const { count = 5, updateProxy = false } = req.body as {
+      count?: number;
+      updateProxy?: boolean;
+    };
+    const scriptPath = new URL("../yn_register.py", import.meta.url).pathname;
+    const args: string[] = [
+      "--count", String(Math.max(1, Math.min(200, count))),
+    ];
+    if (updateProxy) args.push("--update-proxy");
+    const jobId = "yn_reg_" + Date.now();
+    const job = await jobQueue.create(jobId);
+    void job;
+    res.json({ success: true, jobId, message: "Yonoo 注册任务已启动，轮询 /api/tools/jobs/" + jobId });
+
+    const { spawn: _sp } = await import("child_process");
+    const child = _sp("python3", [scriptPath, ...args], {
+      env: { ...(process.env as Record<string, string>), PYTHONUNBUFFERED: "1" },
+    });
+    jobQueue.setChild(jobId, child);
+
+    let accBuf2 = "";
+    let inAccJson = false;
+    child.stdout?.on("data", (d: Buffer) => {
+      const text = d.toString();
+      if (text.includes("__ACCOUNTS_JSON__")) inAccJson = true;
+      if (inAccJson) accBuf2 += text;
+      text.split("\n").filter(Boolean).forEach((l: string) => {
+        if (!l.includes("__ACCOUNTS_JSON__") && !inAccJson) {
+          const type = l.includes("ERROR") ? "error" : l.includes("OK") ? "success" : "log";
+          jobQueue.pushLog(jobId, { type, message: l });
+        } else if (!l.includes("__ACCOUNTS_JSON__") && !l.startsWith("[{") && !l.startsWith("[]")) {
+          jobQueue.pushLog(jobId, { type: "log", message: l });
+        }
+      });
+    });
+    child.stderr?.on("data", (d: Buffer) =>
+      d.toString().split("\n").filter(Boolean).forEach((l: string) =>
+        jobQueue.pushLog(jobId, { type: "log", message: "[err] " + l })));
+    child.on("close", (code: number | null) => {
+      // 解析账号JSON并写入job
+      const m = accBuf2.match(/__ACCOUNTS_JSON__\s*([\s\S]+)/);
+      if (m) {
+        try {
+          const parsed = JSON.parse(m[1].trim());
+          if (Array.isArray(parsed)) {
+            parsed.forEach((a: { email: string; password: string; uid?: string }) =>
+              jobQueue.pushAccount(jobId, { email: a.email, password: a.password, username: a.uid }));
+          }
+        } catch {}
+      }
+      jobQueue.finish(jobId, code ?? -1, code === 0 ? "done" : "failed");
+    });
+  } catch (e: unknown) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
 export default router;
