@@ -123,6 +123,8 @@ def _restore_from_disk():
         return 0
     print("[persist] 从磁盘恢复 " + str(len(saved)) + " 个账号...", flush=True)
     ok_count = 0
+    # 只恢复最新30个（优先新鲜账号，避免大批量login触发429）
+    saved = saved[-30:]
     for i, rec in enumerate(saved):
         email = rec.get("email", "")
         pwd   = rec.get("password", PASSWORD)
@@ -153,7 +155,7 @@ def _restore_from_disk():
                 if not use_proxy:
                     continue
                 print("[persist] " + email + " err: " + str(e)[:60], flush=True)
-        time.sleep(0.3)
+        time.sleep(3.0)  # 避免触发Yonoo IP速率限制(429)
     with _pool_lock:
         _seq = len(saved)
     print("[persist] 恢复完成: " + str(ok_count) + "/" + str(len(saved)), flush=True)
