@@ -108,21 +108,12 @@ export default function ArPanel() {
   const [regCount, setRegCount] = useState(1);
   const [logsOpen, setLogsOpen] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const statusTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const notify = (msg: string, ok = true) => {
     setToast({ msg, ok });
     setTimeout(() => setToast(null), 3000);
   };
 
-  // 快速拉 /status 含 occupied，每 2 秒一次
-  const refreshStatus = useCallback(async () => {
-    try {
-      const s = await apiFetch("/status");
-      if (s.ok !== undefined) { setStatus(s); setErr(null); }
-      else setErr(s.error ?? "status 接口异常");
-    } catch {}
-  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -150,15 +141,9 @@ export default function ArPanel() {
 
   useEffect(() => {
     refresh();
-    // 每 2 秒更新 occupied 等实时指标
-    statusTimerRef.current = setInterval(refreshStatus, 2000);
-    // 每 30 秒全量刷新（含账号列表）
-    timerRef.current = setInterval(refresh, 30000);
-    return () => {
-      if (statusTimerRef.current) clearInterval(statusTimerRef.current);
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
-  }, [refresh, refreshStatus]);
+    timerRef.current = setInterval(refresh, 10000);
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, [refresh]);
 
   useEffect(() => {
     if (logsOpen) fetchLogs();
@@ -325,7 +310,9 @@ export default function ArPanel() {
             </thead>
             <tbody>
               {filtered.map(a => {
-                const inQuarantine = a.quarantine_until > Date.now() / 1000;
+                const now = Date.now() / 1000;
+                const inQuarantine = a.quarantine_until > now;
+                const inRateLimit  = !inQuarantine && a.rate_limit_until > now;
                 return (
                   <tr key={a.id} className="border-t border-[#21262d] hover:bg-[#0d1117]/60">
                     <td className="px-3 py-2 text-gray-200 truncate max-w-[220px]" title={a.email}>{a.email}</td>
@@ -336,8 +323,10 @@ export default function ArPanel() {
                     </td>
                     <td className="px-3 py-2 text-center">
                       {inQuarantine
-                        ? <Pill ok={false} label="隔离" />
-                        : <Pill ok={a.enabled} label={a.enabled ? "活跃" : (a.disabled_reason || "禁用")} />}
+                        ? <Pill ok={false} label={`隔离至 ${fmtTime(a.quarantine_until)}`} />
+                        : inRateLimit
+                          ? <Pill ok={false} label={`限速至 ${fmtTime(a.rate_limit_until)}`} />
+                          : <Pill ok={a.enabled} label={a.enabled ? "活跃" : (a.disabled_reason || "禁用")} />}
                     </td>
                     <td className="px-3 py-2 text-gray-500">{a.create_time?.slice(0, 10) ?? "—"}</td>
                     <td className="px-3 py-2 text-center text-gray-600 font-mono text-[10px]">{a.user_id}</td>
