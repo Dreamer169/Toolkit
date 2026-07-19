@@ -21,8 +21,8 @@ interface ArtStatus {
   version: string;
   service: string;
   pool: {
-    active: number; enabled: number; occupied: number; cooling: number; proactively_limited: number;
-    quarantined: number; rate_limited: number; total: number;
+    active: number; enabled: number; handling: number; cooling: number; occupied: number;
+    queued: number; quarantined: number; rate_limited: number; proactively_limited: number; total: number;
     total_credits_left: number;
   };
   maintainer: {
@@ -30,7 +30,7 @@ interface ArtStatus {
     registered: number; target: number; today: string;
   };
   proxy: { resi_cooled: number; resi_total: number };
-  settings: { admin_pw_set: boolean; chat_proxy: string; reg_proxy: string };
+  settings: { admin_pw_set: boolean; chat_proxy: string; reg_proxy: string; proactive_rpm: number; proactive_rpm_window: number; release_cooldown: number };
 }
 
 function apiFetch(path: string, method = "GET", body?: object) {
@@ -223,11 +223,15 @@ export default function ArPanel() {
         <Stat label="活跃账号" value={p?.active ?? "—"} tone={p && p.active > 0 ? "ok" : "err"} />
         <Stat label="总账号" value={p?.total ?? "—"} />
         <Stat label="占用中"
-          value={(p?.occupied ?? 0) + (p?.cooling ?? 0)}
-          sub={p && ((p.occupied ?? 0) > 0 || (p.cooling ?? 0) > 0)
-            ? `${p.occupied ?? 0} 处理中 · ${p.cooling ?? 0} 冷却 · ${p.proactively_limited ?? 0} 主动限速`
+          value={p?.occupied ?? 0}
+          sub={p && (p.occupied ?? 0) > 0
+            ? `${p.handling ?? 0} 处理中 · ${p.cooling ?? 0} 冷却`
             : undefined}
-          tone={p && ((p.occupied ?? 0) + (p?.cooling ?? 0)) > 0 ? "warn" : "dim"} />
+          tone={p && (p.occupied ?? 0) > 0 ? "warn" : "dim"} />
+        <Stat label="排队中"
+          value={p?.queued ?? 0}
+          sub={p && (p.queued ?? 0) > 0 ? "等待空闲账号" : undefined}
+          tone={p && (p.queued ?? 0) > 0 ? "err" : "dim"} />
         <Stat label="隔离中" value={p?.quarantined ?? 0} tone={(p?.quarantined ?? 0) > 0 ? "warn" : "dim"} />
         <Stat label="剩余积分" value={p?.total_credits_left?.toLocaleString() ?? "—"} sub="活跃账号余额合计" />
         <Stat label="今日注册" value={m?.registered ?? 0} tone={(m?.registered ?? 0) > 0 ? "ok" : "dim"} sub={m?.today ?? ""} />
@@ -262,6 +266,16 @@ export default function ArPanel() {
           <div className="bg-[#0d1117] rounded-lg p-3 border border-[#21262d]">
             <div className="text-[10px] text-gray-500 uppercase mb-1">速率限制</div>
             <div className="text-sm text-white font-mono">{p?.rate_limited ?? 0} 个账号</div>
+          </div>
+          <div className="bg-[#0d1117] rounded-lg p-3 border border-[#21262d]">
+            <div className="text-[10px] text-gray-500 uppercase mb-1">主动限速</div>
+            <div className="text-sm text-white font-mono">
+              {status?.settings.proactive_rpm ? `${status.settings.proactive_rpm}次/${status.settings.proactive_rpm_window}s` : "关"}
+            </div>
+          </div>
+          <div className="bg-[#0d1117] rounded-lg p-3 border border-[#21262d]">
+            <div className="text-[10px] text-gray-500 uppercase mb-1">占用冷却</div>
+            <div className="text-sm text-white font-mono">{status?.settings.release_cooldown ?? 30}s</div>
           </div>
           <div className="bg-[#0d1117] rounded-lg p-3 border border-[#21262d]">
             <div className="text-[10px] text-gray-500 uppercase mb-1">API 端点</div>
