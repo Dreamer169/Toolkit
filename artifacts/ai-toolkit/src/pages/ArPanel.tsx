@@ -21,7 +21,7 @@ interface ArtStatus {
   version: string;
   service: string;
   pool: {
-    active: number; enabled: number; occupied: number; cooling: number;
+    active: number; enabled: number; occupied: number; cooling: number; proactively_limited: number;
     quarantined: number; rate_limited: number; total: number;
     total_credits_left: number;
   };
@@ -225,7 +225,7 @@ export default function ArPanel() {
         <Stat label="占用中"
           value={(p?.occupied ?? 0) + (p?.cooling ?? 0)}
           sub={p && ((p.occupied ?? 0) > 0 || (p.cooling ?? 0) > 0)
-            ? `${p.occupied ?? 0} 处理中 · ${p.cooling ?? 0} 冷却中`
+            ? `${p.occupied ?? 0} 处理中 · ${p.cooling ?? 0} 冷却 · ${p.proactively_limited ?? 0} 主动限速`
             : undefined}
           tone={p && ((p.occupied ?? 0) + (p?.cooling ?? 0)) > 0 ? "warn" : "dim"} />
         <Stat label="隔离中" value={p?.quarantined ?? 0} tone={(p?.quarantined ?? 0) > 0 ? "warn" : "dim"} />
