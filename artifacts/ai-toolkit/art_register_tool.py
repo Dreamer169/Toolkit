@@ -1300,6 +1300,20 @@ def do_chat_stream(pool: ArtPool, registrar: ArtRegistrar,
 # Flask 应用
 # ═══════════════════════════════════════════════════════════════════
 app         = Flask(__name__)
+
+# ── WSGI 层拦截 Server 头（gunicorn 在 after_request 之后追加，必须在此处替换）──
+class _StripServerMiddleware:
+    """WSGI 中间件：将任意上游 Server 头替换为 nginx 伪装值。"""
+    __slots__ = ("app",)
+    def __init__(self, application): self.app = application
+    def __call__(self, environ, start_response):
+        def _sr(status, headers, exc_info=None):
+            headers = [(k, v) for k, v in headers if k.lower() != "server"]
+            headers.append(("Server", "nginx/1.24.0"))
+            return start_response(status, headers, exc_info)
+        return self.app(environ, _sr)
+app.wsgi_app = _StripServerMiddleware(app.wsgi_app)
+
 _pool:       Optional[ArtPool]      = None
 _registrar:  Optional[ArtRegistrar] = None
 _scheduler:  Optional[DailyScheduler] = None
@@ -1340,8 +1354,7 @@ def _handle_options():
 @app.after_request
 def _stealth_headers(resp):
     """剥离 Flask/Werkzeug 特征头，注入与 OpenAI 兼容的伪装头。"""
-    # ── Server 头：删旧值再设新值（Werkzeug 可能追加，gunicorn 正确覆盖）
-    resp.headers.discard("Server")
+    # ── Server 头：WSGI 中间件统一替换，此处保留作 fallback ──────────
     resp.headers["Server"] = "nginx/1.24.0"
     # ── CORS：允许所有来源（OpenAI API 同样开放）───────────────
     resp.headers["Access-Control-Allow-Origin"]  = "*"
