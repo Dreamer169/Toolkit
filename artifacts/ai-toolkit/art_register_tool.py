@@ -23,19 +23,14 @@ arting.ai 协议（实测确认，2026-07-18）：
             key  = HMAC_SECRET（UTF-8 编码），
             msg  = "{unix_ts}\\n{METHOD}\\n{path}\\n{sha256(body)}\\n{uuid}"
         )
-  额度: 60 次 / 账号（FREE_USAGE_CAP=60，可通过 /admin/settings 热改）
+  额度: 60 次 / 账号，每日 UTC 00:00 全量刷新（含未耗尽账号）
   token 过期或单会话冲突 → code 100001 / 100005 / 100012 → 重新登录刷新 JWT
 
-高并发部署（推荐，gevent 已安装时自动启用）：
-  python art_register_tool.py  ← 自动检测 gevent 并使用 gevent worker
+高并发部署（gevent 已安装时自动启用，否则降级 gthread）：
+  python art_register_tool.py
 
-  gevent worker（当前默认）:
-    gunicorn -w 1 -k gevent --worker-connections 1000 --bind 0.0.0.0:9097 art_register_tool:app
-    # 单线程 + greenlet，500-1000 并发 RSS≈40MB；Condition/httpx 在 I/O 时 cooperative yield
-
-  fallback（gevent 不可用时）:
-    gunicorn -w 1 -k gthread --threads 300 --bind 0.0.0.0:9097 art_register_tool:app
-    # 300 OS线程，I/O密集 GIL等待时释放，适合 <300 并发
+  gevent worker（默认）: -w 1 -k gevent --worker-connections 1000
+  gthread  fallback:     -w 1 -k gthread --threads 300
 """
 from __future__ import annotations
 
@@ -637,8 +632,9 @@ class ArtPool:
 
     def restore_quarantined(self) -> int:
         """
-        解除所有已到期的隔离账号（arting.ai 每日午夜后次数重置）。
-        重置 usage=0、max_usage 同步为最新 free_usage_cap，账号重回活跃池。
+        解除所有已到期的隔离账号。
+        仅处理 quarantine_until > 0 的账号（额度耗尽被隔离的）。
+        每日全量 usage 重置由 reset_daily_usage() 完成，两者配合使用。
         """
         now   = time.time()
         base  = int(_runtime_cfg.get("free_usage_cap", FREE_USAGE_CAP))
@@ -650,7 +646,6 @@ class ArtPool:
                 if acc.quarantine_until > 0 and now >= acc.quarantine_until:
                     acc.quarantine_until = 0.0
                     acc.usage            = 0
-                    # 每次解除隔离重新随机余量，使各账号行为不一致
                     acc.max_usage        = max(1, base - random.randint(
                                               min(r_min, r_max), max(r_min, r_max)))
                     acc.enabled          = True
@@ -659,6 +654,30 @@ class ArtPool:
             if count:
                 self._dirty = True
                 self._cond.notify_all()
+        return count
+
+    def reset_daily_usage(self) -> int:
+        """
+        每日午夜全量重置所有账号的 usage=0。
+        arting.ai 每日 UTC 00:00 给所有账号刷新 60 次额度，不论是否已耗尽。
+        仅重置非隔离的已启用账号（隔离账号已由 restore_quarantined 处理）。
+        返回被重置的账号数。
+        """
+        base  = int(_runtime_cfg.get("free_usage_cap", FREE_USAGE_CAP))
+        r_min = int(_runtime_cfg.get("usage_reserve_min", 2))
+        r_max = int(_runtime_cfg.get("usage_reserve_max", 5))
+        count = 0
+        with self._cond:
+            for acc in self._accounts:
+                # 跳过已隔离（由 restore_quarantined 处理）和手动禁用的账号
+                if acc.quarantine_until > 0 or not acc.enabled:
+                    continue
+                acc.usage     = 0
+                acc.max_usage = max(1, base - random.randint(
+                                   min(r_min, r_max), max(r_min, r_max)))
+                count += 1
+            if count:
+                self._dirty = True
         return count
 
     @property
@@ -863,9 +882,14 @@ class DailyScheduler:
 
     # ── 新日初始化 ────────────────────────────────────────────────
     def _new_day(self) -> None:
+        # 1. 解除已到期的隔离账号
         restored = self.pool.restore_quarantined()
         if restored:
             log("sched", f"午夜解隔离: {restored} 个账号恢复活跃")
+        # 2. 全量重置所有非隔离账号的 usage=0（arting.ai 每日给所有账号刷新额度）
+        reset = self.pool.reset_daily_usage()
+        if reset:
+            log("sched", f"午夜用量重置: {reset} 个账号 usage→0")
         total  = self.pool.total_count
         target = self._calc_target(total)
         with self._lock:
@@ -1080,7 +1104,11 @@ def do_chat_sync(pool: ArtPool, registrar: ArtRegistrar,
     def _request(retry: bool = True) -> str:
         body = _make_body(model, messages, False)
         hdrs = _make_headers(curr[0], body, model)
-        r    = get_chat_client().post(ARTING_CHAT_URL, headers=hdrs, content=body)
+        try:
+            r = get_chat_client().post(ARTING_CHAT_URL, headers=hdrs, content=body)
+        except (httpx.ConnectTimeout, httpx.ConnectError, httpx.PoolTimeout,
+                httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.HTTPError) as e:
+            raise RuntimeError(f"network error: {type(e).__name__}: {e}")
         if r.status_code in (401, 403):
             if retry and registrar.refresh_token(curr[0]):
                 return _request(retry=False)
@@ -1180,32 +1208,49 @@ def _stream_arting(acc: ArtAccount, model: str, messages: list):
     向 arting.ai 发起流式请求，逐行 yield。
     arting 流式响应为裸文本行（非 SSE 格式），JSON 行表示错误或状态。
     发生鉴权错误时 yield 特殊 sentinel dict，由调用方处理重试。
+    网络层异常（超时、连接断开等）统一 yield {"__net_error__": str}，不向上抛。
     """
     body = _make_body(model, messages, True)
     hdrs = _make_headers(acc, body, model)
-    with get_chat_client().stream("POST", ARTING_CHAT_URL, headers=hdrs, content=body) as r:
-        if r.status_code in (401, 403):
-            yield {"__auth_error__": r.status_code}
-            return
-        if r.status_code != 200:
-            yield {"__http_error__": r.status_code}
-            return
-        for line in r.iter_lines():
-            if not line:
-                continue
-            # arting 有时以 SSE 格式发错误行：data: {"code":...}
-            # 必须先剥离 "data: " 前缀再判断是否 JSON
-            stripped = line.strip()
-            if stripped.startswith("data: "):
-                stripped = stripped[6:].strip()
-            if stripped.startswith("{"):
-                try:
-                    yield json.loads(stripped)   # arting JSON 行（错误体等）
-                    continue
-                except Exception:
-                    pass
-            if stripped:
-                yield stripped                   # 裸文本内容行
+    try:
+        with get_chat_client().stream("POST", ARTING_CHAT_URL, headers=hdrs, content=body) as r:
+            if r.status_code in (401, 403):
+                yield {"__auth_error__": r.status_code}
+                return
+            if r.status_code != 200:
+                yield {"__http_error__": r.status_code}
+                return
+            try:
+                for line in r.iter_lines():
+                    if not line:
+                        continue
+                    # arting 有时以 SSE 格式发错误行：data: {"code":...}
+                    # 必须先剥离 "data: " 前缀再判断是否 JSON
+                    stripped = line.strip()
+                    if stripped.startswith("data: "):
+                        stripped = stripped[6:].strip()
+                    if stripped.startswith("{"):
+                        try:
+                            yield json.loads(stripped)   # arting JSON 行（错误体等）
+                            continue
+                        except Exception:
+                            pass
+                    if stripped:
+                        yield stripped               # 裸文本内容行
+            except httpx.ReadTimeout:
+                yield {"__net_error__": "read timeout"}
+            except httpx.RemoteProtocolError as e:
+                yield {"__net_error__": f"remote protocol: {e}"}
+            except httpx.StreamError as e:
+                yield {"__net_error__": f"stream: {e}"}
+    except httpx.PoolTimeout:
+        yield {"__net_error__": "connection pool timeout"}
+    except httpx.ConnectTimeout:
+        yield {"__net_error__": "connect timeout"}
+    except httpx.ConnectError as e:
+        yield {"__net_error__": f"connect error: {e}"}
+    except httpx.HTTPError as e:
+        yield {"__net_error__": f"http error: {e}"}
 
 def do_chat_stream(pool: ArtPool, registrar: ArtRegistrar,
                    model: str, messages: list):
@@ -1243,6 +1288,14 @@ def do_chat_stream(pool: ArtPool, registrar: ArtRegistrar,
                     continue
 
                 # item 是 dict（arting JSON 行或内部 sentinel）
+                if "__net_error__" in item:
+                    # 网络层错误（超时/连接断开等），不重试直接上报
+                    msg = item["__net_error__"]
+                    log("chat", f"stream: net error ({curr[0].email}): {msg}")
+                    yield _err_chunk(f"upstream network error: {msg}", "server_error")
+                    yield "data: [DONE]\n\n"
+                    return
+
                 if "__auth_error__" in item or "__http_error__" in item:
                     key  = "__auth_error__" if "__auth_error__" in item else "__http_error__"
                     code = item[key]
