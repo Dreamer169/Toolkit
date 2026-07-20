@@ -27,8 +27,8 @@ arting.ai 协议（实测确认，2026-07-18）：
   token 过期或单会话冲突 → code 100001 / 100005 / 100012 → 重新登录刷新 JWT
 
 高并发部署（推荐）：
-  gunicorn -w 1 -k gthread --threads 100 --bind 0.0.0.0:9097 art_register_tool:app
-  # -w 1 确保账号池单进程共享；--threads 100 满足高并发；GIL 不影响 I/O 密集型场景
+  gunicorn -w 1 -k gthread --threads 300 --bind 0.0.0.0:9097 art_register_tool:app
+  # -w 1 确保账号池单进程共享；--threads 300 满足高并发（I/O密集 GIL在等待时释放）
 """
 from __future__ import annotations
 
@@ -475,15 +475,19 @@ class ArtPool:
         self._req_times[acc.id] = recent   # 顺手清理过期记录
         return len(recent) < limit
 
-    def acquire(self, timeout: float = 60.0) -> Optional[ArtAccount]:
+    def acquire(self, timeout: float = 20.0, max_queue: int = 0) -> Optional[ArtAccount]:
         """
         获取一个可用账号（线程安全阻塞版）。
         - 有空闲账号 → 立即返回（最久未使用者优先）
         - 全部被占用 → 阻塞至有账号释放，最多等待 timeout 秒
         - timeout 内仍无可用 → 返回 None（调用方应返回 503 + Retry-After）
+        - max_queue > 0 → 若已有 max_queue 个线程在等，立即返回 None（防雪崩）
         """
         deadline = time.monotonic() + timeout
         with self._cond:
+            # 快速失败：排队线程已达上限，防止所有线程堆积在 cond.wait()
+            if max_queue > 0 and self._waiting >= max_queue:
+                return None
             while True:
                 _now = time.time()
                 # 候选账号：活跃 + 未被占用 + 未在硬冷却期内 + 未触发主动限速
@@ -1042,7 +1046,7 @@ def _err_chunk(msg: str, err_type: str = "proxy_error") -> str:
 def do_chat_sync(pool: ArtPool, registrar: ArtRegistrar,
                  model: str, messages: list):
     # curr[0] 存当前账号，_released 防止外层 finally 重复释放
-    curr      = [pool.acquire(timeout=60)]
+    curr      = [pool.acquire(timeout=20, max_queue=120)]
     _released = [False]
 
     if not curr[0]:
@@ -1192,7 +1196,7 @@ def _stream_arting(acc: ArtAccount, model: str, messages: list):
 
 def do_chat_stream(pool: ArtPool, registrar: ArtRegistrar,
                    model: str, messages: list):
-    acc = pool.acquire(timeout=60)
+    acc = pool.acquire(timeout=20, max_queue=120)
     if not acc:
         def _no_acc():
             yield _err_chunk("The server had an error processing your request. Sorry about that!", "server_error")
@@ -1252,7 +1256,7 @@ def do_chat_stream(pool: ArtPool, registrar: ArtRegistrar,
                     _retry_done = True
                     pool.release(curr[0])
                     released = True
-                    acc_new = pool.acquire()
+                    acc_new = pool.acquire(timeout=10)
                     if acc_new:
                         curr[0] = acc_new
                         released = False
@@ -1515,8 +1519,8 @@ def ar_admin_settings():
                 if new_proxy != (_CHAT_PROXY_STR or None):
                     _CHAT_PROXY_STR = new_proxy
                     _CHAT_CLIENT = httpx.Client(
-                        timeout=httpx.Timeout(connect=10, read=180, write=30, pool=5),
-                        limits=httpx.Limits(max_connections=200, max_keepalive_connections=100),
+                        timeout=httpx.Timeout(connect=10, read=180, write=30, pool=10),
+                        limits=httpx.Limits(max_connections=400, max_keepalive_connections=150),
                         **( {"proxy": new_proxy} if new_proxy else {}),
                     )
                     applied[k] = new_proxy or "DIRECT"
@@ -1581,8 +1585,8 @@ def main():
     chat_proxy       = args.chat_proxy or None
     _CHAT_PROXY_STR  = chat_proxy
     _CHAT_CLIENT     = httpx.Client(
-        timeout=httpx.Timeout(connect=10, read=180, write=30, pool=5),
-        limits=httpx.Limits(max_connections=200, max_keepalive_connections=100),
+        timeout=httpx.Timeout(connect=10, read=180, write=30, pool=10),
+        limits=httpx.Limits(max_connections=400, max_keepalive_connections=150),
         **( {"proxy": chat_proxy} if chat_proxy else {}),
     )
 
@@ -1626,7 +1630,7 @@ def main():
     print(f"   POST http://0.0.0.0:{args.port}/ar/v1/chat/completions", flush=True)
     print(f"   GET  http://0.0.0.0:{args.port}/ar/admin/status (Bearer {pw_hint})", flush=True)
     print(f" 高并发推荐:", flush=True)
-    print(f"   gunicorn -w 1 -k gthread --threads 100 --bind 0.0.0.0:{args.port} art_register_tool:app", flush=True)
+    print(f"   gunicorn -w 1 -k gthread --threads 300 --bind 0.0.0.0:{args.port} art_register_tool:app", flush=True)
     print(f"{'='*56}\n", flush=True)
 
     # ── 生产模式：gunicorn（-w 1 单进程保证池共享，gthread 高并发 I/O）──
@@ -1648,9 +1652,10 @@ def main():
             "bind":          f"{args.host}:{args.port}",
             "workers":       1,            # 单进程确保账号池内存共享
             "worker_class":  "gthread",    # 线程模型，适合 I/O 密集
-            "threads":       100,           # 并发上限
-            "timeout":       300,           # 流式请求需要长超时
+            "threads":       300,          # I/O密集：GIL在httpx等待时释放，300≈300并发
+            "timeout":       300,          # 流式请求需要长超时
             "keepalive":     5,
+            "worker_rlimit_nofile": 65535, # 显式保障fd上限
             "accesslog":     "-",
             "errorlog":      "-",
             "loglevel":      "warning",    # 减少 gunicorn 日志噪声
