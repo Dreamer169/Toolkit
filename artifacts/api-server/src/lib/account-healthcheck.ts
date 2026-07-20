@@ -1,0 +1,401 @@
+/**
+ * 账号健康检查器
+ * 每5分钟扫描所有 Outlook 账号，自动处理：
+ *  1. 无 OAuth token + 有密码 → 全自动走设备码授权补 token
+ *  2. token 刷新失败（abuse_mode / invalid_grant）→ 已由 live-verify-poller 在线打标；
+ *     healthcheck 负责离线扫描（无 refresh 但 token 已过期的边角情况）
+ */
+import { logger } from "./logger.js";
+import { microsoftFetch, getMicrosoftProxyEnv } from "./proxy-fetch.js";
+import { spawn } from "child_process";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const OAUTH_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
+
+// v9.29 Bug C Fix: CF xray ports (10820-10829) cannot reach microsoft.com/link.
+// Use residential SOCKS5 ports (10851-10859) for browser-based device-code OAuth.
+import { execFileSync as _ncExecSync } from "child_process";
+function pickResidentialProxy(): string {
+  const PORTS = [10851, 10853, 10854, 10857, 10859];
+  for (const port of PORTS) {
+    try {
+      _ncExecSync("nc", ["-z", "-w", "1", "127.0.0.1", String(port)], { timeout: 1500, stdio: "ignore" });
+      return `socks5://127.0.0.1:${port}`;
+    } catch { /* try next */ }
+  }
+  return ""; // fallback: direct (risky but better than ERR_CONNECTION_CLOSED)
+}
+
+let _running    = false;
+let _intervalId: ReturnType<typeof setInterval> | null = null;
+
+// ── 前置企业账号检测（GetCredentialType IfExistsResult=5 → AAD/enterprise）─
+// 在 autoOAuth 之前调用，避免浪费 patchright/设备码资源重试必然失败的企业账号
+async function checkIsEnterprise(email: string): Promise<boolean> {
+  try {
+    const r = await microsoftFetch("https://login.microsoftonline.com/common/GetCredentialType", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0",
+        "Origin": "https://login.microsoftonline.com",
+      },
+      body: JSON.stringify({
+        username: email,
+        isOtherIdpSupported: true,
+        checkPhones: false,
+        isRemoteNGCSupported: false,
+        isCookieBannerShown: false,
+        isFidoSupported: false,
+        originalRequest: "",
+        flowToken: "",
+      }),
+    });
+    const data = await r.json() as { IfExistsResult?: number };
+    // IfExistsResult=5 → 重定向到其他 IdP（AAD / 企业账号），consumer OAuth 无效
+    return data.IfExistsResult === 5;
+  } catch {
+    return false; // 探测失败时保守处理，继续正常 OAuth 流程
+  }
+}
+
+// ── 获取设备码 ─────────────────────────────────────────────────────────────
+async function getDeviceCode(email: string, proxy?: string | null): Promise<{
+  deviceCode: string; userCode: string; verificationUri: string;
+} | null> {
+  try {
+    const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/devicecode", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: OAUTH_CLIENT_ID,
+        scope: "offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read https://graph.microsoft.com/IMAP.AccessAsUser.All https://graph.microsoft.com/SMTP.Send",
+      }).toString(),
+    }, proxy);
+    const d = await r.json() as { device_code?: string; user_code?: string; verification_uri?: string; error?: string };
+    if (!d.device_code || !d.user_code) {
+      logger.warn({ email, error: d.error }, "[healthcheck] 获取设备码失败");
+      return null;
+    }
+    return { deviceCode: d.device_code, userCode: d.user_code, verificationUri: d.verification_uri ?? "" };
+  } catch (e) {
+    logger.warn({ email, err: String(e) }, "[healthcheck] 获取设备码网络错误");
+    return null;
+  }
+}
+
+// ── 轮询 token（等 patchright 完成浏览器操作后） ──────────────────────────
+async function pollForToken(deviceCode: string, proxy?: string | null, maxAttempts = 18): Promise<{
+  accessToken: string; refreshToken: string;
+} | null> {
+  for (let i = 0; i < maxAttempts; i++) {
+    await new Promise(r => setTimeout(r, 5_000));
+    try {
+      const r = await microsoftFetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+          client_id: OAUTH_CLIENT_ID,
+          device_code: deviceCode,
+        }).toString(),
+      }, proxy);
+      const d = await r.json() as { access_token?: string; refresh_token?: string; error?: string };
+      if (d.access_token) return { accessToken: d.access_token, refreshToken: d.refresh_token ?? "" };
+      if (d.error === "access_denied" || d.error === "expired_token") return null;
+      // authorization_pending → continue polling
+    } catch { /* ignore, retry */ }
+  }
+  return null;
+}
+
+// ── 单账号全自动 OAuth ─────────────────────────────────────────────────────
+async function autoOAuth(acc: { id: number; email: string; password: string }): Promise<{ ok: boolean; reason?: string }> {
+  logger.info({ email: acc.email }, "[healthcheck] 开始自动补授权");
+
+  const proxy = pickResidentialProxy(); // v9.29: residential proxy for microsoft.com/link
+  const dc = await getDeviceCode(acc.email, proxy);
+  if (!dc) return { ok: false, reason: 'no_device_code' };
+
+  logger.info({ email: acc.email, userCode: dc.userCode }, "[healthcheck] 设备码已获取，启动 patchright");
+
+  const scriptPath = path.resolve(__dirname, "../auto_device_code.py");
+  const payload    = JSON.stringify([{
+    email:           acc.email,
+    password:        acc.password,
+    userCode:        dc.userCode,
+    verificationUri: "https://www.microsoft.com/link",  // v9.27: force consumers URI (login.microsoft.com/device → ERR_CONNECTION_CLOSED)
+    accountId:       acc.id,
+  }]);
+
+  // v9.31 OOM guard: Chrome 需要 ~200MB，内存不足时跳过避免 OOM kill 导致进程崩溃
+  try {
+    const { readFileSync: _memRfs } = await import("fs");
+    const _memAvailKB = parseInt((_memRfs("/proc/meminfo","utf8").match(/MemAvailable:\s+(\d+)/)||[,"0"])[1]??0);
+    const _memAvailMB = Math.floor(_memAvailKB / 1024);
+    if (_memAvailMB < 600) {
+      logger.warn({ email: acc.email, memAvailMB: _memAvailMB }, "[healthcheck] 内存不足(<600MB)，跳过 patchright，待内存恢复后重试");
+      return { ok: false, reason: "low_memory" };
+    }
+    logger.info({ email: acc.email, memAvailMB: _memAvailMB }, "[healthcheck] 内存充足，启动 patchright");
+  } catch { /* /proc/meminfo not available, proceed anyway */ }
+
+  // patchright 完成浏览器端授权
+  const autoResult = await new Promise<{ status: string; msg?: string }>((resolve) => {
+    // v9.29b: pass "" so auto_device_code.py calls _pick_residential_proxy() internally
+    const child = spawn("python3", [scriptPath, payload, ""], {
+      env: { ...process.env, PYTHONUNBUFFERED: "1" },
+    });
+    let out = "";
+    child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
+    child.stderr.on("data", (d: Buffer) => {
+      const line = d.toString().trim();
+      if (line) logger.debug({ email: acc.email, line }, "[healthcheck] auto_device_code stderr");
+    });
+    child.on("close", () => {
+      const match = out.match(/RESULTS:(.+)/);
+      if (match) {
+        try {
+          const results = JSON.parse(match[1]) as Array<{ status: string; msg?: string }>;
+          resolve(results[0] ?? { status: "error", msg: "empty results" });
+        } catch { resolve({ status: "error", msg: "parse error" }); }
+      } else {
+        resolve({ status: "error", msg: out.slice(-200) });
+      }
+    });
+    child.on("error", (e) => resolve({ status: "error", msg: e.message }));
+    setTimeout(() => {
+      try { child.kill("SIGTERM"); } catch (_e) {}
+      setTimeout(() => { try { child.kill("SIGKILL"); } catch (_e2) {} }, 3_000);
+      resolve({ status: "timeout" });
+    }, 120_000);
+  });
+
+  if (autoResult.status !== "done") {
+    logger.warn({ email: acc.email, status: autoResult.status, msg: autoResult.msg },
+      "[healthcheck] patchright 授权失败");
+    return { ok: false, reason: autoResult.msg ?? autoResult.status };
+  }
+
+  logger.info({ email: acc.email }, "[healthcheck] 浏览器授权完成，轮询 token");
+
+  const tokens = await pollForToken(dc.deviceCode, proxy);
+  if (!tokens) {
+    logger.warn({ email: acc.email }, "[healthcheck] token 轮询超时");
+    return { ok: false, reason: "token_poll_timeout" };
+  }
+
+  const { execute } = await import("../db.js");
+  await execute(
+    "UPDATE accounts SET token=$1, refresh_token=$2, status='active', updated_at=NOW() WHERE id=$3",
+    [tokens.accessToken, tokens.refreshToken, acc.id]
+  );
+  logger.info({ email: acc.email }, "[healthcheck] 自动补授权成功，token 已入库");
+  return { ok: true };
+}
+
+// ── 主扫描逻辑 ────────────────────────────────────────────────────────────
+async function runCheck() {
+  if (_running) return;
+  _running = true;
+  try {
+    const { query, execute } = await import("../db.js");
+
+    // ── 0. 把 suspended+无token+有密码+无封禁 账号批量提升到 needs_oauth 队列 ───────
+    // 这些账号被 step-1 永久跳过（status='suspended' 被排除），需要单独"入队"
+    // 断点自愈：提升后 updated_at=NOW()；若 OAuth 失败打上 needs_oauth_manual 则永不再提升
+    // 若服务器重启：已提升的账号状态仍是 needs_oauth，下轮 runCheck 自动继续处理
+    const suspendedNoauth = await query<{ id: number }>(
+      `SELECT id FROM accounts
+       WHERE platform = 'outlook'
+         AND status = 'suspended'
+         AND (token IS NULL OR token = '')
+         AND (refresh_token IS NULL OR refresh_token = '')
+         AND password IS NOT NULL AND password != ''
+         AND COALESCE(tags, '') NOT LIKE '%abuse_mode%'
+         AND COALESCE(tags, '') NOT LIKE '%needs_oauth_manual%'
+         AND updated_at < NOW() - INTERVAL '2 hours'
+       ORDER BY updated_at ASC
+       LIMIT 10`,
+      []
+    );
+    if (suspendedNoauth.length > 0) {
+      for (const { id } of suspendedNoauth) {
+        await execute(
+          "UPDATE accounts SET status='needs_oauth', updated_at=NOW() WHERE id=$1",
+          [id]
+        );
+      }
+      logger.info({ count: suspendedNoauth.length }, "[healthcheck] suspended+无token 账号已提升到 needs_oauth 队列，等待自动补授权");
+    }
+
+    // ── 1. 找无 token 且有密码的账号（排除已挂起/已标记手动处理/已在处理中的）──
+    const needsOAuth = await query<{ id: number; email: string; password: string }>(
+      `SELECT id, email, password FROM accounts
+       WHERE platform = 'outlook'
+         AND COALESCE(status, '') NOT IN ('suspended', 'done', 'needs_oauth_pending')
+         AND (token IS NULL OR token = '')
+         AND (refresh_token IS NULL OR refresh_token = '')
+         AND password IS NOT NULL AND password != ''
+         AND COALESCE(tags, '') NOT LIKE '%abuse_mode%'
+         AND COALESCE(tags, '') NOT LIKE '%needs_oauth_manual%'
+         AND COALESCE(tags, '') NOT LIKE '%enterprise_account%'
+       ORDER BY created_at ASC
+       LIMIT 5`,  // 每轮处理5个（原3个）；suspended 提升 + DB 状态即为断点，重启自动续跑
+      []
+    );
+
+    if (needsOAuth.length > 0) {
+      logger.info({ count: needsOAuth.length }, "[healthcheck] 发现需要补授权的账号");
+
+      for (const acc of needsOAuth) {
+        // ── 前置企业检测：GetCredentialType=5 → 直接打标，跳过 patchright ──
+        const isEnt = await checkIsEnterprise(acc.email);
+        if (isEnt) {
+          await execute(
+            `UPDATE accounts SET status='needs_oauth',
+               tags=(SELECT NULLIF(string_agg(DISTINCT tag,','),'')
+                     FROM unnest(string_to_array(COALESCE(tags,'')||',enterprise_account',',')) AS tag
+                     WHERE tag<>''),
+               updated_at=NOW() WHERE id=$1`,
+            [acc.id]
+          );
+          logger.warn({ email: acc.email }, "[healthcheck] GetCredentialType=5(enterprise), 跳过 OAuth 直接打标 enterprise_account");
+          continue;
+        }
+        // 标记为 pending，防止并发重复处理
+        await execute(
+          "UPDATE accounts SET status='needs_oauth_pending', updated_at=NOW() WHERE id=$1",
+          [acc.id]
+        );
+        const { ok, reason } = await autoOAuth(acc);
+        if (!ok) {
+          if (reason === "code_invalid_or_expired") {
+            // 企业/AAD 账号——consumer device code 对其无效，打标永不再用此流程重试
+            await execute(
+              `UPDATE accounts
+               SET status = 'needs_oauth',
+                   tags   = (SELECT NULLIF(string_agg(DISTINCT tag, ','), '')
+                             FROM unnest(string_to_array(COALESCE(tags,'') || ',enterprise_account', ',')) AS tag
+                             WHERE tag <> ''),
+                   updated_at = NOW()
+               WHERE id = $1`,
+              [acc.id]
+            );
+            logger.warn({ email: acc.email }, "[healthcheck] 企业/AAD 账号，consumer OAuth 无效，已标记 enterprise_account");
+          } else {
+            // 补授权失败 → 标记为需要手动处理（不再自动重试，避免无限循环）
+            await execute(
+              `UPDATE accounts
+               SET status = 'needs_oauth',
+                   tags   = (
+                     SELECT NULLIF(string_agg(DISTINCT tag, ','), '')
+                     FROM unnest(string_to_array(COALESCE(tags,'') || ',needs_oauth_manual', ',')) AS tag
+                     WHERE tag <> ''
+                   ),
+                   updated_at = NOW()
+               WHERE id = $1`,
+              [acc.id]
+            );
+            logger.warn({ email: acc.email }, "[healthcheck] 自动补授权失败，已标记 needs_oauth_manual");
+          }
+        }
+      }
+    }
+
+
+    // ── 1b. 定期重试 needs_oauth_manual 账号（每12小时一次）──────────────
+    const manualRetryRows = await query<{ id: number; email: string; password: string }>(
+      `SELECT id, email, password FROM accounts
+       WHERE platform = 'outlook'
+         AND status NOT IN ('suspended', 'done', 'needs_oauth_pending')
+         AND COALESCE(tags, '') LIKE '%needs_oauth_manual%'
+         AND COALESCE(tags, '') NOT LIKE '%abuse_mode%'
+         AND COALESCE(tags, '') NOT LIKE '%enterprise_account%'
+         AND password IS NOT NULL AND password != ''
+         AND updated_at < NOW() - INTERVAL '1 hour'
+       ORDER BY updated_at ASC
+       LIMIT 5`,
+      []
+    );
+    if (manualRetryRows.length > 0) {
+      logger.info({ count: manualRetryRows.length }, "[healthcheck] 发现可重试的 needs_oauth_manual 账号");
+      for (const acc of manualRetryRows) {
+        // ── 前置企业检测：GetCredentialType=5 → 直接打标，跳过 patchright ──
+        const isEnt2 = await checkIsEnterprise(acc.email);
+        if (isEnt2) {
+          await execute(
+            `UPDATE accounts SET status='needs_oauth',
+               tags=(SELECT NULLIF(string_agg(DISTINCT tag,','),'')
+                     FROM unnest(string_to_array(COALESCE(tags,'')||',enterprise_account',',')) AS tag
+                     WHERE tag<>''),
+               updated_at=NOW() WHERE id=$1`,
+            [acc.id]
+          );
+          logger.warn({ email: acc.email }, "[healthcheck] 1b GetCredentialType=5(enterprise), 跳过重试直接打标 enterprise_account");
+          continue;
+        }
+        await execute("UPDATE accounts SET status='needs_oauth_pending', updated_at=NOW() WHERE id=$1", [acc.id]);
+        const { ok, reason: _reason2 } = await autoOAuth(acc);
+        if (ok) {
+          // 清除 needs_oauth_manual 标签
+          await execute(
+            `UPDATE accounts SET tags = NULLIF(TRIM(BOTH ',' FROM
+               REGEXP_REPLACE(COALESCE(tags,''), '(^|,?)needs_oauth_manual(,|$)', ',', 'g')
+             ), ','), status='active', updated_at=NOW() WHERE id=$1`,
+            [acc.id]
+          );
+          logger.info({ email: acc.email }, "[healthcheck] needs_oauth_manual 重新授权成功，标签已清除");
+        } else {
+          // v9.31: not_found → suspend；账号在 MS 系统中不存在，无意义无限重试
+          const _freshRow = await query<{ tags: string | null }>("SELECT tags FROM accounts WHERE id=$1", [acc.id]);
+          const _freshTags = _freshRow[0]?.tags ?? "";
+          if (_freshTags.includes("not_found")) {
+            await execute("UPDATE accounts SET status='suspended', tags=CASE WHEN COALESCE(tags,'')='' THEN 'abuse_mode' WHEN tags NOT LIKE '%abuse_mode%' THEN tags||',abuse_mode' ELSE tags END, updated_at=NOW() WHERE id=$1", [acc.id]);
+            logger.warn({ email: acc.email }, "[healthcheck] MS报告账号不存在(not_found)，已自动暂停，停止重试");
+          } else if (_reason2 === "code_invalid_or_expired") {
+            // 企业/AAD 账号在 needs_oauth_manual 重试路径中被发现——打标停止重试
+            await execute(
+              `UPDATE accounts SET status='needs_oauth',
+                 tags=(SELECT NULLIF(string_agg(DISTINCT tag,','),'')
+                       FROM unnest(string_to_array(COALESCE(tags,'')||',enterprise_account',',')) AS tag
+                       WHERE tag<>''),
+                 updated_at=NOW() WHERE id=$1`,
+              [acc.id]
+            );
+            logger.warn({ email: acc.email }, "[healthcheck] 重试时发现企业/AAD账号，已标记 enterprise_account");
+          } else {
+            await execute("UPDATE accounts SET status='needs_oauth', updated_at=NOW() WHERE id=$1", [acc.id]);
+            logger.warn({ email: acc.email }, "[healthcheck] needs_oauth_manual 重试仍失败，1h后再试");
+          }
+        }
+      }
+    }
+
+    // ── 2. 扫描有 token/refresh 但状态异常（未在 live-verify 中覆盖到）的账号 ──
+    // 只检查 status=active 且带有 needs_oauth_pending 遗留的清理
+    await execute(
+      `UPDATE accounts SET status='needs_oauth'
+       WHERE platform='outlook'
+         AND status='needs_oauth_pending'
+         AND updated_at < NOW() - INTERVAL '10 minutes'`,
+      []
+    );
+
+  } catch (e) {
+    logger.error({ err: String(e) }, "[healthcheck] 账号健康检查出错");
+  } finally {
+    _running = false;
+  }
+}
+
+// ── 对外接口 ──────────────────────────────────────────────────────────────
+export function startAccountHealthcheck(intervalMs = 5 * 60 * 1000) {
+  if (_intervalId) clearInterval(_intervalId);
+  _intervalId = setInterval(() => runCheck().catch(() => {}), intervalMs);
+  // 延迟45秒首次运行，等待 api-server 完全就绪
+  setTimeout(() => runCheck().catch(() => {}), 45_000);
+  logger.info({ intervalMs }, "[healthcheck] 账号健康检查已启动（每 5 分钟）");
+}

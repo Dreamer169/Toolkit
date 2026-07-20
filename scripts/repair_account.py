@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""
+repair_account.py — 为 projectId/threadId/sandboxId 为 null 的账号
+                    用已有 session 重新开一个 project+thread，写回 manifest。
+Usage:
+  python3 repair_account.py --label cz-test1
+  python3 repair_account.py --label cz-test1 --headless
+"""
+import asyncio, argparse, json, re, time
+from pathlib import Path
+from datetime import datetime, timezone
+
+ACC_DIR = Path('/root/obvious-accounts')
+
+async def repair(label: str, headless: bool):
+    from playwright.async_api import async_playwright
+
+    mf_path  = ACC_DIR / label / 'manifest.json'
+    ss_path  = ACC_DIR / label / 'storage_state.json'
+    shots_dir = ACC_DIR / label / 'shots'
+    shots_dir.mkdir(parents=True, exist_ok=True)
+
+    if not ss_path.exists():
+        print(f'[repair] ERROR: no storage_state for {label}'); return
+
+    mf = json.loads(mf_path.read_text()) if mf_path.exists() else {}
+    email_addr = mf.get('email', '')
+    proxy_url = mf.get('proxy')
+    print(f'[repair] {label}  proxy={proxy_url}  headless={headless}')
+
+    pw_proxy = None
+    if proxy_url:
+        pw_proxy = {'server': proxy_url}
+
+    api_calls: list[dict] = []
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(
+            headless=headless,
+            args=['--no-sandbox','--disable-setuid-sandbox',
+                  '--disable-blink-features=AutomationControlled'],
+            proxy=pw_proxy,
+        )
+        ctx = await browser.new_context(
+            storage_state=str(ss_path),
+            viewport={'width':1280,'height':800},
+        )
+        page = await ctx.new_page()
+
+        async def on_request(req):
+            api_calls.append({'u': req.url, 'm': req.method})
+        page.on('request', on_request)
+
+        # ── 1. 打开 app，session 自动带入 ──
+        print('[repair] navigating to app.obvious.ai ...')
+        await page.goto('https://app.obvious.ai', wait_until='domcontentloaded', timeout=60000)
+        await asyncio.sleep(5)
+        await page.screenshot(path=str(shots_dir/'repair_01_home.png'))
+
+        # ── 1b. 检测 session 是否过期（obvious.ai 不重定向，在原 URL 显示登录框）──
+        has_login = await page.evaluate("""() => {
+            const ins = document.querySelectorAll('input');
+            let e = false, p = false;
+            for (const i of ins) {
+                const t = (i.getAttribute('type') || '').toLowerCase();
+                const h = (i.getAttribute('placeholder') || '').toLowerCase();
+                if (t === 'email' || h.includes('email')) e = true;
+                if (t === 'password' || h.includes('password')) p = true;
+            }
+            return e && p;
+        }""")
+        print(f'[repair] has_login_form={has_login}')
+        if has_login:
+            pwd = mf.get('password', '')
+            if not email_addr or not pwd:
+                print('[repair] ERROR: no email/password in manifest for re-login')
+                await browser.close(); return
+            print(f'[repair] session expired — re-login as {email_addr}')
+            inputs = await page.query_selector_all('input')
+            for el in inputs:
+                ph = (await el.get_attribute('placeholder') or '').lower()
+                typ = (await el.get_attribute('type') or 'text').lower()
+                if typ == 'email' or 'email' in ph:
+                    await el.click(); await el.type(email_addr, delay=20)
+                elif typ == 'password' or 'password' in ph:
+                    await el.click(); await el.type(pwd, delay=20)
+            clicked = await page.evaluate("""() => {
+                for (const b of document.querySelectorAll('button')) {
+                    const t = (b.innerText || '').trim().toLowerCase();
+                    if (['sign in','log in','login','signin','continue'].includes(t)) {
+                        b.click(); return t;
+                    }
+                }
+                return null;
+            }""")
+            print(f'[repair] login btn clicked={clicked}')
+            await asyncio.sleep(8)
+            await page.screenshot(path=str(shots_dir/'repair_01b_after_login.png'))
+            still_login = await page.evaluate(
+                "() => document.querySelectorAll('input[type=password]').length > 0")
+            if still_login:
+                print('[repair] ERROR: still showing login form after re-login attempt')
+                await browser.close(); return
+            ss_path.write_text(json.dumps(await ctx.storage_state()))
+            print('[repair] session refreshed and saved')
+            await asyncio.sleep(5)
+
+        # ── 2. 找 chat 输入框（obvious.ai 用 ProseMirror/tiptap contenteditable div）──
+        # obvious.ai chat input: div[contenteditable="true"].tiptap.ProseMirror
+        # 先尝试直接在主页找到 chat input，无需点 New Project
+        CI_SELS = [
+            'div.tiptap.ProseMirror[contenteditable="true"]',
+            'div.ProseMirror[contenteditable="true"]',
+            '.tiptap[contenteditable="true"]',
+            '[contenteditable="true"]',
+            'textarea',
+        ]
+        ci = None
+        for sel in CI_SELS:
+            try:
+                el = page.locator(sel).first
+                if await el.is_visible(timeout=3000):
+                    ci = el
+                    print(f'[repair] found chat input with sel={sel}')
+                    break
+            except Exception:
+                pass
+
+        # ── 2b. 如果主页没找到，尝试点 New Project 按钮 ──
+        if not ci:
+            print('[repair] no chat input on main page, looking for New Project button...')
+            new_btn = None
+            for sel in ['button:has-text("New project")',
+                        'button:has-text("New Project")',
+                        '[data-testid="new-project"]',
+                        'a:has-text("New project")',
+                        'button[aria-label*="new"]',
+                        'button:has-text("+")']:
+                try:
+                    el = page.locator(sel).first
+                    if await el.is_visible(timeout=2000):
+                        new_btn = el; break
+                except Exception:
+                    pass
+
+            if new_btn:
+                print('[repair] clicking New Project button')
+                await new_btn.click()
+                await asyncio.sleep(4)
+            else:
+                print('[repair] no button, navigating to /new')
+                await page.goto('https://app.obvious.ai/new',
+                                wait_until='domcontentloaded', timeout=30000)
+                await asyncio.sleep(5)
+
+            await page.screenshot(path=str(shots_dir/'repair_02_newproject.png'))
+
+            for sel in CI_SELS:
+                try:
+                    el = page.locator(sel).first
+                    if await el.is_visible(timeout=4000):
+                        ci = el
+                        print(f'[repair] found chat input after nav, sel={sel}')
+                        break
+                except Exception:
+                    pass
+
+        if not ci:
+            print('[repair] ERROR: cannot find chat input')
+            await browser.close(); return
+
+        # ── 3. 发一条消息启动新 thread ──
+        await page.screenshot(path=str(shots_dir/'repair_02_before_type.png'))
+        await ci.click()
+        await asyncio.sleep(0.5)
+        msg = 'Sandbox health check — please run: echo alive && uname -n && date -u'
+        await page.keyboard.type(msg, delay=15)
+        await asyncio.sleep(0.5)
+        await page.keyboard.press('Enter')
+        print('[repair] message sent, waiting for thread/project IDs ...')
+        await page.screenshot(path=str(shots_dir/'repair_03_sent.png'))
+
+        # ── 4. 轮询 URL + api_calls 拿到 projectId / threadId ──
+        project_id = None; thread_id = None
+        for _ in range(40):
+            await asyncio.sleep(1.5)
+            url_now = page.url
+            # New URL format: /p/slug-shortId?thread=th_xxx
+            m = re.search(r'/p/([a-z0-9-]+-)?([A-Za-z0-9]{6,})', url_now)
+            if m:
+                project_id = 'prj_' + m.group(2)
+            # Also try thread from URL query param (new format)
+            mt = re.search(r'[?&]thread=(th_[A-Za-z0-9]+)', url_now)
+            if mt:
+                thread_id = mt.group(1)
+            for c in api_calls:
+                # Extract threadId from chat/thread API calls (with or without trailing slash)
+                m2 = (re.search(r'/threads/(th_[A-Za-z0-9]+)(?:/|$)', c['u'])
+                      or re.search(r'/agent/chat/(th_[A-Za-z0-9]+)', c['u']))
+                if m2 and not thread_id: thread_id = m2.group(1)
+                # Extract projectId from hydrate API calls
+                m3 = re.search(r'/hydrate/project/(prj_[A-Za-z0-9]+)', c['u'])
+                if m3 and not project_id: project_id = m3.group(1)
+            if project_id and thread_id:
+                break
+
+        print(f'[repair] projectId={project_id}  threadId={thread_id}')
+        await page.screenshot(path=str(shots_dir/'repair_04_ids.png'))
+
+        # ── 5. 轮询 messages API 拿 sandboxId ──
+        sandbox_id = None
+        if thread_id:
+            for _ in range(25):
+                await asyncio.sleep(3)
+                try:
+                    msgs = await page.evaluate("""async (tid) => {
+                        const r = await fetch(
+                            'https://api.app.obvious.ai/prepare/threads/'+tid+'/messages',
+                            {credentials:'include'});
+                        return {s: r.status, b: await r.text()};
+                    }""", thread_id)
+                    if msgs.get('s') == 200:
+                        m3 = re.search(r'"sandboxId"\s*:\s*"([a-z0-9]+)"', msgs['b'])
+                        if m3: sandbox_id = m3.group(1); break
+                except Exception as e:
+                    print(f'  messages poll err: {e}')
+
+        print(f'[repair] sandboxId={sandbox_id}')
+
+        state = await ctx.storage_state()
+        ss_path.write_text(json.dumps(state))
+
+        await browser.close()
+
+    # ── 6. 写回 manifest ──
+    if project_id and thread_id:
+        mf['projectId'] = project_id
+        mf['threadId']  = thread_id
+        if sandbox_id:
+            mf['sandboxId'] = sandbox_id
+        mf['repairedAt'] = datetime.now(timezone.utc).isoformat()
+        if 'deadReason' in mf and mf.get('deadReason') == 'credit_depleted':
+            pass
+        elif mf.get('status') == 'dead' and mf.get('deadReason') not in ('credit_depleted',):
+            mf['status'] = 'active'
+            mf['deadReason'] = None
+        mf_path.write_text(json.dumps(mf, indent=2))
+        print(f'[repair] ✅ manifest updated: pid={project_id} tid={thread_id} sb={sandbox_id}')
+
+        idx_path = ACC_DIR / 'index.json'
+        if idx_path.exists():
+            accs = json.loads(idx_path.read_text())
+            for a in (accs if isinstance(accs, list) else accs.values()):
+                if a.get('label') == label:
+                    a['projectId'] = project_id
+                    a['threadId']  = thread_id
+                    if sandbox_id: a['sandboxId'] = sandbox_id
+            idx_path.write_text(json.dumps(accs, indent=2))
+            print('[repair] index.json updated')
+    else:
+        print('[repair] ❌ could not get projectId/threadId')
+
+if __name__ == '__main__':
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--label', required=True)
+    ap.add_argument('--headless', action='store_true', default=False)
+    args = ap.parse_args()
+    asyncio.run(repair(args.label, args.headless))

@@ -1,0 +1,4 @@
+#!/bin/bash
+export DATABASE_URL="postgresql://postgres:postgres@localhost/toolkit"
+export PORT="${PORT:-8081}"
+exec node --enable-source-maps /root/Toolkit/artifacts/api-server/dist/index.mjs

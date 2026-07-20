@@ -1,0 +1,5538 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "socks-main",
+      "port": 10808,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      },
+      "listen": "127.0.0.1"
+    },
+    {
+      "tag": "http-main",
+      "port": 10809,
+      "protocol": "http",
+      "listen": "127.0.0.1"
+    },
+    {
+      "tag": "in-socks-0",
+      "port": 10820,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-1",
+      "port": 10821,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-2",
+      "port": 10822,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-3",
+      "port": 10823,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-4",
+      "port": 10824,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-5",
+      "port": 10825,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-6",
+      "port": 10826,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-7",
+      "port": 10827,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-8",
+      "port": 10828,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-9",
+      "port": 10829,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-10",
+      "port": 10830,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-11",
+      "port": 10831,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-12",
+      "port": 10832,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-13",
+      "port": 10833,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-14",
+      "port": 10834,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-15",
+      "port": 10835,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-16",
+      "port": 10836,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-17",
+      "port": 10837,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-18",
+      "port": 10838,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-19",
+      "port": 10839,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-20",
+      "port": 10840,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-21",
+      "port": 10841,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-22",
+      "port": 10842,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-23",
+      "port": 10843,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-24",
+      "port": 10844,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-25",
+      "port": 10845,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "ss-in-0",
+      "port": 10850,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ss-in-1",
+      "port": 10851,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ss-in-2",
+      "port": 10852,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ss-in-3",
+      "port": 10853,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ss-in-4",
+      "port": 10854,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ss-in-5",
+      "port": 10855,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ss-in-6",
+      "port": 10856,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ss-in-7",
+      "port": 10857,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ss-in-8",
+      "port": 10858,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ss-in-9",
+      "port": 10859,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ws-in-0",
+      "port": 10900,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      },
+      "sniffing": {
+        "enabled": false
+      },
+      "listen": "127.0.0.1"
+    },
+    {
+      "tag": "ws-in-1",
+      "port": 10901,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      },
+      "sniffing": {
+        "enabled": false
+      },
+      "listen": "127.0.0.1"
+    },
+    {
+      "tag": "ws-in-2",
+      "port": 10902,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      },
+      "sniffing": {
+        "enabled": false
+      },
+      "listen": "127.0.0.1"
+    },
+    {
+      "tag": "ws-in-3",
+      "port": 10903,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      },
+      "sniffing": {
+        "enabled": false
+      },
+      "listen": "127.0.0.1"
+    },
+    {
+      "tag": "ws-in-4",
+      "port": 10904,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      },
+      "sniffing": {
+        "enabled": false
+      },
+      "listen": "127.0.0.1"
+    },
+    {
+      "tag": "ws-in-5",
+      "port": 10905,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      },
+      "sniffing": {
+        "enabled": false
+      },
+      "listen": "127.0.0.1"
+    },
+    {
+      "tag": "ws-in-6",
+      "port": 10906,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      },
+      "sniffing": {
+        "enabled": false
+      },
+      "listen": "127.0.0.1"
+    },
+    {
+      "tag": "ws-in-7",
+      "port": 10907,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      },
+      "sniffing": {
+        "enabled": false
+      },
+      "listen": "127.0.0.1"
+    },
+    {
+      "tag": "ws-in-8",
+      "port": 10908,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      },
+      "sniffing": {
+        "enabled": false
+      },
+      "listen": "127.0.0.1"
+    },
+    {
+      "tag": "ws-in-9",
+      "port": 10909,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      },
+      "sniffing": {
+        "enabled": false
+      },
+      "listen": "127.0.0.1"
+    },
+    {
+      "tag": "af-http-0",
+      "port": 8094,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "allowTransparent": false
+      }
+    },
+    {
+      "tag": "af-http-1",
+      "port": 8095,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "allowTransparent": false
+      }
+    },
+    {
+      "tag": "af-http-2",
+      "port": 8096,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "allowTransparent": false
+      }
+    },
+    {
+      "tag": "af-http-3",
+      "port": 8097,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "allowTransparent": false
+      }
+    },
+    {
+      "tag": "af-http-4",
+      "port": 8098,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "allowTransparent": false
+      }
+    },
+    {
+      "tag": "af-http-5",
+      "port": 8099,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "allowTransparent": false
+      }
+    },
+    {
+      "tag": "af-http-6",
+      "port": 8100,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "allowTransparent": false
+      }
+    },
+    {
+      "tag": "af-http-7",
+      "port": 8101,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "allowTransparent": false
+      }
+    },
+    {
+      "tag": "af-http-8",
+      "port": 8102,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "allowTransparent": false
+      }
+    },
+    {
+      "tag": "af-http-9",
+      "port": 8103,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "allowTransparent": false
+      }
+    },
+    {
+      "tag": "ps-in-0",
+      "port": 10870,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ps-in-1",
+      "port": 10871,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ps-in-2",
+      "port": 10872,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ps-in-3",
+      "port": 10873,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ps-in-4",
+      "port": 10874,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ps-in-5",
+      "port": 10875,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ps-in-6",
+      "port": 10876,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ps-in-7",
+      "port": 10877,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ps-in-8",
+      "port": 10878,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ps-in-9",
+      "port": 10879,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ps-in-10",
+      "port": 10880,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ps-in-11",
+      "port": 10881,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ps-in-12",
+      "port": 10882,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ps-in-13",
+      "port": 10883,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ps-in-14",
+      "port": 10884,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ps-in-15",
+      "port": 10885,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ps-in-16",
+      "port": 10886,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ps-in-17",
+      "port": 10887,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ps-in-18",
+      "port": 10888,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "ps-in-19",
+      "port": 10889,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "tp-in-0",
+      "port": 10910,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "tp-in-1",
+      "port": 10911,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "tp-in-2",
+      "port": 10912,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "tp-in-3",
+      "port": 10913,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "tp-in-4",
+      "port": 10914,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "tp-in-5",
+      "port": 10915,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "tp-in-6",
+      "port": 10916,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-26",
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "port": 10846,
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-27",
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "port": 10847,
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-28",
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "port": 10848,
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-29",
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "port": 10849,
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-30",
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "port": 10850,
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-31",
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "port": 10851,
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-32",
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "port": 10852,
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-33",
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "port": 10853,
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-34",
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "port": 10854,
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-35",
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "port": 10855,
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-36",
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "port": 10856,
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-37",
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "port": 10857,
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-38",
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "port": 10858,
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-0",
+      "port": 10950,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-1",
+      "port": 10951,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-2",
+      "port": 10952,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-3",
+      "port": 10953,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-4",
+      "port": 10954,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-5",
+      "port": 10955,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-6",
+      "port": 10956,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-7",
+      "port": 10957,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-8",
+      "port": 10958,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-9",
+      "port": 10959,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-10",
+      "port": 10960,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-11",
+      "port": 10961,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-12",
+      "port": 10962,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-13",
+      "port": 10963,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-14",
+      "port": 10964,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-15",
+      "port": 10965,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-16",
+      "port": 10966,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-17",
+      "port": 10967,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-18",
+      "port": 10968,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-19",
+      "port": 10969,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-20",
+      "port": 10970,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-21",
+      "port": 10971,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-22",
+      "port": 10972,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-23",
+      "port": 10973,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-24",
+      "port": 10974,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-25",
+      "port": 10975,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-26",
+      "port": 10976,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-27",
+      "port": 10977,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-28",
+      "port": 10978,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-29",
+      "port": 10979,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-30",
+      "port": 10980,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-31",
+      "port": 10981,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-32",
+      "port": 10982,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-33",
+      "port": 10983,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-34",
+      "port": 10984,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-35",
+      "port": 10985,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-36",
+      "port": 10986,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-37",
+      "port": 10987,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-38",
+      "port": 10988,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-39",
+      "port": 10989,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-40",
+      "port": 10990,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-41",
+      "port": 10991,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-42",
+      "port": 10992,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-43",
+      "port": 10993,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-44",
+      "port": 10994,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "sub-in-45",
+      "port": 10995,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "nest-http",
+      "protocol": "http",
+      "settings": {
+        "servers": [
+          {
+            "address": "127.0.0.1",
+            "port": 5559
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-0",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.18.35.200",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-1",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.26.4.90",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-2",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.21.83.210",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-3",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "162.159.44.246",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-4",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.64.159.79",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-5",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "108.162.198.127",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-6",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.64.52.127",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-7",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.31.16.158",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-8",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.17.117.64",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-9",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.19.140.68",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-10",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.17.111.43",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-11",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "162.159.24.131",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-12",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.17.142.212",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-13",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "162.159.38.54",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-14",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.19.47.41",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-15",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.18.151.172",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-16",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.16.65.1",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-17",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "198.41.208.224",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-18",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "198.41.211.17",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-19",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "162.159.136.89",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-20",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.64.42.1",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-21",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "162.159.11.177",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-22",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.25.243.85",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-23",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.18.45.223",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-24",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.25.81.77",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "proxy-25",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "162.159.61.163",
+            "port": 443,
+            "users": [
+              {
+                "id": "3a4c71d0-ace1-4eb3-9fb0-392bfb336de4",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/?ed=2048",
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          }
+        }
+      }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "ss-out-0",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "5.255.103.55",
+            "port": 1080
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "ss-out-1",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "51.79.177.162",
+            "port": 1010
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ss-out-2",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "185.125.171.171",
+            "port": 1080
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "ss-out-3",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "142.248.80.110",
+            "port": 1080
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ss-out-4",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "84.47.150.125",
+            "port": 1080
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "ss-out-5",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "77.232.142.77",
+            "port": 31336
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ss-out-6",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "5.255.103.55",
+            "port": 1080
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "ss-out-7",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "51.79.177.162",
+            "port": 1010
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ss-out-8",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "185.125.171.171",
+            "port": 1080
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "ss-out-9",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "142.248.80.110",
+            "port": 1080
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "ws-out-0",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "216.10.27.159",
+            "port": 6837,
+            "users": [
+              {
+                "user": "nnhginhn",
+                "pass": "ib02dddzfpev"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ws-out-1",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "23.229.19.94",
+            "port": 8689,
+            "users": [
+              {
+                "user": "nnhginhn",
+                "pass": "ib02dddzfpev"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ws-out-2",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "191.96.254.138",
+            "port": 6185,
+            "users": [
+              {
+                "user": "nnhginhn",
+                "pass": "ib02dddzfpev"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ws-out-3",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "198.23.239.134",
+            "port": 6540,
+            "users": [
+              {
+                "user": "nnhginhn",
+                "pass": "ib02dddzfpev"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ws-out-4",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "198.105.121.200",
+            "port": 6462,
+            "users": [
+              {
+                "user": "nnhginhn",
+                "pass": "ib02dddzfpev"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ws-out-5",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "31.59.20.176",
+            "port": 6754,
+            "users": [
+              {
+                "user": "nnhginhn",
+                "pass": "ib02dddzfpev"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ws-out-6",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "45.38.107.97",
+            "port": 6014,
+            "users": [
+              {
+                "user": "nnhginhn",
+                "pass": "ib02dddzfpev"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ws-out-7",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "31.58.9.4",
+            "port": 6077,
+            "users": [
+              {
+                "user": "nnhginhn",
+                "pass": "ib02dddzfpev"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ws-out-8",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "142.111.67.146",
+            "port": 5611,
+            "users": [
+              {
+                "user": "nnhginhn",
+                "pass": "ib02dddzfpev"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ws-out-9",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "107.172.163.27",
+            "port": 6543,
+            "users": [
+              {
+                "user": "nnhginhn",
+                "pass": "ib02dddzfpev"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ps-out-0",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "5.255.103.55",
+            "port": 1080
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ps-out-1",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "51.79.177.162",
+            "port": 1010
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ps-out-2",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "185.125.171.171",
+            "port": 1080
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ps-out-3",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "142.248.80.110",
+            "port": 1080
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ps-out-4",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "84.47.150.125",
+            "port": 1080
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ps-out-5",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "77.232.142.77",
+            "port": 31336
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ps-out-6",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "206.123.156.231",
+            "port": 11213
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ps-out-7",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "206.123.156.228",
+            "port": 5833
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ps-out-8",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "206.123.156.228",
+            "port": 4579
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ps-out-9",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "206.123.156.220",
+            "port": 4423
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ps-out-10",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "206.123.156.213",
+            "port": 12839
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ps-out-11",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "206.123.156.211",
+            "port": 14445
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ps-out-12",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "206.123.156.201",
+            "port": 7335
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ps-out-13",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "206.123.156.201",
+            "port": 5134
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ps-out-14",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "206.123.156.201",
+            "port": 20240
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ps-out-15",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "206.123.156.189",
+            "port": 4917
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ps-out-16",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "206.123.156.236",
+            "port": 24430
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ps-out-17",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "206.123.156.231",
+            "port": 5257
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ps-out-18",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "144.124.227.88",
+            "port": 3129
+          }
+        ]
+      }
+    },
+    {
+      "tag": "ps-out-19",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "119.148.7.10",
+            "port": 22122
+          }
+        ]
+      }
+    },
+    {
+      "tag": "tp-out-0",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "154.44.73.141",
+            "port": 7129,
+            "users": [
+              {
+                "user": "AO13W7HuIzqC",
+                "pass": "8UDFTpgLmRvw"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "tp-out-1",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "38.96.191.150",
+            "port": 21719,
+            "users": [
+              {
+                "user": "44fa737d",
+                "pass": "1bab4a4504ca"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "tp-out-2",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "38.111.30.111",
+            "port": 26433,
+            "users": [
+              {
+                "user": "4b2c7676",
+                "pass": "6f0f4cbba5bb"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "tp-out-3",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "131.143.161.47",
+            "port": 1337,
+            "users": [
+              {
+                "user": "2b4i0hk14vj5",
+                "pass": "qjj5rvzk7jcy"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "tp-out-4",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "82.110.34.3",
+            "port": 7651,
+            "users": [
+              {
+                "user": "vuv3Uacy1lut",
+                "pass": "uleBx40W3Dof"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "tp-out-5",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "200.36.9.33",
+            "port": 1337,
+            "users": [
+              {
+                "user": "uwwt01yosouc",
+                "pass": "72041xv3y1z5"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "tp-out-6",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "205.179.217.31",
+            "port": 7139,
+            "users": [
+              {
+                "user": "bjj0Afk5N8DE",
+                "pass": "wZdVTxx4YcLX"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "proxy-26",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.16.159.64",
+            "port": 443,
+            "users": [
+              {
+                "id": "8fa32701-f591-495a-b4c3-89a261ea006f",
+                "encryption": "none",
+                "flow": "xtls-rprx-vision"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          },
+          "path": "/?ed=2048"
+        }
+      }
+    },
+    {
+      "tag": "proxy-27",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.17.61.223",
+            "port": 443,
+            "users": [
+              {
+                "id": "8fa32701-f591-495a-b4c3-89a261ea006f",
+                "encryption": "none",
+                "flow": "xtls-rprx-vision"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          },
+          "path": "/?ed=2048"
+        }
+      }
+    },
+    {
+      "tag": "proxy-28",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.17.69.244",
+            "port": 443,
+            "users": [
+              {
+                "id": "8fa32701-f591-495a-b4c3-89a261ea006f",
+                "encryption": "none",
+                "flow": "xtls-rprx-vision"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          },
+          "path": "/?ed=2048"
+        }
+      }
+    },
+    {
+      "tag": "proxy-29",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "162.159.153.209",
+            "port": 443,
+            "users": [
+              {
+                "id": "8fa32701-f591-495a-b4c3-89a261ea006f",
+                "encryption": "none",
+                "flow": "xtls-rprx-vision"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          },
+          "path": "/?ed=2048"
+        }
+      }
+    },
+    {
+      "tag": "proxy-30",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.17.49.126",
+            "port": 443,
+            "users": [
+              {
+                "id": "8fa32701-f591-495a-b4c3-89a261ea006f",
+                "encryption": "none",
+                "flow": "xtls-rprx-vision"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          },
+          "path": "/?ed=2048"
+        }
+      }
+    },
+    {
+      "tag": "proxy-31",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.18.46.234",
+            "port": 443,
+            "users": [
+              {
+                "id": "8fa32701-f591-495a-b4c3-89a261ea006f",
+                "encryption": "none",
+                "flow": "xtls-rprx-vision"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          },
+          "path": "/?ed=2048"
+        }
+      }
+    },
+    {
+      "tag": "proxy-32",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "162.159.152.53",
+            "port": 443,
+            "users": [
+              {
+                "id": "8fa32701-f591-495a-b4c3-89a261ea006f",
+                "encryption": "none",
+                "flow": "xtls-rprx-vision"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          },
+          "path": "/?ed=2048"
+        }
+      }
+    },
+    {
+      "tag": "proxy-33",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "162.159.153.194",
+            "port": 443,
+            "users": [
+              {
+                "id": "8fa32701-f591-495a-b4c3-89a261ea006f",
+                "encryption": "none",
+                "flow": "xtls-rprx-vision"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          },
+          "path": "/?ed=2048"
+        }
+      }
+    },
+    {
+      "tag": "proxy-34",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.26.3.162",
+            "port": 443,
+            "users": [
+              {
+                "id": "8fa32701-f591-495a-b4c3-89a261ea006f",
+                "encryption": "none",
+                "flow": "xtls-rprx-vision"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          },
+          "path": "/?ed=2048"
+        }
+      }
+    },
+    {
+      "tag": "proxy-35",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.19.148.121",
+            "port": 443,
+            "users": [
+              {
+                "id": "8fa32701-f591-495a-b4c3-89a261ea006f",
+                "encryption": "none",
+                "flow": "xtls-rprx-vision"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          },
+          "path": "/?ed=2048"
+        }
+      }
+    },
+    {
+      "tag": "proxy-36",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.21.88.215",
+            "port": 443,
+            "users": [
+              {
+                "id": "8fa32701-f591-495a-b4c3-89a261ea006f",
+                "encryption": "none",
+                "flow": "xtls-rprx-vision"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          },
+          "path": "/?ed=2048"
+        }
+      }
+    },
+    {
+      "tag": "proxy-37",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.17.123.144",
+            "port": 443,
+            "users": [
+              {
+                "id": "8fa32701-f591-495a-b4c3-89a261ea006f",
+                "encryption": "none",
+                "flow": "xtls-rprx-vision"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "iam.jimhacker.eu.cc",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "host": "iam.jimhacker.eu.cc",
+          "headers": {
+            "Host": "iam.jimhacker.eu.cc"
+          },
+          "path": "/?ed=2048"
+        }
+      }
+    },
+    {
+      "tag": "proxy-38",
+      "protocol": "trojan",
+      "settings": {
+        "servers": [
+          {
+            "address": "us1.b8977f62-d561-833b-30bf-2bd7f12c670c.36a8c922.the-best-airport.com",
+            "port": 443,
+            "password": "8fa32701-f591-495a-b4c3-89a261ea006f"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "new.download.the-best-airport.com",
+          "fingerprint": "chrome"
+        }
+      }
+    },
+    {
+      "tag": "sub-out-0",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.17.162.3",
+            "port": 29031,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-1",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.21.94.218",
+            "port": 28081,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-2",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.64.159.7",
+            "port": 28482,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-3",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "198.41.194.162",
+            "port": 28952,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-4",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.16.105.166",
+            "port": 28951,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-5",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.64.91.69",
+            "port": 48405,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-6",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "162.159.39.193",
+            "port": 48406,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-7",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.64.145.144",
+            "port": 48407,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-8",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "162.159.153.170",
+            "port": 25341,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-9",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.18.255.167",
+            "port": 28102,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-10",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "162.159.137.204",
+            "port": 28203,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-11",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.17.167.134",
+            "port": 28104,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-12",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.18.43.246",
+            "port": 26920,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-13",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "162.159.58.65",
+            "port": 28106,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-14",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.67.70.92",
+            "port": 28207,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-15",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.18.45.68",
+            "port": 28118,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-16",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.64.52.89",
+            "port": 28201,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-17",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.64.229.7",
+            "port": 28202,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-18",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.64.82.114",
+            "port": 28204,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-19",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.64.229.88",
+            "port": 28808,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-20",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.19.54.79",
+            "port": 28301,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-21",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.26.5.134",
+            "port": 28302,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-22",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "162.159.45.227",
+            "port": 38343,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-23",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.18.223.253",
+            "port": 28304,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-24",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.19.154.200",
+            "port": 33673,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-25",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "162.159.152.31",
+            "port": 38402,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-26",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.64.53.103",
+            "port": 38403,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-27",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "108.162.198.211",
+            "port": 48404,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-28",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.25.252.241",
+            "port": 44148,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-29",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.26.8.117",
+            "port": 28802,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-30",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "162.159.140.116",
+            "port": 26803,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-31",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "198.41.208.15",
+            "port": 39024,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-32",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "162.159.7.93",
+            "port": 39044,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-33",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "173.245.49.194",
+            "port": 28806,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-34",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.18.81.19",
+            "port": 29807,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-35",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.17.129.106",
+            "port": 28501,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-36",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.18.89.52",
+            "port": 27499,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-37",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "198.41.211.199",
+            "port": 48702,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-38",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.64.156.99",
+            "port": 28601,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-39",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.64.48.220",
+            "port": 28602,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-40",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.19.220.22",
+            "port": 28901,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-41",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "162.159.60.239",
+            "port": 28902,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-42",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "108.162.195.104",
+            "port": 28903,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-43",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "162.159.140.85",
+            "port": 28904,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-44",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.64.48.226",
+            "port": 28905,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    },
+    {
+      "tag": "sub-out-45",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.17.139.37",
+            "port": 28906,
+            "users": [
+              {
+                "id": "13f1e74e-1e3a-477a-9750-b1ccdc8d534c",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": null,
+        "security": "none"
+      }
+    }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-45"
+        ],
+        "outboundTag": "sub-out-45"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-44"
+        ],
+        "outboundTag": "sub-out-44"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-43"
+        ],
+        "outboundTag": "sub-out-43"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-42"
+        ],
+        "outboundTag": "sub-out-42"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-41"
+        ],
+        "outboundTag": "sub-out-41"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-40"
+        ],
+        "outboundTag": "sub-out-40"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-39"
+        ],
+        "outboundTag": "sub-out-39"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-38"
+        ],
+        "outboundTag": "sub-out-38"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-37"
+        ],
+        "outboundTag": "sub-out-37"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-36"
+        ],
+        "outboundTag": "sub-out-36"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-35"
+        ],
+        "outboundTag": "sub-out-35"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-34"
+        ],
+        "outboundTag": "sub-out-34"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-33"
+        ],
+        "outboundTag": "sub-out-33"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-32"
+        ],
+        "outboundTag": "sub-out-32"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-31"
+        ],
+        "outboundTag": "sub-out-31"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-30"
+        ],
+        "outboundTag": "sub-out-30"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-29"
+        ],
+        "outboundTag": "sub-out-29"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-28"
+        ],
+        "outboundTag": "sub-out-28"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-27"
+        ],
+        "outboundTag": "sub-out-27"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-26"
+        ],
+        "outboundTag": "sub-out-26"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-25"
+        ],
+        "outboundTag": "sub-out-25"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-24"
+        ],
+        "outboundTag": "sub-out-24"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-23"
+        ],
+        "outboundTag": "sub-out-23"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-22"
+        ],
+        "outboundTag": "sub-out-22"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-21"
+        ],
+        "outboundTag": "sub-out-21"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-20"
+        ],
+        "outboundTag": "sub-out-20"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-19"
+        ],
+        "outboundTag": "sub-out-19"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-18"
+        ],
+        "outboundTag": "sub-out-18"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-17"
+        ],
+        "outboundTag": "sub-out-17"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-16"
+        ],
+        "outboundTag": "sub-out-16"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-15"
+        ],
+        "outboundTag": "sub-out-15"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-14"
+        ],
+        "outboundTag": "sub-out-14"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-13"
+        ],
+        "outboundTag": "sub-out-13"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-12"
+        ],
+        "outboundTag": "sub-out-12"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-11"
+        ],
+        "outboundTag": "sub-out-11"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-10"
+        ],
+        "outboundTag": "sub-out-10"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-9"
+        ],
+        "outboundTag": "sub-out-9"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-8"
+        ],
+        "outboundTag": "sub-out-8"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-7"
+        ],
+        "outboundTag": "sub-out-7"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-6"
+        ],
+        "outboundTag": "sub-out-6"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-5"
+        ],
+        "outboundTag": "sub-out-5"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-4"
+        ],
+        "outboundTag": "sub-out-4"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-3"
+        ],
+        "outboundTag": "sub-out-3"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-2"
+        ],
+        "outboundTag": "sub-out-2"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-1"
+        ],
+        "outboundTag": "sub-out-1"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "sub-in-0"
+        ],
+        "outboundTag": "sub-out-0"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-38"
+        ],
+        "outboundTag": "proxy-38"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-37"
+        ],
+        "outboundTag": "proxy-37"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-36"
+        ],
+        "outboundTag": "proxy-36"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-35"
+        ],
+        "outboundTag": "proxy-35"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-34"
+        ],
+        "outboundTag": "proxy-34"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-33"
+        ],
+        "outboundTag": "proxy-33"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-32"
+        ],
+        "outboundTag": "proxy-32"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-31"
+        ],
+        "outboundTag": "proxy-31"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-30"
+        ],
+        "outboundTag": "proxy-30"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-29"
+        ],
+        "outboundTag": "proxy-29"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-28"
+        ],
+        "outboundTag": "proxy-28"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-27"
+        ],
+        "outboundTag": "proxy-27"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-26"
+        ],
+        "outboundTag": "proxy-26"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-0"
+        ],
+        "outboundTag": "proxy-0"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-1"
+        ],
+        "outboundTag": "proxy-1"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-2"
+        ],
+        "outboundTag": "proxy-2"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-3"
+        ],
+        "outboundTag": "proxy-3"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-4"
+        ],
+        "outboundTag": "proxy-4"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-5"
+        ],
+        "outboundTag": "proxy-5"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-6"
+        ],
+        "outboundTag": "proxy-6"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-7"
+        ],
+        "outboundTag": "proxy-7"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-8"
+        ],
+        "outboundTag": "proxy-8"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-9"
+        ],
+        "outboundTag": "proxy-9"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-10"
+        ],
+        "outboundTag": "proxy-10"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-11"
+        ],
+        "outboundTag": "proxy-11"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-12"
+        ],
+        "outboundTag": "proxy-12"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-13"
+        ],
+        "outboundTag": "proxy-13"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-14"
+        ],
+        "outboundTag": "proxy-14"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-15"
+        ],
+        "outboundTag": "proxy-15"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-16"
+        ],
+        "outboundTag": "proxy-16"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-17"
+        ],
+        "outboundTag": "proxy-17"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-18"
+        ],
+        "outboundTag": "proxy-18"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-19"
+        ],
+        "outboundTag": "proxy-19"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-20"
+        ],
+        "outboundTag": "proxy-20"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-21"
+        ],
+        "outboundTag": "proxy-21"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-22"
+        ],
+        "outboundTag": "proxy-22"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-23"
+        ],
+        "outboundTag": "proxy-23"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-24"
+        ],
+        "outboundTag": "proxy-24"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-25"
+        ],
+        "outboundTag": "proxy-25"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "tp-in-6"
+        ],
+        "outboundTag": "tp-out-6"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "tp-in-5"
+        ],
+        "outboundTag": "tp-out-5"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "tp-in-4"
+        ],
+        "outboundTag": "tp-out-4"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "tp-in-3"
+        ],
+        "outboundTag": "tp-out-3"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "tp-in-2"
+        ],
+        "outboundTag": "tp-out-2"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "tp-in-1"
+        ],
+        "outboundTag": "tp-out-1"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "tp-in-0"
+        ],
+        "outboundTag": "tp-out-0"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ps-in-19"
+        ],
+        "outboundTag": "ps-out-19"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ps-in-18"
+        ],
+        "outboundTag": "ps-out-18"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ps-in-17"
+        ],
+        "outboundTag": "ps-out-17"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ps-in-16"
+        ],
+        "outboundTag": "ps-out-16"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ps-in-15"
+        ],
+        "outboundTag": "ps-out-15"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ps-in-14"
+        ],
+        "outboundTag": "ps-out-14"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ps-in-13"
+        ],
+        "outboundTag": "ps-out-13"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ps-in-12"
+        ],
+        "outboundTag": "ps-out-12"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ps-in-11"
+        ],
+        "outboundTag": "ps-out-11"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ps-in-10"
+        ],
+        "outboundTag": "ps-out-10"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ps-in-9"
+        ],
+        "outboundTag": "ps-out-9"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ps-in-8"
+        ],
+        "outboundTag": "ps-out-8"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ps-in-7"
+        ],
+        "outboundTag": "ps-out-7"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ps-in-6"
+        ],
+        "outboundTag": "ps-out-6"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ps-in-5"
+        ],
+        "outboundTag": "ps-out-5"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ps-in-4"
+        ],
+        "outboundTag": "ps-out-4"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ps-in-3"
+        ],
+        "outboundTag": "ps-out-3"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ps-in-2"
+        ],
+        "outboundTag": "ps-out-2"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ps-in-1"
+        ],
+        "outboundTag": "ps-out-1"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ps-in-0"
+        ],
+        "outboundTag": "ps-out-0"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "af-http-9"
+        ],
+        "outboundTag": "nest-http"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "af-http-8"
+        ],
+        "outboundTag": "nest-http"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "af-http-7"
+        ],
+        "outboundTag": "nest-http"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "af-http-6"
+        ],
+        "outboundTag": "nest-http"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "af-http-5"
+        ],
+        "outboundTag": "nest-http"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "af-http-4"
+        ],
+        "outboundTag": "nest-http"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "af-http-3"
+        ],
+        "outboundTag": "nest-http"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "af-http-2"
+        ],
+        "outboundTag": "nest-http"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "af-http-1"
+        ],
+        "outboundTag": "nest-http"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "af-http-0"
+        ],
+        "outboundTag": "nest-http"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ws-in-0"
+        ],
+        "outboundTag": "ws-out-0"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ws-in-1"
+        ],
+        "outboundTag": "ws-out-1"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ws-in-2"
+        ],
+        "outboundTag": "ws-out-2"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ws-in-3"
+        ],
+        "outboundTag": "ws-out-3"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ws-in-4"
+        ],
+        "outboundTag": "ws-out-4"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ws-in-5"
+        ],
+        "outboundTag": "ws-out-5"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ws-in-6"
+        ],
+        "outboundTag": "ws-out-6"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ws-in-7"
+        ],
+        "outboundTag": "ws-out-7"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ws-in-8"
+        ],
+        "outboundTag": "ws-out-8"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ws-in-9"
+        ],
+        "outboundTag": "ws-out-9"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ss-in-0"
+        ],
+        "outboundTag": "ss-out-0"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ss-in-1"
+        ],
+        "outboundTag": "ss-out-1"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ss-in-2"
+        ],
+        "outboundTag": "ss-out-2"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ss-in-3"
+        ],
+        "outboundTag": "ss-out-3"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ss-in-4"
+        ],
+        "outboundTag": "ss-out-4"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ss-in-5"
+        ],
+        "outboundTag": "ss-out-5"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ss-in-6"
+        ],
+        "outboundTag": "ss-out-6"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ss-in-7"
+        ],
+        "outboundTag": "ss-out-7"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ss-in-8"
+        ],
+        "outboundTag": "ss-out-8"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "ss-in-9"
+        ],
+        "outboundTag": "ss-out-9"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "socks-main",
+          "http-main"
+        ],
+        "outboundTag": "nest-http"
+      }
+    ]
+  }
+}

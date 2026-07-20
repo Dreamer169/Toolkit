@@ -1,0 +1,27 @@
+{
+  "ts": 1784538004.9715753,
+  "elapsed_s": 2.7,
+  "expired_removed": 0,
+  "free": {
+    "total": 29,
+    "alive": 22,
+    "dead": 7,
+    "residential": 0,
+    "datacenter": 22,
+    "unknown": 0,
+    "quality_ok": 22,
+    "avg_latency_ms": 682
+  },
+  "event": {
+    "total": 76,
+    "alive": 76,
+    "dead": 0,
+    "residential": 76,
+    "datacenter": 0,
+    "unknown": 0,
+    "quality_ok": 76,
+    "avg_latency_ms": 674
+  },
+  "injected_resi_pool": 10,
+  "triggered_sync": false
+}

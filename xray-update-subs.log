@@ -1,0 +1,458 @@
+  File "/root/Toolkit/xray-update-subs.py", line 45
+    (time.strftime(%Y-%m-%d %H:%M:%S))
+                   ^
+SyntaxError: f-string: invalid syntax
+Use --update-env to update environment variables
+[PM2] Applying action restartProcessId on app [xray](ids: [ 42 ])
+[PM2] [xray](42) ✓
+┌────┬────────────────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐
+│ id │ name                   │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├────┼────────────────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤
+│ 57 │ cewsco-pool            │ default     │ N/A     │ fork    │ 2526380  │ 7h     │ 0    │ online    │ 0%       │ 29.9mb   │ root     │ disabled │
+│ 16 │ code-server            │ default     │ N/A     │ fork    │ 2513774  │ 7h     │ 224  │ online    │ 0%       │ 58.7mb   │ root     │ disabled │
+│ 18 │ easytier               │ default     │ N/A     │ fork    │ 2513810  │ 7h     │ 1    │ online    │ 0%       │ 30.5mb   │ root     │ disabled │
+│ 34 │ fake-trace             │ default     │ N/A     │ fork    │ 2513993  │ 7h     │ 2    │ online    │ 0%       │ 19.4mb   │ root     │ disabled │
+│ 48 │ gptree-proxy           │ default     │ 0.2.1   │ fork    │ 2513995  │ 7h     │ 1    │ online    │ 0%       │ 62.0mb   │ root     │ disabled │
+│ 51 │ gratis-register        │ default     │ N/A     │ fork    │ 2514023  │ 7h     │ 4    │ online    │ 0%       │ 39.9mb   │ root     │ disabled │
+│ 21 │ grok2api               │ default     │ N/A     │ fork    │ 2513937  │ 7h     │ 8    │ online    │ 0%       │ 67.8mb   │ root     │ disabled │
+│ 0  │ new-api                │ default     │ N/A     │ fork    │ 2953415  │ 2h     │ 47   │ online    │ 0%       │ 63.3mb   │ root     │ disabled │
+│ 6  │ outlook-register       │ default     │ N/A     │ fork    │ 2513721  │ 7h     │ 2    │ online    │ 0%       │ 3.7mb    │ root     │ disabled │
+│ 3  │ st-proxy               │ default     │ 1.0.0   │ fork    │ 2513710  │ 7h     │ 1    │ online    │ 0%       │ 56.1mb   │ root     │ disabled │
+│ 31 │ sub1-airport-mihomo    │ default     │ N/A     │ fork    │ 2513953  │ 7h     │ 1    │ online    │ 0%       │ 37.7mb   │ root     │ disabled │
+│ 17 │ tauritavern            │ default     │ N/A     │ fork    │ 2513888  │ 7h     │ 12   │ online    │ 0%       │ 128.7mb  │ root     │ disabled │
+│ 4  │ ticnote-proxy          │ default     │ 0.0.0   │ fork    │ 2513731  │ 7h     │ 2    │ online    │ 0%       │ 25.9mb   │ root     │ disabled │
+│ 50 │ toolkit-api            │ default     │ 0.0.0   │ fork    │ 2514014  │ 7h     │ 1    │ online    │ 15.4%    │ 177.6mb  │ root     │ disabled │
+│ 24 │ turb-register          │ default     │ N/A     │ fork    │ 2513977  │ 7h     │ 1    │ online    │ 0%       │ 30.1mb   │ root     │ disabled │
+│ 2  │ unitool-proxy          │ default     │ 0.0.0   │ fork    │ 2513720  │ 7h     │ 8    │ online    │ 0%       │ 160.9mb  │ root     │ disabled │
+│ 42 │ xray                   │ default     │ 0.0.0   │ fork    │ 3269598  │ 0s     │ 1068 │ online    │ 0%       │ 12.8mb   │ root     │ disabled │
+│ 58 │ yonoo-proxy            │ default     │ N/A     │ fork    │ 3262789  │ 2m     │ 270  │ online    │ 0%       │ 48.5mb   │ root     │ disabled │
+└────┴────────────────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘
+[update-subs] 2026-07-16 21:08:51
+[update-subs] subscriptions: 2
+  SKIP https://sub2.smallstrawberry.com/api/v1/client/sub: HTTP Error 403: Forbidden
+  46 nodes from https://nowjump.tiaotiao.org/https://hi.nowjiasu.com/no...
+[update-subs] 46 nodes written, ports 10950~10995
+[update-subs] xray restarted
+Use --update-env to update environment variables
+[PM2] Applying action restartProcessId on app [xray](ids: [ 42 ])
+[PM2] [xray](42) ✓
+┌────┬────────────────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐
+│ id │ name                   │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├────┼────────────────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤
+│ 57 │ cewsco-pool            │ default     │ N/A     │ fork    │ 2526380  │ 9h     │ 0    │ online    │ 0%       │ 19.2mb   │ root     │ disabled │
+│ 16 │ code-server            │ default     │ N/A     │ fork    │ 2513774  │ 10h    │ 224  │ online    │ 0%       │ 4.3mb    │ root     │ disabled │
+│ 18 │ easytier               │ default     │ N/A     │ fork    │ 2513810  │ 10h    │ 1    │ online    │ 0%       │ 3.4mb    │ root     │ disabled │
+│ 34 │ fake-trace             │ default     │ N/A     │ fork    │ 2513993  │ 10h    │ 2    │ online    │ 0%       │ 13.5mb   │ root     │ disabled │
+│ 48 │ gptree-proxy           │ default     │ 0.2.1   │ fork    │ 2513995  │ 10h    │ 1    │ online    │ 0%       │ 20.8mb   │ root     │ disabled │
+│ 51 │ gratis-register        │ default     │ N/A     │ fork    │ 2514023  │ 10h    │ 4    │ online    │ 7.1%     │ 34.9mb   │ root     │ disabled │
+│ 21 │ grok2api               │ default     │ N/A     │ fork    │ 2513937  │ 10h    │ 8    │ online    │ 0%       │ 14.4mb   │ root     │ disabled │
+│ 0  │ new-api                │ default     │ N/A     │ fork    │ 3442376  │ 72m    │ 48   │ online    │ 0%       │ 33.3mb   │ root     │ disabled │
+│ 6  │ outlook-register       │ default     │ N/A     │ fork    │ 2513721  │ 10h    │ 2    │ online    │ 0%       │ 3.5mb    │ root     │ disabled │
+│ 3  │ st-proxy               │ default     │ 1.0.0   │ fork    │ 2513710  │ 10h    │ 1    │ online    │ 0%       │ 26.4mb   │ root     │ disabled │
+│ 31 │ sub1-airport-mihomo    │ default     │ N/A     │ fork    │ 2513953  │ 10h    │ 1    │ online    │ 0%       │ 15.9mb   │ root     │ disabled │
+│ 17 │ tauritavern            │ default     │ N/A     │ fork    │ 2513888  │ 10h    │ 12   │ online    │ 0%       │ 3.9mb    │ root     │ disabled │
+│ 4  │ ticnote-proxy          │ default     │ 0.0.0   │ fork    │ 2513731  │ 10h    │ 2    │ online    │ 0%       │ 13.4mb   │ root     │ disabled │
+│ 50 │ toolkit-api            │ default     │ 0.0.0   │ fork    │ 2514014  │ 10h    │ 1    │ online    │ 14.3%    │ 150.1mb  │ root     │ disabled │
+│ 24 │ turb-register          │ default     │ N/A     │ fork    │ 2513977  │ 10h    │ 1    │ online    │ 0%       │ 11.0mb   │ root     │ disabled │
+│ 2  │ unitool-proxy          │ default     │ 0.0.0   │ fork    │ 2513720  │ 10h    │ 8    │ online    │ 207.1%   │ 150.0mb  │ root     │ disabled │
+│ 42 │ xray                   │ default     │ 0.0.0   │ fork    │ 3562391  │ 0s     │ 1114 │ online    │ 0%       │ 15.3mb   │ root     │ disabled │
+│ 58 │ yonoo-proxy            │ default     │ N/A     │ fork    │ 3443922  │ 70m    │ 273  │ online    │ 0%       │ 119.0mb  │ root     │ disabled │
+└────┴────────────────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘
+[update-subs] 2026-07-17 00:00:02
+[update-subs] subscriptions: 1
+  46 nodes from https://nowjump.tiaotiao.org/https://hi.nowjiasu.com/no...
+[update-subs] 46 nodes written, ports 10950~10995
+[update-subs] xray restarted
+Use --update-env to update environment variables
+[PM2] Applying action restartProcessId on app [xray](ids: [ 42 ])
+[PM2] [xray](42) ✓
+┌────┬────────────────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐
+│ id │ name                   │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├────┼────────────────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤
+│ 57 │ cewsco-pool            │ default     │ N/A     │ fork    │ 2526380  │ 15h    │ 0    │ online    │ 0%       │ 25.9mb   │ root     │ disabled │
+│ 16 │ code-server            │ default     │ N/A     │ fork    │ 2513774  │ 16h    │ 224  │ online    │ 0%       │ 4.3mb    │ root     │ disabled │
+│ 18 │ easytier               │ default     │ N/A     │ fork    │ 2513810  │ 16h    │ 1    │ online    │ 0%       │ 3.5mb    │ root     │ disabled │
+│ 34 │ fake-trace             │ default     │ N/A     │ fork    │ 2513993  │ 16h    │ 2    │ online    │ 0%       │ 13.5mb   │ root     │ disabled │
+│ 48 │ gptree-proxy           │ default     │ 0.2.1   │ fork    │ 2513995  │ 16h    │ 1    │ online    │ 5.6%     │ 32.2mb   │ root     │ disabled │
+│ 51 │ gratis-register        │ default     │ N/A     │ fork    │ 4111990  │ 42m    │ 9    │ online    │ 5.6%     │ 141.5mb  │ root     │ disabled │
+│ 21 │ grok2api               │ default     │ N/A     │ fork    │ 2513937  │ 16h    │ 8    │ online    │ 0%       │ 14.4mb   │ root     │ disabled │
+│ 0  │ new-api                │ default     │ N/A     │ fork    │ 3958007  │ 2h     │ 50   │ online    │ 0%       │ 54.5mb   │ root     │ disabled │
+│ 6  │ outlook-register       │ default     │ N/A     │ fork    │ 2513721  │ 16h    │ 2    │ online    │ 0%       │ 3.5mb    │ root     │ disabled │
+│ 3  │ st-proxy               │ default     │ 1.0.0   │ fork    │ 2513710  │ 16h    │ 1    │ online    │ 0%       │ 30.5mb   │ root     │ disabled │
+│ 31 │ sub1-airport-mihomo    │ default     │ N/A     │ fork    │ 2513953  │ 16h    │ 1    │ online    │ 0%       │ 19.6mb   │ root     │ disabled │
+│ 17 │ tauritavern            │ default     │ N/A     │ fork    │ 2513888  │ 16h    │ 12   │ online    │ 0%       │ 3.8mb    │ root     │ disabled │
+│ 4  │ ticnote-proxy          │ default     │ 0.0.0   │ fork    │ 2513731  │ 16h    │ 2    │ online    │ 0%       │ 13.4mb   │ root     │ disabled │
+│ 50 │ toolkit-api            │ default     │ 0.0.0   │ fork    │ 2514014  │ 16h    │ 1    │ online    │ 16.7%    │ 162.7mb  │ root     │ disabled │
+│ 24 │ turb-register          │ default     │ N/A     │ fork    │ 2513977  │ 16h    │ 1    │ online    │ 0%       │ 11.0mb   │ root     │ disabled │
+│ 2  │ unitool-proxy          │ default     │ 0.0.0   │ fork    │ 2513720  │ 16h    │ 8    │ online    │ 0%       │ 150.5mb  │ root     │ disabled │
+│ 42 │ xray                   │ default     │ 0.0.0   │ fork    │ 4182475  │ 0s     │ 1207 │ online    │ 0%       │ 14.7mb   │ root     │ disabled │
+│ 58 │ yonoo-proxy            │ default     │ N/A     │ fork    │ 3942348  │ 2h     │ 277  │ online    │ 0%       │ 251.1mb  │ root     │ disabled │
+└────┴────────────────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘
+[update-subs] 2026-07-17 06:00:02
+[update-subs] subscriptions: 1
+  46 nodes from https://nowjump.tiaotiao.org/https://hi.nowjiasu.com/no...
+[update-subs] 46 nodes written, ports 10950~10995
+[update-subs] xray restarted
+Use --update-env to update environment variables
+[PM2] Applying action restartProcessId on app [xray](ids: [ 42 ])
+[PM2] [xray](42) ✓
+┌────┬────────────────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐
+│ id │ name                   │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├────┼────────────────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤
+│ 57 │ cewsco-pool            │ default     │ N/A     │ fork    │ 2526380  │ 21h    │ 0    │ online    │ 0%       │ 25.8mb   │ root     │ disabled │
+│ 16 │ code-server            │ default     │ N/A     │ fork    │ 2513774  │ 22h    │ 224  │ online    │ 0%       │ 4.3mb    │ root     │ disabled │
+│ 18 │ easytier               │ default     │ N/A     │ fork    │ 2513810  │ 22h    │ 1    │ online    │ 0%       │ 3.7mb    │ root     │ disabled │
+│ 34 │ fake-trace             │ default     │ N/A     │ fork    │ 2513993  │ 22h    │ 2    │ online    │ 0%       │ 13.5mb   │ root     │ disabled │
+│ 48 │ gptree-proxy           │ default     │ 0.2.1   │ fork    │ 2513995  │ 22h    │ 1    │ online    │ 0%       │ 32.0mb   │ root     │ disabled │
+│ 51 │ gratis-register        │ default     │ N/A     │ fork    │ 4111990  │ 6h     │ 9    │ online    │ 70%      │ 176.3mb  │ root     │ disabled │
+│ 21 │ grok2api               │ default     │ N/A     │ fork    │ 2513937  │ 22h    │ 8    │ online    │ 0%       │ 14.4mb   │ root     │ disabled │
+│ 0  │ new-api                │ default     │ N/A     │ fork    │ 3958007  │ 8h     │ 50   │ online    │ 0%       │ 47.5mb   │ root     │ disabled │
+│ 6  │ outlook-register       │ default     │ N/A     │ fork    │ 2513721  │ 22h    │ 2    │ online    │ 0%       │ 3.3mb    │ root     │ disabled │
+│ 3  │ st-proxy               │ default     │ 1.0.0   │ fork    │ 2513710  │ 22h    │ 1    │ online    │ 0%       │ 30.6mb   │ root     │ disabled │
+│ 31 │ sub1-airport-mihomo    │ default     │ N/A     │ fork    │ 2513953  │ 22h    │ 1    │ online    │ 0%       │ 21.2mb   │ root     │ disabled │
+│ 17 │ tauritavern            │ default     │ N/A     │ fork    │ 2513888  │ 22h    │ 12   │ online    │ 0%       │ 3.4mb    │ root     │ disabled │
+│ 4  │ ticnote-proxy          │ default     │ 0.0.0   │ fork    │ 2513731  │ 22h    │ 2    │ online    │ 0%       │ 13.4mb   │ root     │ disabled │
+│ 50 │ toolkit-api            │ default     │ 0.0.0   │ fork    │ 2514014  │ 22h    │ 1    │ online    │ 5%       │ 157.4mb  │ root     │ disabled │
+│ 24 │ turb-register          │ default     │ N/A     │ fork    │ 2513977  │ 22h    │ 1    │ online    │ 0%       │ 11.0mb   │ root     │ disabled │
+│ 2  │ unitool-proxy          │ default     │ 0.0.0   │ fork    │ 2513720  │ 22h    │ 8    │ online    │ 0%       │ 155.0mb  │ root     │ disabled │
+│ 42 │ xray                   │ default     │ 0.0.0   │ fork    │ 617042   │ 0s     │ 1299 │ online    │ 0%       │ 21.8mb   │ root     │ disabled │
+│ 58 │ yonoo-proxy            │ default     │ N/A     │ fork    │ 248440   │ 3h     │ 285  │ online    │ 0%       │ 104.4mb  │ root     │ disabled │
+└────┴────────────────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘
+[update-subs] 2026-07-17 12:00:02
+[update-subs] subscriptions: 1
+  46 nodes from https://nowjump.tiaotiao.org/https://hi.nowjiasu.com/no...
+[update-subs] 46 nodes written, ports 10950~10995
+[update-subs] xray restarted
+Use --update-env to update environment variables
+[PM2] Applying action restartProcessId on app [xray](ids: [ 42 ])
+[PM2][ERROR] Process 42 not found
+[update-subs] 2026-07-17 18:00:01
+[update-subs] subscriptions: 1
+  46 nodes from https://nowjump.tiaotiao.org/https://hi.nowjiasu.com/no...
+[update-subs] 46 nodes written, ports 10950~10995
+[update-subs] xray restarted
+Use --update-env to update environment variables
+[PM2] Applying action restartProcessId on app [xray](ids: [ 42 ])
+[PM2] [xray](42) ✓
+┌────┬────────────────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐
+│ id │ name                   │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├────┼────────────────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤
+│ 57 │ cewsco-pool            │ default     │ N/A     │ fork    │ 2526380  │ 33h    │ 0    │ online    │ 0%       │ 25.6mb   │ root     │ disabled │
+│ 16 │ code-server            │ default     │ N/A     │ fork    │ 2513774  │ 34h    │ 224  │ online    │ 0%       │ 4.3mb    │ root     │ disabled │
+│ 18 │ easytier               │ default     │ N/A     │ fork    │ 2513810  │ 34h    │ 1    │ online    │ 0%       │ 3.6mb    │ root     │ disabled │
+│ 34 │ fake-trace             │ default     │ N/A     │ fork    │ 2513993  │ 34h    │ 2    │ online    │ 0%       │ 13.4mb   │ root     │ disabled │
+│ 48 │ gptree-proxy           │ default     │ 0.2.1   │ fork    │ 2513995  │ 34h    │ 1    │ online    │ 0%       │ 54.5mb   │ root     │ disabled │
+│ 51 │ gratis-register        │ default     │ N/A     │ fork    │ 4111990  │ 18h    │ 9    │ online    │ 0%       │ 94.9mb   │ root     │ disabled │
+│ 21 │ grok2api               │ default     │ N/A     │ fork    │ 2513937  │ 34h    │ 8    │ online    │ 0%       │ 14.3mb   │ root     │ disabled │
+│ 0  │ new-api                │ default     │ N/A     │ fork    │ 3958007  │ 20h    │ 50   │ online    │ 0%       │ 65.4mb   │ root     │ disabled │
+│ 6  │ outlook-register       │ default     │ N/A     │ fork    │ 2513721  │ 34h    │ 2    │ online    │ 0%       │ 3.4mb    │ root     │ disabled │
+│ 3  │ st-proxy               │ default     │ 1.0.0   │ fork    │ 2513710  │ 34h    │ 1    │ online    │ 0%       │ 31.1mb   │ root     │ disabled │
+│ 31 │ sub1-airport-mihomo    │ default     │ N/A     │ fork    │ 2513953  │ 34h    │ 1    │ online    │ 0%       │ 25.7mb   │ root     │ disabled │
+│ 17 │ tauritavern            │ default     │ N/A     │ fork    │ 906731   │ 9h     │ 18   │ online    │ 0%       │ 140.7mb  │ root     │ disabled │
+│ 4  │ ticnote-proxy          │ default     │ 0.0.0   │ fork    │ 2513731  │ 34h    │ 2    │ online    │ 0%       │ 13.4mb   │ root     │ disabled │
+│ 50 │ toolkit-api            │ default     │ 0.0.0   │ fork    │ 826227   │ 10h    │ 4    │ online    │ 0%       │ 203.0mb  │ root     │ disabled │
+│ 24 │ turb-register          │ default     │ N/A     │ fork    │ 2513977  │ 34h    │ 1    │ online    │ 0%       │ 11.0mb   │ root     │ disabled │
+│ 2  │ unitool-proxy          │ default     │ 0.0.0   │ fork    │ 2513720  │ 34h    │ 8    │ online    │ 0%       │ 160.7mb  │ root     │ disabled │
+│ 42 │ xray                   │ default     │ 0.0.0   │ fork    │ 1900915  │ 0s     │ 1482 │ online    │ 0%       │ 21.6mb   │ root     │ disabled │
+│ 58 │ yonoo-proxy            │ default     │ N/A     │ fork    │ 248440   │ 15h    │ 285  │ online    │ 0%       │ 147.9mb  │ root     │ disabled │
+└────┴────────────────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘
+[update-subs] 2026-07-18 00:00:02
+[update-subs] subscriptions: 1
+  46 nodes from https://nowjump.tiaotiao.org/https://hi.nowjiasu.com/no...
+[update-subs] 46 nodes written, ports 10950~10995
+[update-subs] xray restarted
+Use --update-env to update environment variables
+[PM2] Applying action restartProcessId on app [xray](ids: [ 42 ])
+[PM2] [xray](42) ✓
+┌────┬────────────────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐
+│ id │ name                   │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├────┼────────────────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤
+│ 57 │ cewsco-pool            │ default     │ N/A     │ fork    │ 2526380  │ 39h    │ 0    │ online    │ 0%       │ 25.9mb   │ root     │ disabled │
+│ 16 │ code-server            │ default     │ N/A     │ fork    │ 2513774  │ 40h    │ 224  │ online    │ 0%       │ 4.3mb    │ root     │ disabled │
+│ 18 │ easytier               │ default     │ N/A     │ fork    │ 2513810  │ 40h    │ 1    │ online    │ 0%       │ 3.5mb    │ root     │ disabled │
+│ 34 │ fake-trace             │ default     │ N/A     │ fork    │ 2513993  │ 40h    │ 2    │ online    │ 0%       │ 13.4mb   │ root     │ disabled │
+│ 48 │ gptree-proxy           │ default     │ 0.2.1   │ fork    │ 2513995  │ 40h    │ 1    │ online    │ 0%       │ 55.0mb   │ root     │ disabled │
+│ 51 │ gratis-register        │ default     │ N/A     │ fork    │ 4111990  │ 24h    │ 9    │ online    │ 0%       │ 95.0mb   │ root     │ disabled │
+│ 21 │ grok2api               │ default     │ N/A     │ fork    │ 2513937  │ 40h    │ 8    │ online    │ 0%       │ 14.3mb   │ root     │ disabled │
+│ 0  │ new-api                │ default     │ N/A     │ fork    │ 3958007  │ 26h    │ 50   │ online    │ 0%       │ 66.6mb   │ root     │ disabled │
+│ 6  │ outlook-register       │ default     │ N/A     │ fork    │ 2513721  │ 40h    │ 2    │ online    │ 0%       │ 3.4mb    │ root     │ disabled │
+│ 3  │ st-proxy               │ default     │ 1.0.0   │ fork    │ 2513710  │ 40h    │ 1    │ online    │ 0%       │ 31.4mb   │ root     │ disabled │
+│ 31 │ sub1-airport-mihomo    │ default     │ N/A     │ fork    │ 2513953  │ 40h    │ 1    │ online    │ 5.9%     │ 27.2mb   │ root     │ disabled │
+│ 17 │ tauritavern            │ default     │ N/A     │ fork    │ 906731   │ 15h    │ 18   │ online    │ 0%       │ 140.7mb  │ root     │ disabled │
+│ 4  │ ticnote-proxy          │ default     │ 0.0.0   │ fork    │ 2513731  │ 40h    │ 2    │ online    │ 0%       │ 13.6mb   │ root     │ disabled │
+│ 50 │ toolkit-api            │ default     │ 0.0.0   │ fork    │ 826227   │ 16h    │ 4    │ online    │ 17.6%    │ 203.3mb  │ root     │ disabled │
+│ 24 │ turb-register          │ default     │ N/A     │ fork    │ 2513977  │ 40h    │ 1    │ online    │ 0%       │ 11.0mb   │ root     │ disabled │
+│ 2  │ unitool-proxy          │ default     │ 0.0.0   │ fork    │ 2513720  │ 40h    │ 8    │ online    │ 0%       │ 158.6mb  │ root     │ disabled │
+│ 42 │ xray                   │ default     │ 0.0.0   │ fork    │ 2558995  │ 0s     │ 1575 │ online    │ 0%       │ 19.3mb   │ root     │ disabled │
+│ 58 │ yonoo-proxy            │ default     │ N/A     │ fork    │ 248440   │ 21h    │ 285  │ online    │ 0%       │ 129.6mb  │ root     │ disabled │
+└────┴────────────────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘
+[update-subs] 2026-07-18 06:00:01
+[update-subs] subscriptions: 1
+  49 nodes from https://nowjump.tiaotiao.org/https://hi.nowjiasu.com/no...
+[update-subs] 46 nodes written, ports 10950~10995
+[update-subs] xray restarted
+Use --update-env to update environment variables
+[PM2] Applying action restartProcessId on app [xray](ids: [ 42 ])
+[PM2] [xray](42) ✓
+┌────┬────────────────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐
+│ id │ name                   │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├────┼────────────────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤
+│ 57 │ cewsco-pool            │ default     │ N/A     │ fork    │ 2526380  │ 45h    │ 0    │ online    │ 0%       │ 25.9mb   │ root     │ disabled │
+│ 16 │ code-server            │ default     │ N/A     │ fork    │ 2513774  │ 46h    │ 224  │ online    │ 0%       │ 4.3mb    │ root     │ disabled │
+│ 18 │ easytier               │ default     │ N/A     │ fork    │ 2513810  │ 46h    │ 1    │ online    │ 0%       │ 3.8mb    │ root     │ disabled │
+│ 34 │ fake-trace             │ default     │ N/A     │ fork    │ 2513993  │ 46h    │ 2    │ online    │ 0%       │ 13.2mb   │ root     │ disabled │
+│ 48 │ gptree-proxy           │ default     │ 0.2.1   │ fork    │ 2513995  │ 46h    │ 1    │ online    │ 0%       │ 54.0mb   │ root     │ disabled │
+│ 51 │ gratis-register        │ default     │ N/A     │ fork    │ 4111990  │ 30h    │ 9    │ online    │ 0%       │ 95.0mb   │ root     │ disabled │
+│ 21 │ grok2api               │ default     │ N/A     │ fork    │ 2513937  │ 46h    │ 8    │ online    │ 0%       │ 14.3mb   │ root     │ disabled │
+│ 0  │ new-api                │ default     │ N/A     │ fork    │ 3958007  │ 32h    │ 50   │ online    │ 0%       │ 44.3mb   │ root     │ disabled │
+│ 6  │ outlook-register       │ default     │ N/A     │ fork    │ 2513721  │ 46h    │ 2    │ online    │ 0%       │ 3.4mb    │ root     │ disabled │
+│ 3  │ st-proxy               │ default     │ 1.0.0   │ fork    │ 2513710  │ 46h    │ 1    │ online    │ 0%       │ 31.2mb   │ root     │ disabled │
+│ 31 │ sub1-airport-mihomo    │ default     │ N/A     │ fork    │ 2513953  │ 46h    │ 1    │ online    │ 0%       │ 26.2mb   │ root     │ disabled │
+│ 17 │ tauritavern            │ default     │ N/A     │ fork    │ 906731   │ 21h    │ 18   │ online    │ 0%       │ 97.9mb   │ root     │ disabled │
+│ 4  │ ticnote-proxy          │ default     │ 0.0.0   │ fork    │ 2513731  │ 46h    │ 2    │ online    │ 0%       │ 13.8mb   │ root     │ disabled │
+│ 50 │ toolkit-api            │ default     │ 0.0.0   │ fork    │ 826227   │ 22h    │ 4    │ online    │ 0%       │ 205.3mb  │ root     │ disabled │
+│ 24 │ turb-register          │ default     │ N/A     │ fork    │ 2513977  │ 46h    │ 1    │ online    │ 0%       │ 11.0mb   │ root     │ disabled │
+│ 2  │ unitool-proxy          │ default     │ 0.0.0   │ fork    │ 2513720  │ 46h    │ 8    │ online    │ 35.7%    │ 159.9mb  │ root     │ disabled │
+│ 42 │ xray                   │ default     │ 0.0.0   │ fork    │ 3214805  │ 0s     │ 1669 │ online    │ 0%       │ 14.6mb   │ root     │ disabled │
+│ 58 │ yonoo-proxy            │ default     │ N/A     │ fork    │ 248440   │ 27h    │ 285  │ online    │ 0%       │ 128.8mb  │ root     │ disabled │
+└────┴────────────────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘
+[update-subs] 2026-07-18 12:00:01
+[update-subs] subscriptions: 1
+  49 nodes from https://nowjump.tiaotiao.org/https://hi.nowjiasu.com/no...
+[update-subs] 46 nodes written, ports 10950~10995
+[update-subs] xray restarted
+Use --update-env to update environment variables
+[PM2] Applying action restartProcessId on app [xray](ids: [ 42 ])
+[PM2] [xray](42) ✓
+┌────┬────────────────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐
+│ id │ name                   │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├────┼────────────────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤
+│ 71 │ art-register           │ default     │ N/A     │ fork    │ 3846337  │ 12m    │ 0    │ online    │ 0%       │ 50.7mb   │ root     │ disabled │
+│ 57 │ cewsco-pool            │ default     │ N/A     │ fork    │ 3763658  │ 62m    │ 7    │ online    │ 0%       │ 32.3mb   │ root     │ disabled │
+│ 16 │ code-server            │ default     │ N/A     │ fork    │ 3719323  │ 90m    │ 226  │ online    │ 0%       │ 61.1mb   │ root     │ disabled │
+│ 18 │ easytier               │ default     │ N/A     │ fork    │ 3719354  │ 90m    │ 3    │ online    │ 0%       │ 30.9mb   │ root     │ disabled │
+│ 34 │ fake-trace             │ default     │ N/A     │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 61 │ gptchat-proxy          │ default     │ N/A     │ fork    │ 3719384  │ 90m    │ 1    │ online    │ 0%       │ 33.8mb   │ root     │ disabled │
+│ 48 │ gptree-proxy           │ default     │ 0.2.1   │ fork    │ 3719363  │ 90m    │ 3    │ online    │ 0%       │ 60.9mb   │ root     │ disabled │
+│ 51 │ gratis-register        │ default     │ N/A     │ fork    │ 0        │ 0      │ 9    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 21 │ grok2api               │ default     │ N/A     │ fork    │ 0        │ 0      │ 8    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 62 │ mail-hub               │ default     │ N/A     │ fork    │ 3719391  │ 90m    │ 2    │ online    │ 0%       │ 54.5mb   │ root     │ disabled │
+│ 6  │ outlook-register       │ default     │ N/A     │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 3  │ st-proxy               │ default     │ 1.0.0   │ fork    │ 3719310  │ 90m    │ 3    │ online    │ 0%       │ 49.5mb   │ root     │ disabled │
+│ 31 │ sub1-airport-mihomo    │ default     │ N/A     │ fork    │ 0        │ 0      │ 1    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 17 │ tauritavern            │ default     │ N/A     │ fork    │ 0        │ 0      │ 18   │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 4  │ ticnote-proxy          │ default     │ 0.0.0   │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 50 │ toolkit-api            │ default     │ 0.0.0   │ fork    │ 3811910  │ 28m    │ 4    │ online    │ 23.1%    │ 179.9mb  │ root     │ disabled │
+│ 24 │ turb-register          │ default     │ N/A     │ fork    │ 0        │ 0      │ 1    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 2  │ unitool-proxy          │ default     │ 0.0.0   │ fork    │ 0        │ 0      │ 8    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 42 │ xray                   │ default     │ 0.0.0   │ fork    │ 3857930  │ 0s     │ 1761 │ online    │ 0%       │ 12.0mb   │ root     │ disabled │
+│ 58 │ yonoo-proxy            │ default     │ N/A     │ fork    │ 0        │ 0      │ 285  │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+└────┴────────────────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘
+[update-subs] 2026-07-18 18:00:01
+[update-subs] subscriptions: 1
+  46 nodes from https://nowjump.tiaotiao.org/https://hi.nowjiasu.com/no...
+[update-subs] 46 nodes written, ports 10950~10995
+[update-subs] xray restarted
+Use --update-env to update environment variables
+[PM2] Applying action restartProcessId on app [xray](ids: [ 42 ])
+[PM2] [xray](42) ✓
+┌────┬────────────────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐
+│ id │ name                   │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├────┼────────────────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤
+│ 71 │ art-register           │ default     │ N/A     │ fork    │ 46261    │ 106m   │ 35   │ online    │ 0%       │ 70.6mb   │ root     │ disabled │
+│ 57 │ cewsco-pool            │ default     │ N/A     │ fork    │ 3763658  │ 7h     │ 7    │ online    │ 0%       │ 32.3mb   │ root     │ disabled │
+│ 16 │ code-server            │ default     │ N/A     │ fork    │ 3719323  │ 7h     │ 226  │ online    │ 0%       │ 57.1mb   │ root     │ disabled │
+│ 18 │ easytier               │ default     │ N/A     │ fork    │ 3719354  │ 7h     │ 3    │ online    │ 4.8%     │ 30.7mb   │ root     │ disabled │
+│ 34 │ fake-trace             │ default     │ N/A     │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 61 │ gptchat-proxy          │ default     │ N/A     │ fork    │ 3719384  │ 7h     │ 1    │ online    │ 0%       │ 33.8mb   │ root     │ disabled │
+│ 48 │ gptree-proxy           │ default     │ 0.2.1   │ fork    │ 3719363  │ 7h     │ 3    │ online    │ 0%       │ 65.2mb   │ root     │ disabled │
+│ 51 │ gratis-register        │ default     │ N/A     │ fork    │ 0        │ 0      │ 9    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 21 │ grok2api               │ default     │ N/A     │ fork    │ 0        │ 0      │ 8    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 62 │ mail-hub               │ default     │ N/A     │ fork    │ 3719391  │ 7h     │ 2    │ online    │ 0%       │ 58.9mb   │ root     │ disabled │
+│ 72 │ new-api                │ default     │ N/A     │ fork    │ 4090505  │ 3h     │ 0    │ online    │ 0%       │ 66.1mb   │ root     │ disabled │
+│ 6  │ outlook-register       │ default     │ N/A     │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 3  │ st-proxy               │ default     │ 1.0.0   │ fork    │ 3719310  │ 7h     │ 3    │ online    │ 0%       │ 55.3mb   │ root     │ disabled │
+│ 31 │ sub1-airport-mihomo    │ default     │ N/A     │ fork    │ 0        │ 0      │ 1    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 17 │ tauritavern            │ default     │ N/A     │ fork    │ 0        │ 0      │ 18   │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 4  │ ticnote-proxy          │ default     │ 0.0.0   │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 50 │ toolkit-api            │ default     │ 0.0.0   │ fork    │ 3811910  │ 6h     │ 4    │ online    │ 28.6%    │ 204.8mb  │ root     │ disabled │
+│ 24 │ turb-register          │ default     │ N/A     │ fork    │ 0        │ 0      │ 1    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 2  │ unitool-proxy          │ default     │ 0.0.0   │ fork    │ 0        │ 0      │ 8    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 42 │ xray                   │ default     │ 0.0.0   │ fork    │ 189654   │ 0s     │ 1853 │ online    │ 0%       │ 26.4mb   │ root     │ disabled │
+│ 58 │ yonoo-proxy            │ default     │ N/A     │ fork    │ 0        │ 0      │ 285  │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+└────┴────────────────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘
+[update-subs] 2026-07-19 00:00:01
+[update-subs] subscriptions: 1
+  46 nodes from https://nowjump.tiaotiao.org/https://hi.nowjiasu.com/no...
+[update-subs] 46 nodes written, ports 10950~10995
+[update-subs] xray restarted
+Use --update-env to update environment variables
+[PM2] Applying action restartProcessId on app [xray](ids: [ 42 ])
+[PM2] [xray](42) ✓
+┌────┬────────────────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐
+│ id │ name                   │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├────┼────────────────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤
+│ 71 │ art-register           │ default     │ N/A     │ fork    │ 46261    │ 7h     │ 35   │ online    │ 0%       │ 73.4mb   │ root     │ disabled │
+│ 57 │ cewsco-pool            │ default     │ N/A     │ fork    │ 3763658  │ 13h    │ 7    │ online    │ 0%       │ 32.3mb   │ root     │ disabled │
+│ 16 │ code-server            │ default     │ N/A     │ fork    │ 3719323  │ 13h    │ 226  │ online    │ 0%       │ 57.1mb   │ root     │ disabled │
+│ 18 │ easytier               │ default     │ N/A     │ fork    │ 3719354  │ 13h    │ 3    │ online    │ 0%       │ 30.7mb   │ root     │ disabled │
+│ 34 │ fake-trace             │ default     │ N/A     │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 61 │ gptchat-proxy          │ default     │ N/A     │ fork    │ 3719384  │ 13h    │ 1    │ online    │ 0%       │ 33.8mb   │ root     │ disabled │
+│ 48 │ gptree-proxy           │ default     │ 0.2.1   │ fork    │ 3719363  │ 13h    │ 3    │ online    │ 0%       │ 63.6mb   │ root     │ disabled │
+│ 51 │ gratis-register        │ default     │ N/A     │ fork    │ 0        │ 0      │ 9    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 21 │ grok2api               │ default     │ N/A     │ fork    │ 0        │ 0      │ 8    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 73 │ heck-pool              │ default     │ N/A     │ fork    │ 194558   │ 5h     │ 1    │ online    │ 0%       │ 23.3mb   │ root     │ disabled │
+│ 62 │ mail-hub               │ default     │ N/A     │ fork    │ 3719391  │ 13h    │ 2    │ online    │ 0%       │ 56.9mb   │ root     │ disabled │
+│ 72 │ new-api                │ default     │ N/A     │ fork    │ 212100   │ 5h     │ 5    │ online    │ 0%       │ 50.1mb   │ root     │ disabled │
+│ 6  │ outlook-register       │ default     │ N/A     │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 3  │ st-proxy               │ default     │ 1.0.0   │ fork    │ 3719310  │ 13h    │ 3    │ online    │ 0%       │ 53.5mb   │ root     │ disabled │
+│ 31 │ sub1-airport-mihomo    │ default     │ N/A     │ fork    │ 0        │ 0      │ 1    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 17 │ tauritavern            │ default     │ N/A     │ fork    │ 0        │ 0      │ 18   │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 4  │ ticnote-proxy          │ default     │ 0.0.0   │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 50 │ toolkit-api            │ default     │ 0.0.0   │ fork    │ 3811910  │ 12h    │ 4    │ online    │ 6.7%     │ 209.2mb  │ root     │ disabled │
+│ 24 │ turb-register          │ default     │ N/A     │ fork    │ 0        │ 0      │ 1    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 2  │ unitool-proxy          │ default     │ 0.0.0   │ fork    │ 0        │ 0      │ 8    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 42 │ xray                   │ default     │ 0.0.0   │ fork    │ 699793   │ 0s     │ 1946 │ online    │ 0%       │ 13.1mb   │ root     │ disabled │
+│ 58 │ yonoo-proxy            │ default     │ N/A     │ fork    │ 0        │ 0      │ 285  │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+└────┴────────────────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘
+[update-subs] 2026-07-19 06:00:01
+[update-subs] subscriptions: 1
+  46 nodes from https://nowjump.tiaotiao.org/https://hi.nowjiasu.com/no...
+[update-subs] 46 nodes written, ports 10950~10995
+[update-subs] xray restarted
+Use --update-env to update environment variables
+[PM2] Applying action restartProcessId on app [xray](ids: [ 42 ])
+[PM2] [xray](42) ✓
+┌────┬────────────────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐
+│ id │ name                   │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├────┼────────────────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤
+│ 71 │ art-register           │ default     │ N/A     │ fork    │ 1121824  │ 78m    │ 46   │ online    │ 0%       │ 58.9mb   │ root     │ disabled │
+│ 57 │ cewsco-pool            │ default     │ N/A     │ fork    │ 3763658  │ 19h    │ 7    │ online    │ 0%       │ 20.8mb   │ root     │ disabled │
+│ 16 │ code-server            │ default     │ N/A     │ fork    │ 3719323  │ 19h    │ 226  │ online    │ 0%       │ 8.8mb    │ root     │ disabled │
+│ 18 │ easytier               │ default     │ N/A     │ fork    │ 3719354  │ 19h    │ 3    │ online    │ 0%       │ 6.9mb    │ root     │ disabled │
+│ 34 │ fake-trace             │ default     │ N/A     │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 61 │ gptchat-proxy          │ default     │ N/A     │ fork    │ 3719384  │ 19h    │ 1    │ online    │ 0%       │ 15.1mb   │ root     │ disabled │
+│ 48 │ gptree-proxy           │ default     │ 0.2.1   │ fork    │ 3719363  │ 19h    │ 3    │ online    │ 0%       │ 49.9mb   │ root     │ disabled │
+│ 51 │ gratis-register        │ default     │ N/A     │ fork    │ 788282   │ 4h     │ 9    │ online    │ 0%       │ 39.4mb   │ root     │ disabled │
+│ 21 │ grok2api               │ default     │ N/A     │ fork    │ 0        │ 0      │ 8    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 73 │ heck-pool              │ default     │ N/A     │ fork    │ 194558   │ 11h    │ 1    │ online    │ 0%       │ 23.3mb   │ root     │ disabled │
+│ 62 │ mail-hub               │ default     │ N/A     │ fork    │ 896451   │ 3h     │ 3    │ online    │ 0%       │ 46.0mb   │ root     │ disabled │
+│ 72 │ new-api                │ default     │ N/A     │ fork    │ 212100   │ 11h    │ 5    │ online    │ 0%       │ 34.6mb   │ root     │ disabled │
+│ 6  │ outlook-register       │ default     │ N/A     │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 3  │ st-proxy               │ default     │ 1.0.0   │ fork    │ 3719310  │ 19h    │ 3    │ online    │ 0%       │ 44.5mb   │ root     │ disabled │
+│ 31 │ sub1-airport-mihomo    │ default     │ N/A     │ fork    │ 0        │ 0      │ 1    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 17 │ tauritavern            │ default     │ N/A     │ fork    │ 0        │ 0      │ 18   │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 4  │ ticnote-proxy          │ default     │ 0.0.0   │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 50 │ toolkit-api            │ default     │ 0.0.0   │ fork    │ 1034466  │ 2h     │ 5    │ online    │ 21.4%    │ 200.5mb  │ root     │ disabled │
+│ 24 │ turb-register          │ default     │ N/A     │ fork    │ 0        │ 0      │ 1    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 2  │ unitool-proxy          │ default     │ 0.0.0   │ fork    │ 0        │ 0      │ 8    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 42 │ xray                   │ default     │ 0.0.0   │ fork    │ 1236327  │ 0s     │ 2017 │ online    │ 0%       │ 13.9mb   │ root     │ disabled │
+│ 58 │ yonoo-proxy            │ default     │ N/A     │ fork    │ 0        │ 0      │ 285  │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+└────┴────────────────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘
+[update-subs] 2026-07-19 12:00:01
+[update-subs] subscriptions: 1
+  46 nodes from https://nowjump.tiaotiao.org/https://hi.nowjiasu.com/no...
+[update-subs] 46 nodes written, ports 10950~10995
+[update-subs] xray restarted
+Use --update-env to update environment variables
+[PM2] Applying action restartProcessId on app [xray](ids: [ 42 ])
+[PM2] [xray](42) ✓
+┌────┬────────────────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐
+│ id │ name                   │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├────┼────────────────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤
+│ 71 │ art-register           │ default     │ N/A     │ fork    │ 1600442  │ 106m   │ 49   │ online    │ 0%       │ 80.9mb   │ root     │ disabled │
+│ 57 │ cewsco-pool            │ default     │ N/A     │ fork    │ 3763658  │ 25h    │ 7    │ online    │ 0%       │ 15.5mb   │ root     │ disabled │
+│ 16 │ code-server            │ default     │ N/A     │ fork    │ 3719323  │ 25h    │ 226  │ online    │ 0%       │ 7.3mb    │ root     │ disabled │
+│ 18 │ easytier               │ default     │ N/A     │ fork    │ 3719354  │ 25h    │ 3    │ online    │ 0%       │ 3.5mb    │ root     │ disabled │
+│ 34 │ fake-trace             │ default     │ N/A     │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 61 │ gptchat-proxy          │ default     │ N/A     │ fork    │ 3719384  │ 25h    │ 1    │ online    │ 0%       │ 12.6mb   │ root     │ disabled │
+│ 48 │ gptree-proxy           │ default     │ 0.2.1   │ fork    │ 1611892  │ 97m    │ 4    │ online    │ 0%       │ 61.7mb   │ root     │ disabled │
+│ 51 │ gratis-register        │ default     │ N/A     │ fork    │ 788282   │ 10h    │ 9    │ online    │ 0%       │ 39.4mb   │ root     │ disabled │
+│ 21 │ grok2api               │ default     │ N/A     │ fork    │ 0        │ 0      │ 8    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 73 │ heck-pool              │ default     │ N/A     │ fork    │ 194558   │ 17h    │ 1    │ online    │ 0%       │ 23.3mb   │ root     │ disabled │
+│ 62 │ mail-hub               │ default     │ N/A     │ fork    │ 896451   │ 9h     │ 3    │ online    │ 0%       │ 50.3mb   │ root     │ disabled │
+│ 72 │ new-api                │ default     │ N/A     │ fork    │ 212100   │ 17h    │ 5    │ online    │ 0%       │ 40.7mb   │ root     │ disabled │
+│ 6  │ outlook-register       │ default     │ N/A     │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 3  │ st-proxy               │ default     │ 1.0.0   │ fork    │ 3719310  │ 25h    │ 3    │ online    │ 0%       │ 44.0mb   │ root     │ disabled │
+│ 31 │ sub1-airport-mihomo    │ default     │ N/A     │ fork    │ 0        │ 0      │ 1    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 17 │ tauritavern            │ default     │ N/A     │ fork    │ 0        │ 0      │ 18   │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 4  │ ticnote-proxy          │ default     │ 0.0.0   │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 50 │ toolkit-api            │ default     │ 0.0.0   │ fork    │ 1657459  │ 72m    │ 11   │ online    │ 28.6%    │ 209.3mb  │ root     │ disabled │
+│ 24 │ turb-register          │ default     │ N/A     │ fork    │ 0        │ 0      │ 1    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 2  │ unitool-proxy          │ default     │ 0.0.0   │ fork    │ 0        │ 0      │ 8    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 42 │ xray                   │ default     │ 0.0.0   │ fork    │ 1764828  │ 0s     │ 2031 │ online    │ 0%       │ 16.9mb   │ root     │ disabled │
+│ 58 │ yonoo-proxy            │ default     │ N/A     │ fork    │ 0        │ 0      │ 285  │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+└────┴────────────────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘
+[update-subs] 2026-07-19 18:00:01
+[update-subs] subscriptions: 1
+  46 nodes from https://nowjump.tiaotiao.org/https://hi.nowjiasu.com/no...
+[update-subs] 46 nodes written, ports 10950~10995
+[update-subs] xray restarted
+Use --update-env to update environment variables
+[PM2] Applying action restartProcessId on app [xray](ids: [ 42 ])
+[PM2] [xray](42) ✓
+┌────┬────────────────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐
+│ id │ name                   │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├────┼────────────────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤
+│ 71 │ art-register           │ default     │ N/A     │ fork    │ 1600442  │ 7h     │ 49   │ online    │ 0%       │ 85.7mb   │ root     │ disabled │
+│ 57 │ cewsco-pool            │ default     │ N/A     │ fork    │ 3763658  │ 31h    │ 7    │ online    │ 0%       │ 13.0mb   │ root     │ disabled │
+│ 16 │ code-server            │ default     │ N/A     │ fork    │ 3719323  │ 31h    │ 226  │ online    │ 0%       │ 6.4mb    │ root     │ disabled │
+│ 18 │ easytier               │ default     │ N/A     │ fork    │ 3719354  │ 31h    │ 3    │ online    │ 0%       │ 3.6mb    │ root     │ disabled │
+│ 34 │ fake-trace             │ default     │ N/A     │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 61 │ gptchat-proxy          │ default     │ N/A     │ fork    │ 3719384  │ 31h    │ 1    │ online    │ 0%       │ 12.2mb   │ root     │ disabled │
+│ 48 │ gptree-proxy           │ default     │ 0.2.1   │ fork    │ 1611892  │ 7h     │ 4    │ online    │ 0%       │ 33.5mb   │ root     │ disabled │
+│ 51 │ gratis-register        │ default     │ N/A     │ fork    │ 788282   │ 16h    │ 9    │ online    │ 0%       │ 34.2mb   │ root     │ disabled │
+│ 21 │ grok2api               │ default     │ N/A     │ fork    │ 0        │ 0      │ 8    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 73 │ heck-pool              │ default     │ N/A     │ fork    │ 194558   │ 23h    │ 1    │ online    │ 0%       │ 12.3mb   │ root     │ disabled │
+│ 62 │ mail-hub               │ default     │ N/A     │ fork    │ 896451   │ 15h    │ 3    │ online    │ 0%       │ 31.5mb   │ root     │ disabled │
+│ 72 │ new-api                │ default     │ N/A     │ fork    │ 212100   │ 23h    │ 5    │ online    │ 0%       │ 35.2mb   │ root     │ disabled │
+│ 6  │ outlook-register       │ default     │ N/A     │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 3  │ st-proxy               │ default     │ 1.0.0   │ fork    │ 3719310  │ 31h    │ 3    │ online    │ 0%       │ 31.9mb   │ root     │ disabled │
+│ 31 │ sub1-airport-mihomo    │ default     │ N/A     │ fork    │ 0        │ 0      │ 1    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 17 │ tauritavern            │ default     │ N/A     │ fork    │ 0        │ 0      │ 18   │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 4  │ ticnote-proxy          │ default     │ 0.0.0   │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 50 │ toolkit-api            │ default     │ 0.0.0   │ fork    │ 1839122  │ 5h     │ 12   │ online    │ 0%       │ 186.4mb  │ root     │ disabled │
+│ 24 │ turb-register          │ default     │ N/A     │ fork    │ 0        │ 0      │ 1    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 2  │ unitool-proxy          │ default     │ 0.0.0   │ fork    │ 0        │ 0      │ 8    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 42 │ xray                   │ default     │ 0.0.0   │ fork    │ 2241952  │ 0s     │ 2044 │ online    │ 0%       │ 16.2mb   │ root     │ disabled │
+│ 58 │ yonoo-proxy            │ default     │ N/A     │ fork    │ 0        │ 0      │ 285  │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+└────┴────────────────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘
+[update-subs] 2026-07-20 00:00:01
+[update-subs] subscriptions: 1
+  46 nodes from https://nowjump.tiaotiao.org/https://hi.nowjiasu.com/no...
+[update-subs] 46 nodes written, ports 10950~10995
+[update-subs] xray restarted
+Use --update-env to update environment variables
+[PM2] Applying action restartProcessId on app [xray](ids: [ 42 ])
+[PM2] [xray](42) ✓
+┌────┬────────────────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐
+│ id │ name                   │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├────┼────────────────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤
+│ 71 │ art-register           │ default     │ N/A     │ fork    │ 1600442  │ 13h    │ 49   │ online    │ 0%       │ 87.4mb   │ root     │ disabled │
+│ 57 │ cewsco-pool            │ default     │ N/A     │ fork    │ 3763658  │ 37h    │ 7    │ online    │ 0%       │ 13.3mb   │ root     │ disabled │
+│ 16 │ code-server            │ default     │ N/A     │ fork    │ 3719323  │ 37h    │ 226  │ online    │ 0%       │ 6.4mb    │ root     │ disabled │
+│ 18 │ easytier               │ default     │ N/A     │ fork    │ 3719354  │ 37h    │ 3    │ online    │ 0%       │ 3.5mb    │ root     │ disabled │
+│ 34 │ fake-trace             │ default     │ N/A     │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 61 │ gptchat-proxy          │ default     │ N/A     │ fork    │ 3719384  │ 37h    │ 1    │ online    │ 0%       │ 12.2mb   │ root     │ disabled │
+│ 48 │ gptree-proxy           │ default     │ 0.2.1   │ fork    │ 1611892  │ 13h    │ 4    │ online    │ 0%       │ 37.3mb   │ root     │ disabled │
+│ 51 │ gratis-register        │ default     │ N/A     │ fork    │ 788282   │ 22h    │ 9    │ online    │ 0%       │ 34.2mb   │ root     │ disabled │
+│ 21 │ grok2api               │ default     │ N/A     │ fork    │ 0        │ 0      │ 8    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 73 │ heck-pool              │ default     │ N/A     │ fork    │ 194558   │ 29h    │ 1    │ online    │ 0%       │ 12.3mb   │ root     │ disabled │
+│ 62 │ mail-hub               │ default     │ N/A     │ fork    │ 896451   │ 21h    │ 3    │ online    │ 0%       │ 31.0mb   │ root     │ disabled │
+│ 72 │ new-api                │ default     │ N/A     │ fork    │ 212100   │ 29h    │ 5    │ online    │ 0%       │ 42.2mb   │ root     │ disabled │
+│ 6  │ outlook-register       │ default     │ N/A     │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 3  │ st-proxy               │ default     │ 1.0.0   │ fork    │ 3719310  │ 37h    │ 3    │ online    │ 0%       │ 32.9mb   │ root     │ disabled │
+│ 31 │ sub1-airport-mihomo    │ default     │ N/A     │ fork    │ 0        │ 0      │ 1    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 17 │ tauritavern            │ default     │ N/A     │ fork    │ 0        │ 0      │ 18   │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 4  │ ticnote-proxy          │ default     │ 0.0.0   │ fork    │ 0        │ 0      │ 2    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 50 │ toolkit-api            │ default     │ 0.0.0   │ fork    │ 1839122  │ 11h    │ 12   │ online    │ 35.7%    │ 169.8mb  │ root     │ disabled │
+│ 24 │ turb-register          │ default     │ N/A     │ fork    │ 0        │ 0      │ 1    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 2  │ unitool-proxy          │ default     │ 0.0.0   │ fork    │ 0        │ 0      │ 8    │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 42 │ xray                   │ default     │ 0.0.0   │ fork    │ 2742652  │ 0s     │ 2057 │ online    │ 0%       │ 16.7mb   │ root     │ disabled │
+│ 58 │ yonoo-proxy            │ default     │ N/A     │ fork    │ 0        │ 0      │ 285  │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+└────┴────────────────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘
+[update-subs] 2026-07-20 06:00:01
+[update-subs] subscriptions: 1
+  46 nodes from https://nowjump.tiaotiao.org/https://hi.nowjiasu.com/no...
+[update-subs] 46 nodes written, ports 10950~10995
+[update-subs] xray restarted

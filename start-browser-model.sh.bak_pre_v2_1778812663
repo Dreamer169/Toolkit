@@ -1,0 +1,117 @@
+#!/bin/bash
+# v8.64 — browser-model 启动脚本 (VPS 45.205.27.248 — 数据盘版)
+
+export PORT=8092
+export NODE_ENV=production
+export PLAYWRIGHT_BROWSERS_PATH=/data/cache/ms-playwright
+export REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE=/data/cache/ms-playwright/chromium-1208/chrome-linux64/chrome
+export DISPLAY=:99
+export FRONTEND_DIR=/data/browser-model/public
+
+_is_cf_ip() {
+  local ip="$1"
+  [[ -z "$ip" ]] && return 1
+  case "$ip" in
+    104.1[6-9].*|104.2[0-9].*|104.3[01].*) return 0 ;;
+    172.6[4-9].*|172.7[01].*) return 0 ;;
+    141.101.6[4-9].*|141.101.[7-9][0-9].*|141.101.1[0-2][0-9].*) return 0 ;;
+    162.158.*|173.245.4[8-9].*|173.245.5[0-9].*|173.245.6[0-3].*) return 0 ;;
+    188.114.9[6-9].*|188.114.1[01][0-9].*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_pick_browser_proxy() {
+  _probe_replit_reachable() {
+    local proxy_arg="$1" url="https://replit.com/signup"
+    local out rc body
+    if [[ -n "$proxy_arg" ]]; then
+      out=$(curl -s -w "\n%{http_code}" --max-time 10 --socks5 "$proxy_arg" "$url" 2>/dev/null)
+    else
+      out=$(curl -s -w "\n%{http_code}" --max-time 10 "$url" 2>/dev/null)
+    fi
+    rc=$(echo "$out" | tail -1)
+    body=$(echo "$out" | head -c 600)
+    case "$rc" in
+      2*|3*) echo "replit-200/30x"; return 0 ;;
+      403)
+        if echo "$body" | grep -q "Just a moment"; then
+          echo "cf-js-challenge-acceptable"; return 0
+        fi
+        echo "replit-403-banned"; return 1 ;;
+      *) echo "replit-unreachable($rc)"; return 1 ;;
+    esac
+  }
+
+  # cooldown skip
+  _COOLED_PORTS=""
+  if [[ -f /root/Toolkit/.local/port_cooldown.json ]]; then
+    _COOLED_PORTS=$(python3 -c "import json,time; d=json.load(open(/root/Toolkit/.local/port_cooldown.json)); now=time.time()*1000; print( .join(p for p,t in d.get(bans,{}).items() if t>now))" 2>/dev/null)
+    [[ -n "$_COOLED_PORTS" ]] && echo "[picker] cooldown skip: ${_COOLED_PORTS}" >&2
+  fi
+  _is_cooled() { [[ " $_COOLED_PORTS " == *" $1 "* ]]; }
+
+  # Pool B — shadowsocks sticky-IP ports (优先)
+  for cand in 10857:HKBN-HK 10859:HGC-HK 10853:Fourplex-US 10855:M247-GB 10851:Datacamp-US 10910:tp-US1 10911:tp-US2 10912:tp-US3 10914:tp-UK 10915:tp-MX 10916:tp-US4 10854:HKT-HK; do
+    port="${cand%%:*}"; name="${cand##*:}"
+    _is_cooled "$port" && { echo "[picker] skip ${name}(${port}) — cooldown" >&2; continue; }
+    ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:${port}\b" || { echo "[picker] skip ${name}(${port}) — not listening" >&2; continue; }
+    EXIT=$(curl -s --max-time 8 --socks5 "127.0.0.1:${port}" https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
+    [[ -z "$EXIT" ]] && { echo "[picker] skip ${name}(${port}) — exit probe failed" >&2; continue; }
+    _is_cf_ip "$EXIT" && { echo "[picker] skip ${name}(${port}) — CF IP ${EXIT}" >&2; continue; }
+    _probe_status=$(_probe_replit_reachable "127.0.0.1:${port}")
+    [[ $? -ne 0 ]] && { echo "[picker] skip ${name}(${port}) — Replit unreachable: ${_probe_status}" >&2; continue; }
+    echo "[picker] ✓ Pool B PICK ${name}(${port}) exit=${EXIT}" >&2
+    echo "socks5://127.0.0.1:${port}|${name}@${EXIT}"
+    return 0
+  done
+
+  # DIRECT fallback
+  DIRECT_EXIT=$(curl -s --max-time 6 https://api.ipify.org 2>/dev/null | tr -d "[:space:]")
+  echo "[picker] DIRECT fallback exit=${DIRECT_EXIT}" >&2
+  echo "|DIRECT-VPS@${DIRECT_EXIT:-45.205.27.248}"
+}
+
+_picked="$(_pick_browser_proxy)"
+export BROWSER_PROXY="${_picked%%|*}"
+_brox="$BROWSER_PROXY"
+if [[ -z "$_brox" ]]; then
+  export BROKER_EXIT_FAMILY="direct"; unset BROKER_EXIT_SOCKS_PORT
+elif [[ "$_brox" == *":40000" ]]; then
+  export BROKER_EXIT_FAMILY="warp"; unset BROKER_EXIT_SOCKS_PORT
+else
+  export BROKER_EXIT_FAMILY="socks"
+  export BROKER_EXIT_SOCKS_PORT="$(echo "$_brox" | sed -E 's/.*:([0-9]+).*/\1/')"
+fi
+echo "[start-browser-model] BROWSER_PROXY=${BROWSER_PROXY} (${_picked##*|})"
+echo "[start-browser-model] BROKER_EXIT_FAMILY=${BROKER_EXIT_FAMILY} SOCKS_PORT=${BROKER_EXIT_SOCKS_PORT:-N/A}"
+
+mkdir -p /tmp/replit-broker
+printf '{"family":"%s","port":"%s","ts":%d}\n' "${BROKER_EXIT_FAMILY}" "${BROKER_EXIT_SOCKS_PORT:-}" "$(date +%s)" > /tmp/replit-broker/exit.json
+
+# dbus
+if [ ! -S /var/run/dbus/system_bus_socket ] || ! pgrep -f "dbus-daemon --system --fork" >/dev/null 2>&1; then
+  mkdir -p /var/run/dbus
+  /usr/bin/dbus-daemon --system --fork 2>/dev/null || true
+fi
+
+# Xvfb
+if ! pgrep -f "Xvfb :99" >/dev/null 2>&1; then
+  Xvfb :99 -screen 0 1920x1080x24 -ac & sleep 1
+fi
+
+# orphan chromium cleanup
+for pid in $(pgrep -f "remote-debugging-port=9222" 2>/dev/null); do
+  kill -9 "$pid" 2>/dev/null && echo "[start-browser-model] killed orphan chromium pid=$pid"
+done
+pid=$(ss -lntp 2>/dev/null | grep ":9222" | grep -oP "pid=\K[0-9]+" | head -1)
+[[ -n "$pid" ]] && kill -9 "$pid" 2>/dev/null
+rm -f /tmp/broker-chromium-profile/Singleton* 2>/dev/null
+sleep 0.5
+
+# release port 8092
+_stale=$(ss -lntp 2>/dev/null | grep ":8092" | grep -oP "pid=\K[0-9]+" | head -1)
+[[ -n "$_stale" ]] && kill -9 "$_stale" 2>/dev/null && echo "[start-browser-model] cleared stale :8092"
+sleep 0.3
+
+exec node --enable-source-maps /data/browser-model/dist/index.mjs

@@ -1158,7 +1158,6 @@ router.post("/tools/outlook/batch-oauth/auto-complete", async (req, res) => {
     }
     if (!rows.length) { res.json({ success: false, error: "没有需要授权的账号" }); return; }
 
-    // v8.97: 直接构建 payload（无预获取设备码），Python 端通过 CF proxy 自申请
     const autoPayload = rows.map(r => ({
       accountId: r.id,
       email: r.email,
@@ -1177,7 +1176,7 @@ router.post("/tools/outlook/batch-oauth/auto-complete", async (req, res) => {
     const acLogPath = `/tmp/dc_autocomplete_${Date.now()}.log`;
     const acLogFd = oAc(acLogPath, "a");
     const acProc = spawnAc(
-      "python3", [acScript, JSON.stringify(autoPayload), ""],  // v8.99: 空串→Python _pick_cf_proxy()独立中继
+      "python3", [acScript, JSON.stringify(autoPayload), ""],  // 空串→Python _pick_cf_proxy() 独立中继
       { detached: true, stdio: ["ignore", acLogFd, acLogFd], env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: "1" } }
     );
     acProc.unref();
@@ -1245,8 +1244,6 @@ router.post("/tools/outlook/batch-oauth/reauth-manual", async (req, res) => {
       return;
     }
 
-    // v8.97: 清零 token + 设为 needs_oauth_pending，不在 Node.js 预申请设备码
-    // Python 脚本会通过同一 CF proxy 自申请设备码（确保申请IP==授权IP==兑换IP）
     for (const r of rows) {
       await dbERm(
         "UPDATE accounts SET token=NULL, refresh_token=NULL, status='needs_oauth_pending', updated_at=NOW() WHERE id=$1",
@@ -1254,7 +1251,6 @@ router.post("/tools/outlook/batch-oauth/reauth-manual", async (req, res) => {
       );
     }
 
-    // v8.97: 直接构建 payload（无预获取设备码），Python 端自行申请
     const autoPayload = rows.map(r => ({
       accountId: r.id,
       email: r.email,
@@ -1277,7 +1273,7 @@ router.post("/tools/outlook/batch-oauth/reauth-manual", async (req, res) => {
     const rmLogPath = `/tmp/dc_reauth_${Date.now()}.log`;
     const rmLogFd = oRm(rmLogPath, "a");
     const rmProc = spawnRm(
-      "python3", [rmScript, JSON.stringify(autoPayload), ""],  // v8.99: 空串→Python _pick_cf_proxy()独立中继
+      "python3", [rmScript, JSON.stringify(autoPayload), ""],  // 空串→Python _pick_cf_proxy() 独立中继
       { detached: true, stdio: ["ignore", rmLogFd, rmLogFd], env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: "1" } }
     );
     rmProc.unref();
@@ -1499,7 +1495,6 @@ interface RegJob {
   child?: ReturnType<import("child_process").ChildProcess["kill"] extends (...args: unknown[]) => unknown ? never : never>;
 }
 
-// regJobs 已替换为持久化 jobQueue
 
 // 启动注册任务，立即返回 jobId
 // ── 完整工作流 Step 2/2：Outlook 注册主入口 ───────────────────────────────────
@@ -1519,8 +1514,8 @@ router.post("/tools/outlook/register", async (req, res) => {
     autoProxy = false,
     proxyMode = "cf",             // "cf" = 使用 CF IP 池 + xray 中继
     cfPort    = 443,
-    username  = "",               // v9.23: 预生成用户名
-    password  = "",               // v9.23: 预生成密码
+    username  = "",               // 预生成用户名
+    password  = "",               // 预生成密码
     workers  = 1,                   // parallel sub-process count
   } = req.body as {
     count?: number; proxy?: string; proxies?: string; headless?: boolean; delay?: number;
@@ -1543,11 +1538,8 @@ router.post("/tools/outlook/register", async (req, res) => {
 
   if (!proxy && autoProxy && proxyMode === "shared") {
     try {
-      // v8.95 BUG-FIX: pickSharedProxyPool 会返回 external CF IPs (http://IP:443)
-        // 这些 CF IP 只能通过 xray VLESS relay 使用，不支持直接 HTTP CONNECT 隧道
-        // → ERR_TUNNEL_CONNECTION_FAILED。改用 pickAdaptiveProxy("outlook") 正确优先
-        // local_socks5 (xray SOCKS5 端口 10820-10845) 和 webshare HTTP 真实代理。
-        const pickedRaw = await pickAdaptiveProxy("outlook", Math.min(10, n * 3));  // v9.00: 3x spare proxies for rate-limit rotation
+      // pickAdaptiveProxy 优先 local_socks5/webshare HTTP 真实代理，避免 CF IP 直接 HTTP CONNECT 失败
+      const pickedRaw = await pickAdaptiveProxy("outlook", Math.min(10, n * 3));  // 3x spare for rate-limit rotation
         const picked = pickedRaw.map((p) => ({ formatted: p.formatted, source: p.pool }));
       if (picked.length > 0) {
         proxyList = picked.map((p) => p.formatted);
@@ -1573,9 +1565,7 @@ router.post("/tools/outlook/register", async (req, res) => {
 
   const proxyDisplay = proxy ? proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@") : "无代理";
   const job = await jobQueue.create(jobId);
-  // 将代理池阶段收集的日志合并
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  for (const l of preJobLogs) job.logs.push(l as any);
+  for (const l of preJobLogs) jobQueue.pushLog(jobId, l);
   job.logs.push({ type: "start", message: `启动 ${eng} 注册 ${n} 个 Outlook 账号 (bot_protection_wait=${wait}s)${effectiveProxyMode === "cf" ? " [CF+xray代理池]" : proxy ? " [手动代理]" : ""}...` });
   if (proxy) job.logs.push({ type: "log", message: `🌐 代理: ${proxyDisplay}` });
   // 立即响应 jobId（不等待注册完成）
@@ -1605,7 +1595,7 @@ router.post("/tools/outlook/register", async (req, res) => {
     job.logs.push({ type: "log", message: `☁️ CF+xray 代理池：共享代理不可用时作为备用，每账号独占一个已测速 CF 节点` });
   }
 
-  // v9.23 BUG-FIX: pass pre-generated username/password to Python (first account)
+  // 预生成用户名/密码时传入 Python 脚本（第一个账号）
   if (username) {
     const cleanUser = (username as string).replace(/@outlook\.com$/i, "");
     args.push("--username", cleanUser);
@@ -1792,8 +1782,7 @@ router.post("/tools/outlook/register", async (req, res) => {
     _regLogStream.end(`=== JOB ${jobId} EXIT code=${code} ${new Date().toISOString()} ===\n`);
     try {
     // 解析 JSON 结果块
-    // v8.20: identityMap declared above (before stdout handler) for cross-handler access
-    try {
+      try {
       const jsonStart = jsonBuf.indexOf("[");
       if (jsonStart >= 0) {
         const cleaned = jsonBuf.slice(jsonStart).split("\n── JSON")[0].trim();
@@ -1819,7 +1808,7 @@ router.post("/tools/outlook/register", async (req, res) => {
     // 兼容: 老代码可能用 tokenMap, 提供别名
     const tokenMap = identityMap;
 
-    // v9.30 BUG-FIX: stdout 误捕防护 — 只持久化 JSON 确认成功的账号（identityMap 里有的）
+    // stdout 误捕防护 — 只持久化 JSON 确认成功的账号（identityMap 里有的）
     // 根因: 子进程打印 ✅ 行 → stdout handler 立即 push job.accounts →
     //       进程崩溃/超时导致 JSON 块未输出 → identityMap 为空 →
     //       okCount 仍 >0 → DB 写入"幽灵账号" status=active →
@@ -1835,7 +1824,7 @@ router.post("/tools/outlook/register", async (req, res) => {
           let accountRow: { id: number } | null = null;
           // 1. 保存到账号库（失败则跳过该账号）
           try {
-            // v8.20: identity bundle 同步入库 (cookies/fp/UA/exit_ip/port + token/refresh_token)
+            // identity bundle 同步入库 (cookies/fp/UA/exit_ip/port + token/refresh_token)
             // 解决: 注册时浏览器指纹/cookies/IP 全丢, retoken 时新指纹访问被微软判 abuse
             const _idn = identityMap.get(acc.email);
             accountRow = await queryOne<{ id: number }>(
@@ -1909,7 +1898,7 @@ router.post("/tools/outlook/register", async (req, res) => {
           } catch (emailErr) {
             job.logs.push({ type: "warn", message: `⚠ 邮箱库同步失败(${acc.email}): ${emailErr}` });
           }
-          // 3. 保存到档案库 — v8.21: 真持久化 cookies+fingerprint (不再依赖 job.fingerprint=null fallback)
+          // 3. 保存到档案库 (cookies+fingerprint 真持久化)
           //    archives 表 schema 早就有 cookies/fingerprint/identity_data jsonb 字段, 但历年来一直被
           //    archiveFingerprint=(job as any).fingerprint=null 写空, retoken 也从没读它. 现在
           //    archives.cookies/fingerprint 存注册时真实浏览器 storage_state + BrowserProfile dict,
@@ -1963,8 +1952,7 @@ router.post("/tools/outlook/register", async (req, res) => {
             const inlineRefresh = tok?.refresh_token || undefined;
             // Bug fix: inlineRefresh 存在时也应保存并跳过设备码（防止 refresh_token 被浏览器拦截但 access_token 未捕到时重复授权）
             if (inlineAccess || inlineRefresh) {
-              // v8.80 Bug N: 注册成功 in-browser OAuth 路径必须显式 status='active', 否则邮件中心/健康检查
-              // 基于 status 过滤会漏掉这些账号 (设备码 fallback path 已 active, 这里也补齐)
+              // in-browser OAuth 路径显式 status='active'（设备码 fallback path 已补齐）
               // archives 表通过 PG trigger 自动同步, 无需在此处手写 UPDATE archives.
               await execute(
                 "UPDATE accounts SET token=$1, refresh_token=$2, status='active', updated_at=NOW() WHERE email=$3 AND platform='outlook'",
@@ -2029,7 +2017,7 @@ router.post("/tools/outlook/register", async (req, res) => {
                 for (const _p of _pendingPorts) {
                   if (await _probePort(_p)) { _aliveProxyPort = _p; break; }
                 }
-                // v9.25 FIX: CF VLESS cannot reach Microsoft URLs; use residential SOCKS5
+                // CF VLESS cannot reach Microsoft URLs; use residential SOCKS5
                 const RESIDENTIAL_PORTS_FOR_AUTH = [10851, 10853, 10854, 10857, 10859];
                 let _autoProxy = _aliveProxyPort > 0 ? `socks5://127.0.0.1:${_aliveProxyPort}` : "";
                 let _proxyTag = _aliveProxyPort > 0 ? "per-account-alive" : "residential-fallback";
@@ -2044,7 +2032,7 @@ router.post("/tools/outlook/register", async (req, res) => {
                   { stdio: ["ignore", "pipe", "pipe"], env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: '1' } }
                 );
                 job.logs.push({ type: 'log', message: `🤖 自动完成 ${autoPayload.length} 个账号的设备码授权…` });
-                // v8.79 Bug L: 解析 Python 的 RESULTS: 行 → 跳过 error/suspended (它们 poll 必 timeout)
+                // 解析 Python 的 RESULTS: 行 → 跳过 error/suspended (它们 poll 必 timeout)
                 const _autoResults: Map<string, { status: string; msg: string }> = new Map();
                 autoProc.stdout?.on('data', (d: Buffer) => {
                   for (const line of d.toString().split('\n').filter(Boolean)) {
@@ -2057,7 +2045,6 @@ router.post("/tools/outlook/register", async (req, res) => {
                     }
                   }
                 });
-                // v9.01: stderr capture (stdio changed ignore->pipe)
                 autoProc.stderr?.on('data', (d2: Buffer) => {
                   const errL = d2.toString().split('\n').filter(Boolean);
                   for (const el of errL) {
@@ -2066,10 +2053,8 @@ router.post("/tools/outlook/register", async (req, res) => {
                       job.logs.push({ type: 'log', message: '[auto-auth-sys] ' + et.slice(0, 200) });
                   }
                 });
-                // v9.01: token exchange done inside Python via CF proxy
                 autoProc.on('close', (code: number | null) => {
                   job.logs.push({ type: code === 0 ? 'success' : 'warn', message: '\u{1F916} \u81EA\u52A8\u6388\u6743\u5B8C\u6210 (code=' + code + ') \u2014 token \u5DF2\u7531 Python \u5728 CF proxy \u5185\u5151\u6362\u5165\u5E93' });
-                  // v9.02: persist auto-auth logs after process completes
                   PersistenceManager.save(job).catch(() => {});
                 });
               }
@@ -2131,6 +2116,7 @@ function classifyToolJob(jobId: string) {
   if (jobId.startsWith("cur_")) return { source: "tools", kind: "cursor_register", title: "Cursor 注册" };
   if (jobId.startsWith("retoken_")) return { source: "tools", kind: "outlook_retoken", title: "Outlook Retoken" };
   if (jobId.startsWith("ip2free_")) return { source: "tools", kind: "ip2free_register", title: "ip2free 注册" };
+  if (jobId.startsWith("sched_outlook_")) return { source: "tools", kind: "outlook_schedule", title: "定时 Outlook 注册" };
   return { source: "tools", kind: "tool_job", title: "工具任务" };
 }
 
@@ -2140,7 +2126,9 @@ router.get("/tools/jobs", async (_req, res) => {
   // 过滤0成功已完成任务，同时从内存中清除
   const filtered = [];
   for (const job of allJobs) {
-    if (DONE_STATUSES.includes(job.status) && (job.accounts?.length ?? 0) === 0) {
+    // 定时任务（sched_）即使0账号也保留，方便 Monitor 查看执行记录
+    const isSchedJob = job.jobId.startsWith("sched_");
+    if (!isSchedJob && DONE_STATUSES.includes(job.status) && (job.accounts?.length ?? 0) === 0) {
       await jobQueue.remove(job.jobId);
       continue;
     }
@@ -2176,6 +2164,7 @@ router.get("/tools/jobs/:jobId", async (req, res) => {
     logs: job.logs.slice(since),
     nextSince: job.logs.length,
     exitCode: job.exitCode,
+    finishedAt: job.finishedAt ?? null,
   });
 });
 
@@ -2880,8 +2869,7 @@ router.post("/tools/ip2free/register", async (req, res) => {
   const primaryProxy    = proxyList[0] ?? "";
   const proxyDisplay    = primaryProxy ? primaryProxy.replace(/:([^:@]{4})[^:@]*@/, ":****@") : "无代理";
   const job = await jobQueue.create(jobId);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  for (const l of preJobLogs) job.logs.push(l as any);
+  for (const l of preJobLogs) jobQueue.pushLog(jobId, l);
   job.logs.push({ type: "start", message: `启动 ip2free 注册: ${email} [${proxyList.length} 个代理备选]` });
 
   res.json({ success: true, jobId, message: "ip2free 注册任务已启动" });
@@ -3234,7 +3222,7 @@ async function pickAdaptiveProxy(
   for (const pool of order) {
     if (remain <= 0) break;
     let filter = "";
-    if (pool === "webshare_http")  filter = "AND formatted ILIKE 'http://%@%'";  // v8.98: exclude bare CF IPs (http://IP:443 no-auth) — they need xray relay, cannot do HTTP CONNECT
+    if (pool === "webshare_http")  filter = "AND formatted ILIKE 'http://%@%'";  // exclude bare CF IPs (http://IP:443, no-auth) — they require xray relay, cannot do HTTP CONNECT
     if (pool === "local_socks5")   filter = `AND host='127.0.0.1' AND port BETWEEN 10820 AND 10860`;
     if (pool === "subnode_bridge") filter = `AND host='127.0.0.1' AND port BETWEEN 1089 AND 1199`;
     if (!filter) continue;
@@ -4730,7 +4718,7 @@ router.post("/tools/outlook/auto-verify-emails", async (req, res) => {
 
         // 对每封匹配邮件执行点击验证
         for (const msg of msgs) {
-          // v9.27 SSL-fix: pre-extract verify URL in TS (microsoftFetch handles proxy/SSL correctly)
+          // pre-extract verify URL in TS (microsoftFetch handles proxy/SSL correctly)
           // This avoids SSL EOF errors in click_verify_link.py's Python HTTP client
           let _preVerifyUrl = "";
           try {
@@ -4760,7 +4748,7 @@ router.post("/tools/outlook/auto-verify-emails", async (req, res) => {
             child.on("error", (e) => resolve({ success: false, error: e.message }));
             setTimeout(() => { child.kill(); resolve({ success: false, error: "timeout" }); }, 45000);
           });
-          // v9.27 Fix3+4: auto-tag replit_used after verify-link click
+          // auto-tag replit_used after verify-link click
           // 'Success! You can now close this window' -> replit_used
           // 'already registered / already exists' -> also replit_used (consumed)
           const _vFinalUrl = (clickResult.final_url ?? "").toLowerCase();
@@ -6026,7 +6014,6 @@ router.delete('/tools/outlook/full-workflow/:jobId', (req, res) => {
 
 
 // ── GET /tools/unitool/token-stats — 触发 unitool_token_stats.py 刷新缓存 ──
-// v5.40: 此路由之前缺失，导致监控页"刷新 token 余额"按钮无效
 router.get("/tools/unitool/token-stats", async (req, res) => {
   const forceRefresh = req.query.refresh === "1";
   try {
@@ -6317,6 +6304,287 @@ router.post("/tools/yn-register", async (req, res) => {
   } catch (e: unknown) {
     res.status(500).json({ success: false, error: String(e) });
   }
+});
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── Outlook 每日随机分布注册调度器 ───────────────────────────────────────────
+// 将每日目标均匀随机分散到全天，每个时间槽注册 1 个账号
+// dailyCount / floatRatio / targetCount 热更新，无需重启或重新启用
+// ══════════════════════════════════════════════════════════════════════════════
+
+interface OutlookScheduleState {
+  enabled:      boolean;
+  targetCount:  number;   // 账号池上限，达到后停止
+  dailyCount:   number;   // 每日目标注册数
+  floatRatio:   number;   // 随机浮动比例 0.0–0.5，实际数 = dailyCount × (1 ± floatRatio)
+  engine:       string;   // patchright | playwright
+  proxyMode:    string;   // "cf" | ""
+  nextRunAt:    number | null;
+  lastRunAt:    number | null;
+  lastRunResult: { registered: number; attempted: number; error?: string } | null;
+  runCount:     number;
+  todaySlots:   number[]; // 今日各槽触发时间戳(ms)，升序
+  todayDate:    string;   // "YYYY-MM-DD"，日期切换时重新生成
+}
+
+let _outlookSched: OutlookScheduleState = {
+  enabled:      false,
+  targetCount:  500,
+  dailyCount:   24,
+  floatRatio:   0.2,
+  engine:       "patchright",
+  proxyMode:    "cf",
+  nextRunAt:    null,
+  lastRunAt:    null,
+  lastRunResult: null,
+  runCount:     0,
+  todaySlots:   [],
+  todayDate:    "",
+};
+
+let _schedTimer:   ReturnType<typeof setTimeout> | null = null;
+let _schedRunning: boolean = false;
+
+function _todayDateStr(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** 将全天 0:00–24:00 均分为 actual 个窗口，各窗口内随机取一个时间点 */
+function buildDailyPlan(): number[] {
+  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+  const variation  = (_outlookSched.floatRatio * 2 * Math.random()) - _outlookSched.floatRatio;
+  const actual     = Math.max(1, Math.round(_outlookSched.dailyCount * (1 + variation)));
+  const windowMs   = (24 * 60 * 60 * 1000) / actual;
+  const slots: number[] = [];
+  for (let i = 0; i < actual; i++) {
+    const winStart = todayStart.getTime() + i * windowMs;
+    slots.push(winStart + Math.random() * windowMs);
+  }
+  return slots; // 已升序
+}
+
+/** 臂定时器，指向 todaySlots 中下一个未触发的槽；今日所有槽已过则等到明天 */
+function armScheduleTimer(): void {
+  if (_schedTimer) { clearTimeout(_schedTimer); _schedTimer = null; }
+  if (!_outlookSched.enabled) { _outlookSched.nextRunAt = null; return; }
+
+  const td = _todayDateStr();
+  if (_outlookSched.todayDate !== td || _outlookSched.todaySlots.length === 0) {
+    _outlookSched.todayDate  = td;
+    _outlookSched.todaySlots = buildDailyPlan();
+  }
+
+  const now  = Date.now();
+  const next = _outlookSched.todaySlots.find(t => t > now);
+  if (!next) {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(0, 0, 0, 0);
+    _outlookSched.nextRunAt = null;
+    _schedTimer = setTimeout(() => armScheduleTimer(), tomorrow.getTime() - now + 1000);
+    return;
+  }
+
+  _outlookSched.nextRunAt = next;
+  _schedTimer = setTimeout(async () => {
+    try { await runScheduledOutlookReg(); } catch {}
+    armScheduleTimer();
+  }, Math.max(0, next - Date.now()));
+}
+
+async function runScheduledOutlookReg(): Promise<void> {
+  if (_schedRunning) return;
+  _schedRunning = true;
+  let registered = 0;
+  let lastErr: string | undefined;
+  const jobId = `sched_outlook_${Date.now()}`;
+
+  try {
+    const rows = await query<{ cnt: string }>(
+      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active'"
+    );
+    const current = parseInt(rows[0]?.cnt ?? "0", 10);
+    if (current >= _outlookSched.targetCount) {
+      _outlookSched.lastRunResult = { registered: 0, attempted: 0 };
+      _outlookSched.runCount++;
+      return;
+    }
+
+    await jobQueue.create(jobId);
+    jobQueue.pushLog(jobId, {
+      type: "log",
+      message: `[sched] 触发：current=${current} target=${_outlookSched.targetCount} engine=${_outlookSched.engine}`,
+    });
+
+    const { spawn } = await import("child_process");
+    const scriptPath = new URL("../outlook_register.py", import.meta.url).pathname;
+    const args = [
+      scriptPath,
+      "--count",    "1",
+      "--engine",   _outlookSched.engine,
+      "--headless", "true",
+      "--wait",     "11",
+      "--retries",  "4",
+      "--delay",    "2",
+    ];
+    if (_outlookSched.proxyMode === "cf") args.push("--proxy-mode", "cf");
+
+    const child = spawn("python3", args, {
+      env: {
+        ...(process.env as Record<string, string>),
+        PYTHONUNBUFFERED:         "1",
+        PLAYWRIGHT_BROWSERS_PATH: "/data/cache/ms-playwright",
+        DISPLAY:                  process.env.DISPLAY || ":99",
+      },
+    });
+    jobQueue.setChild(jobId, child);
+
+    let lineBuf = "";
+
+    const processLine = (line: string): void => {
+      const t = line.trim();
+      if (!t) return;
+      jobQueue.pushLog(jobId, {
+        type: "log",
+        message: t.length > 600 ? t.slice(0, 600) + " …[truncated]" : t,
+      });
+      if (!t.startsWith("-- INLINE_RESULT --")) return;
+      try {
+        const r = JSON.parse(t.slice("-- INLINE_RESULT --".length).trim()) as Record<string, unknown>;
+        if (!r.success || !r.email) return;
+        registered++;
+        const em = String(r.email);
+        jobQueue.pushAccount(jobId, { email: em, password: String(r.password ?? "") });
+        (async () => {
+          try {
+            const ar = await queryOne<{ id: number }>(
+              `INSERT INTO accounts
+                 (platform, email, password, status, token, refresh_token,
+                  cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port, proxy_formatted)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+               ON CONFLICT (platform, email) DO UPDATE SET
+                 password         = EXCLUDED.password,
+                 status           = active,
+                 token            = COALESCE(NULLIF(EXCLUDED.token,),            accounts.token),
+                 refresh_token    = COALESCE(NULLIF(EXCLUDED.refresh_token,),    accounts.refresh_token),
+                 cookies_json     = COALESCE(NULLIF(EXCLUDED.cookies_json,),     accounts.cookies_json),
+                 fingerprint_json = COALESCE(NULLIF(EXCLUDED.fingerprint_json,), accounts.fingerprint_json),
+                 user_agent       = COALESCE(NULLIF(EXCLUDED.user_agent,),       accounts.user_agent),
+                 exit_ip          = COALESCE(NULLIF(EXCLUDED.exit_ip,),          accounts.exit_ip),
+                 proxy_port       = COALESCE(NULLIF(EXCLUDED.proxy_port,0),        accounts.proxy_port),
+                 proxy_formatted  = COALESCE(NULLIF(EXCLUDED.proxy_formatted,),  accounts.proxy_formatted),
+                 updated_at       = NOW()
+               RETURNING id`,
+              ["outlook", em, String(r.password ?? ""), "active",
+               (r.access_token     as string) || null,
+               (r.refresh_token    as string) || null,
+               (r.cookies_json     as string) || null,
+               (r.fingerprint_json as string) || null,
+               (r.user_agent       as string) || null,
+               (r.exit_ip          as string) || null,
+               (r.proxy_port       as number) || null,
+               (r.proxy_formatted  as string) || (r.proxy_port ? `socks5://127.0.0.1:${r.proxy_port}` : null)]
+            );
+            jobQueue.pushLog(jobId, { type: "success", message: `✅ [sched] 已入库: ${em} id=${ar?.id}` });
+          } catch (dbErr) {
+            jobQueue.pushLog(jobId, { type: "warn", message: `⚠ [sched] 入库失败(${em}): ${String(dbErr).slice(0, 150)}` });
+          }
+        })();
+      } catch (parseErr) {
+        jobQueue.pushLog(jobId, { type: "warn", message: `⚠ [sched] INLINE_RESULT 解析失败: ${String(parseErr).slice(0, 120)}` });
+      }
+    };
+
+    await new Promise<void>((resolve) => {
+      child.stdout.on("data", (chunk: Buffer) => {
+        lineBuf += chunk.toString();
+        const parts = lineBuf.split("\n");
+        lineBuf = parts.pop() ?? "";
+        for (const line of parts) processLine(line);
+      });
+      child.stderr.on("data", (chunk: Buffer) => {
+        const msg = chunk.toString().trim();
+        if (msg) {
+          lastErr = msg.slice(0, 200);
+          jobQueue.pushLog(jobId, { type: "log", message: "[err] " + msg });
+        }
+      });
+      child.on("close", (code: number | null) => {
+        if (lineBuf.trim()) processLine(lineBuf);
+        jobQueue.finish(jobId, code ?? -1, code === 0 ? "done" : "failed");
+        resolve();
+      });
+      child.on("error", (e: Error) => { lastErr = e.message; resolve(); });
+      setTimeout(() => { child.kill(); resolve(); }, 15 * 60 * 1000);
+    });
+
+    _outlookSched.lastRunResult = { registered, attempted: 1, ...(lastErr ? { error: lastErr } : {}) };
+    _outlookSched.runCount++;
+  } catch (e: unknown) {
+    lastErr = String(e);
+    _outlookSched.lastRunResult = { registered: 0, attempted: 1, error: lastErr };
+    try { jobQueue.finish(jobId, -1, "failed"); } catch {}
+  } finally {
+    _schedRunning = false;
+    _outlookSched.lastRunAt = Date.now();
+  }
+}
+
+// GET /api/tools/outlook/schedule
+router.get("/tools/outlook/schedule", async (_req, res) => {
+  try {
+    const rows = await query<{ cnt: string }>(
+      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active'"
+    );
+    const currentCount = parseInt(rows[0]?.cnt ?? "0", 10);
+    res.json({ success: true, currentCount, ..._outlookSched });
+  } catch (e) {
+    res.status(500).json({ success: false, error: String(e) });
+  }
+});
+
+// POST /api/tools/outlook/schedule — 热更新配置（启用中也可修改，立即重新生成今日计划）
+router.post("/tools/outlook/schedule", async (req, res) => {
+  const { enabled, targetCount, dailyCount, floatRatio, engine, proxyMode } =
+    req.body as Partial<OutlookScheduleState>;
+
+  if (typeof enabled     === "boolean") _outlookSched.enabled     = enabled;
+  if (typeof targetCount === "number" && targetCount >= 1)
+    _outlookSched.targetCount = Math.floor(targetCount);
+  if (typeof dailyCount  === "number" && dailyCount  >= 1)
+    _outlookSched.dailyCount  = Math.min(288, Math.floor(dailyCount));
+  if (typeof floatRatio  === "number")
+    _outlookSched.floatRatio  = Math.min(0.5, Math.max(0, floatRatio));
+  if (typeof engine    === "string" && ["patchright", "playwright"].includes(engine))
+    _outlookSched.engine = engine;
+  if (typeof proxyMode === "string") _outlookSched.proxyMode = proxyMode;
+
+  // 任何配置变更强制重新生成今日计划
+  _outlookSched.todayDate  = "";
+  _outlookSched.todaySlots = [];
+  armScheduleTimer();
+
+  try {
+    const rows = await query<{ cnt: string }>(
+      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active'"
+    );
+    const currentCount = parseInt(rows[0]?.cnt ?? "0", 10);
+    res.json({ success: true, currentCount, ..._outlookSched });
+  } catch {
+    res.json({ success: true, currentCount: 0, ..._outlookSched });
+  }
+});
+
+// POST /api/tools/outlook/schedule/run-now — 立即触发一次
+router.post("/tools/outlook/schedule/run-now", async (_req, res) => {
+  if (_schedRunning) {
+    res.json({ success: false, message: "调度任务正在运行，请稍候" });
+    return;
+  }
+  res.json({ success: true, message: "已触发立即运行" });
+  runScheduledOutlookReg().catch(() => {});
 });
 
 export default router;

@@ -93,6 +93,7 @@ import { useState, useRef, useEffect } from "react";
   import FullWorkflow from "@/pages/FullWorkflow";
   import GeneralTools from "@/pages/GeneralTools";
   import GratisPanel from "@/pages/GratisPanel";
+import ArPanel from "@/pages/ArPanel";
   import Monitor from "@/pages/Monitor";
   import CursorRegister from "@/pages/CursorRegister";
   import Sub2ApiManager from "@/pages/Sub2ApiManager";
@@ -107,14 +108,16 @@ import { useState, useRef, useEffect } from "react";
   import OxylabsRegister from "@/pages/OxylabsRegister";
 import GpRegister from "@/pages/GpRegister";
 import YnRegister from "@/pages/YnRegister";
+import CodexControl from "@/pages/CodexControl";
 import Ip2freeProxy from "@/pages/Ip2freeProxy";
 
   const queryClient = new QueryClient();
 
-  type Tab = "vscode" | "turb-register" | "home" | "agent" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "machine-reset" | "fingerprint" | "outlook" | "mail-center" | "cursor-register" | "replit-register" | "sub2api" | "team-register" | "openai-pool" | "data-manager" | "full-workflow" | "monitor" | "sms-center" | "captcha" | "waf-bypass" | "unitool-login" | "webshare-register" | "oxylabs-register" | "general-tools" | "gratis-panel" | "gp-register" | "yn-register" | "ip2free-proxy";
+  type Tab = "vscode" | "turb-register" | "home" | "agent" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "machine-reset" | "fingerprint" | "outlook" | "mail-center" | "cursor-register" | "replit-register" | "sub2api" | "team-register" | "openai-pool" | "data-manager" | "full-workflow" | "monitor" | "sms-center" | "captcha" | "waf-bypass" | "unitool-login" | "webshare-register" | "oxylabs-register" | "general-tools" | "gratis-panel" | "gp-register" | "yn-register" | "ip2free-proxy" | "codex-control" | "ar-panel";
 
   // ─── 主导航标签（常驻显示）───────────────────────────────────────────────────
   const PRIMARY_TABS: { id: Tab; label: string; icon: string }[] = [
+    { id: "codex-control", label: "Codex 控制台", icon: "⬡" },
     { id: "vscode", label: "VS Code", icon: "💻" },
     { id: "full-workflow", label: "完整工作流", icon: "🔗" },
     { id: "general-tools",  label: "通用模块",   icon: "🧩" },
@@ -123,6 +126,7 @@ import Ip2freeProxy from "@/pages/Ip2freeProxy";
     { id: "data-manager",  label: "数据管理",   icon: "🗄️" },
     { id: "outlook",       label: "Outlook 工作流", icon: "📧" },
     { id: "gratis-panel",  label: "Gratis 账号池",  icon: "🆓" },
+    { id: "ar-panel",      label: "Arting 账号池",  icon: "🎨" },
     { id: "gp-register",   label: "GPTree 注册",    icon: "🌲" },
     { id: "yn-register",   label: "Yonoo 注册",     icon: "🌀" },
   ];
@@ -289,7 +293,7 @@ import Ip2freeProxy from "@/pages/Ip2freeProxy";
             </div>
           ) : (
             <main className="max-w-7xl mx-auto px-4 py-8">
-              {tab === "home"              && <Home />}
+              {tab === "home"              && <Home onNavigate={switchTab} />}
               {tab === "agent"             && <AIAssistant onNavigate={(nextTab) => switchTab(nextTab as Tab)} />}
               {tab === "email"             && <TempEmail />}
               {tab === "bulk-email"        && <BulkEmail />}
@@ -315,10 +319,12 @@ import Ip2freeProxy from "@/pages/Ip2freeProxy";
               {tab === "full-workflow"     && <FullWorkflow />}
               {tab === "general-tools"     && <GeneralTools />}
               {tab === "gratis-panel"      && <GratisPanel />}
+              {tab === "ar-panel"         && <ArPanel />}
               {tab === "gp-register"      && <GpRegister />}
               {tab === "yn-register"      && <YnRegister />}
               {tab === "ip2free-proxy"    && <Ip2freeProxy />}
               {tab === "monitor"           && <Monitor />}
+              {tab === "codex-control"     && <CodexControl />}
             </main>
           )}
         </div>

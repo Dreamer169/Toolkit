@@ -1,0 +1,820 @@
+#!/usr/bin/env python3
+"""
+ip2free_proxy_sync.py v3.0
+-------------------------
+Toolkit-integrated sync daemon for ip2free.com proxy pools.
+
+Responsibilities:
+  1. Read ip2free credentials from Toolkit DB (accounts.platform='ip2free'),
+     or from a local env file, or from CLI args.
+  2. For every account, login to api.ip2free.com.
+  3. Fetch free SOCKS5 proxies from /api/ip/freeList and add them to the
+     VPS resi_pool (free proxy pool).
+  4. Claim daily event rewards (task_code=client_click) via /api/website/linkClick
+     + /api/account/finishTask, then fetch activity proxies from /api/ip/taskIpList.
+  5. Persist activity proxies separately (JSON) with metadata and expiration.
+  6. Run once or loop every 8 hours.
+
+Run once:
+    python3 ip2free_proxy_sync.py --probe
+
+Run as 8-hour cron:
+    python3 ip2free_proxy_sync.py --probe --loop
+
+Toolkit API trigger:
+    POST /api/tools/ip2free/proxies/sync  -> body: { probe?: bool }
+"""
+
+import argparse
+import json
+import os
+import sys
+import fcntl
+import atexit
+import time
+import traceback
+import warnings
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
+
+warnings.filterwarnings("ignore")
+
+# ── resi_pool integration (VPS paths) ─────────────────────────────────────────
+RESI_POOL_PATHS = ["/data/Toolkit/scripts", "/root/Toolkit/scripts"]
+for _rp in RESI_POOL_PATHS:
+    if _rp not in sys.path and os.path.isdir(_rp):
+        sys.path.insert(0, _rp)
+
+try:
+    import resi_pool
+except Exception as _exc:
+    print(f"[warn] resi_pool import failed: {_exc}", file=sys.stderr)
+    resi_pool = None  # type: ignore
+
+import requests
+import urllib3
+
+urllib3.disable_warnings()
+
+BASE_API = "https://api.ip2free.com"
+UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.85 Safari/537.36"
+)
+COMMON_H = {
+    "User-Agent": UA,
+    "Accept": "*/*",
+    "Accept-Language": "zh-CN",
+    "Origin": "https://www.ip2free.com",
+    "Referer": "https://www.ip2free.com/",
+    "domain": "www.ip2free.com",
+    "lang": "cn",
+    "webname": "IP2FREE",
+    "affid": "",
+    "invitecode": "",
+    "serviceid": "",
+}
+
+# Files written by the daemon
+FREE_PROXY_FILE = "/tmp/ip2free_free_proxies.json"
+EVENT_PROXY_FILE = "/tmp/ip2free_event_proxies.json"
+SYNC_STATE_FILE = "/tmp/ip2free_sync_state.json"
+LOCK_FILE       = "/tmp/ip2free_proxy_sync.lock"
+DEFAULT_ENV_FILE = "/data/Toolkit/.ip2free_proxy.env"
+
+# Daily event codes that can be claimed automatically via API
+AUTO_CLAIMABLE_CODES = {"client_click"}
+
+
+def _api_session() -> requests.Session:
+    s = requests.Session()
+    s.verify = False
+    s.headers.update(COMMON_H)
+    return s
+
+
+def login(email: str, pw: str) -> Tuple[requests.Session, str, str]:
+    s = _api_session()
+    r = s.post(
+        f"{BASE_API}/api/account/login?",
+        data=json.dumps({"email": email, "password": pw}),
+        headers={"Content-Type": "text/plain;charset=UTF-8"},
+        timeout=15,
+    )
+    r.raise_for_status()
+    payload = r.json()
+    if payload.get("code") != 0:
+        raise RuntimeError(f"login failed: {payload}")
+    tok = payload.get("data", {}).get("token")
+    if not tok:
+        raise RuntimeError("login success but no token")
+    inv = (payload.get("data", {}).get("profile") or {}).get("invite_code", "")
+    s.headers["x-token"] = tok
+    return s, tok, inv
+
+
+
+def _build_pm_proxy_dict(p: Dict[str, Any], email: str) -> Dict[str, Any]:
+    """Normalize a free or event proxy record into proxy_manager.load_from_json_file format."""
+    ip = p.get("ip", "").strip()
+    port = int(p.get("port", 0) or 0)
+    if not ip or not port:
+        return {}
+    uid = (p.get("proxy_uid") or p.get("id") or f"{ip}:{port}")
+    expire = (p.get("expire_ts")
+              or _parse_expire_ts(p.get("expired_at") or p.get("expire_time") or p.get("expires_at"))
+              or None)
+    return {
+        "proxy_uid": uid,
+        "id": uid,
+        "ip": ip,
+        "port": port,
+        "username": (p.get("username") or "").strip(),
+        "password": (p.get("password") or "").strip(),
+        "protocol": (p.get("protocol") or "socks5").lower(),
+        "country_code": (p.get("country_code") or p.get("country") or "").strip(),
+        "city": (p.get("city") or "").strip(),
+        "source_account": email,
+        "expire_time": expire,
+        "expires_at": expire,
+    }
+
+
+def write_proxy_manager_json(
+    results: List[Dict[str, Any]],
+    path: str = "/tmp/ip2free_proxies_all.json",
+) -> int:
+    """Write all collected ip2free proxies into proxy_manager's auto-load format."""
+    items: List[Dict[str, Any]] = []
+    for r in results:
+        email = r.get("email", "")
+        for p in r.get("free_proxies", []):
+            d = _build_pm_proxy_dict(p, email)
+            if d:
+                items.append(d)
+        for p in r.get("event_proxies", []):
+            d = _build_pm_proxy_dict(p, email)
+            if d:
+                items.append(d)
+    if not items:
+        return 0
+    try:
+        _save_json(path, {"proxies": items, "ts": time.time()})
+        return len(items)
+    except Exception as e:
+        print(f"[warn] failed to write proxy_manager JSON: {e}", file=sys.stderr)
+        return 0
+
+
+def load_and_inject_proxy_manager(path: str = "/tmp/ip2free_proxies_all.json") -> None:
+    """Load collected ip2free proxies into proxy_manager and inject into resi_pool."""
+    if not Path(path).exists():
+        return
+    pm_script = Path("/data/Toolkit/scripts/proxy_manager.py")
+    if not pm_script.exists():
+        print(f"[warn] proxy_manager.py not found, skipping DB injection", file=sys.stderr)
+        return
+    try:
+        import subprocess
+        r = subprocess.run(
+            [sys.executable, str(pm_script), "load-file", path, "--source", "ip2free"],
+            capture_output=True, text=True, cwd=str(pm_script.parent), timeout=120
+        )
+        if r.returncode != 0:
+            print(f"[warn] proxy_manager load-file failed: {r.stderr[-500:]}", file=sys.stderr)
+        else:
+            print(f"[proxy_manager] {r.stdout.strip().splitlines()[-1]}", flush=True)
+        r2 = subprocess.run(
+            [sys.executable, str(pm_script), "inject-resi-pool"],
+            capture_output=True, text=True, cwd=str(pm_script.parent), timeout=180
+        )
+        if r2.returncode != 0:
+            print(f"[warn] proxy_manager inject-resi-pool failed: {r2.stderr[-500:]}", file=sys.stderr)
+        else:
+            for line in r2.stdout.strip().splitlines():
+                if line.strip():
+                    print(f"[proxy_manager] {line}", flush=True)
+    except Exception as e:
+        print(f"[warn] proxy_manager injection error: {e}", file=sys.stderr)
+
+
+
+def fetch_free_proxies(s: requests.Session, size: int = 200) -> List[Dict[str, Any]]:
+    """Return raw freeList proxy records (with ip/port/user/pass/status)."""
+    r = s.post(
+        f"{BASE_API}/api/ip/freeList?",
+        data=json.dumps({"size": size}),
+        headers={"Content-Type": "text/plain;charset=UTF-8"},
+        timeout=15,
+    )
+    r.raise_for_status()
+    payload = r.json()
+    if payload.get("code") != 0:
+        raise RuntimeError(f"freeList failed: {payload}")
+    data = payload.get("data", {})
+    proxies = data.get("free_ip_list", []) if isinstance(data, dict) else []
+    return [p for p in proxies if p.get("status") == 1 and p.get("ip") and p.get("port")]
+
+
+def fmt_proxy_url(p: Dict[str, Any]) -> str:
+    user = (p.get("username") or "").strip()
+    pw = (p.get("password") or "").strip()
+    host = p.get("ip", "").strip()
+    port = int(p.get("port", 0))
+    if user and pw:
+        return f"{user}:{pw}@{host}:{port}"
+    return f"{host}:{port}"
+
+
+def _click_all_links(s: requests.Session) -> int:
+    """Click all partner links via API to unlock client_click task condition."""
+    try:
+        r = s.get(f"{BASE_API}/api/website/link?", timeout=10)
+        r.raise_for_status()
+    except Exception:
+        return 0
+
+    link_ids: List[int] = []
+
+    def _recurse(obj: Any) -> None:
+        if isinstance(obj, dict):
+            if "id" in obj and "link" in obj:
+                try:
+                    link_ids.append(int(obj["id"]))
+                except Exception:
+                    pass
+            for v in obj.values():
+                _recurse(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _recurse(item)
+
+    _recurse(r.json())
+    for lid in link_ids:
+        try:
+            s.get(f"{BASE_API}/api/website/linkClick?id={lid}", timeout=8, allow_redirects=True)
+        except Exception:
+            pass
+        time.sleep(0.2)
+    return len(link_ids)
+
+
+def _get_link_urls(s: requests.Session) -> List[Tuple[int, str]]:
+    """GET /api/website/link → return (id, link_url) pairs."""
+    try:
+        r = s.get(f"{BASE_API}/api/website/link?", timeout=10)
+        r.raise_for_status()
+    except Exception:
+        return []
+    pairs: List[Tuple[int, str]] = []
+
+    def _recurse(obj: Any) -> None:
+        if isinstance(obj, dict):
+            if "id" in obj and "link" in obj:
+                try:
+                    pairs.append((int(obj["id"]), obj["link"]))
+                except Exception:
+                    pass
+            for v in obj.values():
+                _recurse(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _recurse(item)
+
+    _recurse(r.json())
+    return pairs
+
+
+def fetch_task_list(s: requests.Session) -> List[Dict[str, Any]]:
+    r = s.post(
+        f"{BASE_API}/api/account/taskList?",
+        data="{}",
+        headers={"Content-Type": "text/plain;charset=UTF-8"},
+        timeout=12,
+    )
+    r.raise_for_status()
+    return r.json().get("data", {}).get("list", []) or []
+
+
+def finish_task(s: requests.Session, record_id: int) -> Dict[str, Any]:
+    r = s.post(
+        f"{BASE_API}/api/account/finishTask?",
+        data=json.dumps({"id": record_id}),
+        headers={"Content-Type": "text/plain;charset=UTF-8"},
+        timeout=12,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def fetch_event_proxies(s: requests.Session, size: int = 100) -> List[Dict[str, Any]]:
+    r = s.post(
+        f"{BASE_API}/api/ip/taskIpList?",
+        data=json.dumps({"size": size}),
+        headers={"Content-Type": "text/plain;charset=UTF-8"},
+        timeout=12,
+    )
+    r.raise_for_status()
+    return (r.json().get("data", {}).get("page") or {}).get("list", []) or []
+
+
+def claim_event_tasks(s: requests.Session) -> Tuple[int, List[str]]:
+    """
+    Claim all auto-claimable daily event tasks for the session.
+    Returns (claimed_count, list of messages).
+    """
+    tasks = fetch_task_list(s)
+    # Log full task list for debugging event claim issues
+    print(f"  [event] taskList: {len(tasks)} records", flush=True)
+    for t in tasks:
+        if t.get("task_code", "") in AUTO_CLAIMABLE_CODES:
+            print(f"    task_id={t.get('task_id')} code={t.get('task_code')} rec_id={t.get('id')} finished={t.get('is_finished')} data={json.dumps(t, ensure_ascii=False)}", flush=True)
+    claimed = 0
+    msgs: List[str] = []
+    for t in tasks:
+        code = t.get("task_code", "")
+        if code not in AUTO_CLAIMABLE_CODES:
+            continue
+        if t.get("is_finished", 1):
+            continue
+        rec_id = t.get("id")
+        if rec_id is None:
+            continue
+        res = finish_task(s, rec_id)
+        msg = res.get("msg", "")
+        rc = res.get("code", -1)
+        print(f"  [event] finishTask rec_id={rec_id} response: code={rc} msg={msg}", flush=True)
+        if rc in (0, 200) or "success" in msg.lower() or "成功" in msg:
+            claimed += 1
+            msgs.append(f"claimed task_id={t.get('task_id')} rec_id={rec_id}")
+        elif "invalid" in msg.lower():
+            msgs.append(f"task_finish_invalid task_id={t.get('task_id')} rec_id={rec_id}")
+        else:
+            msgs.append(f"claim_failed task_id={t.get('task_id')} rec_id={rec_id} msg={msg}")
+    return claimed, msgs
+
+
+def _parse_expire_ts(exp_str: Optional[str]) -> Optional[float]:
+    if not exp_str:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+        try:
+            dt = datetime.strptime(exp_str, fmt).replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except Exception:
+            continue
+    return None
+
+
+ACTIVATION_STATE_FILE = "/tmp/ip2free_activation_state.json"
+
+
+def _is_activated(email: str) -> bool:
+    state = _load_json(ACTIVATION_STATE_FILE, {})
+    return state.get(email, False)
+
+
+def _mark_activated(email: str) -> None:
+    state = _load_json(ACTIVATION_STATE_FILE, {})
+    state[email] = True
+    _save_json(ACTIVATION_STATE_FILE, state)
+
+
+def browser_login_activate(email: str, pw: str, headless: bool = True) -> bool:
+    """
+    New ip2free invite-registered accounts need at least one browser login
+    before /api/account/finishTask accepts API calls. This helper uses
+    patchright to perform that first browser login and stores the activation.
+    """
+    try:
+        from patchright.sync_api import sync_playwright
+    except ImportError:
+        print("  [browser-activate] patchright not installed, skipping", flush=True)
+        return False
+
+    import random as _rnd
+    def _human_type(p, selector: str, text: str, min_ms: int = 40, max_ms: int = 120):
+        loc = p.locator(selector).first
+        loc.click(timeout=3000)
+        p.wait_for_timeout(_rnd.randint(100, 300))
+        for ch in text:
+            loc.press_sequentially(ch, delay=_rnd.randint(min_ms, max_ms))
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=headless,
+                args=[
+                    "--no-sandbox", "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-infobars", "--no-first-run",
+                    "--ignore-certificate-errors",
+                ],
+            )
+            ctx = browser.new_context(
+                locale="zh-CN",
+                timezone_id="Asia/Shanghai",
+                viewport={"width": 1920, "height": 1080},
+                user_agent=UA,
+                java_script_enabled=True,
+            )
+            page = ctx.new_page()
+            print("  [browser-activate] login page ...", flush=True)
+            page.goto("https://www.ip2free.com/login", wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(3000)
+
+            try:
+                page.wait_for_selector("#email", timeout=12000)
+            except Exception as e:
+                print(f"  [browser-activate] #email not found: {e}", flush=True)
+                try:
+                    page.screenshot(path=f"/tmp/ip2free_login_{email.split('@')[0]}_nopage.png")
+                except Exception:
+                    pass
+                browser.close()
+                return False
+
+            # Remove readonly and type
+            for fid, val in [("#email", email), ("#password", pw)]:
+                page.evaluate(f"el=document.querySelector('{fid}');if(el){{el.removeAttribute('readonly');el.removeAttribute('disabled');}}")
+                _human_type(page, fid, val)
+                page.wait_for_timeout(_rnd.randint(200, 500))
+
+            # Check agreement checkbox
+            try:
+                cb = page.locator('input[type="checkbox"]').first
+                if cb.count() > 0 and not cb.is_checked():
+                    cb.click(timeout=3000)
+                    page.wait_for_timeout(200)
+                    print("  [browser-activate] agreement checked", flush=True)
+            except Exception as e:
+                print(f"  [browser-activate] checkbox click: {e}", flush=True)
+
+            page.wait_for_timeout(800)
+
+            submit_clicked = False
+            submit_selectors = [
+                'button[type="submit"]',
+                'button.MuiButton-sizeLarge',
+                'button:has-text("登录")',
+                'button:has-text("Login")',
+                'button:has-text("登 录")',
+                'button.ant-btn-primary',
+            ]
+            for sel in submit_selectors:
+                try:
+                    btn = page.locator(sel)
+                    cnt = btn.count()
+                    if cnt > 0:
+                        try:
+                            page.evaluate(f"""
+                                (function(){{
+                                    var btns = document.querySelectorAll('{sel}');
+                                    var t = btns.length > 1 ? btns[btns.length - 1] : (btns[0] || null);
+                                    if (t) {{
+                                        t.scrollIntoView({{ behavior: 'instant', block: 'center' }});
+                                        t.focus();
+                                        t.click();
+                                        return 1;
+                                    }}
+                                    return 0;
+                                }})()
+                            """)
+                            submit_clicked = True
+                            print(f"  [browser-activate] JS click submit ({sel} × {cnt})", flush=True)
+                            break
+                        except Exception as e_click:
+                            print(f"  [browser-activate] JS click failed {sel}: {e_click}", flush=True)
+                        try:
+                            target = btn.last if "sizeLarge" in sel or "submit" in sel else btn.first
+                            target.scroll_into_view_if_needed(timeout=3000)
+                            target.click(timeout=8000, force=True)
+                            submit_clicked = True
+                            print(f"  [browser-activate] PW click submit ({sel} × {cnt})", flush=True)
+                            break
+                        except Exception as e2:
+                            print(f"  [browser-activate] PW click failed {sel}: {e2}", flush=True)
+                except Exception as e2:
+                    print(f"  [browser-activate] submit selector {sel} error: {e2}", flush=True)
+
+            page.wait_for_timeout(4000)
+            cur = page.url
+            print(f"  [browser-activate] URL after login: {cur}", flush=True)
+            ok = any(k in cur for k in ["/dashboard", "/home", "/freeProxy", "/user"])
+            slug = email.split('@')[0]
+            try:
+                page.screenshot(path=f"/tmp/ip2free_login_{slug}_{'ok' if ok else 'fail'}.png")
+            except Exception:
+                pass
+            if ok:
+                # Click partner links in browser to satisfy client_click task condition.
+                # API linkClick alone is not sufficient for some accounts.
+                try:
+                    # We can read links via a fresh API call; no auth needed for this endpoint.
+                    links = _get_link_urls(_api_session())
+                    print(f"  [browser-activate] visiting {len(links)} partner links in browser...", flush=True)
+                    for lid, url in links:
+                        try:
+                            page.goto(url, timeout=12000, wait_until="domcontentloaded")
+                            page.wait_for_timeout(1500)
+                        except Exception as e_link:
+                            print(f"    link {lid} ({url[:60]}) error: {e_link}", flush=True)
+                    page.wait_for_timeout(3000)
+                    _mark_activated(email)
+                    print("  [browser-activate] OK, account activated + partner links visited", flush=True)
+                except Exception as e:
+                    print(f"  [browser-activate] partner link visit error: {e}", flush=True)
+            else:
+                try:
+                    html = page.content()
+                    with open(f"/tmp/ip2free_login_{slug}_fail.html", "w", encoding="utf-8") as f:
+                        f.write(html)
+                    print(f"  [browser-activate] dumped HTML to /tmp/ip2free_login_{slug}_fail.html", flush=True)
+                except Exception:
+                    pass
+            browser.close()
+            return ok
+    except Exception as e:
+        print(f"  [browser-activate] failed: {e}", flush=True)
+        return False
+
+
+def sync_account(
+    email: str,
+    pw: str,
+    probe: bool = False,
+    no_browser_activate: bool = False,
+) -> Dict[str, Any]:
+    """
+    Sync one ip2free account.
+    Returns result dict with free_proxies, event_proxies, claim status, etc.
+    """
+    result: Dict[str, Any] = {
+        "email": email,
+        "success": False,
+        "free_total": 0,
+        "free_added": 0,
+        "event_total": 0,
+        "event_added": 0,
+        "claimed": 0,
+        "error": None,
+    }
+
+    try:
+        s, _tok, _inv = login(email, pw)
+
+        # ── Free proxies ───────────────────────────────────────────────────────
+        free_raw = fetch_free_proxies(s)
+        result["free_total"] = len(free_raw)
+        result["free_proxies"] = free_raw
+        free_added = 0
+
+        # Free proxies are now handed to proxy_manager for durable pool injection.
+        # They are still written to FREE_PROXY_FILE for the user-facing free list.
+        result["free_added"] = free_added
+
+        # Save free proxies to dedicated file (separate from event pool)
+        try:
+            existing_free = _load_json(FREE_PROXY_FILE, {}).get("proxies", [])
+            free_urls = [fmt_proxy_url(p) for p in free_raw]
+            merged_free = existing_free + [u for u in free_urls if u not in existing_free]
+            _save_json(FREE_PROXY_FILE, {"proxies": merged_free, "ts": time.time()})
+        except Exception as e:
+            print(f"  [warn] failed to save free proxy file: {e}", flush=True)
+
+        # ── Event tasks + activity proxies ───────────────────────────────────
+        _click_all_links(s)
+        claimed, claim_msgs = claim_event_tasks(s)
+        result["claimed"] = claimed
+        result["claim_messages"] = claim_msgs
+
+        # If API task claim returns "task finish invalid", the client_click task
+        # condition must be satisfied in a real browser session. We do a browser
+        # login + partner link visit, then re-login via API and retry claim.
+        needs_browser = any("task_finish_invalid" in m for m in claim_msgs)
+        if needs_browser and not no_browser_activate:
+            print("  [event] task condition not met via API, doing browser login + link visit...", flush=True)
+            if browser_login_activate(email, pw, headless=True):
+                # Re-login via API and retry claim + event proxies
+                s, _tok, _inv = login(email, pw)
+                _click_all_links(s)
+                claimed, claim_msgs = claim_event_tasks(s)
+                result["claimed"] = claimed
+                result["claim_messages"] = claim_msgs + ["browser_retry_done"]
+
+        event_raw = fetch_event_proxies(s)
+        result["event_total"] = len(event_raw)
+        result["event_proxies"] = event_proxies
+
+        # Enrich event proxies with source account and parsed expiration
+        event_proxies: List[Dict[str, Any]] = []
+        for p in event_raw:
+            entry = {
+                "proxy_uid": p.get("id") or p.get("proxy_uid") or f"{p.get('ip')}:{p.get('port')}",
+                "ip": p.get("ip", ""),
+                "port": int(p.get("port", 0) or 0),
+                "username": p.get("username", ""),
+                "password": p.get("password", ""),
+                "protocol": (p.get("protocol") or "socks5").lower(),
+                "country_code": p.get("country_code", ""),
+                "city": p.get("city", ""),
+                "remark": p.get("remark", ""),
+                "bind_status": p.get("bind_status", 0),
+                "assigned_at": p.get("assigned_at", ""),
+                "expired_at": p.get("expired_at") or p.get("expire_time") or None,
+                "expire_ts": _parse_expire_ts(p.get("expired_at") or p.get("expire_time")),
+                "source_account": email,
+                "source": "ip2free_event",
+            }
+            entry["url"] = fmt_proxy_url(entry)
+            event_proxies.append(entry)
+
+        # Merge into persistent event pool file (deduplicate by proxy_uid)
+        existing_event = _load_json(EVENT_PROXY_FILE, {}).get("proxies", [])
+        existing_uids = {p.get("proxy_uid") for p in existing_event}
+        new_event = [p for p in event_proxies if p.get("proxy_uid") not in existing_uids]
+        merged_event = existing_event + new_event
+        result["event_added"] = len(new_event)
+        _save_json(EVENT_PROXY_FILE, {"proxies": merged_event, "ts": time.time()})
+
+        # Event proxies are now handed to proxy_manager for durable pool injection.
+        print(f"  [account] free_total={result['free_total']} free_added={result['free_added']} "
+              f"event_total={result['event_total']} event_added={result['event_added']} claimed={result['claimed']}",
+              flush=True)
+        result["success"] = True
+
+    except Exception as e:
+        result["error"] = str(e)
+        traceback.print_exc()
+
+    return result
+
+
+def _load_json(path: str, default: Any) -> Any:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def _save_json(path: str, data: Any) -> None:
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[warn] failed to write {path}: {e}", file=sys.stderr)
+
+
+def load_credentials_env_file(path: str) -> List[Dict[str, str]]:
+    """Load email=password lines from env file. Format: IP2FREE_EMAIL=... IP2FREE_PASSWORD=..."""
+    creds: List[Dict[str, str]] = []
+    if not os.path.exists(path):
+        return creds
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if k == "IP2FREE_EMAIL":
+                creds.append({"email": v, "password": ""})
+            elif k == "IP2FREE_PASSWORD" and creds:
+                creds[-1]["password"] = v
+    return [c for c in creds if c["email"] and c["password"]]
+
+
+def load_credentials_toolkit_api(api_base: str) -> List[Dict[str, str]]:
+    """
+    Ask the Toolkit API for ip2free accounts saved in the accounts table.
+    Returns list of {email, password}.
+    """
+    try:
+        url = api_base.rstrip("/") + "/api/tools/ip2free/accounts"
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        if data.get("success") and isinstance(data.get("accounts"), list):
+            return [
+                {"email": a.get("email", ""), "password": a.get("password", "")}
+                for a in data["accounts"]
+                if a.get("email") and a.get("password")
+            ]
+    except Exception as e:
+        print(f"[warn] Toolkit API credential fetch failed: {e}", file=sys.stderr)
+    return []
+
+
+def run_sync(
+    accounts: List[Dict[str, str]],
+    probe: bool = False,
+    no_browser_activate: bool = False,
+) -> Dict[str, Any]:
+    """Run sync for all supplied accounts and return summary."""
+    summary = {
+        "ts": time.time(),
+        "accounts_total": len(accounts),
+        "results": [],
+        "free_total": 0,
+        "free_added": 0,
+        "event_total": 0,
+        "event_added": 0,
+        "claimed": 0,
+        "errors": 0,
+    }
+
+    if resi_pool:
+        loaded = resi_pool.reload_externals()
+        if loaded:
+            print(f"[run_sync] loaded {loaded} existing external proxies into pool", flush=True)
+
+    for i, acct in enumerate(accounts, 1):
+        email = acct.get("email", "").strip()
+        pw = acct.get("password", "").strip()
+        if not email or not pw:
+            continue
+        print(f"[{i}/{len(accounts)}] sync {email} ...", flush=True)
+        r = sync_account(email, pw, probe=probe, no_browser_activate=no_browser_activate)
+        summary["results"].append(r)
+        summary["free_total"] += r.get("free_total", 0)
+        summary["free_added"] += r.get("free_added", 0)
+        summary["event_total"] += r.get("event_total", 0)
+        summary["event_added"] += r.get("event_added", 0)
+        summary["claimed"] += r.get("claimed", 0)
+        if r.get("error"):
+            summary["errors"] += 1
+
+    pm_count = write_proxy_manager_json(summary["results"])
+    if pm_count:
+        print(f"[sync] wrote {pm_count} proxies for proxy_manager", flush=True)
+        load_and_inject_proxy_manager()
+
+    _save_json(SYNC_STATE_FILE, summary)
+    print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
+    return summary
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="ip2free → VPS proxy pool sync v3")
+    parser.add_argument("--email", default=os.environ.get("IP2FREE_EMAIL"), help="Single account email")
+    parser.add_argument("--password", default=os.environ.get("IP2FREE_PASSWORD"), help="Single account password")
+    parser.add_argument("--accounts-json", help="JSON file with [{email,password},...]")
+    parser.add_argument("--api-base", default="http://localhost:8081", help="Toolkit API base URL")
+    parser.add_argument("--probe", action="store_true", help="Probe proxy before adding to resi_pool")
+    parser.add_argument("--loop", action="store_true", help="Loop forever")
+    parser.add_argument("--interval", type=int, default=8 * 3600, help="Loop interval seconds")
+    parser.add_argument("--env-file", default=DEFAULT_ENV_FILE, help="dotenv file with IP2FREE_EMAIL and IP2FREE_PASSWORD")
+    parser.add_argument("--use-api", action="store_true", help="Load accounts from Toolkit API instead of env file")
+    parser.add_argument("--no-browser-activate", action="store_true", help="Skip browser activation for event tasks")
+    args = parser.parse_args()
+
+    accounts: List[Dict[str, str]] = []
+
+    if args.accounts_json:
+        accounts = _load_json(args.accounts_json, [])
+    elif args.email and args.password:
+        accounts = [{"email": args.email, "password": args.password}]
+    elif args.use_api:
+        accounts = load_credentials_toolkit_api(args.api_base)
+    else:
+        accounts = load_credentials_env_file(args.env_file)
+
+    if not accounts:
+        parser.error("No ip2free credentials found. Provide --email/--password, --accounts-json, --use-api, or an env file.")
+
+    # single-instance lock
+    try:
+        lock_fd = open(LOCK_FILE, "w")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, IOError):
+        print("[main] another instance is running, exit", file=sys.stderr)
+        sys.exit(0)
+
+    def _release_lock():
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            lock_fd.close()
+        except Exception:
+            pass
+
+    atexit.register(_release_lock)
+
+    while True:
+        try:
+            run_sync(accounts, probe=args.probe, no_browser_activate=args.no_browser_activate)
+        except Exception as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            traceback.print_exc()
+        if not args.loop:
+            break
+        print(f"sleep {args.interval}s ...", flush=True)
+        time.sleep(args.interval)
+
+
+if __name__ == "__main__":
+    main()

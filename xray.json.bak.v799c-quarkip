@@ -1,0 +1,957 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "socks-main",
+      "port": 10808,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "http-main",
+      "port": 10809,
+      "protocol": "http"
+    },
+    {
+      "tag": "in-socks-0",
+      "port": 10820,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-1",
+      "port": 10821,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-2",
+      "port": 10822,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-3",
+      "port": 10823,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-4",
+      "port": 10824,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-5",
+      "port": 10825,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-6",
+      "port": 10826,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-7",
+      "port": 10827,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-8",
+      "port": 10828,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-9",
+      "port": 10829,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-10",
+      "port": 10830,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-11",
+      "port": 10831,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-12",
+      "port": 10832,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-13",
+      "port": 10833,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-14",
+      "port": 10834,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-15",
+      "port": 10835,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-16",
+      "port": 10836,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-17",
+      "port": 10837,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-18",
+      "port": 10838,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-19",
+      "port": 10839,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-20",
+      "port": 10840,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-21",
+      "port": 10841,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-22",
+      "port": 10842,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-23",
+      "port": 10843,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-24",
+      "port": 10844,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "in-socks-25",
+      "port": 10845,
+      "protocol": "socks",
+      "listen": "127.0.0.1",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "proxy-0",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410000",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-1",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410001",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-2",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410002",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-3",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410003",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-4",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410004",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-5",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410005",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-6",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410006",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-7",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410007",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-8",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410008",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-9",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410009",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-10",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410010",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-11",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410011",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-12",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410012",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-13",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410013",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-14",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410014",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-15",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410015",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-16",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410016",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-17",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410017",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-18",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410018",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-19",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410019",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-20",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410020",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-21",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410021",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-22",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410022",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-23",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410023",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-24",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410024",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "proxy-25",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "pool-us.quarkip.io",
+            "port": 7777,
+            "users": [
+              {
+                "user": "PvN1fHeJtl-country-US-sessid-177593745410025",
+                "pass": "Zn4w03WLbI2P8aX"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-0"
+        ],
+        "outboundTag": "proxy-0"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-1"
+        ],
+        "outboundTag": "proxy-1"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-2"
+        ],
+        "outboundTag": "proxy-2"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-3"
+        ],
+        "outboundTag": "proxy-3"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-4"
+        ],
+        "outboundTag": "proxy-4"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-5"
+        ],
+        "outboundTag": "proxy-5"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-6"
+        ],
+        "outboundTag": "proxy-6"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-7"
+        ],
+        "outboundTag": "proxy-7"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-8"
+        ],
+        "outboundTag": "proxy-8"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-9"
+        ],
+        "outboundTag": "proxy-9"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-10"
+        ],
+        "outboundTag": "proxy-10"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-11"
+        ],
+        "outboundTag": "proxy-11"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-12"
+        ],
+        "outboundTag": "proxy-12"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-13"
+        ],
+        "outboundTag": "proxy-13"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-14"
+        ],
+        "outboundTag": "proxy-14"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-15"
+        ],
+        "outboundTag": "proxy-15"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-16"
+        ],
+        "outboundTag": "proxy-16"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-17"
+        ],
+        "outboundTag": "proxy-17"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-18"
+        ],
+        "outboundTag": "proxy-18"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-19"
+        ],
+        "outboundTag": "proxy-19"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-20"
+        ],
+        "outboundTag": "proxy-20"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-21"
+        ],
+        "outboundTag": "proxy-21"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-22"
+        ],
+        "outboundTag": "proxy-22"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-23"
+        ],
+        "outboundTag": "proxy-23"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-24"
+        ],
+        "outboundTag": "proxy-24"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-socks-25"
+        ],
+        "outboundTag": "proxy-25"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "socks-main",
+          "http-main"
+        ],
+        "outboundTag": "proxy-0"
+      }
+    ]
+  },
+  "dns": {
+    "queryStrategy": "UseIPv4",
+    "servers": [
+      "1.1.1.1",
+      "8.8.8.8"
+    ]
+  }
+}

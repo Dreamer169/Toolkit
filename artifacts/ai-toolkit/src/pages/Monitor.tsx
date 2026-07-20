@@ -1,0 +1,978 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+
+const API = import.meta.env.BASE_URL.replace(/\/$/, "") + "/api";
+const PM2_API = import.meta.env.BASE_URL.replace(/\/$/, "") + "/pm2-api";
+
+// ── 类型 ──────────────────────────────────────────────────────────────────────
+interface JobSummary {
+  id: string;
+  source?: "tools" | "replit";
+  kind?: string;
+  title?: string;
+  status: "running" | "done" | "stopped" | "error" | "failed";
+  startedAt: number;
+  finishedAt?: number | null;
+  logCount: number;
+  accountCount: number;
+  exitCode: number | null;
+  lastLog: { type: string; message: string } | null;
+}
+interface LogEntry { type: string; message: string }
+interface ProxyStats {
+  total: number;
+  eligibleTotal: number;
+  dynamicAvailable: number;
+  idle: number;
+  active: number;
+  banned: number;
+  sources: {
+    subnodeBridge: number;
+    external: number;
+    localProxy: number;
+  };
+  cf: {
+    available: number;
+    usedTotal: number;
+    bannedTotal: number;
+  };
+}
+interface MaintenanceStatus { ts: number; checked: number; banned: number; recycled: number; }
+interface DbStats { accounts: number; identities: number; temp_emails: number; proxies: number }
+interface RecentAccount { id: number; platform: string; email: string; status: string; created_at: string }
+interface ApiHealth { ok: boolean; latency: number }
+interface Pm2Process {
+  name: string; status: string; pid: number | null; pm_id: number;
+  uptime: number | null; restarts: number; cpu: number; memory: number;
+}
+interface OutlookScheduleState {
+  enabled: boolean; targetCount: number; intervalHours: number;
+  countPerRun: number; workers: number; engine: string; proxyMode: string;
+  nextRunAt: number | null; lastRunAt: number | null; runCount: number;
+  currentCount?: number;
+  lastRunResult: { registered: number; attempted: number; error?: string } | null;
+}
+
+// ── 工具函数 ──────────────────────────────────────────────────────────────────
+function elapsed(ms: number, endMs?: number | null) {
+  // v7.94: 任务结束后用 finishedAt 冻结显示，避免出错任务也持续涨秒数
+  const end = endMs && endMs > 0 ? endMs : Date.now();
+  const s = Math.floor((end - ms) / 1000);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m${s % 60}s`;
+  return `${Math.floor(s / 3600)}h${Math.floor((s % 3600) / 60)}m`;
+}
+function statusColor(s: string) {
+  if (s === "running") return "text-blue-400";
+  if (s === "done")    return "text-emerald-400";
+  if (s === "stopped") return "text-amber-400";
+  return "text-red-400";
+}
+function statusDot(s: string) {
+  if (s === "running") return "bg-blue-400 animate-pulse";
+  if (s === "done")    return "bg-emerald-400";
+  if (s === "stopped") return "bg-amber-400";
+  return "bg-red-400";
+}
+function logColor(type: string) {
+  if (type === "ok" || type === "done") return "text-emerald-400";
+  if (type === "error") return "text-red-400";
+  if (type === "warn")  return "text-amber-400";
+  if (type === "start") return "text-blue-400";
+  return "text-gray-300";
+}
+function platformBadge(p: string) {
+  const m: Record<string, string> = {
+    outlook: "bg-blue-900/40 text-blue-300",
+    gmail:   "bg-red-900/40 text-red-300",
+    openai:  "bg-emerald-900/40 text-emerald-300",
+  };
+  return m[p.toLowerCase()] ?? "bg-gray-800 text-gray-400";
+}
+
+// ── 메인 컴포넌트 ─────────────────────────────────────────────────────────────
+export default function Monitor() {
+  const [jobs, setJobs]               = useState<JobSummary[]>([]);
+  const jobsRef = useRef<JobSummary[]>([]);
+  const [selectedJob, setSelectedJob] = useState<string | null>(null);
+  const [jobLogs, setJobLogs]         = useState<LogEntry[]>([]);
+  const [sinceIdx, setSinceIdx]       = useState(0);
+  const [proxyStats, setProxyStats]   = useState<ProxyStats | null>(null);
+  const [dbStats, setDbStats]         = useState<DbStats | null>(null);
+  const [recentAcc, setRecentAcc]     = useState<RecentAccount[]>([]);
+  const [health, setHealth]           = useState<ApiHealth | null>(null);
+  const [lastRefresh, setLastRefresh]   = useState(Date.now());
+  const [paused, setPaused]             = useState(false);
+  const [maintainStatus, setMaintainStatus] = useState<MaintenanceStatus | null>(null);
+  const [schedState, setSchedState] = useState<OutlookScheduleState | null>(null);
+  const [schedDraft, setSchedDraft] = useState<{ targetCount: string; countPerRun: string; intervalHours: string; workers: string } | null>(null);
+  const [schedSaving, setSchedSaving] = useState(false);
+  const [pm2Procs, setPm2Procs] = useState<Pm2Process[]>([]);
+  const [procLoading, setProcLoading] = useState<Record<string, string>>({});
+  const [unitoolStats, setUnitoolStats] = useState<any>(null);
+  const [cfArkose, setCfArkose] = useState<any>(null);
+
+  const logRef   = useRef<HTMLDivElement>(null);
+  const sinceRef = useRef(0);
+
+  // 自动滚动日志
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [jobLogs]);
+
+  // ── 拉取 API 健康 ──────────────────────────────────────────────────────────
+  const checkHealth = useCallback(async () => {
+    const t0 = Date.now();
+    try {
+      const r = await fetch(`${API}/data/stats`);
+      setHealth({ ok: r.ok, latency: Date.now() - t0 });
+    } catch {
+      setHealth({ ok: false, latency: -1 });
+    }
+  }, []);
+
+  // ── 拉取维护状态 ───────────────────────────────────────────────────────────
+  const fetchMaintain = useCallback(async () => {
+    try {
+      const r = await fetch(`${API}/data/proxies/maintenance/status`).then(r => r.json());
+      if (r.success && r.lastRun) setMaintainStatus(r.lastRun);
+    } catch {}
+  }, []);
+
+
+  const fetchSched = useCallback(async () => {
+    try {
+      const r = await fetch(`${API}/tools/outlook/schedule`).then(r => r.json());
+      if (r.success) {
+        setSchedState(r);
+        setSchedDraft(prev => prev ?? {
+          targetCount: String(r.targetCount),
+          countPerRun: String(r.countPerRun),
+          intervalHours: String(r.intervalHours),
+          workers: String(r.workers),
+        });
+      }
+    } catch {}
+  }, []);
+
+  const saveSched = useCallback(async (patch: Partial<{ enabled: boolean; targetCount: number; countPerRun: number; intervalHours: number; workers: number }>) => {
+    setSchedSaving(true);
+    try {
+      const r = await fetch(`${API}/tools/outlook/schedule`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      }).then(r => r.json());
+      if (r.success) await fetch(`${API}/tools/outlook/schedule`).then(r => r.json()).then(r => { if (r.success) setSchedState(r); });
+    } catch {}
+    setSchedSaving(false);
+  }, []);
+
+  const runNow = useCallback(async () => {
+    setSchedSaving(true);
+    try {
+      await fetch(`${API}/tools/outlook/schedule/run-now`, { method: "POST" });
+      setTimeout(fetchSched, 1000);
+    } catch {}
+    setSchedSaving(false);
+  }, [fetchSched]);
+
+  const commitSchedDraft = useCallback(async () => {
+    if (!schedDraft) return;
+    await saveSched({
+      targetCount: Number(schedDraft.targetCount),
+      countPerRun: Number(schedDraft.countPerRun),
+      intervalHours: Number(schedDraft.intervalHours),
+      workers: Number(schedDraft.workers),
+    });
+  }, [schedDraft, saveSched]);
+
+  const fetchPm2 = useCallback(async () => {
+    try {
+      const r = await fetch(`${PM2_API}/processes`).then(r => r.json());
+      if (r.success) setPm2Procs(r.processes ?? []);
+    } catch {}
+  }, []);
+
+  const controlProc = useCallback(async (action: "restart" | "stop" | "start", name: string) => {
+    setProcLoading(prev => ({ ...prev, [name]: action }));
+    try {
+      const r = await fetch(`${PM2_API}/${action}/${encodeURIComponent(name)}`, { method: "POST" }).then(r => r.json());
+      if (r.success) { setTimeout(() => fetchPm2(), 1500); }
+    } catch {}
+    setProcLoading(prev => { const n = { ...prev }; delete n[name]; return n; });
+  }, [fetchPm2]);
+  // ── 拉取代理池统计 ─────────────────────────────────────────────────────────
+  const fetchProxy = useCallback(async () => {
+    try {
+      const [shared, cf] = await Promise.all([
+        fetch(`${API}/data/proxies?limit=9999`).then(r => r.json()),
+        fetch(`${API}/tools/cf-pool/status`).then(r => r.json()).catch(() => null),
+      ]);
+      if (shared.success) {
+        const list: { status: string }[] = shared.data ?? shared.proxies ?? [];
+        const cfAvailable = Number(cf?.available ?? 0);
+        const eligibleTotal = Number(shared.eligibleTotal ?? 0);
+        setProxyStats({
+          total: Number(shared.total ?? list.length ?? 0),
+          eligibleTotal,
+          dynamicAvailable: eligibleTotal,  // 只显示共享代理池，CF 单独展示
+          idle: list.filter(p => p.status === "idle").length,
+          active: list.filter(p => p.status === "active").length,
+          banned: list.filter(p => p.status === "banned").length,
+          sources: {
+            subnodeBridge: Number(shared.sources?.subnodeBridge ?? 0),
+            external: Number(shared.sources?.external ?? 0),
+            localProxy: Number(shared.sources?.localProxy ?? 0),
+          },
+          cf: {
+            available: cfAvailable,
+            usedTotal: Number(cf?.used_total ?? 0),
+            bannedTotal: Number(cf?.banned_total ?? 0),
+          },
+        });
+      }
+    } catch {}
+  }, []);
+
+  // ── 拉取 DB 统计 & 最近账号 ───────────────────────────────────────────────
+  const fetchStats = useCallback(async () => {
+    try {
+      const r = await fetch(`${API}/data/stats`).then(r => r.json());
+      if (r.success) {
+        setDbStats({
+          accounts:   r.counts?.accounts   ?? r.accounts?.total ?? 0,
+          identities: r.counts?.identities ?? 0,
+          temp_emails:r.counts?.temp_emails ?? r.emails?.total ?? 0,
+          proxies:    r.counts?.proxies     ?? ((r.proxies?.idle ?? 0) + (r.proxies?.active ?? 0) + (r.proxies?.banned ?? 0)),
+        });
+      }
+    } catch {}
+    try {
+      const r = await fetch(`${API}/data/accounts?limit=6`).then(r => r.json());
+      if (r.success) setRecentAcc(r.data ?? r.accounts ?? []);
+    } catch {}
+  }, []);
+
+  // ── 拉取任务列表 ───────────────────────────────────────────────────────────
+  const fetchJobs = useCallback(async () => {
+    try {
+      const [tools, replit] = await Promise.all([
+        fetch(`${API}/tools/jobs`).then(r => r.json()).catch(() => ({ success: false, jobs: [] })),
+        fetch(`${API}/replit/jobs`).then(r => r.json()).catch(() => ({ success: false, jobs: [] })),
+      ]);
+      const combined: JobSummary[] = [
+        ...(tools.success ? tools.jobs ?? [] : []),
+        ...(replit.success ? replit.jobs ?? [] : []),
+      ].sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+      setJobs(combined); jobsRef.current = combined;
+      setLastRefresh(Date.now());
+      setSelectedJob(prev => {
+        if (!prev && combined.find((j: JobSummary) => j.status === "running")) {
+          return combined.find((j: JobSummary) => j.status === "running")?.id ?? null;
+        }
+        return prev;
+      });
+    } catch {}
+  }, []);
+
+  // ── 拉取选中任务的日志 ────────────────────────────────────────────────────
+  const fetchLogs = useCallback(async (jobId: string) => {
+    try {
+      const job = jobsRef.current.find(j => j.id === jobId);
+      const source = job?.source === "replit" ? "replit" : "tools";
+      const r = await fetch(`${API}/${source}/jobs/${jobId}?since=${sinceRef.current}`);
+      if (r.status === 404) { setSinceIdx(0); sinceRef.current = 0; return; }
+      const d = await r.json();
+      if (!d.success) return;
+      const newLines: LogEntry[] = (d.logs ?? []).map((line: string | LogEntry) =>
+        typeof line === "string" ? { type: "log", message: line } : line
+      );
+      if (newLines.length > 0) {
+        setJobLogs(prev => [...prev, ...newLines]);
+      }
+      if (d.nextSince != null) { sinceRef.current = d.nextSince; setSinceIdx(d.nextSince); }
+    } catch {}
+  }, []);
+
+  // ── 切换选中任务 ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    setJobLogs([]);
+    sinceRef.current = 0;
+    setSinceIdx(0);
+  }, [selectedJob]);
+
+  // ── 主轮询循环 ─────────────────────────────────────────────────────────────
+  useEffect(() => {
+    checkHealth();
+    fetchProxy();
+    fetchStats();
+    fetchJobs();
+    fetchMaintain();
+    fetchSched();
+    fetchPm2();
+  }, [checkHealth, fetchProxy, fetchStats, fetchJobs]);
+
+  useEffect(() => {
+    if (paused) return;
+    const t = setInterval(() => {
+      fetchJobs();
+      if (selectedJob) fetchLogs(selectedJob);
+    }, 2000);
+    return () => clearInterval(t);
+  }, [paused, fetchJobs, fetchLogs, selectedJob]);
+
+  useEffect(() => {
+    if (paused) return;
+    const t = setInterval(() => {
+      fetchStats();
+      fetchProxy();
+      checkHealth();
+      fetchMaintain();
+      fetchSched();
+      fetchPm2();
+    }, 8000);
+    return () => clearInterval(t);
+  }, [paused, fetchStats, fetchProxy, checkHealth, fetchMaintain, fetchSched, fetchPm2]);
+
+  // ── 停止任务 ──────────────────────────────────────────────────────────────
+  async function stopJob(id: string) {
+    const job = jobsRef.current.find(j => j.id === id);
+    const source = job?.source === "replit" ? "replit" : "tools";
+    await fetch(`${API}/${source}/jobs/${id}`, { method: "DELETE" }).catch(() => {});
+    fetchJobs();
+  }
+
+  const runningJobs = jobs.filter(j => j.status === "running");
+  const otherJobs   = jobs.filter(j => j.status !== "running");
+  const selectedJobObj = jobs.find(j => j.id === selectedJob);
+
+  return (
+    <div className="space-y-4">
+      {/* ── 顶部标题栏 ──────────────────────────────────────────────────── */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-white flex items-center gap-2">
+            <span className="text-lg">📡</span> 实时监控中心
+          </h1>
+          <p className="text-xs text-gray-500 mt-0.5">每 2s 自动刷新 · 覆盖 Outlook/Cursor/Replit/流水线/子节点部署任务</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-gray-600">上次刷新 {elapsed(lastRefresh)}前</span>
+          <button
+            onClick={() => setPaused(p => !p)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${paused ? "bg-blue-700 text-white" : "bg-[#21262d] text-gray-400 hover:text-white"}`}
+          >
+            {paused ? "▶ 恢复" : "⏸ 暂停"}
+          </button>
+          <button
+            onClick={() => { fetchJobs(); fetchStats(); fetchProxy(); checkHealth(); }}
+            className="px-3 py-1.5 rounded-lg text-xs bg-[#21262d] text-gray-400 hover:text-white transition-colors"
+          >
+            🔄 立即刷新
+          </button>
+        </div>
+      </div>
+
+      {/* ── 状态卡片行 ──────────────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {/* API 健康 */}
+        <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4">
+          <div className="text-xs text-gray-500 mb-1">API 服务器</div>
+          {health ? (
+            <>
+              <div className={`text-lg font-bold ${health.ok ? "text-emerald-400" : "text-red-400"}`}>
+                {health.ok ? "● 正常" : "● 离线"}
+              </div>
+              <div className="text-xs text-gray-600 mt-1">
+                延迟 {health.latency >= 0 ? `${health.latency}ms` : "—"}
+              </div>
+            </>
+          ) : (
+            <div className="text-gray-600 text-sm animate-pulse">检测中…</div>
+          )}
+        </div>
+
+        {/* 活跃任务 */}
+        <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4">
+          <div className="text-xs text-gray-500 mb-1">注册任务</div>
+          <div className="text-lg font-bold text-white">
+            {runningJobs.length > 0 ? (
+              <span className="text-blue-400">⚙ {runningJobs.length} 运行中</span>
+            ) : (
+              <span className="text-gray-500">— 空闲</span>
+            )}
+          </div>
+          <div className="text-xs text-gray-600 mt-1">历史共 {jobs.length} 次</div>
+        </div>
+
+        {/* 代理池 */}
+        <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4">
+          <div className="text-xs text-gray-500 mb-1">代理池</div>
+          {proxyStats ? (
+            <>
+              <div className="text-lg font-bold text-emerald-400">{proxyStats.eligibleTotal} 代理可用</div>
+              <div className="text-xs text-gray-600 mt-1 space-x-2">
+                <span className="text-cyan-400">CF {proxyStats.cf.available} IPs</span>
+                <span className="text-red-400">封禁 {proxyStats.banned}</span>
+              </div>
+            </>
+          ) : (
+            <div className="text-gray-600 text-sm animate-pulse">加载中…</div>
+          )}
+        </div>
+
+        {/* 账号库 */}
+        <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4">
+          <div className="text-xs text-gray-500 mb-1">数据库</div>
+          {dbStats ? (
+            <>
+              <div className="text-lg font-bold text-white">{dbStats.accounts} 账号</div>
+              <div className="text-xs text-gray-600 mt-1">
+                身份 {dbStats.identities} · 邮箱 {dbStats.temp_emails}
+              </div>
+            </>
+          ) : (
+            <div className="text-gray-600 text-sm animate-pulse">加载中…</div>
+          )}
+        </div>
+      </div>
+
+      {/* ── 主体：任务列表 + 实时日志 ──────────────────────────────────── */}
+
+      {/* unitool chain stats panel */}
+      {unitoolStats && (
+        <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-gray-300">🔗 unitool.ai 流水线统计</h2>
+            <span className="text-xs text-gray-500">
+              链状态: <span className={unitoolStats.chain.status === "running" ? "text-blue-400" : "text-gray-400"}>{unitoolStats.chain.status}</span>
+              {" · "}上次运行: <span className="text-gray-300">{unitoolStats.chain.last_run}</span>
+            </span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs mb-3">
+            <div className="rounded-lg bg-[#0d1117] border border-emerald-900/40 p-3">
+              <div className="text-gray-500">已注册</div>
+              <div className="text-xl font-bold text-emerald-400 mt-1">{unitoolStats.outlook.registered}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">账号总数</div>
+              <div className="text-xl font-bold text-white mt-1">{unitoolStats.outlook.total}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-blue-900/40 p-3">
+              <div className="text-gray-500">处理中</div>
+              <div className="text-xl font-bold text-blue-400 mt-1">{unitoolStats.outlook.processing}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">池账号</div>
+              <div className="text-xl font-bold text-cyan-400 mt-1">{unitoolStats.pool.live}</div>
+              <div className="text-gray-600 mt-0.5">有余额 {unitoolStats.pool.with_balance}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-amber-900/40 p-3">
+              <div className="text-gray-500">总积分</div>
+              <div className="text-xl font-bold text-amber-400 mt-1">{unitoolStats.token.total_bonus.toFixed(0)}</div>
+              <div className="text-gray-600 mt-0.5">{unitoolStats.token.bonus_accounts} 账号有积分</div>
+            </div>
+          </div>
+          {unitoolStats.chain.brief && (
+            <div className="text-xs text-gray-600 bg-[#0d1117] rounded-lg px-3 py-2 font-mono truncate">
+              {unitoolStats.chain.brief}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+
+        {/* 左：任务列表 */}
+        <div className="lg:col-span-2 space-y-2">
+          <div className="flex items-center justify-between mb-1">
+            <h2 className="text-sm font-semibold text-gray-300">注册任务队列</h2>
+            <span className="text-xs text-gray-600">{jobs.length} 条记录</span>
+          </div>
+
+          {jobs.length === 0 ? (
+            <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-8 text-center text-gray-600 text-sm">
+              暂无任务<br/>
+              <span className="text-xs">在「完整工作流」页面启动注册后会显示在这里</span>
+            </div>
+          ) : (
+            <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
+              {/* 运行中 */}
+              {runningJobs.length > 0 && (
+                <div className="text-xs text-blue-400/70 px-1 font-medium">▶ 运行中</div>
+              )}
+              {[...runningJobs, ...otherJobs].map(job => (
+                <button
+                  key={job.id}
+                  onClick={() => setSelectedJob(prev => prev === job.id ? null : job.id)}
+                  className={`w-full text-left rounded-xl border p-3 transition-all ${
+                    selectedJob === job.id
+                      ? "bg-blue-900/20 border-blue-700/60"
+                      : "bg-[#161b22] border-[#21262d] hover:border-[#30363d]"
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <div className="flex items-center gap-2">
+                      <div className={`w-2 h-2 rounded-full flex-shrink-0 ${statusDot(job.status)}`} />
+                      <span className={`text-xs font-semibold ${statusColor(job.status)}`}>
+                        {job.status === "running" ? "运行中" : job.status === "done" ? "完成" : job.status === "stopped" ? "已停止" : "出错"}
+                      </span>
+                    </div>
+                    <span className="text-xs text-gray-600">{job.status === "running" ? "运行 " + elapsed(job.startedAt) : "耗时 " + elapsed(job.startedAt, job.finishedAt)}</span>
+                  </div>
+                  <div className="text-xs text-gray-500 font-mono truncate">{job.title ? `${job.title} · ` : ""}{job.id}</div>
+                  {job.lastLog && (
+                    <div className={`text-xs mt-1.5 truncate ${logColor(job.lastLog.type)}`}>
+                      {job.lastLog.message}
+                    </div>
+                  )}
+                  <div className="flex items-center gap-3 mt-2 text-xs text-gray-600">
+                    <span>📝 {job.logCount} 条日志</span>
+                    {job.accountCount > 0 && (
+                      <span className="text-emerald-500">✅ {job.accountCount} 个账号</span>
+                    )}
+                    {job.status === "running" && (
+                      <button
+                        onClick={e => { e.stopPropagation(); stopJob(job.id); }}
+                        className="ml-auto text-red-400 hover:text-red-300 transition-colors"
+                      >
+                        ⏹ 停止
+                      </button>
+                    )}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 右：实时日志 */}
+        <div className="lg:col-span-3 flex flex-col bg-[#161b22] border border-[#21262d] rounded-xl overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-[#21262d]">
+            <div className="flex items-center gap-2">
+              <div className={`w-2 h-2 rounded-full ${selectedJobObj?.status === "running" ? "bg-blue-400 animate-pulse" : selectedJobObj ? "bg-emerald-400" : "bg-gray-700"}`} />
+              <span className="text-sm font-semibold text-gray-300">
+                {selectedJobObj ? `任务日志 · ${sinceIdx} 条` : "选中左侧任务查看日志"}
+              </span>
+            </div>
+            {selectedJobObj && (
+              <button
+                onClick={() => { setJobLogs([]); sinceRef.current = 0; setSinceIdx(0); if (selectedJob) fetchLogs(selectedJob); }}
+                className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+              >
+                清空
+              </button>
+            )}
+          </div>
+
+          <div
+            ref={logRef}
+            className="flex-1 overflow-y-auto p-4 font-mono text-xs space-y-0.5 min-h-[300px] max-h-[420px]"
+          >
+            {!selectedJobObj ? (
+              <div className="h-full flex items-center justify-center text-gray-700">
+                从左侧选择一个任务以查看实时日志
+              </div>
+            ) : jobLogs.length === 0 ? (
+              <div className="text-gray-700 animate-pulse">等待日志…</div>
+            ) : (
+              jobLogs.map((l, i) => (
+                <div key={i} className={`leading-5 ${logColor(l.type)}`}>
+                  <span className="text-gray-700 select-none mr-2">{String(i + 1).padStart(3, "0")}</span>
+                  {l.message}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Outlook 定时注册调度 ─────────────────────────────────────────────── */}
+      {schedState && (
+        <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4 space-y-4">
+          {/* 标题 + 开关 */}
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-300">⏰ Outlook 定时注册调度</h2>
+              <p className="text-xs text-gray-600 mt-0.5">
+                当前 {schedState.currentCount ?? "—"} 个活跃账号 · 目标 {schedState.targetCount} · 已触发 {schedState.runCount} 次
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={runNow}
+                disabled={schedSaving}
+                className="px-3 py-1 text-xs rounded-lg bg-blue-900/40 text-blue-400 hover:bg-blue-800/60 disabled:opacity-40 transition-colors"
+              >
+                ▶ 立即执行
+              </button>
+              <button
+                onClick={() => saveSched({ enabled: !schedState.enabled })}
+                disabled={schedSaving}
+                className={`relative inline-flex h-5 w-10 items-center rounded-full transition-colors disabled:opacity-40 ${schedState.enabled ? "bg-emerald-600" : "bg-gray-700"}`}
+              >
+                <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${schedState.enabled ? "translate-x-5" : "translate-x-0.5"}`} />
+              </button>
+              <span className={`text-xs font-medium ${schedState.enabled ? "text-emerald-400" : "text-gray-500"}`}>
+                {schedState.enabled ? "已启用" : "已停用"}
+              </span>
+            </div>
+          </div>
+
+          {/* 状态行 */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">上次执行</div>
+              <div className="text-white font-medium mt-1">{schedState.lastRunAt ? elapsed(schedState.lastRunAt) + "前" : "—"}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">下次执行</div>
+              <div className={`font-medium mt-1 ${schedState.enabled && schedState.nextRunAt ? "text-blue-400" : "text-gray-600"}`}>
+                {schedState.enabled && schedState.nextRunAt ? elapsed(Date.now(), schedState.nextRunAt) + "后" : "—"}
+              </div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">上次结果</div>
+              <div className={`font-medium mt-1 ${schedState.lastRunResult?.error ? "text-red-400" : "text-emerald-400"}`}>
+                {schedState.lastRunResult
+                  ? (schedState.lastRunResult.error
+                    ? "出错"
+                    : `✅ ${schedState.lastRunResult.registered}/${schedState.lastRunResult.attempted}`)
+                  : "—"}
+              </div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">执行引擎</div>
+              <div className="text-gray-300 font-medium mt-1 font-mono">{schedState.engine}</div>
+            </div>
+          </div>
+
+          {/* 可编辑参数 */}
+          {schedDraft && (
+            <div className="flex flex-wrap items-end gap-3">
+              {[
+                { label: "目标账号数", key: "targetCount" as const, min: 1, max: 9999 },
+                { label: "每次注册数", key: "countPerRun" as const, min: 1, max: 50 },
+                { label: "间隔(小时)", key: "intervalHours" as const, min: 1, max: 168 },
+                { label: "并发Workers", key: "workers" as const, min: 1, max: 10 },
+              ].map(({ label, key, min, max }) => (
+                <div key={key} className="flex flex-col gap-1">
+                  <label className="text-xs text-gray-500">{label}</label>
+                  <input
+                    type="number"
+                    min={min}
+                    max={max}
+                    value={schedDraft[key]}
+                    onChange={e => setSchedDraft(prev => prev ? { ...prev, [key]: e.target.value } : prev)}
+                    className="w-28 px-2 py-1 text-xs rounded-lg bg-[#0d1117] border border-[#21262d] text-gray-300 focus:outline-none focus:border-blue-700 transition-colors"
+                  />
+                </div>
+              ))}
+              <button
+                onClick={commitSchedDraft}
+                disabled={schedSaving}
+                className="px-4 py-1.5 text-xs rounded-lg bg-emerald-900/40 text-emerald-400 hover:bg-emerald-800/60 disabled:opacity-40 transition-colors"
+              >
+                {schedSaving ? "保存中…" : "💾 热更新"}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── 最近账号 ──────────────────────────────────────────────────────── */}
+      <div className="bg-[#161b22] border border-[#21262d] rounded-xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-[#21262d] flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-gray-300">最近入库账号</h2>
+          <span className="text-xs text-gray-600">共 {dbStats?.accounts ?? "—"} 条</span>
+        </div>
+        {recentAcc.length === 0 ? (
+          <div className="px-4 py-6 text-center text-gray-600 text-sm">暂无账号记录</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-[#21262d]">
+                  {["平台", "邮箱", "状态", "入库时间"].map(h => (
+                    <th key={h} className="text-left px-4 py-2 text-gray-600 font-medium">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {recentAcc.map((acc, i) => (
+                  <tr key={acc.id} className={`border-b border-[#1c2128] ${i % 2 === 0 ? "" : "bg-[#0d1117]/30"}`}>
+                    <td className="px-4 py-2.5">
+                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${platformBadge(acc.platform)}`}>
+                        {acc.platform}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2.5 font-mono text-gray-300">{acc.email}</td>
+                    <td className="px-4 py-2.5">
+                      <span className={`${acc.status === "active" ? "text-emerald-400" : acc.status === "inactive" ? "text-red-400" : "text-amber-400"}`}>
+                        {acc.status === "active" ? "✅ 正常" : acc.status === "inactive" ? "❌ 失效" : acc.status}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2.5 text-gray-600">
+                      {acc.created_at ? new Date(acc.created_at).toLocaleString("zh-CN") : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* ── 代理池明细 ────────────────────────────────────────────────────── */}
+      {proxyStats && (
+        <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-gray-300">代理池状态</h2>
+            <span className="text-xs text-gray-600">共享代理池（SOCKS5/HTTP）与 CF IP 池是独立系统，低于50个时自动用 CF IP 补充</span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4 text-xs">
+            <div className="rounded-lg bg-[#0d1117] border border-emerald-900/40 p-3">
+              <div className="text-gray-500">共享代理可用</div>
+              <div className="text-xl font-bold text-emerald-400 mt-1">{proxyStats.eligibleTotal}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">子节点桥</div>
+              <div className="text-xl font-bold text-blue-400 mt-1">{proxyStats.sources.subnodeBridge}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">外部代理</div>
+              <div className="text-xl font-bold text-purple-400 mt-1">{proxyStats.sources.external}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-cyan-900/40 p-3">
+              <div className="text-gray-500">CF IP 池（独立）</div>
+              <div className="text-xl font-bold text-cyan-400 mt-1">{proxyStats.cf.available}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">共享封禁</div>
+              <div className="text-xl font-bold text-red-400 mt-1">{proxyStats.banned}</div>
+              <div className="text-gray-600 mt-0.5">CF封 {proxyStats.cf.bannedTotal}</div>
+            </div>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="flex-1 h-3 bg-[#21262d] rounded-full overflow-hidden flex">
+              {proxyStats.eligibleTotal > 0 && (
+                <>
+                  <div
+                    className="h-full bg-blue-500/80 transition-all"
+                    style={{ width: `${proxyStats.eligibleTotal > 0 ? (proxyStats.sources.subnodeBridge / proxyStats.eligibleTotal) * 100 : 0}%` }}
+                  />
+                  <div
+                    className="h-full bg-purple-500/80 transition-all"
+                    style={{ width: `${proxyStats.eligibleTotal > 0 ? (proxyStats.sources.external / proxyStats.eligibleTotal) * 100 : 0}%` }}
+                  />
+                  {/* CF IP 池独立，不并入共享代理进度条 */}
+                </>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-4 text-xs shrink-0">
+              <span className="text-emerald-400">共享代理 <strong className="text-white">{proxyStats.eligibleTotal}</strong></span>
+              <span className="text-cyan-400/70">CF IP <strong className="text-white">{proxyStats.cf.available}</strong>（独立系统）</span>
+              <span className="text-blue-400">子节点 <strong className="text-white">{proxyStats.sources.subnodeBridge}</strong></span>
+              <span className="text-cyan-400">CF <strong className="text-white">{proxyStats.cf.available}</strong></span>
+              <span className="text-gray-600">入库总数 {proxyStats.total}</span>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* ── 代理池维护状态 ────────────────────────────────────────────── */}
+      <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4">
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-sm font-semibold text-gray-300">代理池后台维护</h2>
+          <span className="text-xs text-gray-600">每 2 分钟自动运行 · 验证真实出网连通性</span>
+        </div>
+        {maintainStatus ? (
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">上次运行</div>
+              <div className="text-white font-medium mt-1">{elapsed(maintainStatus.ts)}前</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">连通性验证</div>
+              <div className="text-blue-400 font-bold text-lg mt-1">{maintainStatus.checked}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">封禁无效代理</div>
+              <div className="text-red-400 font-bold text-lg mt-1">{maintainStatus.banned}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-[#21262d] p-3">
+              <div className="text-gray-500">回收卡死</div>
+              <div className="text-amber-400 font-bold text-lg mt-1">{maintainStatus.recycled}</div>
+            </div>
+            <div className="rounded-lg bg-[#0d1117] border border-emerald-900/40 p-3">
+              <div className="text-gray-500">自动补充</div>
+              <div className="text-emerald-400 font-bold text-lg mt-1">{(maintainStatus as any).replenished ?? 0}</div>
+            </div>
+          </div>
+        ) : (
+          <div className="text-gray-600 text-sm animate-pulse">等待首次维护运行（启动后 20 秒）…</div>
+        )}
+      </div>
+
+      {/* CF 子网 Arkose 成功率 */}
+      {cfArkose && cfArkose.subnets.length > 0 && (
+        <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-gray-300">⚡ CF 子网 Arkose 成功率</h2>
+            <span className="text-xs text-gray-600">按使用量排序 · &lt;35% 为高风险子网 · 建议屏蔽</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-[#21262d]">
+                  {["子网 /20", "ok", "fail", "总次数", "Arkose成功率", "风险级"].map(h => (
+                    <th key={h} className="text-left px-3 py-2 text-gray-600 font-medium">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {cfArkose.subnets.map((s, i) => {
+                  const risk = s.rate < 20 ? "🔴 极高" : s.rate < 35 ? "🟠 高" : s.rate < 55 ? "🟡 中" : "🟢 低";
+                  const rateColor = s.rate < 20 ? "text-red-400" : s.rate < 35 ? "text-orange-400" : s.rate < 55 ? "text-amber-400" : "text-emerald-400";
+                  return (
+                    <tr key={s.subnet} className={`border-b border-[#1c2128] ${i % 2 === 0 ? "" : "bg-[#0d1117]/30"}`}>
+                      <td className="px-3 py-2 font-mono text-gray-300">{s.subnet}</td>
+                      <td className="px-3 py-2 text-emerald-400">{s.ok}</td>
+                      <td className="px-3 py-2 text-red-400">{s.fail}</td>
+                      <td className="px-3 py-2 text-gray-400">{s.total}</td>
+                      <td className="px-3 py-2">
+                        <div className="flex items-center gap-2">
+                          <div className="w-16 h-1.5 bg-[#21262d] rounded-full overflow-hidden">
+                            <div
+                              className={`h-full rounded-full ${s.rate < 35 ? "bg-red-500" : s.rate < 55 ? "bg-amber-500" : "bg-emerald-500"}`}
+                              style={{ width: `${s.rate}%` }}
+                            />
+                          </div>
+                          <span className={rateColor}>{s.rate}%</span>
+                        </div>
+                      </td>
+                      <td className="px-3 py-2">{risk}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+
+      {/* ── 注册流水线开关 ─────────────────────────────────────────────── */}
+      {pm2Procs.length > 0 && (() => {
+        const GROUPS = [
+          {
+            label: "Kiro 注册",
+            procs: ["kiro-chain"],
+          },
+          {
+            label: "Outlook 注册",
+            procs: ["outlook-register"],
+          },
+          {
+            label: "Unitool 注册",
+            procs: ["unitool_chain_v3", "unitool_chain_v3_w1", "unitool_chain_v3_w2"],
+          },
+        ];
+        const procMap = Object.fromEntries(pm2Procs.map(p => [p.name, p]));
+        return (
+          <div className="bg-[#161b22] border border-[#21262d] rounded-xl p-4">
+            <h2 className="text-sm font-semibold text-gray-300 mb-3">⚙️ 注册流水线控制</h2>
+            <div className="flex flex-wrap gap-6">
+              {GROUPS.map(group => (
+                <div key={group.label} className="flex flex-col gap-2">
+                  <div className="text-xs text-gray-500 font-medium">{group.label}</div>
+                  {group.procs.map(name => {
+                    const proc = procMap[name];
+                    const isOnline = proc?.status === "online";
+                    const loading = procLoading[name];
+                    return (
+                      <div key={name} className="flex items-center gap-3">
+                        <button
+                          onClick={() => controlProc(isOnline ? "stop" : "start", name)}
+                          disabled={!!loading}
+                          title={isOnline ? "点击停止" : "点击启动"}
+                          className={"relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-200 disabled:opacity-40 disabled:cursor-not-allowed " + (isOnline ? "bg-emerald-500" : "bg-gray-600")}
+                        >
+                          <span className={"inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-200 " + (isOnline ? "translate-x-6" : "translate-x-1")} />
+                        </button>
+                        <div className="flex flex-col">
+                          <span className="text-xs font-mono text-gray-300">{name}</span>
+                          <span className={"text-xs " + (loading ? "text-blue-400" : isOnline ? "text-emerald-400" : proc ? "text-amber-400" : "text-gray-600")}>
+                            {loading ? (loading === "start" ? "启动中…" : "停止中…") : isOnline ? ("● 运行中" + (proc?.cpu ? " " + proc.cpu.toFixed(0) + "%" : "")) : proc ? "○ 已停止" : "未找到"}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── 进程状态总览 ─────────────────────────────────────────────────── */}
+      <div className="bg-[#161b22] border border-[#21262d] rounded-xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-[#21262d] flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-gray-300">🖥️ 所有进程状态</h2>
+          <span className="text-xs text-gray-600">PM2 共 {pm2Procs.length} 个进程</span>
+        </div>
+        {pm2Procs.length === 0 ? (
+          <div className="px-4 py-6 text-center text-gray-600 text-sm animate-pulse">加载进程列表…</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-[#21262d]">
+                  {["进程名", "状态", "PID", "CPU", "内存", "重启", "操作"].map(h => (
+                    <th key={h} className="text-left px-4 py-2 text-gray-600 font-medium">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {pm2Procs.map((proc) => (
+                  <tr key={proc.pm_id} className="border-b border-[#1c2128] hover:bg-[#0d1117]/30">
+                    <td className="px-4 py-2.5 font-mono text-gray-300">{proc.name}</td>
+                    <td className="px-4 py-2.5">
+                      <span className={proc.status === "online" ? "text-emerald-400" : proc.status === "stopped" ? "text-amber-400" : proc.status.startsWith("wait") ? "text-blue-400" : "text-red-400"}>
+                        {proc.status === "online" ? "● 在线" : proc.status === "stopped" ? "○ 停止" : proc.status === "waiting" || proc.status === "waiting…" ? "◌ 等待" : proc.status === "errored" ? "✗ 错误" : proc.status}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2.5 text-gray-600 font-mono">{proc.pid ?? "—"}</td>
+                    <td className="px-4 py-2.5 text-gray-400">{proc.cpu.toFixed(1)}%</td>
+                    <td className="px-4 py-2.5 text-gray-400">{(proc.memory / 1024 / 1024).toFixed(1)} MB</td>
+                    <td className="px-4 py-2.5 text-gray-400">{proc.restarts}</td>
+                    <td className="px-4 py-2.5">
+                      <div className="flex gap-1">
+                        <button
+                          onClick={() => controlProc("restart", proc.name)}
+                          disabled={!!procLoading[proc.name]}
+                          className="px-2 py-0.5 text-xs rounded bg-blue-900/40 text-blue-400 hover:bg-blue-800/60 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                        >
+                          {procLoading[proc.name] === "restart" ? "…" : "重启"}
+                        </button>
+                        {proc.status === "online" && (
+                          <button
+                            onClick={() => controlProc("stop", proc.name)}
+                            disabled={!!procLoading[proc.name]}
+                            className="px-2 py-0.5 text-xs rounded bg-red-900/40 text-red-400 hover:bg-red-800/60 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                          >
+                            {procLoading[proc.name] === "stop" ? "…" : "停止"}
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

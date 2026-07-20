@@ -1,0 +1,286 @@
+"""
+gratis_proxy.py v2 — ia.gratis → OpenAI-compatible adapter
+  POST /v1/chat/completions   (stream + non-stream)
+  GET  /v1/models
+
+模型前缀 [gt] 在 new-api 侧标识本渠道。
+代理内部去掉 [gt] 后按以下规则分发：
+  - [gt]<openrouter/name>   → /api/tools/chat/  (chat 模型)
+  - [gt]search              → /api/tools/search/   (last user msg 作为 query)
+  - [gt]summarize           → /api/tools/summarize/ (last user msg 作为 text)
+  - [gt]translate-<to>      → /api/tools/translate/ (e.g. [gt]translate-en)
+  - [gt]humanize            → /api/tools/humanize/
+  - [gt]detect              → /api/tools/detect/
+"""
+import json, time, uuid, threading, urllib.request, urllib.error
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+PORT      = 8092
+BASE_URL  = "https://ia.gratis/api/tools/"
+API_TOKEN = "f370ccedad7e41f7b99428d1f0a06c31"
+PREFIX    = "[gt]"
+
+# ── Chat 模型（来自 ia.gratis/chat/ 页面，全部 OpenRouter 格式）──────────
+CHAT_MODELS = [
+    # OpenAI
+    "openai/gpt-4o",
+    "openai/gpt-4o-mini",
+    "openai/gpt-5.5",
+    "openai/o3",
+    "openai/gpt-oss-120b:free",
+    "openai/gpt-oss-20b:free",
+    # Anthropic
+    "anthropic/claude-opus-4.8",
+    "anthropic/claude-sonnet-4.6",
+    "anthropic/claude-haiku-4.5",
+    # DeepSeek
+    "deepseek/deepseek-r1",
+    "deepseek/deepseek-chat",
+    # Google
+    "google/gemini-2.5-pro",
+    "google/gemini-2.5-flash",
+    "google/gemini-3.1-pro-preview",
+    "google/gemma-4-26b-a4b-it:free",
+    "google/gemma-4-31b-it:free",
+    # Meta Llama
+    "meta-llama/llama-4-maverick",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "meta-llama/llama-3.2-3b-instruct:free",
+    # Mistral
+    "mistralai/mistral-large-2512",
+    # Qwen
+    "qwen/qwen3-coder:free",
+    "qwen/qwen3-next-80b-a3b-instruct:free",
+    # NVIDIA Nemotron
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "nvidia/nemotron-3-nano-30b-a3b:free",
+    "nvidia/nemotron-nano-9b-v2:free",
+    "nvidia/nemotron-nano-12b-v2-vl:free",
+    # xAI
+    "x-ai/grok-4.20",
+    # Others
+    "nex-agi/nex-n2-pro:free",
+    "nousresearch/hermes-3-llama-3.1-405b:free",
+    "poolside/laguna-m.1:free",
+]
+
+# ── 工具模型（非 chat 端点，映射为伪模型）─────────────────────────────────
+TOOL_MODELS = [
+    "search",       # /api/tools/search/
+    "summarize",    # /api/tools/summarize/
+    "humanize",     # /api/tools/humanize/
+    "detect",       # /api/tools/detect/
+    "translate-en", # /api/tools/translate/ → English
+    "translate-es", # → Spanish
+    "translate-zh", # → Chinese
+    "translate-fr", # → French
+    "translate-de", # → German
+    "translate-pt", # → Portuguese
+    "translate-ja", # → Japanese
+    "translate-ko", # → Korean
+    "translate-ru", # → Russian
+    "translate-ar", # → Arabic
+]
+
+ALL_MODELS = CHAT_MODELS + TOOL_MODELS
+
+
+def strip_prefix(model: str) -> str:
+    return model[len(PREFIX):] if model.startswith(PREFIX) else model
+
+
+def last_user_msg(messages: list) -> str:
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            c = m.get("content", "")
+            if isinstance(c, list):
+                return " ".join(p.get("text", "") for p in c if p.get("type") == "text")
+            return str(c)
+    return ""
+
+
+def call_gratis(path: str, payload: dict, timeout: int = 60) -> dict:
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        BASE_URL + path,
+        data=data,
+        headers={
+            "Authorization": f"Bearer {API_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode())
+
+
+def call_chat(model: str, messages: list, timeout: int = 60) -> dict:
+    return call_gratis("chat/", {"messages": messages, "model": model}, timeout)
+
+
+def dispatch_tool(inner_model: str, messages: list) -> tuple[bool, str]:
+    """returns (ok, reply_text)"""
+    text = last_user_msg(messages)
+    if inner_model == "search":
+        d = call_gratis("search/", {"query": text})
+        if d.get("ok"):
+            results = d.get("results", [])
+            summary = d.get("summary", "")
+            parts = [summary] if summary else []
+            for r in results[:5]:
+                parts.append(f"- [{r.get('title','')}]({r.get('url','')}): {r.get('snippet','')}")
+            return True, "\n".join(parts) or "(no results)"
+        return False, d.get("error", "search failed")
+    elif inner_model == "summarize":
+        d = call_gratis("summarize/", {"text": text})
+        return d.get("ok", False), d.get("result", d.get("error", "summarize failed"))
+    elif inner_model == "humanize":
+        d = call_gratis("humanize/", {"text": text})
+        return d.get("ok", False), d.get("result", d.get("error", "humanize failed"))
+    elif inner_model == "detect":
+        d = call_gratis("detect/", {"text": text})
+        if d.get("ok"):
+            r = d.get("result", {})
+            pct = r.get("ai_probability", "?")
+            verdict = r.get("verdict", "?")
+            reasons = r.get("reasons", [])
+            reply = f"AI probability: {pct}%\nVerdict: {verdict}"
+            if reasons:
+                reply += "\nReasons:\n" + "\n".join(f"- {x}" for x in reasons)
+            return True, reply
+        return False, d.get("error", "detect failed")
+    elif inner_model.startswith("translate-"):
+        lang = inner_model.split("-", 1)[1]
+        d = call_gratis("translate/", {"text": text, "to": lang})
+        return d.get("ok", False), d.get("result", d.get("error", "translate failed"))
+    return False, f"unknown tool model: {inner_model}"
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        print(fmt % args, flush=True)
+
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Authorization,Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+
+    def _json(self, code: int, obj: dict):
+        body = json.dumps(obj, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self._cors(); self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._cors(); self.end_headers()
+
+    def do_GET(self):
+        if self.path.startswith("/v1/models"):
+            ts = int(time.time())
+            items = [{
+                "id": f"{PREFIX}{m}",
+                "object": "model",
+                "created": ts,
+                "owned_by": "ia.gratis",
+            } for m in ALL_MODELS]
+            self._json(200, {"object": "list", "data": items})
+        elif self.path == "/health":
+            self._json(200, {"ok": True, "models": len(ALL_MODELS)})
+        else:
+            self._json(404, {"error": "not found"})
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            body = json.loads(self.rfile.read(length))
+        except Exception as e:
+            return self._json(400, {"error": {"message": str(e), "type": "parse_error"}})
+
+        raw_model = body.get("model", "openai/gpt-4o")
+        inner     = strip_prefix(raw_model)
+        messages  = body.get("messages", [])
+        do_stream = body.get("stream", False)
+        resp_id   = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        ts        = int(time.time())
+
+        # ── dispatch ────────────────────────────────────────────────────────
+        try:
+            if inner in TOOL_MODELS:
+                ok, reply = dispatch_tool(inner, messages)
+                if not ok:
+                    return self._json(502, {"error": {"message": reply, "type": "tool_error"}})
+            else:
+                # chat
+                data = call_chat(inner, messages)
+                if not data.get("ok"):
+                    msg = data.get("error", "upstream error")
+                    # 区分付费 vs 其他
+                    code = 402 if "plan" in msg.lower() or "token" in msg.lower() or "credito" in msg.lower() else 502
+                    return self._json(code, {"error": {"message": msg, "type": "upstream_error"}})
+                reply = data.get("reply", "")
+        except urllib.error.HTTPError as e:
+            body_txt = e.read().decode(errors="replace")[:300]
+            return self._json(e.code, {"error": {"message": f"ia.gratis HTTP {e.code}: {body_txt}", "type": "upstream_http_error"}})
+        except Exception as e:
+            return self._json(502, {"error": {"message": str(e), "type": "proxy_error"}})
+
+        # ── respond ─────────────────────────────────────────────────────────
+        pt = sum(len(str(m.get("content", ""))) // 4 for m in messages)
+        ct = len(reply) // 4
+
+        if do_stream:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self._cors(); self.end_headers()
+
+            def sse(obj):
+                try:
+                    self.wfile.write(f"data: {json.dumps(obj)}\n\n".encode())
+                    self.wfile.flush()
+                except Exception:
+                    pass
+
+            sse({"id": resp_id, "object": "chat.completion.chunk", "created": ts,
+                 "model": raw_model,
+                 "choices": [{"index": 0, "delta": {"role": "assistant", "content": reply},
+                              "finish_reason": None}]})
+            sse({"id": resp_id, "object": "chat.completion.chunk", "created": ts,
+                 "model": raw_model,
+                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+            try:
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            except Exception:
+                pass
+        else:
+            self._json(200, {
+                "id": resp_id, "object": "chat.completion",
+                "created": ts, "model": raw_model,
+                "choices": [{"index": 0,
+                             "message": {"role": "assistant", "content": reply},
+                             "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": pt, "completion_tokens": ct,
+                          "total_tokens": pt + ct},
+            })
+
+
+class ThreadedServer(HTTPServer):
+    allow_reuse_address = True
+    def process_request(self, req, addr):
+        threading.Thread(target=self.finish_request, args=(req, addr), daemon=True).start()
+
+
+if __name__ == "__main__":
+    import signal, sys
+    server = ThreadedServer(("0.0.0.0", PORT), Handler)
+    def _exit(s, f): sys.exit(0)
+    signal.signal(signal.SIGTERM, _exit)
+    signal.signal(signal.SIGINT, _exit)
+    print(f"[gratis-proxy v2] port={PORT} chat={len(CHAT_MODELS)} tools={len(TOOL_MODELS)}", flush=True)
+    server.serve_forever()

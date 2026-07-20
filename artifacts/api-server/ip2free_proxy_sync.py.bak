@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""
+ip2free_proxy_sync.py
+---------------------
+Login to ip2free.com, fetch free SOCKS5 proxies (with auth) and the daily-event
+(task_id=6) status, then inject proxies into the VPS resi_pool.
+
+Run once:
+    python3 ip2free_proxy_sync.py --email <you@outlook.com> --password <pw>
+
+Run every 8 hours (daemon / cron):
+    python3 ip2free_proxy_sync.py --email <you> --password <pw> --loop
+
+The script uses resi_pool.add_external_full() to preserve ip2free credentials
+(user:pass@host:port) so unitool_proxy can route through them.
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+import traceback
+import warnings
+
+warnings.filterwarnings("ignore")
+
+# resi_pool lives in /data/Toolkit/scripts on the VPS
+sys.path.insert(0, "/data/Toolkit/scripts")
+sys.path.insert(0, "/root/Toolkit/scripts")
+try:
+    import resi_pool
+except Exception as _exc:
+    print(f"[warn] resi_pool import failed: {_exc}", file=sys.stderr)
+    resi_pool = None
+
+import requests
+import urllib3
+urllib3.disable_warnings()
+
+BASE_API = "https://api.ip2free.com"
+UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+COMMON_H = {
+    "User-Agent": UA,
+    "Accept": "*/*",
+    "Accept-Language": "zh-CN",
+    "Origin": "https://www.ip2free.com",
+    "Referer": "https://www.ip2free.com/",
+    "domain": "www.ip2free.com",
+    "lang": "cn",
+    "webname": "IP2FREE",
+    "affid": "",
+    "invitecode": "",
+    "serviceid": "",
+}
+
+
+def _api_session():
+    s = requests.Session()
+    s.verify = False
+    s.headers.update(COMMON_H)
+    return s
+
+
+def login(email: str, pw: str):
+    s = _api_session()
+    r = s.post(
+        f"{BASE_API}/api/account/login?",
+        data=json.dumps({"email": email, "password": pw}),
+        headers={"Content-Type": "text/plain;charset=UTF-8"},
+        timeout=15,
+    )
+    r.raise_for_status()
+    payload = r.json()
+    if payload.get("code") != 0:
+        raise RuntimeError(f"login failed: {payload}")
+    tok = payload.get("data", {}).get("token")
+    if not tok:
+        raise RuntimeError("login success but no token")
+    s.headers["x-token"] = tok
+    return s
+
+
+def fetch_free_proxies(s):
+    """Return list of 'user:pass@host:port' SOCKS5 proxies from /api/ip/freeList."""
+    r = s.get(f"{BASE_API}/api/ip/freeList", timeout=15)
+    r.raise_for_status()
+    payload = r.json()
+    if payload.get("code") != 0:
+        raise RuntimeError(f"freeList failed: {payload}")
+    data = payload.get("data", {})
+    proxies = data.get("free_ip_list", []) if isinstance(data, dict) else []
+    out = []
+    for item in proxies:
+        if item.get("status") != 1:
+            continue
+        host = (item.get("ip") or item.get("host") or "").strip()
+        port = item.get("port")
+        user = (item.get("username") or "").strip()
+        pw = (item.get("password") or "").strip()
+        proto = (item.get("protocol") or "socks5").lower()
+        if not host or not port:
+            continue
+        try:
+            port = int(str(port).split(":")[-1])
+        except (ValueError, TypeError):
+            continue
+        if proto != "socks5":
+            continue
+        if user and pw:
+            out.append(f"{user}:{pw}@{host}:{port}")
+        else:
+            out.append(f"{host}:{port}")
+    return out
+
+
+def fetch_event_status(s):
+    """Fetch daily event (task_id=6) status and rewards."""
+    r = s.post(
+        f"{BASE_API}/api/account/taskList?",
+        data="{}",
+        headers={"Content-Type": "text/plain;charset=UTF-8"},
+        timeout=15,
+    )
+    r.raise_for_status()
+    payload = r.json()
+    if payload.get("code") != 0:
+        raise RuntimeError(f"taskList failed: {payload}")
+    tasks = payload.get("data", {}).get("list", [])
+    t6 = next((t for t in tasks if t.get("task_id") == 6), None)
+    if not t6:
+        return None
+    return {
+        "task_id": 6,
+        "task_name": t6.get("task_name"),
+        "is_finished": t6.get("is_finished"),
+        "finished_at": t6.get("finished_at"),
+        "items": t6.get("items", []),
+    }
+
+
+def sync_one(email: str, pw: str, probe: bool = False):
+    print(f"[{time.strftime('%H:%M:%S')}] sync {email} ...", flush=True)
+    s = login(email, pw)
+
+    free_proxies = fetch_free_proxies(s)
+    event_status = fetch_event_status(s)
+
+    added = 0
+    if resi_pool:
+        for proxy in free_proxies:
+            try:
+                if resi_pool.add_external_full(proxy, probe=probe):
+                    added += 1
+                    print(f"  + {proxy}", flush=True)
+                else:
+                    print(f"  - skipped {proxy}", flush=True)
+            except Exception as e:
+                print(f"  ! error adding {proxy}: {e}", flush=True)
+
+    result = {
+        "email": email,
+        "free_total": len(free_proxies),
+        "free_added": added,
+        "event": event_status,
+        "ts": time.time(),
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description="ip2free → VPS proxy pool sync")
+    parser.add_argument("--email", default=os.environ.get("IP2FREE_EMAIL"))
+    parser.add_argument("--password", default=os.environ.get("IP2FREE_PASSWORD"))
+    parser.add_argument("--probe", action="store_true", help="probe proxy before adding")
+    parser.add_argument("--loop", action="store_true", help="loop forever")
+    parser.add_argument("--interval", type=int, default=8 * 3600, help="loop interval seconds")
+    parser.add_argument("--env-file", default="/data/Toolkit/.ip2free_proxy.env",
+                        help="dotenv file with IP2FREE_EMAIL and IP2FREE_PASSWORD")
+    args = parser.parse_args()
+
+    if os.path.exists(args.env_file):
+        with open(args.env_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip() == "IP2FREE_EMAIL" and not args.email:
+                    args.email = v.strip()
+                elif k.strip() == "IP2FREE_PASSWORD" and not args.password:
+                    args.password = v.strip()
+
+    if not args.email or not args.password:
+        parser.error("--email and --password are required (or set IP2FREE_EMAIL/IP2FREE_PASSWORD env / env file)")
+
+    while True:
+        try:
+            sync_one(args.email, args.password, probe=args.probe)
+        except Exception as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            traceback.print_exc()
+        if not args.loop:
+            break
+        print(f"sleep {args.interval}s ...", flush=True)
+        time.sleep(args.interval)
+
+
+if __name__ == "__main__":
+    main()

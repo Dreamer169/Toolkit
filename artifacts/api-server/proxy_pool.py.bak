@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""
+代理池管理器
+- 轮询 (Round-Robin)，支持按组分组
+- 403/429 自动加入黑名单 (可设冷却时间)
+- 从数据库加载 / 支持直接传列表
+- 线程安全
+"""
+
+import json
+import os
+import threading
+import time
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@localhost/toolkit")
+
+
+class ProxyPool:
+    """线程安全的代理池，支持分组轮询 + 自动 ban"""
+
+    def __init__(self, proxies=None, ban_seconds: int = 300):
+        self._lock        = threading.RLock()
+        self._ban_seconds = ban_seconds
+        self._proxies     = []
+        self._index       = 0
+        self._group_index = {}
+
+        if proxies:
+            self._load(proxies)
+
+    def _load(self, proxies):
+        with self._lock:
+            self._proxies     = [{**p, "banned_until": 0} for p in proxies]
+            self._index       = 0
+            self._group_index = {}
+
+    def load_from_db(self):
+        try:
+            import psycopg2
+            conn = psycopg2.connect(DATABASE_URL)
+            cur  = conn.cursor()
+            cur.execute("""
+                SELECT proxy_url, proxy_group, status
+                FROM proxies
+                WHERE status = 'active'
+                ORDER BY id
+            """)
+            rows = cur.fetchall()
+            conn.close()
+            proxies = [{"url": r[0], "group": r[1] or "default"} for r in rows]
+            self._load(proxies)
+            print(f"[ProxyPool] 从数据库加载 {len(proxies)} 个代理", flush=True)
+        except Exception as e:
+            print(f"[ProxyPool] 加载代理失败: {e}", flush=True)
+
+    def load_from_list(self, proxy_urls, group="default"):
+        proxies = [{"url": u, "group": group} for u in proxy_urls]
+        self._load(proxies)
+
+    def _active(self):
+        now = time.time()
+        return [p for p in self._proxies if p["banned_until"] <= now]
+
+    def next(self):
+        with self._lock:
+            active = self._active()
+            if not active:
+                return None
+            idx = self._index % len(active)
+            self._index += 1
+            return active[idx]["url"]
+
+    def next_by_group(self, group: str):
+        with self._lock:
+            now     = time.time()
+            matched = [p for p in self._proxies
+                       if p["group"] == group and p["banned_until"] <= now]
+            if not matched:
+                return None
+            idx = self._group_index.get(group, 0) % len(matched)
+            self._group_index[group] = idx + 1
+            return matched[idx]["url"]
+
+    def ban(self, proxy_url: str, reason: str = ""):
+        with self._lock:
+            banned_until = time.time() + self._ban_seconds
+            for p in self._proxies:
+                if p["url"] == proxy_url:
+                    p["banned_until"] = banned_until
+                    print(f"[ProxyPool] ban {proxy_url} ({reason}), cooldown {self._ban_seconds}s",
+                          flush=True)
+                    break
+            # 同步数据库
+            try:
+                import psycopg2
+                from datetime import datetime, timedelta
+                conn = psycopg2.connect(DATABASE_URL)
+                cur  = conn.cursor()
+                cur.execute("""
+                    UPDATE proxies
+                    SET status='banned', ban_reason=%s, banned_until=%s
+                    WHERE proxy_url=%s
+                """, (reason,
+                      datetime.utcnow() + timedelta(seconds=self._ban_seconds),
+                      proxy_url))
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
+
+    def ban_on_http_error(self, proxy_url: str, status_code: int):
+        if status_code in (403, 429):
+            self.ban(proxy_url, reason=f"HTTP {status_code}")
+
+    def unban_expired(self):
+        """将已超过冷却时间的代理在数据库中恢复为 active"""
+        try:
+            import psycopg2
+            from datetime import datetime
+            conn = psycopg2.connect(DATABASE_URL)
+            cur  = conn.cursor()
+            cur.execute("""
+                UPDATE proxies
+                SET status='active', ban_reason=NULL, banned_until=NULL
+                WHERE status='banned' AND banned_until < %s
+            """, (datetime.utcnow(),))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+    def stats(self) -> dict:
+        with self._lock:
+            now    = time.time()
+            total  = len(self._proxies)
+            banned = sum(1 for p in self._proxies if p["banned_until"] > now)
+            return {
+                "total":  total,
+                "active": total - banned,
+                "banned": banned,
+            }
+
+    def list(self):
+        with self._lock:
+            now = time.time()
+            return [
+                {
+                    "url":    p["url"],
+                    "group":  p["group"],
+                    "status": "banned" if p["banned_until"] > now else "active",
+                }
+                for p in self._proxies
+            ]
+
+
+# 全局单例
+_pool      = None
+_pool_lock = threading.Lock()
+
+
+def get_pool() -> ProxyPool:
+    global _pool
+    if _pool is None:
+        with _pool_lock:
+            if _pool is None:
+                _pool = ProxyPool(ban_seconds=300)
+                _pool.load_from_db()
+    return _pool
+
+
+if __name__ == "__main__":
+    pool = get_pool()
+    print(json.dumps(pool.stats(), indent=2))
+    for p in pool.list():
+        print(f"  {p['status']:6}  {p['url']}  [{p['group']}]")

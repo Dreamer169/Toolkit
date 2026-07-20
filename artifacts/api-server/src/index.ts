@@ -1,0 +1,87 @@
+import app from "./app";
+import { initDatabase } from "./db.js";
+import { logger } from "./lib/logger";
+import { selfRegister } from "./routes/tunnel";
+import { startLiveVerifyPoller } from "./lib/live-verify-poller.js";
+import { startAccountHealthcheck } from "./lib/account-healthcheck.js";
+import { startReplitReplayAudit } from "./lib/replit-replay-audit.js";
+import { startCfPoolMaintainer } from "./lib/cf-pool-maintainer.js";
+import { startNestingPool } from "./lib/nesting-pool.js";
+import { startProxyMaintenance } from "./routes/data.js";
+import { attachCdpRelayWebSocket } from "./lib/cdp_relay_ws.js";
+import { PersistenceManager } from "./lib/persistence-manager.js";
+import { jobQueue } from "./lib/job-queue.js";
+
+import { createServer } from "http";
+
+const rawPort = process.env["PORT"];
+if (!rawPort) throw new Error("PORT environment variable is required but was not provided.");
+
+const port = Number(rawPort);
+if (Number.isNaN(port) || port <= 0) throw new Error(`Invalid PORT value: "${rawPort}"`);
+
+// v7.78r Bug O: 启动前确保所有 CREATE TABLE IF NOT EXISTS 跑过
+await initDatabase().catch((e) => { logger.error({ err: String(e) }, "initDatabase failed"); process.exit(1); });
+
+// v8.23 — listen with EADDRINUSE retry (防 pm2 重启风暴)
+async function _listenWithRetry(): Promise<ReturnType<typeof app.listen>> {
+  let lastErr: unknown = null;
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    try {
+      const sv = await new Promise<ReturnType<typeof app.listen>>((resolve, reject) => {
+        // v9.15: raise HTTP parser maxHeaderSize to 32 KB (fixes 431 on large cookies)
+        const s = createServer({ maxHeaderSize: 32 * 1024 }, app);
+        s.listen(port);
+        s.once("listening", () => resolve(s));
+        s.once("error", reject);
+      });
+      if (attempt > 1) logger.warn({ attempt }, "listen succeeded after EADDRINUSE retry");
+      return sv;
+    } catch (e: unknown) {
+      lastErr = e;
+      const code = (e as { code?: string })?.code;
+      if (code === "EADDRINUSE") {
+        const wait = Math.min(2000 * attempt, 8000);
+        logger.warn({ attempt, port, wait }, "EADDRINUSE — old process still binding port, sleep+retry");
+        await new Promise((r) => setTimeout(r, wait));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr;
+}
+const server = await _listenWithRetry();
+{
+  const err: Error | null = null;
+  if (err) { logger.error({ err }, "Error listening on port"); process.exit(1); }
+  logger.info({ port }, "Server listening");
+  logger.info({ url: `http://localhost:${port}` }, "Stream relay URL");
+  setTimeout(selfRegister, 3_000).unref();
+  // 实时验证链接点击（每10秒扫描）
+  startLiveVerifyPoller();  // v8.85: 默认 30s
+  // 账号健康检查：自动补 OAuth + 打标签（每5分钟）
+  startAccountHealthcheck(5 * 60 * 1000);
+  // v7.78r — Replit 账号 replay-audit 周期校验 (默认 6h, env REPLAY_AUDIT_INTERVAL_HOURS)
+  startReplitReplayAudit();
+  startCfPoolMaintainer();
+  startNestingPool();   // jimjio Worker pool — SOCKS5 多 Colo 出口
+  startProxyMaintenance();
+  attachCdpRelayWebSocket(server);
+  // v1: 启动 job watchdog — 5分钟无活动的 running 任务自动标记 failed（防止 close 事件永不触发导致卡死）
+  jobQueue.startWatchdog(5 * 60 * 1000, 60 * 1000);
+  // v1: 启动时回收上次 api-server 退出后留下的 'running' 僵尸 job
+  PersistenceManager.reapOrphans()
+    .then((n) => { if (n > 0) logger.warn({ reaped: n }, "reaped orphan running jobs"); })
+    .catch((err) => logger.error({ err }, "reapOrphans failed"));
+}
+
+server.on("error", (err) => { logger.error({ err }, "Server error"); });
+
+// v9.01: global crash防护 — 防止 unhandledRejection/uncaughtException 导致进程退出
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error({ reason: String(reason), promise: String(promise) }, '[crash-guard] unhandledRejection — caught, not exiting');
+});
+process.on('uncaughtException', (err) => {
+  logger.error({ err: String(err), stack: (err as Error).stack }, '[crash-guard] uncaughtException — caught, not exiting');
+});

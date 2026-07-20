@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""
+obvious_airforce_factory_code.py — Sandbox-B: api.airforce 注册器
+Key fix: sandbox exec runs under uvicorn async loop → nest_asyncio.
+"""
+import asyncio, json, os, random, re, string, subprocess, sys, time, urllib.request, urllib.error
+from pathlib import Path
+
+def _pip(pkg):
+    r = subprocess.run([sys.executable,"-m","pip","install","-q",pkg],
+        capture_output=True, text=True, timeout=60)
+    return r.returncode == 0
+
+for _p in ["playwright","nest_asyncio"]:
+    try: __import__(_p)
+    except ImportError: _pip(_p)
+
+try:
+    from playwright.async_api import async_playwright
+except ImportError:
+    print("[af-factory] FATAL: playwright not importable"); sys.exit(0)
+
+import nest_asyncio; nest_asyncio.apply()
+
+VPS_API       = os.environ.get("VPS_API",       "http://45.205.27.69:8084")
+SANDBOX_LABEL = os.environ.get("SANDBOX_LABEL", "unknown")
+SHOT_DIR      = Path("/home/user/work/shots"); SHOT_DIR.mkdir(parents=True, exist_ok=True)
+
+RESULT = {"success":False,"username":None,"email":None,"password":None,
+          "api_key":None,"error":None,"elapsed":None,"sandbox":SANDBOX_LABEL}
+
+def vps_get(path):
+    try:
+        with urllib.request.urlopen(f"{VPS_API}{path}", timeout=10) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return {"error":f"HTTP {e.code}","body":e.read().decode()[:200]}
+    except Exception as e:
+        return {"error":str(e)}
+
+def vps_post(path, payload):
+    try:
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(f"{VPS_API}{path}", data=data,
+            headers={"Content-Type":"application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read())
+    except Exception as e:
+        return {"error":str(e)}
+
+def gen_af_username(email_username):
+    base = re.sub(r"[^a-z0-9]","",email_username.lower())[:12]
+    sfx  = "".join(random.choices(string.ascii_lowercase+string.digits,k=4))
+    return f"af_{base}{sfx}"
+
+async def shot(page, name):
+    try: await page.screenshot(path=str(SHOT_DIR/f"{name}.png"),full_page=False)
+    except: pass
+
+async def register():
+    t0 = time.time()
+    print(f"[af-factory:{SANDBOX_LABEL}] claiming email from VPS queue...", flush=True)
+    claim = vps_get("/emails/pop")
+    if claim.get("error") or not claim.get("email"):
+        RESULT["error"] = f"no email from queue: {claim}"; return
+
+    email   = claim["email"]
+    af_user = gen_af_username(claim.get("username", email.split("@")[0]))
+    RESULT.update({"email":email,"username":af_user})
+    print(f"[af-factory:{SANDBOX_LABEL}] claimed {email} → af_user={af_user}", flush=True)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox","--disable-dev-shm-usage",
+                  "--disable-blink-features=AutomationControlled","--disable-setuid-sandbox"],
+        )
+        ctx = await browser.new_context(
+            viewport={"width":1366,"height":768},
+            user_agent=("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
+        )
+        await ctx.add_init_script("""
+            Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
+            window.chrome={runtime:{}};
+            Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5]});
+            Object.defineProperty(navigator,'languages',{get:()=>['en-US','en']});
+        """)
+        page = await ctx.new_page()
+
+        try:
+            await page.goto("https://api.airforce/signup/",timeout=40000,wait_until="domcontentloaded")
+            await asyncio.sleep(2)
+            try:
+                await page.wait_for_selector('input[name="username"]',timeout=15000)
+                print(f"[af-factory:{SANDBOX_LABEL}] form ready t={time.time()-t0:.1f}s", flush=True)
+            except:
+                RESULT["error"] = "form not found: "+(await page.title())[:60]; return
+
+            # Turnstile bypass: probe invisible token first
+            token = None
+            for _ in range(5):
+                await asyncio.sleep(1)
+                token = await page.evaluate("""() => {
+                    for (const inp of document.querySelectorAll('input[name="cf-turnstile-response"]'))
+                        if (inp.value) return inp.value;
+                    return null;
+                }""")
+                if token: break
+
+            if not token:
+                print(f"[af-factory:{SANDBOX_LABEL}] shadow bypass...", flush=True)
+                try:
+                    await page.wait_for_selector("iframe[src*='challenges.cloudflare.com']",timeout=8000)
+                    frame = page.frame_locator("iframe[src*='challenges.cloudflare.com']").first
+                    cb = frame.locator("input[type='checkbox']")
+                    if await cb.count()==0: cb = frame.locator(".ctp-checkbox-label,label")
+                    await cb.first.click(timeout=6000)
+                except Exception as e:
+                    print(f"[af-factory:{SANDBOX_LABEL}] iframe click: {e}", flush=True)
+                for _ in range(30):
+                    await asyncio.sleep(1)
+                    token = await page.evaluate("""() => {
+                        for (const inp of document.querySelectorAll('input[name="cf-turnstile-response"]'))
+                            if (inp.value) return inp.value;
+                        return null;
+                    }""")
+                    if token:
+                        print(f"[af-factory:{SANDBOX_LABEL}] TOKEN len={len(token)}", flush=True)
+                        break
+
+            if not token:
+                RESULT["error"] = "no Turnstile token after 35s"; return
+
+            af_pass = (random.choice(string.ascii_uppercase)
+                       +"".join(random.choices(string.ascii_lowercase,k=6))
+                       +"".join(random.choices(string.digits,k=3))
+                       +random.choice("!@#$%"))
+            RESULT["password"] = af_pass
+
+            await page.fill('input[name="username"]', af_user)
+            await page.fill('input[name="email"]',    email)
+            await page.fill('input[name="password"]', af_pass)
+            try: await page.fill('input[name="confirmPassword"]', af_pass)
+            except: pass
+            await shot(page, f"{af_user}_01_filled")
+            print(f"[af-factory:{SANDBOX_LABEL}] form filled t={time.time()-t0:.1f}s", flush=True)
+
+            for sel in ['button[type="submit"]','button:has-text("Create")','button:has-text("Sign")']:
+                try:
+                    el = page.locator(sel).first
+                    if await el.is_visible(timeout=2000):
+                        await el.click()
+                        print(f"[af-factory:{SANDBOX_LABEL}] submitted t={time.time()-t0:.1f}s", flush=True)
+                        break
+                except: pass
+
+            dashboard = False
+            for _ in range(80):
+                await asyncio.sleep(1)
+                url = page.url
+                if "dashboard" in url.lower():
+                    print(f"[af-factory:{SANDBOX_LABEL}] DASHBOARD t={time.time()-t0:.1f}s", flush=True)
+                    dashboard = True; break
+                err_el = page.locator('[class*="error"],[role="alert"],.text-red,.text-destructive')
+                if await err_el.count()>0:
+                    try:
+                        err_txt = await err_el.first.text_content(timeout=500)
+                        if err_txt and len(err_txt.strip())>2:
+                            RESULT["error"] = "signup error: "+err_txt.strip()[:100]; return
+                    except: pass
+
+            if not dashboard:
+                RESULT["error"] = "timeout waiting for dashboard (80s)"; return
+
+            await shot(page, f"{af_user}_02_dashboard")
+            await asyncio.sleep(1)
+            api_key = await page.evaluate("""async () => {
+                try {
+                    const r = await fetch('/api/me',{credentials:'include'});
+                    const d = await r.json();
+                    return d.api_key || null;
+                } catch(e) { return null; }
+            }""")
+
+            if api_key:
+                RESULT.update({"success":True,"api_key":api_key,
+                               "elapsed":round(time.time()-t0,1)})
+                print(f"[af-factory:{SANDBOX_LABEL}] SUCCESS key={api_key[:28]}... t={RESULT['elapsed']}s", flush=True)
+                vps_post("/accounts/push",{"username":af_user,"email":email,
+                                           "password":af_pass,"api_key":api_key,"sandbox":SANDBOX_LABEL})
+            else:
+                RESULT["error"] = "dashboard reached but no api_key from /api/me"
+
+        except Exception as e:
+            RESULT["error"] = type(e).__name__+": "+str(e)[:200]
+            print(f"[af-factory:{SANDBOX_LABEL}] EXCEPTION: {e}", flush=True)
+        finally:
+            await browser.close()
+
+asyncio.get_event_loop().run_until_complete(register())
+print("RESULT:"+json.dumps(RESULT))
