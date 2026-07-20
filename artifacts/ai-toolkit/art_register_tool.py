@@ -266,10 +266,6 @@ def _estimate_tokens(text: str) -> int:
     """粗估 token 数（中英混合约3字符/token），用于伪装 OpenAI 用量字段。"""
     return max(1, len(text) // 3)
 
-def _estimate_tokens(text: str) -> int:
-    """粗估 token 数（中英混合约3字符/token），用于伪装 OpenAI 用量字段。"""
-    return max(1, len(text) // 3)
-
 def mark_proxy_failed(port: int) -> None:
     """标记端口冷却黑名单，同时清除 good-cache（代理连接级失败时调用）。"""
     _ttl = _runtime_cfg.get("proxy_cooldown_ttl", PROXY_COOLDOWN_TTL)
