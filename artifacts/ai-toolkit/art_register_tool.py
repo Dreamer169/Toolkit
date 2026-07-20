@@ -1301,18 +1301,6 @@ def do_chat_stream(pool: ArtPool, registrar: ArtRegistrar,
 # ═══════════════════════════════════════════════════════════════════
 app         = Flask(__name__)
 
-# ── WSGI 层拦截 Server 头（gunicorn 在 after_request 之后追加，必须在此处替换）──
-class _StripServerMiddleware:
-    """WSGI 中间件：将任意上游 Server 头替换为 nginx 伪装值。"""
-    __slots__ = ("app",)
-    def __init__(self, application): self.app = application
-    def __call__(self, environ, start_response):
-        def _sr(status, headers, exc_info=None):
-            headers = [(k, v) for k, v in headers if k.lower() != "server"]
-            headers.append(("Server", "nginx/1.24.0"))
-            return start_response(status, headers, exc_info)
-        return self.app(environ, _sr)
-app.wsgi_app = _StripServerMiddleware(app.wsgi_app)
 
 _pool:       Optional[ArtPool]      = None
 _registrar:  Optional[ArtRegistrar] = None
@@ -1339,23 +1327,9 @@ def _handle_options():
         resp.headers["Access-Control-Max-Age"]       = "86400"
         return resp
 
-# ── CORS 预检 + 伪装响应头 ────────────────────────────────────────
-@app.before_request
-def _handle_options():
-    """处理 OPTIONS 预检，避免浏览器客户端 405；同时让 CDN/探针觉得是正常 nginx。"""
-    if request.method == "OPTIONS":
-        resp = Response(status=204)
-        resp.headers["Access-Control-Allow-Origin"]  = "*"
-        resp.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, X-Requested-With"
-        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        resp.headers["Access-Control-Max-Age"]       = "86400"
-        return resp
-
 @app.after_request
 def _stealth_headers(resp):
-    """剥离 Flask/Werkzeug 特征头，注入与 OpenAI 兼容的伪装头。"""
-    # ── Server 头：WSGI 中间件统一替换，此处保留作 fallback ──────────
-    resp.headers["Server"] = "nginx/1.24.0"
+    """注入 CORS 和 OpenAI 兼容伪装头；Server 头由 gunicorn.http.wsgi.Response.version 统一注入。"""
     # ── CORS：允许所有来源（OpenAI API 同样开放）───────────────
     resp.headers["Access-Control-Allow-Origin"]  = "*"
     resp.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, X-Requested-With"
@@ -1681,6 +1655,10 @@ def main():
             "errorlog":      "-",
             "loglevel":      "warning",    # 减少 gunicorn 日志噪声
         }
+        # gunicorn.__init__ 里 self.version = SERVER（模块级绑定），必须 patch wsgi 模块的 SERVER 变量
+        # patch 类属性无效：__init__ 每次都用 SERVER 名称覆盖实例属性
+        import gunicorn.http.wsgi as _gwsgi
+        _gwsgi.SERVER = "nginx/1.24.0"
         log("init", "启动 gunicorn gthread（高并发模式）")
         _StandaloneApp(app, opts).run()
     except ImportError:
