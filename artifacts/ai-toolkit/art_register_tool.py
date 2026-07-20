@@ -1546,6 +1546,23 @@ def ar_admin_restore():
     log("admin", f"手动解除隔离: {restored} 个")
     return jsonify({"ok": True, "restored": restored, "pool": _pool.stats()})
 
+@app.route("/ar/admin/reset-usage", methods=["POST"])
+def ar_admin_reset_usage():
+    """
+    立即执行每日 usage 全量重置（等价于午夜自动重置）。
+    arting.ai 没有余额查询 API，本地 usage 计数器是唯一来源。
+    当本地计数已知偏差时（如跨天未重置的历史值），调此接口手动对齐。
+    先解除到期隔离，再重置所有非隔离账号的 usage=0。
+    """
+    denied = _check_admin()
+    if denied: return denied
+    if _pool is None:
+        return jsonify({"error": "pool not ready"}), 503
+    restored = _pool.restore_quarantined()
+    reset    = _pool.reset_daily_usage()
+    log("admin", f"手动全量重置: 解隔离={restored} 重置usage={reset}")
+    return jsonify({"ok": True, "restored": restored, "reset": reset, "pool": _pool.stats()})
+
 _SETTINGS_FIELDS = [
     {"key":"rate_limit_cooldown","label":"速率冷却时长(s)","desc":"100099 账号冷却秒数","type":"number","default":60},
     {"key":"proxy_cooldown_ttl","label":"代理冷却时长(s)","desc":"代理端口失效后冷却秒数","type":"number","default":600},
