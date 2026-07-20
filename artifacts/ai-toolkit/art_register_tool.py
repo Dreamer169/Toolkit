@@ -26,11 +26,28 @@ arting.ai 协议（实测确认，2026-07-18）：
   额度: 60 次 / 账号（FREE_USAGE_CAP=60，可通过 /admin/settings 热改）
   token 过期或单会话冲突 → code 100001 / 100005 / 100012 → 重新登录刷新 JWT
 
-高并发部署（推荐）：
-  gunicorn -w 1 -k gthread --threads 300 --bind 0.0.0.0:9097 art_register_tool:app
-  # -w 1 确保账号池单进程共享；--threads 300 满足高并发（I/O密集 GIL在等待时释放）
+高并发部署（推荐，gevent 已安装时自动启用）：
+  python art_register_tool.py  ← 自动检测 gevent 并使用 gevent worker
+
+  gevent worker（当前默认）:
+    gunicorn -w 1 -k gevent --worker-connections 1000 --bind 0.0.0.0:9097 art_register_tool:app
+    # 单线程 + greenlet，500-1000 并发 RSS≈40MB；Condition/httpx 在 I/O 时 cooperative yield
+
+  fallback（gevent 不可用时）:
+    gunicorn -w 1 -k gthread --threads 300 --bind 0.0.0.0:9097 art_register_tool:app
+    # 300 OS线程，I/O密集 GIL等待时释放，适合 <300 并发
 """
 from __future__ import annotations
+
+# gevent monkey-patch 必须在所有其他 import 之前执行
+# gunicorn gevent worker 启动时会自动 patch，但 _StandaloneApp 内嵌模式下
+# app 模块在 gunicorn 初始化前已 import，所以必须在此处主动 patch
+try:
+    from gevent import monkey as _gm
+    _gm.patch_all()
+    _GEVENT = True
+except ImportError:
+    _GEVENT = False
 
 import hashlib
 import hmac as _hmac
@@ -1630,7 +1647,7 @@ def main():
     print(f"   POST http://0.0.0.0:{args.port}/ar/v1/chat/completions", flush=True)
     print(f"   GET  http://0.0.0.0:{args.port}/ar/admin/status (Bearer {pw_hint})", flush=True)
     print(f" 高并发推荐:", flush=True)
-    print(f"   gunicorn -w 1 -k gthread --threads 300 --bind 0.0.0.0:{args.port} art_register_tool:app", flush=True)
+    print(f"   [gevent] gunicorn -w 1 -k gevent --worker-connections 1000 --bind 0.0.0.0:{args.port} art_register_tool:app", flush=True)
     print(f"{'='*56}\n", flush=True)
 
     # ── 生产模式：gunicorn（-w 1 单进程保证池共享，gthread 高并发 I/O）──
@@ -1648,23 +1665,38 @@ def main():
                         self.cfg.set(k.lower(), v)
             def load(self):
                 return self.application
-        opts = {
-            "bind":          f"{args.host}:{args.port}",
-            "workers":       1,            # 单进程确保账号池内存共享
-            "worker_class":  "gthread",    # 线程模型，适合 I/O 密集
-            "threads":       300,          # I/O密集：GIL在httpx等待时释放，300≈300并发
-            "timeout":       300,          # 流式请求需要长超时
-            "keepalive":     5,
-            "worker_rlimit_nofile": 65535, # 显式保障fd上限
-            "accesslog":     "-",
-            "errorlog":      "-",
-            "loglevel":      "warning",    # 减少 gunicorn 日志噪声
-        }
-        # gunicorn.__init__ 里 self.version = SERVER（模块级绑定），必须 patch wsgi 模块的 SERVER 变量
-        # patch 类属性无效：__init__ 每次都用 SERVER 名称覆盖实例属性
+        # ── Worker 自动选择：gevent（协程，单线程，500-1000并发）> gthread（线程池，<300并发）──
+        if _GEVENT:
+            opts = {
+                "bind":                 f"{args.host}:{args.port}",
+                "workers":              1,       # 单进程确保账号池内存共享
+                "worker_class":         "gevent",
+                "worker_connections":   1000,    # 最大并发 greenlet 数
+                "timeout":              300,     # 流式请求需要长超时
+                "keepalive":            5,
+                "worker_rlimit_nofile": 65535,
+                "accesslog":            "-",
+                "errorlog":             "-",
+                "loglevel":             "warning",
+            }
+            mode_msg = "gevent（单线程协程，最高并发）"
+        else:
+            opts = {
+                "bind":                 f"{args.host}:{args.port}",
+                "workers":              1,
+                "worker_class":         "gthread",
+                "threads":              300,
+                "timeout":              300,
+                "keepalive":            5,
+                "worker_rlimit_nofile": 65535,
+                "accesslog":            "-",
+                "errorlog":             "-",
+                "loglevel":             "warning",
+            }
+            mode_msg = "gthread 300（线程池，gevent 不可用）"
         import gunicorn.http.wsgi as _gwsgi
         _gwsgi.SERVER = "nginx/1.24.0"
-        log("init", "启动 gunicorn gthread（高并发模式）")
+        log("init", f"启动 gunicorn {mode_msg}")
         _StandaloneApp(app, opts).run()
     except ImportError:
         log("init", "gunicorn 未安装，回退到 Flask dev server（仅开发用）")
