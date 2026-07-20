@@ -30,7 +30,7 @@ interface ArtStatus {
     registered: number; target: number; today: string;
   };
   proxy: { resi_cooled: number; resi_total: number };
-  settings: { admin_pw_set: boolean; chat_proxy: string; reg_proxy: string; proactive_rpm: number; proactive_rpm_window: number; release_cooldown: number };
+  settings: { admin_pw_set: boolean; chat_proxy: string; reg_proxy: string; proactive_rpm: number; proactive_rpm_window: number; release_cooldown: number; free_usage_cap: number };
 }
 
 function apiFetch(path: string, method = "GET", body?: object) {
@@ -107,6 +107,9 @@ export default function ArPanel() {
   const [search, setSearch] = useState("");
   const [regCount, setRegCount] = useState(1);
   const [logsOpen, setLogsOpen] = useState(false);
+  const [cfg, setCfg] = useState<{ fields: { key: string; label: string; desc: string; type: string; default: number | string }[]; values: Record<string, string | number> } | null>(null);
+  const [cfgDraft, setCfgDraft] = useState<Record<string, string>>({});
+  const [cfgSaving, setCfgSaving] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const notify = (msg: string, ok = true) => {
@@ -139,6 +142,31 @@ export default function ArPanel() {
     } catch {}
   };
 
+  const loadSettings = useCallback(async () => {
+    try { const r = await apiFetch("/settings"); if (r.fields) setCfg(r); } catch {}
+  }, []);
+
+  async function saveSettings() {
+    if (!cfg || Object.keys(cfgDraft).length === 0) return;
+    setCfgSaving(true);
+    try {
+      const body: Record<string, string | number> = {};
+      cfg.fields.forEach(f => {
+        if (cfgDraft[f.key] !== undefined)
+          body[f.key] = f.type === "number" ? Number(cfgDraft[f.key]) : cfgDraft[f.key];
+      });
+      const r = await apiFetch("/settings", "PATCH", body);
+      if (r.ok) {
+        notify("参数已保存，即时生效");
+        setCfgDraft({});
+        await loadSettings();
+        await refresh();
+      } else notify(r.error ?? "保存失败", false);
+    } catch (e: any) {
+      notify("网络错误: " + e.message, false);
+    } finally { setCfgSaving(false); }
+  }
+
   useEffect(() => {
     refresh();
     timerRef.current = setInterval(refresh, 10000);
@@ -148,6 +176,8 @@ export default function ArPanel() {
   useEffect(() => {
     if (logsOpen) fetchLogs();
   }, [logsOpen]);
+
+  useEffect(() => { loadSettings(); }, [loadSettings]);
 
   async function act(path: string, method: string, body?: object, msg?: string) {
     setBusy(path);
@@ -254,56 +284,61 @@ export default function ArPanel() {
             </button>
           </div>
         }>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-1">
+        <div className="grid grid-cols-2 gap-2 mt-1">
           <div className="bg-[#0d1117] rounded-lg p-3 border border-[#21262d]">
             <div className="text-[10px] text-gray-500 uppercase mb-1">聊天代理</div>
-            <div className="text-sm text-white font-mono">{status?.settings.chat_proxy ?? "—"}</div>
-          </div>
-          <div className="bg-[#0d1117] rounded-lg p-3 border border-[#21262d]">
-            <div className="text-[10px] text-gray-500 uppercase mb-1">注册代理</div>
-            <div className="text-sm text-white font-mono">{status?.settings.reg_proxy ?? "—"}</div>
-          </div>
-          <div className="bg-[#0d1117] rounded-lg p-3 border border-[#21262d]">
-            <div className="text-[10px] text-gray-500 uppercase mb-1">速率限制</div>
-            <div className="text-sm text-white font-mono">{p?.rate_limited ?? 0} 个账号</div>
-          </div>
-          <div className="bg-[#0d1117] rounded-lg p-3 border border-[#21262d]">
-            <div className="text-[10px] text-gray-500 uppercase mb-1">主动限速</div>
-            <div className="text-sm text-white font-mono">
-              {status?.settings.proactive_rpm ? `${status.settings.proactive_rpm}次/${status.settings.proactive_rpm_window}s` : "关"}
-            </div>
-          </div>
-          <div className="bg-[#0d1117] rounded-lg p-3 border border-[#21262d]">
-            <div className="text-[10px] text-gray-500 uppercase mb-1">占用冷却</div>
-            <div className="text-sm text-white font-mono">{status?.settings.release_cooldown ?? 30}s</div>
+            <div className="text-sm text-white font-mono truncate">{status?.settings.chat_proxy || "直连"}</div>
           </div>
           <div className="bg-[#0d1117] rounded-lg p-3 border border-[#21262d]">
             <div className="text-[10px] text-gray-500 uppercase mb-1">API 端点</div>
-            <div className="text-xs text-blue-400 font-mono break-all">/api/ar/v1/chat/completions</div>
+            <div className="text-xs text-blue-400 font-mono">/api/ar/v1/chat/completions</div>
           </div>
         </div>
+      </Section>
 
-        {/* 翻页控件 */}
-        {!search && accountsTotal > 50 && (
-          <div className="flex items-center justify-between px-1 pt-3">
-            <span className="text-xs text-gray-500">
-              第 {page + 1} / {Math.ceil(accountsTotal / 50)} 页 · 共 {accountsTotal} 个账号
-            </span>
-            <div className="flex gap-2">
+      {/* 运行参数编辑器 */}
+      <Section title="运行参数" icon="⚙️" defaultOpen={false}>
+        {cfg ? (
+          <div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-1">
+              {cfg.fields.map(field => {
+                const saved = String(cfg.values[field.key] ?? field.default);
+                const cur   = cfgDraft[field.key] ?? saved;
+                const dirty = cfgDraft[field.key] !== undefined && cfgDraft[field.key] !== saved;
+                return (
+                  <div key={field.key} className="bg-[#0d1117] rounded-lg p-3 border border-[#21262d]">
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="text-[10px] text-gray-500 uppercase tracking-wide">{field.label}</div>
+                      {dirty && <span className="text-[10px] text-amber-400 font-medium">已修改</span>}
+                    </div>
+                    <input
+                      type={field.type === "number" ? "number" : "text"}
+                      value={cur}
+                      onChange={e => setCfgDraft(d => ({ ...d, [field.key]: e.target.value }))}
+                      className="w-full bg-[#161b22] border border-[#30363d] rounded px-2 py-1.5 text-sm text-white font-mono focus:border-violet-500 outline-none"
+                    />
+                    <div className="text-[10px] text-gray-600 mt-1 leading-tight">{field.desc}</div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex justify-end gap-2 mt-3">
+              {Object.keys(cfgDraft).length > 0 && (
+                <button onClick={() => setCfgDraft({})}
+                  className="px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200 bg-[#21262d] rounded-lg">
+                  重置
+                </button>
+              )}
               <button
-                disabled={page === 0}
-                onClick={() => setPage(p => p - 1)}
-                className="px-3 py-1 rounded-lg bg-[#21262d] hover:bg-[#30363d] text-sm text-gray-300 disabled:opacity-30">
-                ← 上一页
-              </button>
-              <button
-                disabled={(page + 1) * 50 >= accountsTotal}
-                onClick={() => setPage(p => p + 1)}
-                className="px-3 py-1 rounded-lg bg-[#21262d] hover:bg-[#30363d] text-sm text-gray-300 disabled:opacity-30">
-                下一页 →
+                disabled={cfgSaving || Object.keys(cfgDraft).length === 0}
+                onClick={saveSettings}
+                className="px-4 py-1.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 rounded-lg text-xs text-white font-medium">
+                {cfgSaving ? "保存中…" : `保存修改 (${Object.keys(cfgDraft).length}项)`}
               </button>
             </div>
           </div>
+        ) : (
+          <div className="text-gray-500 text-sm py-4 text-center">加载中…</div>
         )}
       </Section>
 
@@ -372,6 +407,23 @@ export default function ArPanel() {
             </tbody>
           </table>
         </div>
+        {!search && accountsTotal > 50 && (
+          <div className="flex items-center justify-between px-1 pt-3">
+            <span className="text-xs text-gray-500">
+              第 {page + 1} / {Math.ceil(accountsTotal / 50)} 页 · 共 {accountsTotal} 个账号
+            </span>
+            <div className="flex gap-2">
+              <button disabled={page === 0} onClick={() => setPage(p => p - 1)}
+                className="px-3 py-1 rounded-lg bg-[#21262d] hover:bg-[#30363d] text-sm text-gray-300 disabled:opacity-30">
+                ← 上一页
+              </button>
+              <button disabled={(page + 1) * 50 >= accountsTotal} onClick={() => setPage(p => p + 1)}
+                className="px-3 py-1 rounded-lg bg-[#21262d] hover:bg-[#30363d] text-sm text-gray-300 disabled:opacity-30">
+                下一页 →
+              </button>
+            </div>
+          </div>
+        )}
       </Section>
 
       {/* Logs */}
