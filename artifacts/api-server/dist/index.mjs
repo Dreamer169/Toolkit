@@ -28115,7 +28115,7 @@ var require_pino = __commonJS({
     function pinoBundlerAbsolutePath(p) {
       try {
         const path8 = __require("path");
-        const outputDir = "/data/Toolkit/artifacts/api-server/dist";
+        const outputDir = "/home/runner/workspace/forks/Toolkit/artifacts/api-server/dist";
         return path8.resolve(outputDir, p.replace(/^\.\//, ""));
       } catch (e) {
         const f = new Function("p", "return new URL(p, import.meta.url).pathname");
@@ -74529,24 +74529,14 @@ ${_sep}
     }
     const lines = raw.split("\n").filter(Boolean);
     for (const line of lines) {
-      const t = line.trim();
+      const raw_t = line.trim();
+      if (!raw_t) continue;
+      const t = raw_t.replace(/^\[T\+\s*[\d.]+s\]\s*/, "");
       if (!t) continue;
-      if (t.startsWith("\u2500\u2500") || t.startsWith("\u{1F680}")) continue;
-      if (t === "[" || t === "{" || t === "]" || t === "}") continue;
-      if (t.startsWith("{") || t.startsWith("[{") && t.endsWith("}]")) continue;
-      if (t.startsWith('"') && t.includes(":")) continue;
-      if (/^\s*"(email|username|password|success|error|elapsed|engine)"\s*:/.test(t)) continue;
-      if (t === "\u2500\u2500 JSON \u7ED3\u679C \u2500\u2500") continue;
-      let type = "log";
-      if (t.includes("\u26A0")) type = "warn";
-      else if (t.includes("\u274C")) type = "error";
-      else if (t.includes("\u2705") && t.includes("|")) type = "success";
-      else if (t === "\u2705 \u6210\u529F: 0 / 1" || t.startsWith("\u2705 \u6210\u529F:")) type = "done";
-      job.logs.push({ type, message: t });
-      if (t.startsWith("-- INLINE_RESULT --")) {
+      const inlineIdx = t.indexOf("-- INLINE_RESULT --");
+      if (inlineIdx >= 0) {
         try {
-          const jsonPart = t.slice("-- INLINE_RESULT --".length).trim();
-          const r = JSON.parse(jsonPart);
+          const r = JSON.parse(t.slice(inlineIdx + "-- INLINE_RESULT --".length).trim());
           if (r.success && r.email) {
             const em = String(r.email);
             if (!identityMap.has(em)) {
@@ -74561,8 +74551,9 @@ ${_sep}
                 proxy_formatted: String(r.proxy_formatted ?? "")
               });
             }
-            const already = job.accounts.find((a) => a.email === em);
-            if (!already) job.accounts.push({ email: em, password: String(r.password ?? "") });
+            if (!job.accounts.find((a) => a.email === em))
+              job.accounts.push({ email: em, password: String(r.password ?? "") });
+            job.logs.push({ type: "success", message: `\u2705 [inline] \u89E3\u6790\u6210\u529F: ${em}` });
             (async () => {
               const idn = identityMap.get(em);
               try {
@@ -74571,7 +74562,7 @@ ${_sep}
                                           cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port, proxy_formatted)
                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
                    ON CONFLICT (platform, email) DO UPDATE SET
-                     password=EXCLUDED.password, status=EXCLUDED.status,
+                     password=EXCLUDED.password, status='active',
                      token=COALESCE(NULLIF(EXCLUDED.token,''), accounts.token),
                      refresh_token=COALESCE(NULLIF(EXCLUDED.refresh_token,''), accounts.refresh_token),
                      cookies_json=COALESCE(NULLIF(EXCLUDED.cookies_json,''), accounts.cookies_json),
@@ -74607,13 +74598,22 @@ ${_sep}
         }
         continue;
       }
+      if (t.startsWith("\u2500\u2500") || t.startsWith("\u{1F680}")) continue;
+      if (t === "[" || t === "{" || t === "]" || t === "}") continue;
+      if (t.startsWith("{") || t.startsWith("[{") && t.endsWith("}]")) continue;
+      if (t.startsWith('"') && t.includes(":")) continue;
+      if (/^\s*"(email|username|password|success|error|elapsed|engine)"\s*:/.test(t)) continue;
+      let type = "log";
+      if (t.includes("\u26A0")) type = "warn";
+      else if (t.includes("\u274C")) type = "error";
+      else if (t.includes("\u2705") && t.includes("|")) type = "success";
+      else if (t.startsWith("\u2705 \u6210\u529F:")) type = "done";
+      job.logs.push({ type, message: t });
       if (type === "success" && t.includes("@outlook.com")) {
         const emailM = t.match(/([\w.\-+]+@(?:outlook|hotmail|live)\.com)/);
         const passM = t.match(/密码:\s*(\S+)/);
-        if (emailM && passM) {
-          const already = job.accounts.find((a) => a.email === emailM[1]);
-          if (!already) job.accounts.push({ email: emailM[1], password: passM[1] });
-        }
+        if (emailM && passM && !job.accounts.find((a) => a.email === emailM[1]))
+          job.accounts.push({ email: emailM[1], password: passM[1] });
       }
     }
   });
@@ -78419,10 +78419,12 @@ router2.post("/tools/outlook/full-workflow", async (req, res) => {
     const _fwIdentityMap = /* @__PURE__ */ new Map();
     child.stdout?.on("data", (d) => {
       d.toString().split("\n").filter(Boolean).forEach((line) => {
-        jobQueue.pushLog(jobId, { type: "log", message: line });
-        if (line.startsWith("-- INLINE_RESULT --")) {
+        const t = line.trim().replace(/^\[T\+\s*[\d.]+s\]\s*/, "");
+        if (!t) return;
+        const _inlineIdx = t.indexOf("-- INLINE_RESULT --");
+        if (_inlineIdx >= 0) {
           try {
-            const _jr = JSON.parse(line.slice("-- INLINE_RESULT --".length).trim());
+            const _jr = JSON.parse(t.slice(_inlineIdx + "-- INLINE_RESULT --".length).trim());
             if (_jr.success && _jr.email) {
               const _em = String(_jr.email);
               _fwIdentityMap.set(_em, {
@@ -78437,6 +78439,7 @@ router2.post("/tools/outlook/full-workflow", async (req, res) => {
               });
               if (!job.accounts.find((a) => a.email === _em))
                 jobQueue.pushAccount(jobId, { email: _em, password: String(_jr.password ?? "") });
+              jobQueue.pushLog(jobId, { type: "success", message: `\u2705 [fw] \u89E3\u6790\u6210\u529F: ${_em}` });
               (async () => {
                 const _idn = _fwIdentityMap.get(_em);
                 try {
@@ -78445,7 +78448,7 @@ router2.post("/tools/outlook/full-workflow", async (req, res) => {
                                            cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port, proxy_formatted)
                      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
                      ON CONFLICT (platform, email) DO UPDATE SET
-                       password=EXCLUDED.password, status=EXCLUDED.status,
+                       password=EXCLUDED.password, status='active',
                        token=COALESCE(NULLIF(EXCLUDED.token,''), accounts.token),
                        refresh_token=COALESCE(NULLIF(EXCLUDED.refresh_token,''), accounts.refresh_token),
                        cookies_json=COALESCE(NULLIF(EXCLUDED.cookies_json,''), accounts.cookies_json),
@@ -78471,9 +78474,9 @@ router2.post("/tools/outlook/full-workflow", async (req, res) => {
                       _idn.proxy_formatted || (_idn.proxy_port ? `socks5://127.0.0.1:${_idn.proxy_port}` : null)
                     ]
                   );
-                  jobQueue.pushLog(jobId, { type: "success", message: `\u2705 [fw inline] \u5DF2\u5165\u5E93: ${_em} id=${_ar?.id}` });
+                  jobQueue.pushLog(jobId, { type: "success", message: `\u2705 [fw] \u5DF2\u5165\u5E93: ${_em} id=${_ar?.id}` });
                 } catch (_e) {
-                  jobQueue.pushLog(jobId, { type: "warn", message: `\u26A0 [fw inline] \u5165\u5E93\u5931\u8D25(${_em}): ${_e}` });
+                  jobQueue.pushLog(jobId, { type: "warn", message: `\u26A0 [fw] \u5165\u5E93\u5931\u8D25(${_em}): ${_e}` });
                 }
               })();
             }
@@ -78481,14 +78484,13 @@ router2.post("/tools/outlook/full-workflow", async (req, res) => {
           }
           return;
         }
+        jobQueue.pushLog(jobId, { type: "log", message: t });
         try {
-          const parsed = JSON.parse(line);
+          const parsed = JSON.parse(t);
           if (Array.isArray(parsed)) {
             for (const r of parsed) {
-              if (r.email && r.success) {
-                if (!job.accounts.find((a) => a.email === r.email))
-                  jobQueue.pushAccount(jobId, { email: r.email, password: r.password ?? "" });
-              }
+              if (r.email && r.success && !job.accounts.find((a) => a.email === r.email))
+                jobQueue.pushAccount(jobId, { email: r.email, password: r.password ?? "" });
             }
           }
         } catch {
@@ -78917,9 +78919,10 @@ async function runScheduledOutlookReg() {
         type: "log",
         message: t.length > 600 ? t.slice(0, 600) + " \u2026[truncated]" : t
       });
-      if (!t.startsWith("-- INLINE_RESULT --")) return;
+      const inlineIdx = t.indexOf("-- INLINE_RESULT --");
+      if (inlineIdx < 0) return;
       try {
-        const r = JSON.parse(t.slice("-- INLINE_RESULT --".length).trim());
+        const r = JSON.parse(t.slice(inlineIdx + "-- INLINE_RESULT --".length).trim());
         if (!r.success || !r.email) return;
         registered++;
         const em = String(r.email);
@@ -78933,15 +78936,15 @@ async function runScheduledOutlookReg() {
                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
                ON CONFLICT (platform, email) DO UPDATE SET
                  password         = EXCLUDED.password,
-                 status           = active,
-                 token            = COALESCE(NULLIF(EXCLUDED.token,),            accounts.token),
-                 refresh_token    = COALESCE(NULLIF(EXCLUDED.refresh_token,),    accounts.refresh_token),
-                 cookies_json     = COALESCE(NULLIF(EXCLUDED.cookies_json,),     accounts.cookies_json),
-                 fingerprint_json = COALESCE(NULLIF(EXCLUDED.fingerprint_json,), accounts.fingerprint_json),
-                 user_agent       = COALESCE(NULLIF(EXCLUDED.user_agent,),       accounts.user_agent),
-                 exit_ip          = COALESCE(NULLIF(EXCLUDED.exit_ip,),          accounts.exit_ip),
+                 status           = 'active',
+                 token            = COALESCE(NULLIF(EXCLUDED.token,''),            accounts.token),
+                 refresh_token    = COALESCE(NULLIF(EXCLUDED.refresh_token,''),    accounts.refresh_token),
+                 cookies_json     = COALESCE(NULLIF(EXCLUDED.cookies_json,''),     accounts.cookies_json),
+                 fingerprint_json = COALESCE(NULLIF(EXCLUDED.fingerprint_json,''), accounts.fingerprint_json),
+                 user_agent       = COALESCE(NULLIF(EXCLUDED.user_agent,''),       accounts.user_agent),
+                 exit_ip          = COALESCE(NULLIF(EXCLUDED.exit_ip,''),          accounts.exit_ip),
                  proxy_port       = COALESCE(NULLIF(EXCLUDED.proxy_port,0),        accounts.proxy_port),
-                 proxy_formatted  = COALESCE(NULLIF(EXCLUDED.proxy_formatted,),  accounts.proxy_formatted),
+                 proxy_formatted  = COALESCE(NULLIF(EXCLUDED.proxy_formatted,''),  accounts.proxy_formatted),
                  updated_at       = NOW()
                RETURNING id`,
               [
@@ -78984,6 +78987,10 @@ async function runScheduledOutlookReg() {
       });
       child.on("close", (code) => {
         if (lineBuf.trim()) processLine(lineBuf);
+        jobQueue.pushLog(jobId, {
+          type: "log",
+          message: JSON.stringify({ type: "close", code: code ?? -1, registered, ...lastErr ? { error: lastErr } : {} })
+        });
         jobQueue.finish(jobId, code ?? -1, code === 0 ? "done" : "failed");
         resolve();
       });

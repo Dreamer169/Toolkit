@@ -1676,31 +1676,17 @@ router.post("/tools/outlook/register", async (req, res) => {
 
     const lines = raw.split("\n").filter(Boolean);
     for (const line of lines) {
-      const t = line.trim();
-      // 过滤无意义行和 JSON 结果块
+      const raw_t = line.trim();
+      if (!raw_t) continue;
+      // 剥离 _timed_print 加的 [T+Xs] 前缀，所有过滤和展示都用 t
+      const t = raw_t.replace(/^\[T\+\s*[\d.]+s\]\s*/, "");
       if (!t) continue;
-      if (t.startsWith("──") || t.startsWith("🚀")) continue;
-      // 只过滤独立的 JSON 括号行，不要过滤 [captcha]、[relay]、[register] 这类前缀
-      if (t === "[" || t === "{" || t === "]" || t === "}") continue;
-      if (t.startsWith("{") || (t.startsWith("[{") && t.endsWith("}]"))) continue; // JSON object/array行
-      if (t.startsWith('"') && t.includes(":")) continue;  // JSON 字段行
-      if (/^\s*"(email|username|password|success|error|elapsed|engine)"\s*:/.test(t)) continue;
-      if (t === "── JSON 结果 ──") continue;
 
-      let type = "log";
-      if (t.includes("⚠"))                         type = "warn";
-      else if (t.includes("❌"))                    type = "error";
-      else if (t.includes("✅") && t.includes("|")) type = "success";  // 带账号信息的成功行
-      else if (t === "✅ 成功: 0 / 1" || t.startsWith("✅ 成功:")) type = "done";
-
-      job.logs.push({ type, message: t });
-
-      // 解析 INLINE_RESULT（每账号成功后立即输出，防OOM崩溃丢失）
+      // INLINE_RESULT 行：解析入库，不推送原始 JSON 到 UI 日志（体积大且含明文密码）
       const inlineIdx = t.indexOf("-- INLINE_RESULT --");
       if (inlineIdx >= 0) {
         try {
-          const jsonPart = t.slice(inlineIdx + "-- INLINE_RESULT --".length).trim();
-          const r = JSON.parse(jsonPart) as Record<string, unknown>;
+          const r = JSON.parse(t.slice(inlineIdx + "-- INLINE_RESULT --".length).trim()) as Record<string, unknown>;
           if (r.success && r.email) {
             const em = String(r.email);
             if (!identityMap.has(em)) {
@@ -1715,8 +1701,9 @@ router.post("/tools/outlook/register", async (req, res) => {
                 proxy_formatted:  String(r.proxy_formatted  ?? ""),
               });
             }
-            const already = job.accounts.find(a => a.email === em);
-            if (!already) job.accounts.push({ email: em, password: String(r.password ?? "") });
+            if (!job.accounts.find(a => a.email === em))
+              job.accounts.push({ email: em, password: String(r.password ?? "") });
+            job.logs.push({ type: "success", message: `✅ [inline] 解析成功: ${em}` });
             // 立即持久化该账号（异步，不阻塞）
             (async () => {
               const idn = identityMap.get(em)!;
@@ -1726,7 +1713,7 @@ router.post("/tools/outlook/register", async (req, res) => {
                                           cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port, proxy_formatted)
                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
                    ON CONFLICT (platform, email) DO UPDATE SET
-                     password=EXCLUDED.password, status=EXCLUDED.status,
+                     password=EXCLUDED.password, status='active',
                      token=COALESCE(NULLIF(EXCLUDED.token,''), accounts.token),
                      refresh_token=COALESCE(NULLIF(EXCLUDED.refresh_token,''), accounts.refresh_token),
                      cookies_json=COALESCE(NULLIF(EXCLUDED.cookies_json,''), accounts.cookies_json),
@@ -1754,14 +1741,27 @@ router.post("/tools/outlook/register", async (req, res) => {
         continue;
       }
 
-      // 解析成功账号行
+      // 过滤无意义行和 JSON 结果块（前缀已剥离，startsWith/=== 匹配正常）
+      if (t.startsWith("──") || t.startsWith("🚀")) continue;
+      if (t === "[" || t === "{" || t === "]" || t === "}") continue;
+      if (t.startsWith("{") || (t.startsWith("[{") && t.endsWith("}]"))) continue;
+      if (t.startsWith('"') && t.includes(":")) continue;
+      if (/^\s*"(email|username|password|success|error|elapsed|engine)"\s*:/.test(t)) continue;
+
+      let type = "log";
+      if (t.includes("⚠"))                         type = "warn";
+      else if (t.includes("❌"))                    type = "error";
+      else if (t.includes("✅") && t.includes("|")) type = "success";
+      else if (t.startsWith("✅ 成功:"))             type = "done";
+
+      job.logs.push({ type, message: t });
+
+      // ✅ 行 regex 备用解析（INLINE_RESULT 未命中时兜底，不含 identity bundle）
       if (type === "success" && t.includes("@outlook.com")) {
         const emailM = t.match(/([\w.\-+]+@(?:outlook|hotmail|live)\.com)/);
         const passM  = t.match(/密码:\s*(\S+)/);
-        if (emailM && passM) {
-          const already = job.accounts.find(a => a.email === emailM[1]);
-          if (!already) job.accounts.push({ email: emailM[1], password: passM[1] });
-        }
+        if (emailM && passM && !job.accounts.find(a => a.email === emailM[1]))
+          job.accounts.push({ email: emailM[1], password: passM[1] });
       }
     }
   });
@@ -1809,11 +1809,8 @@ router.post("/tools/outlook/register", async (req, res) => {
     // 兼容: 老代码可能用 tokenMap, 提供别名
     const tokenMap = identityMap;
 
-    // stdout 误捕防护 — 只持久化 JSON 确认成功的账号（identityMap 里有的）
-    // 根因: 子进程打印 ✅ 行 → stdout handler 立即 push job.accounts →
-    //       进程崩溃/超时导致 JSON 块未输出 → identityMap 为空 →
-    //       okCount 仍 >0 → DB 写入"幽灵账号" status=active →
-    //       auto_device_code.py OAuth → MS 报 not_found → 写 not_found tag
+    // close 阶段只持久化 INLINE_RESULT 确认过的账号（identityMap 有 entry）
+    // 以 INLINE_RESULT 为唯一权威来源，✅ 行 regex 仅作最终 fallback
     const confirmedAccounts = job.accounts.filter(acc => identityMap.has(acc.email));
     const okCount = confirmedAccounts.length;
 
@@ -5904,13 +5901,15 @@ router.post('/tools/outlook/full-workflow', async (req, res) => {
     }>();
     child.stdout?.on('data', (d: Buffer) => {
       d.toString().split('\n').filter(Boolean).forEach((line: string) => {
-        jobQueue.pushLog(jobId, { type: 'log', message: line });
+        // 剥离 _timed_print 加的 [T+Xs] 前缀
+        const t = line.trim().replace(/^\[T\+\s*[\d.]+s\]\s*/, '');
+        if (!t) return;
 
-        // ── INLINE_RESULT: immediate DB write (Bug #2 fix) ────────────────────
-        const _inlineIdx = line.indexOf('-- INLINE_RESULT --');
+        // INLINE_RESULT 行：解析入库，不推送原始 JSON 到 UI 日志
+        const _inlineIdx = t.indexOf('-- INLINE_RESULT --');
         if (_inlineIdx >= 0) {
           try {
-            const _jr = JSON.parse(line.slice(_inlineIdx + '-- INLINE_RESULT --'.length).trim()) as Record<string, unknown>;
+            const _jr = JSON.parse(t.slice(_inlineIdx + '-- INLINE_RESULT --'.length).trim()) as Record<string, unknown>;
             if (_jr.success && _jr.email) {
               const _em = String(_jr.email);
               _fwIdentityMap.set(_em, {
@@ -5925,6 +5924,7 @@ router.post('/tools/outlook/full-workflow', async (req, res) => {
               });
               if (!job.accounts.find((a: { email: string }) => a.email === _em))
                 jobQueue.pushAccount(jobId, { email: _em, password: String(_jr.password ?? '') });
+              jobQueue.pushLog(jobId, { type: 'success', message: `✅ [fw] 解析成功: ${_em}` });
               (async () => {
                 const _idn = _fwIdentityMap.get(_em)!;
                 try {
@@ -5933,7 +5933,7 @@ router.post('/tools/outlook/full-workflow', async (req, res) => {
                                            cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port, proxy_formatted)
                      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
                      ON CONFLICT (platform, email) DO UPDATE SET
-                       password=EXCLUDED.password, status=EXCLUDED.status,
+                       password=EXCLUDED.password, status='active',
                        token=COALESCE(NULLIF(EXCLUDED.token,''), accounts.token),
                        refresh_token=COALESCE(NULLIF(EXCLUDED.refresh_token,''), accounts.refresh_token),
                        cookies_json=COALESCE(NULLIF(EXCLUDED.cookies_json,''), accounts.cookies_json),
@@ -5951,25 +5951,25 @@ router.post('/tools/outlook/full-workflow', async (req, res) => {
                      _idn.proxy_port||null,
                      _idn.proxy_formatted||(_idn.proxy_port?`socks5://127.0.0.1:${_idn.proxy_port}`:null)]
                   );
-                  jobQueue.pushLog(jobId, { type: 'success', message: `✅ [fw inline] 已入库: ${_em} id=${_ar?.id}` });
+                  jobQueue.pushLog(jobId, { type: 'success', message: `✅ [fw] 已入库: ${_em} id=${_ar?.id}` });
                 } catch(_e) {
-                  jobQueue.pushLog(jobId, { type: 'warn', message: `⚠ [fw inline] 入库失败(${_em}): ${_e}` });
+                  jobQueue.pushLog(jobId, { type: 'warn', message: `⚠ [fw] 入库失败(${_em}): ${_e}` });
                 }
               })();
             }
-          } catch { /* parse error */ }
+          } catch { /* INLINE_RESULT JSON 解析失败，忽略 */ }
           return;
         }
 
-        // parse account from final JSON summary line
+        jobQueue.pushLog(jobId, { type: 'log', message: t });
+
+        // 最终 JSON summary 行解析（outlook_full_workflow.py 末尾输出，无 [T+Xs] 前缀）
         try {
-          const parsed = JSON.parse(line) as Array<{ email?: string; password?: string; success?: boolean; imap_enabled?: boolean }>;
+          const parsed = JSON.parse(t) as Array<{ email?: string; password?: string; success?: boolean }>;
           if (Array.isArray(parsed)) {
             for (const r of parsed) {
-              if (r.email && r.success) {
-                if (!job.accounts.find((a: { email: string }) => a.email === r.email))
-                  jobQueue.pushAccount(jobId, { email: r.email, password: r.password ?? '' });
-              }
+              if (r.email && r.success && !job.accounts.find((a: { email: string }) => a.email === r.email))
+                jobQueue.pushAccount(jobId, { email: r.email, password: r.password ?? '' });
             }
           }
         } catch { /* not JSON */ }
@@ -6469,15 +6469,15 @@ async function runScheduledOutlookReg(): Promise<void> {
                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
                ON CONFLICT (platform, email) DO UPDATE SET
                  password         = EXCLUDED.password,
-                 status           = active,
-                 token            = COALESCE(NULLIF(EXCLUDED.token,),            accounts.token),
-                 refresh_token    = COALESCE(NULLIF(EXCLUDED.refresh_token,),    accounts.refresh_token),
-                 cookies_json     = COALESCE(NULLIF(EXCLUDED.cookies_json,),     accounts.cookies_json),
-                 fingerprint_json = COALESCE(NULLIF(EXCLUDED.fingerprint_json,), accounts.fingerprint_json),
-                 user_agent       = COALESCE(NULLIF(EXCLUDED.user_agent,),       accounts.user_agent),
-                 exit_ip          = COALESCE(NULLIF(EXCLUDED.exit_ip,),          accounts.exit_ip),
+                 status           = 'active',
+                 token            = COALESCE(NULLIF(EXCLUDED.token,''),            accounts.token),
+                 refresh_token    = COALESCE(NULLIF(EXCLUDED.refresh_token,''),    accounts.refresh_token),
+                 cookies_json     = COALESCE(NULLIF(EXCLUDED.cookies_json,''),     accounts.cookies_json),
+                 fingerprint_json = COALESCE(NULLIF(EXCLUDED.fingerprint_json,''), accounts.fingerprint_json),
+                 user_agent       = COALESCE(NULLIF(EXCLUDED.user_agent,''),       accounts.user_agent),
+                 exit_ip          = COALESCE(NULLIF(EXCLUDED.exit_ip,''),          accounts.exit_ip),
                  proxy_port       = COALESCE(NULLIF(EXCLUDED.proxy_port,0),        accounts.proxy_port),
-                 proxy_formatted  = COALESCE(NULLIF(EXCLUDED.proxy_formatted,),  accounts.proxy_formatted),
+                 proxy_formatted  = COALESCE(NULLIF(EXCLUDED.proxy_formatted,''),  accounts.proxy_formatted),
                  updated_at       = NOW()
                RETURNING id`,
               ["outlook", em, String(r.password ?? ""), "active",
