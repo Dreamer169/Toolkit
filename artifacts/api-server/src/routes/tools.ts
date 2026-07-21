@@ -1696,9 +1696,10 @@ router.post("/tools/outlook/register", async (req, res) => {
       job.logs.push({ type, message: t });
 
       // 解析 INLINE_RESULT（每账号成功后立即输出，防OOM崩溃丢失）
-      if (t.startsWith("-- INLINE_RESULT --")) {
+      const inlineIdx = t.indexOf("-- INLINE_RESULT --");
+      if (inlineIdx >= 0) {
         try {
-          const jsonPart = t.slice("-- INLINE_RESULT --".length).trim();
+          const jsonPart = t.slice(inlineIdx + "-- INLINE_RESULT --".length).trim();
           const r = JSON.parse(jsonPart) as Record<string, unknown>;
           if (r.success && r.email) {
             const em = String(r.email);
@@ -5906,9 +5907,10 @@ router.post('/tools/outlook/full-workflow', async (req, res) => {
         jobQueue.pushLog(jobId, { type: 'log', message: line });
 
         // ── INLINE_RESULT: immediate DB write (Bug #2 fix) ────────────────────
-        if (line.startsWith('-- INLINE_RESULT --')) {
+        const _inlineIdx = line.indexOf('-- INLINE_RESULT --');
+        if (_inlineIdx >= 0) {
           try {
-            const _jr = JSON.parse(line.slice('-- INLINE_RESULT --'.length).trim()) as Record<string, unknown>;
+            const _jr = JSON.parse(line.slice(_inlineIdx + '-- INLINE_RESULT --'.length).trim()) as Record<string, unknown>;
             if (_jr.success && _jr.email) {
               const _em = String(_jr.email);
               _fwIdentityMap.set(_em, {
@@ -6450,9 +6452,10 @@ async function runScheduledOutlookReg(): Promise<void> {
         type: "log",
         message: t.length > 600 ? t.slice(0, 600) + " …[truncated]" : t,
       });
-      if (!t.startsWith("-- INLINE_RESULT --")) return;
+      const inlineIdx = t.indexOf("-- INLINE_RESULT --");
+      if (inlineIdx < 0) return;
       try {
-        const r = JSON.parse(t.slice("-- INLINE_RESULT --".length).trim()) as Record<string, unknown>;
+        const r = JSON.parse(t.slice(inlineIdx + "-- INLINE_RESULT --".length).trim()) as Record<string, unknown>;
         if (!r.success || !r.email) return;
         registered++;
         const em = String(r.email);
@@ -6513,6 +6516,11 @@ async function runScheduledOutlookReg(): Promise<void> {
       });
       child.on("close", (code: number | null) => {
         if (lineBuf.trim()) processLine(lineBuf);
+        // close event JSON fallback，供调度端识别结束与结果
+        jobQueue.pushLog(jobId, {
+          type: "log",
+          message: JSON.stringify({ type: "close", code: code ?? -1, registered, ...(lastErr ? { error: lastErr } : {}) }),
+        });
         jobQueue.finish(jobId, code ?? -1, code === 0 ? "done" : "failed");
         resolve();
       });
