@@ -28115,7 +28115,7 @@ var require_pino = __commonJS({
     function pinoBundlerAbsolutePath(p) {
       try {
         const path8 = __require("path");
-        const outputDir = "/home/runner/workspace/forks/Toolkit/artifacts/api-server/dist";
+        const outputDir = "/data/Toolkit/artifacts/api-server/dist";
         return path8.resolve(outputDir, p.replace(/^\.\//, ""));
       } catch (e) {
         const f = new Function("p", "return new URL(p, import.meta.url).pathname");
@@ -74373,6 +74373,252 @@ router2.post("/tools/outlook/enable-imap/batch", async (req, res) => {
     res.status(500).json({ success: false, error: String(e) });
   }
 });
+async function persistOutlookAccounts(jobId, accounts, identityMap, opts = {}) {
+  const job = await jobQueue.get(jobId);
+  const tokenMap = identityMap;
+  const confirmedAccounts = accounts.filter((acc) => identityMap.has(acc.email));
+  const okCount = confirmedAccounts.length;
+  if (okCount === 0) return;
+  const _log = (type, message) => {
+    if (job) job.logs.push({ type, message });
+  };
+  const _logErr = (em, label, err) => {
+    _log("warn", `\u26A0 ${label}(${em}): ${String(err).slice(0, 180)}`);
+  };
+  await (async () => {
+    const pendingOAuthRows = [];
+    for (const acc of confirmedAccounts) {
+      let accountRow = null;
+      try {
+        const _idn = identityMap.get(acc.email);
+        accountRow = await queryOne(
+          `INSERT INTO accounts (platform, email, password, status, token, refresh_token,
+                                   cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port, proxy_formatted)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           ON CONFLICT (platform, email) DO UPDATE SET
+             password         = EXCLUDED.password,
+             status           = EXCLUDED.status,
+             token            = COALESCE(NULLIF(EXCLUDED.token,''), accounts.token),
+             refresh_token    = COALESCE(NULLIF(EXCLUDED.refresh_token,''), accounts.refresh_token),
+             cookies_json     = COALESCE(NULLIF(EXCLUDED.cookies_json,''), accounts.cookies_json),
+             fingerprint_json = COALESCE(NULLIF(EXCLUDED.fingerprint_json,''), accounts.fingerprint_json),
+             user_agent       = COALESCE(NULLIF(EXCLUDED.user_agent,''), accounts.user_agent),
+             exit_ip          = COALESCE(NULLIF(EXCLUDED.exit_ip,''), accounts.exit_ip),
+             proxy_port       = COALESCE(NULLIF(EXCLUDED.proxy_port, 0), accounts.proxy_port),
+             proxy_formatted  = COALESCE(NULLIF(EXCLUDED.proxy_formatted,''), accounts.proxy_formatted),
+             updated_at       = NOW()
+           RETURNING id`,
+          [
+            "outlook",
+            acc.email,
+            acc.password,
+            "active",
+            _idn?.access_token || null,
+            _idn?.refresh_token || null,
+            _idn?.cookies_json || null,
+            _idn?.fingerprint_json || null,
+            _idn?.user_agent || null,
+            _idn?.exit_ip || null,
+            _idn?.proxy_port || null,
+            _idn?.proxy_formatted ? _idn.proxy_formatted : _idn?.proxy_port ? `socks5://127.0.0.1:${_idn.proxy_port}` : null
+          ]
+        );
+      } catch (dbErr) {
+        _logErr(acc.email, "\u8D26\u53F7\u5E93\u4FDD\u5B58\u5931\u8D25", dbErr);
+        continue;
+      }
+      try {
+        const _idn2 = identityMap.get(acc.email);
+        const _tok2 = tokenMap.get(acc.email);
+        const _syncPayload = JSON.stringify({
+          action: "outlook",
+          email: acc.email,
+          password: acc.password || "",
+          token: _tok2?.access_token || _idn2?.access_token || null,
+          refresh_token: _tok2?.refresh_token || _idn2?.refresh_token || null,
+          status: "active",
+          proxy: _idn2?.proxy_formatted || (_idn2?.proxy_port ? `socks5://127.0.0.1:${_idn2.proxy_port}` : null),
+          egress_ip: _idn2?.exit_ip || null,
+          user_agent: _idn2?.user_agent || null,
+          fingerprint_json: _idn2?.fingerprint_json || null,
+          cookies_json: _idn2?.cookies_json || null
+        });
+        import("child_process").then(({ spawn: _spawn }) => {
+          const _cp = _spawn("python3", ["/data/Toolkit/artifacts/api-server/sync_unified_db.py"]);
+          _cp.stdin.write(_syncPayload);
+          _cp.stdin.end();
+        }).catch(() => {
+        });
+      } catch (_) {
+      }
+      try {
+        await execute(
+          `INSERT INTO temp_emails (address,password,provider,status,notes)
+           VALUES ($1,$2,$3,$4,$5)
+           ON CONFLICT (address) DO UPDATE SET password=EXCLUDED.password,status=EXCLUDED.status,notes=EXCLUDED.notes`,
+          [acc.email, acc.password, "outlook", "active", `Outlook \u81EA\u52A8\u6CE8\u518C${opts.sourceTag ? " \xB7 " + opts.sourceTag : ""}`]
+        );
+      } catch (emailErr) {
+        _logErr(acc.email, "\u90AE\u7BB1\u5E93\u540C\u6B65\u5931\u8D25", emailErr);
+      }
+      try {
+        const _idnArc = identityMap.get(acc.email);
+        const archiveProxy = _idnArc?.exit_ip ? `socks5://127.0.0.1:${_idnArc.proxy_port}#cf=${_idnArc.exit_ip}` : opts.proxyList && opts.proxyList.length > 0 ? opts.proxyList[0] : opts.proxy || null;
+        const fpJsonForArchive = _idnArc?.fingerprint_json && _idnArc.fingerprint_json.startsWith("{") ? _idnArc.fingerprint_json : null;
+        const cookiesJsonForArchive = _idnArc?.cookies_json && _idnArc.cookies_json.startsWith("{") ? _idnArc.cookies_json : null;
+        const idnDataForArchive = _idnArc?.user_agent ? JSON.stringify({ user_agent: _idnArc.user_agent, exit_ip: _idnArc.exit_ip, proxy_port: _idnArc.proxy_port }) : null;
+        await execute(
+          `INSERT INTO archives (platform,email,password,token,refresh_token,proxy_used,identity_data,fingerprint,cookies,status,notes)
+           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11)
+           ON CONFLICT (platform,email) DO UPDATE SET
+             password      = EXCLUDED.password,
+             token         = COALESCE(NULLIF(EXCLUDED.token,''), archives.token),
+             refresh_token = COALESCE(NULLIF(EXCLUDED.refresh_token,''), archives.refresh_token),
+             proxy_used    = COALESCE(NULLIF(EXCLUDED.proxy_used,''), archives.proxy_used),
+             identity_data = COALESCE(EXCLUDED.identity_data, archives.identity_data),
+             fingerprint   = COALESCE(EXCLUDED.fingerprint, archives.fingerprint),
+             cookies       = COALESCE(EXCLUDED.cookies, archives.cookies),
+             status        = EXCLUDED.status,
+             updated_at    = NOW()`,
+          [
+            "outlook",
+            acc.email,
+            acc.password,
+            _idnArc?.access_token || null,
+            _idnArc?.refresh_token || null,
+            archiveProxy,
+            idnDataForArchive,
+            fpJsonForArchive,
+            cookiesJsonForArchive,
+            "active",
+            `Outlook \u81EA\u52A8\u6CE8\u518C${opts.sourceTag ? " \xB7 " + opts.sourceTag : ""}`
+          ]
+        );
+        _log("log", `[\u6863\u6848\u5E93] ${acc.email} \u5DF2\u4FDD\u5B58 (cookies=${cookiesJsonForArchive ? cookiesJsonForArchive.length : 0}B fp=${fpJsonForArchive ? fpJsonForArchive.length : 0}B)`);
+      } catch (archErr) {
+        _logErr(acc.email, "\u6863\u6848\u5E93\u4FDD\u5B58\u5931\u8D25", archErr);
+      }
+      try {
+        const tok = tokenMap.get(acc.email);
+        const inlineAccess = tok?.access_token || void 0;
+        const inlineRefresh = tok?.refresh_token || void 0;
+        if (inlineAccess || inlineRefresh) {
+          await execute(
+            "UPDATE accounts SET token=$1, refresh_token=$2, status='active', updated_at=NOW() WHERE email=$3 AND platform='outlook'",
+            [inlineAccess ?? null, inlineRefresh ?? null, acc.email]
+          );
+          _log("success", `[key] ${acc.email} in-browser OAuth \u6388\u6743\u6210\u529F`);
+        } else if (accountRow?.id) {
+          pendingOAuthRows.push({ id: accountRow.id, email: acc.email, password: acc.password || "" });
+          _log("warn", `[warn] ${acc.email} \u672A\u5185\u8054\u5230 token\uFF0C\u6B63\u5728\u81EA\u52A8\u7533\u8BF7\u8BBE\u5907\u7801`);
+        } else {
+          _log("warn", `[warn] ${acc.email} \u672A\u5185\u8054\u5230 token\uFF0C\u9700\u624B\u52A8\u8BBE\u5907\u7801\u6388\u6743`);
+        }
+      } catch (authErr) {
+        _logErr(acc.email, "\u4FDD\u5B58 token \u5F02\u5E38", authErr);
+      }
+    }
+    if (pendingOAuthRows.length > 0) {
+      try {
+        const { sessionId, sessionList } = await createBatchOAuthSessions(pendingOAuthRows);
+        _log("log", `\u{1F510} \u5DF2\u81EA\u52A8\u521B\u5EFA\u90AE\u7BB1\u6388\u6743\u4F1A\u8BDD: ${sessionId}`);
+        for (const s of sessionList) {
+          if (s.status === "pending") {
+            _log("warn", `\u{1F510} ${s.email} \u8BBE\u5907\u7801: ${s.userCode} \xB7 \u6253\u5F00 ${s.verificationUri} \u8F93\u5165\u540E\u4F1A\u81EA\u52A8\u5165\u5E93 token`);
+          } else {
+            _log("warn", `\u{1F510} ${s.email} \u8BBE\u5907\u7801\u7533\u8BF7\u5931\u8D25: ${s.errorMsg ?? "\u672A\u77E5\u9519\u8BEF"}`);
+          }
+        }
+        try {
+          const autoPayload = sessionList.filter((s) => s.status === "pending").map((s) => {
+            const row = pendingOAuthRows.find((r) => r.email === s.email);
+            const _idn = identityMap.get(s.email);
+            return {
+              accountId: s.accountId,
+              email: s.email,
+              password: row?.password || "",
+              userCode: s.userCode,
+              deviceCode: s.deviceCode,
+              dbUrl: process.env.DATABASE_URL || "postgresql://postgres:postgres@localhost/toolkit",
+              cookiesJson: _idn?.cookies_json || ""
+            };
+          }).filter((x) => x.password);
+          if (autoPayload.length > 0) {
+            const { spawn: spawnAuto } = await import("child_process");
+            const autoScript = new URL("../auto_device_code.py", import.meta.url).pathname;
+            const _net = await import("net");
+            const _probePort = (port2, timeoutMs = 1500) => new Promise((resolve) => {
+              const sock = _net.createConnection({ host: "127.0.0.1", port: port2, timeout: timeoutMs });
+              let done = false;
+              const finish = (ok) => {
+                if (done) return;
+                done = true;
+                try {
+                  sock.destroy();
+                } catch {
+                }
+                resolve(ok);
+              };
+              sock.once("connect", () => finish(true));
+              sock.once("error", () => finish(false));
+              sock.once("timeout", () => finish(false));
+            });
+            const _pendingPorts = Array.from(new Set(
+              autoPayload.map((a) => identityMap.get(a.email)?.proxy_port || 0).filter((p) => p > 0)
+            ));
+            let _aliveProxyPort = 0;
+            for (const _p of _pendingPorts) {
+              if (await _probePort(_p)) {
+                _aliveProxyPort = _p;
+                break;
+              }
+            }
+            const RESIDENTIAL_PORTS_FOR_AUTH = [10851, 10853, 10854, 10857, 10859];
+            let _autoProxy = _aliveProxyPort > 0 ? `socks5://127.0.0.1:${_aliveProxyPort}` : "";
+            let _proxyTag = _aliveProxyPort > 0 ? "per-account-alive" : "residential-fallback";
+            if (!_autoProxy) {
+              for (const rp of RESIDENTIAL_PORTS_FOR_AUTH) {
+                if (await _probePort(rp)) {
+                  _autoProxy = `socks5://127.0.0.1:${rp}`;
+                  break;
+                }
+              }
+            }
+            _log("log", `\u{1F310} \u81EA\u52A8\u6388\u6743\u4EE3\u7406: ${_autoProxy} [${_proxyTag}]`);
+            const autoProc = spawnAuto(
+              "python3",
+              [autoScript, JSON.stringify(autoPayload), _autoProxy],
+              { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, PYTHONUNBUFFERED: "1" } }
+            );
+            _log("log", `\u{1F916} \u81EA\u52A8\u5B8C\u6210 ${autoPayload.length} \u4E2A\u8D26\u53F7\u7684\u8BBE\u5907\u7801\u6388\u6743\u2026`);
+            autoProc.stdout?.on("data", (d) => {
+              for (const line of d.toString().split("\n").filter(Boolean)) {
+                _log("log", `[auto-auth] ${line}`);
+              }
+            });
+            autoProc.stderr?.on("data", (d2) => {
+              for (const el of d2.toString().split("\n").filter(Boolean)) {
+                const et = el.trim();
+                if (et && et.length > 5 && !et.includes("DeprecationWarning") && !et.includes("FutureWarning"))
+                  _log("log", "[auto-auth-sys] " + et.slice(0, 200));
+              }
+            });
+            autoProc.on("close", (code) => {
+              _log(code === 0 ? "success" : "warn", "\u{1F916} \u81EA\u52A8\u6388\u6743\u5B8C\u6210 (code=" + code + ") \u2014 token \u5DF2\u7531 Python \u5728 CF proxy \u5185\u5151\u6362\u5165\u5E93");
+              if (job) PersistenceManager.save(job).catch(() => {
+              });
+            });
+          }
+        } catch (autoErr) {
+          _log("warn", `\u26A0 \u542F\u52A8\u81EA\u52A8\u8BBE\u5907\u7801\u5B8C\u6210\u5931\u8D25: ${autoErr}`);
+        }
+      } catch (oauthErr) {
+        _log("warn", `\u26A0 \u81EA\u52A8\u7533\u8BF7\u8BBE\u5907\u7801\u5931\u8D25: ${oauthErr}`);
+      }
+    }
+    _log("log", `\u{1F4E6} \u5DF2\u4FDD\u5B58\u8D26\u53F7\u5E93 + \u90AE\u7BB1\u5E93\uFF0C\u5E76\u5C1D\u8BD5\u6388\u6743 ${okCount} \u4E2A\u8D26\u53F7`);
+  })();
+}
 router2.post("/tools/outlook/register", async (req, res) => {
   const {
     count = 1,
@@ -74656,255 +74902,8 @@ ${_sep}
         }
       } catch {
       }
-      const tokenMap = identityMap;
-      const confirmedAccounts = job.accounts.filter((acc) => identityMap.has(acc.email));
-      const okCount = confirmedAccounts.length;
-      if (okCount > 0) {
-        await (async () => {
-          const pendingOAuthRows = [];
-          for (const acc of confirmedAccounts) {
-            let accountRow = null;
-            try {
-              const _idn = identityMap.get(acc.email);
-              accountRow = await queryOne(
-                `INSERT INTO accounts (platform, email, password, status, token, refresh_token,
-                                       cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port, proxy_formatted)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-               ON CONFLICT (platform, email) DO UPDATE SET
-                 password         = EXCLUDED.password,
-                 status           = EXCLUDED.status,
-                 token            = COALESCE(NULLIF(EXCLUDED.token,''), accounts.token),
-                 refresh_token    = COALESCE(NULLIF(EXCLUDED.refresh_token,''), accounts.refresh_token),
-                 cookies_json     = COALESCE(NULLIF(EXCLUDED.cookies_json,''), accounts.cookies_json),
-                 fingerprint_json = COALESCE(NULLIF(EXCLUDED.fingerprint_json,''), accounts.fingerprint_json),
-                 user_agent       = COALESCE(NULLIF(EXCLUDED.user_agent,''), accounts.user_agent),
-                 exit_ip          = COALESCE(NULLIF(EXCLUDED.exit_ip,''), accounts.exit_ip),
-                 proxy_port       = COALESCE(NULLIF(EXCLUDED.proxy_port, 0), accounts.proxy_port),
-                 proxy_formatted  = COALESCE(NULLIF(EXCLUDED.proxy_formatted,''), accounts.proxy_formatted),
-                 updated_at       = NOW()
-               RETURNING id`,
-                [
-                  "outlook",
-                  acc.email,
-                  acc.password,
-                  "active",
-                  _idn?.access_token || null,
-                  _idn?.refresh_token || null,
-                  _idn?.cookies_json || null,
-                  _idn?.fingerprint_json || null,
-                  _idn?.user_agent || null,
-                  _idn?.exit_ip || null,
-                  _idn?.proxy_port || null,
-                  // proxy_formatted: 注册时实际使用的完整代理URL（IP一致性锚点）
-                  // 优先用 proxy_formatted 字段，fallback 到 proxy_port 重建 socks5://127.0.0.1:PORT
-                  _idn?.proxy_formatted ? _idn.proxy_formatted : _idn?.proxy_port ? `socks5://127.0.0.1:${_idn.proxy_port}` : null
-                ]
-              );
-            } catch (dbErr) {
-              job.logs.push({ type: "warn", message: `\u26A0 \u8D26\u53F7\u5E93\u4FDD\u5B58\u5931\u8D25(${acc.email}): ${dbErr}` });
-              continue;
-            }
-            try {
-              const _idn2 = identityMap.get(acc.email);
-              const _tok2 = tokenMap.get(acc.email);
-              const _syncPayload = JSON.stringify({
-                action: "outlook",
-                email: acc.email,
-                password: acc.password || "",
-                token: _tok2?.access_token || _idn2?.access_token || null,
-                refresh_token: _tok2?.refresh_token || _idn2?.refresh_token || null,
-                status: "active",
-                proxy: _idn2?.proxy_formatted || (_idn2?.proxy_port ? `socks5://127.0.0.1:${_idn2.proxy_port}` : null),
-                egress_ip: _idn2?.exit_ip || null,
-                user_agent: _idn2?.user_agent || null,
-                fingerprint_json: _idn2?.fingerprint_json || null,
-                cookies_json: _idn2?.cookies_json || null
-              });
-              import("child_process").then(({ spawn: _spawn }) => {
-                const _cp = _spawn("python3", ["/data/Toolkit/artifacts/api-server/sync_unified_db.py"]);
-                _cp.stdin.write(_syncPayload);
-                _cp.stdin.end();
-              }).catch(() => {
-              });
-            } catch (_) {
-            }
-            try {
-              await execute(
-                `INSERT INTO temp_emails (address,password,provider,status,notes)
-               VALUES ($1,$2,$3,$4,$5)
-               ON CONFLICT (address) DO UPDATE SET password=EXCLUDED.password,status=EXCLUDED.status,notes=EXCLUDED.notes`,
-                [acc.email, acc.password, "outlook", "active", "Outlook \u81EA\u52A8\u6CE8\u518C"]
-              );
-            } catch (emailErr) {
-              job.logs.push({ type: "warn", message: `\u26A0 \u90AE\u7BB1\u5E93\u540C\u6B65\u5931\u8D25(${acc.email}): ${emailErr}` });
-            }
-            try {
-              const _idnArc = identityMap.get(acc.email);
-              const archiveProxy = _idnArc?.exit_ip ? `socks5://127.0.0.1:${_idnArc.proxy_port}#cf=${_idnArc.exit_ip}` : proxyList.length > 0 ? proxyList[0] : proxy || null;
-              const fpJsonForArchive = _idnArc?.fingerprint_json && _idnArc.fingerprint_json.startsWith("{") ? _idnArc.fingerprint_json : null;
-              const cookiesJsonForArchive = _idnArc?.cookies_json && _idnArc.cookies_json.startsWith("{") ? _idnArc.cookies_json : null;
-              const idnDataForArchive = _idnArc?.user_agent ? JSON.stringify({ user_agent: _idnArc.user_agent, exit_ip: _idnArc.exit_ip, proxy_port: _idnArc.proxy_port }) : null;
-              await execute(
-                `INSERT INTO archives (platform,email,password,token,refresh_token,proxy_used,identity_data,fingerprint,cookies,status,notes)
-               VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11)
-               ON CONFLICT (platform,email) DO UPDATE SET
-                 password      = EXCLUDED.password,
-                 token         = COALESCE(NULLIF(EXCLUDED.token,''), archives.token),
-                 refresh_token = COALESCE(NULLIF(EXCLUDED.refresh_token,''), archives.refresh_token),
-                 proxy_used    = COALESCE(NULLIF(EXCLUDED.proxy_used,''), archives.proxy_used),
-                 identity_data = COALESCE(EXCLUDED.identity_data, archives.identity_data),
-                 fingerprint   = COALESCE(EXCLUDED.fingerprint, archives.fingerprint),
-                 cookies       = COALESCE(EXCLUDED.cookies, archives.cookies),
-                 status        = EXCLUDED.status,
-                 updated_at    = NOW()`,
-                [
-                  "outlook",
-                  acc.email,
-                  acc.password,
-                  _idnArc?.access_token || null,
-                  _idnArc?.refresh_token || null,
-                  archiveProxy,
-                  idnDataForArchive,
-                  fpJsonForArchive,
-                  cookiesJsonForArchive,
-                  "active",
-                  "Outlook \u81EA\u52A8\u6CE8\u518C"
-                ]
-              );
-              job.logs.push({ type: "log", message: `[\u6863\u6848\u5E93] ${acc.email} \u5DF2\u4FDD\u5B58 (cookies=${cookiesJsonForArchive ? cookiesJsonForArchive.length : 0}B fp=${fpJsonForArchive ? fpJsonForArchive.length : 0}B)` });
-            } catch (archErr) {
-              job.logs.push({ type: "warn", message: `\u26A0 \u6863\u6848\u5E93\u4FDD\u5B58\u5931\u8D25(${acc.email}): ${archErr}` });
-            }
-            try {
-              const tok = tokenMap.get(acc.email);
-              const inlineAccess = tok?.access_token || void 0;
-              const inlineRefresh = tok?.refresh_token || void 0;
-              if (inlineAccess || inlineRefresh) {
-                await execute(
-                  "UPDATE accounts SET token=$1, refresh_token=$2, status='active', updated_at=NOW() WHERE email=$3 AND platform='outlook'",
-                  [inlineAccess ?? null, inlineRefresh ?? null, acc.email]
-                );
-                job.logs.push({ type: "success", message: `[key] ${acc.email} in-browser OAuth \u6388\u6743\u6210\u529F` });
-              } else if (accountRow?.id) {
-                pendingOAuthRows.push({ id: accountRow.id, email: acc.email, password: acc.password || "" });
-                job.logs.push({ type: "warn", message: `[warn] ${acc.email} \u672A\u5185\u8054\u5230 token\uFF0C\u6B63\u5728\u81EA\u52A8\u7533\u8BF7\u8BBE\u5907\u7801` });
-              } else {
-                job.logs.push({ type: "warn", message: `[warn] ${acc.email} \u672A\u5185\u8054\u5230 token\uFF0C\u9700\u624B\u52A8\u8BBE\u5907\u7801\u6388\u6743` });
-              }
-            } catch (authErr) {
-              job.logs.push({ type: "warn", message: `[err] ${acc.email} \u4FDD\u5B58 token \u5F02\u5E38: ${authErr}` });
-            }
-          }
-          if (pendingOAuthRows.length > 0) {
-            try {
-              const { sessionId, sessionList } = await createBatchOAuthSessions(pendingOAuthRows);
-              job.logs.push({ type: "log", message: `\u{1F510} \u5DF2\u81EA\u52A8\u521B\u5EFA\u90AE\u7BB1\u6388\u6743\u4F1A\u8BDD: ${sessionId}` });
-              for (const s of sessionList) {
-                if (s.status === "pending") {
-                  job.logs.push({ type: "warn", message: `\u{1F510} ${s.email} \u8BBE\u5907\u7801: ${s.userCode} \xB7 \u6253\u5F00 ${s.verificationUri} \u8F93\u5165\u540E\u4F1A\u81EA\u52A8\u5165\u5E93 token` });
-                } else {
-                  job.logs.push({ type: "warn", message: `\u{1F510} ${s.email} \u8BBE\u5907\u7801\u7533\u8BF7\u5931\u8D25: ${s.errorMsg ?? "\u672A\u77E5\u9519\u8BEF"}` });
-                }
-              }
-              try {
-                const autoPayload = sessionList.filter((s) => s.status === "pending").map((s) => {
-                  const row = pendingOAuthRows.find((r) => r.email === s.email);
-                  const _idn = identityMap.get(s.email);
-                  return {
-                    accountId: s.accountId,
-                    email: s.email,
-                    password: row?.password || "",
-                    userCode: s.userCode,
-                    deviceCode: s.deviceCode,
-                    dbUrl: process.env.DATABASE_URL || "postgresql://postgres:postgres@localhost/toolkit",
-                    cookiesJson: _idn?.cookies_json || ""
-                  };
-                }).filter((x) => x.password);
-                if (autoPayload.length > 0) {
-                  const { spawn: spawnAuto } = await import("child_process");
-                  const autoScript = new URL("../auto_device_code.py", import.meta.url).pathname;
-                  const _net = await import("net");
-                  const _probePort = (port2, timeoutMs = 1500) => new Promise((resolve) => {
-                    const sock = _net.createConnection({ host: "127.0.0.1", port: port2, timeout: timeoutMs });
-                    let done = false;
-                    const finish = (ok) => {
-                      if (done) return;
-                      done = true;
-                      try {
-                        sock.destroy();
-                      } catch {
-                      }
-                      resolve(ok);
-                    };
-                    sock.once("connect", () => finish(true));
-                    sock.once("error", () => finish(false));
-                    sock.once("timeout", () => finish(false));
-                  });
-                  const _pendingPorts = Array.from(new Set(
-                    autoPayload.map((a) => identityMap.get(a.email)?.proxy_port || 0).filter((p) => p > 0)
-                  ));
-                  let _aliveProxyPort = 0;
-                  for (const _p of _pendingPorts) {
-                    if (await _probePort(_p)) {
-                      _aliveProxyPort = _p;
-                      break;
-                    }
-                  }
-                  const RESIDENTIAL_PORTS_FOR_AUTH = [10851, 10853, 10854, 10857, 10859];
-                  let _autoProxy = _aliveProxyPort > 0 ? `socks5://127.0.0.1:${_aliveProxyPort}` : "";
-                  let _proxyTag = _aliveProxyPort > 0 ? "per-account-alive" : "residential-fallback";
-                  if (!_autoProxy) {
-                    for (const rp of RESIDENTIAL_PORTS_FOR_AUTH) {
-                      if (await _probePort(rp)) {
-                        _autoProxy = `socks5://127.0.0.1:${rp}`;
-                        break;
-                      }
-                    }
-                  }
-                  job.logs.push({ type: "log", message: `\u{1F310} \u81EA\u52A8\u6388\u6743\u4EE3\u7406: ${_autoProxy} [${_proxyTag}]` });
-                  const autoProc = spawnAuto(
-                    "python3",
-                    [autoScript, JSON.stringify(autoPayload), _autoProxy],
-                    { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, PYTHONUNBUFFERED: "1" } }
-                  );
-                  job.logs.push({ type: "log", message: `\u{1F916} \u81EA\u52A8\u5B8C\u6210 ${autoPayload.length} \u4E2A\u8D26\u53F7\u7684\u8BBE\u5907\u7801\u6388\u6743\u2026` });
-                  const _autoResults = /* @__PURE__ */ new Map();
-                  autoProc.stdout?.on("data", (d) => {
-                    for (const line of d.toString().split("\n").filter(Boolean)) {
-                      job.logs.push({ type: "log", message: `[auto-auth] ${line}` });
-                      if (line.startsWith("RESULTS:")) {
-                        try {
-                          const arr = JSON.parse(line.slice(8));
-                          for (const r of arr) _autoResults.set(r.email, { status: r.status, msg: r.msg });
-                        } catch {
-                        }
-                      }
-                    }
-                  });
-                  autoProc.stderr?.on("data", (d2) => {
-                    const errL = d2.toString().split("\n").filter(Boolean);
-                    for (const el of errL) {
-                      const et = el.trim();
-                      if (et && et.length > 5 && !et.includes("DeprecationWarning") && !et.includes("FutureWarning"))
-                        job.logs.push({ type: "log", message: "[auto-auth-sys] " + et.slice(0, 200) });
-                    }
-                  });
-                  autoProc.on("close", (code2) => {
-                    job.logs.push({ type: code2 === 0 ? "success" : "warn", message: "\u{1F916} \u81EA\u52A8\u6388\u6743\u5B8C\u6210 (code=" + code2 + ") \u2014 token \u5DF2\u7531 Python \u5728 CF proxy \u5185\u5151\u6362\u5165\u5E93" });
-                    PersistenceManager.save(job).catch(() => {
-                    });
-                  });
-                }
-              } catch (autoErr) {
-                job.logs.push({ type: "warn", message: `\u26A0 \u542F\u52A8\u81EA\u52A8\u8BBE\u5907\u7801\u5B8C\u6210\u5931\u8D25: ${autoErr}` });
-              }
-            } catch (oauthErr) {
-              job.logs.push({ type: "warn", message: `\u26A0 \u81EA\u52A8\u7533\u8BF7\u8BBE\u5907\u7801\u5931\u8D25: ${oauthErr}` });
-            }
-          }
-          job.logs.push({ type: "log", message: `\u{1F4E6} \u5DF2\u4FDD\u5B58\u8D26\u53F7\u5E93 + \u90AE\u7BB1\u5E93\uFF0C\u5E76\u5C1D\u8BD5\u6388\u6743 ${okCount} \u4E2A\u8D26\u53F7` });
-        })();
-      }
+      const okCount = job.accounts.filter((acc) => identityMap.has(acc.email)).length;
+      await persistOutlookAccounts(jobId, job.accounts, identityMap, { proxyList, proxy, sourceTag: "\u624B\u52A8\u6CE8\u518C" });
       job.logs.push({
         type: "done",
         message: `\u6CE8\u518C\u4EFB\u52A1\u5B8C\u6210 \xB7 \u6210\u529F ${okCount} \u4E2A / \u5171 ${n} \u4E2A` + (okCount > 0 ? ` \u2705` : ``)
@@ -78884,6 +78883,38 @@ async function runScheduledOutlookReg() {
       type: "log",
       message: `[sched] \u89E6\u53D1\uFF1Acurrent=${current} target=${_outlookSched.targetCount} engine=${_outlookSched.engine}`
     });
+    const proxyMode = ["cf", "shared", ""].includes(_outlookSched.proxyMode) ? _outlookSched.proxyMode : "cf";
+    let proxyList = [];
+    let proxy = "";
+    let effectiveProxyMode = proxyMode === "cf" ? "cf" : "";
+    const preJobLogs = [];
+    if (proxyMode === "shared") {
+      try {
+        const picked = await pickAdaptiveProxy("outlook", 3);
+        if (picked.length > 0) {
+          proxyList = picked.map((p) => p.formatted);
+          proxy = proxyList[0];
+          effectiveProxyMode = "";
+          const sourceCounts = picked.reduce((acc, p) => {
+            acc[p.pool] = (acc[p.pool] || 0) + 1;
+            return acc;
+          }, {});
+          const sourceLabel = Object.entries(sourceCounts).map(([k, v]) => `${k}:${v}`).join(", ");
+          preJobLogs.push({ type: "log", message: `\u{1F310} \u5171\u4EAB\u4EE3\u7406\u6C60\u5DF2\u9009\u53D6 ${picked.length} \u4E2A\u8282\u70B9\uFF08${sourceLabel}\uFF09` });
+        } else {
+          effectiveProxyMode = "cf";
+          preJobLogs.push({ type: "warn", message: "\u26A0 \u5171\u4EAB\u4EE3\u7406\u6C60\u65E0\u53EF\u7528\u8282\u70B9\uFF0C\u81EA\u52A8\u9000\u56DE CF IP \u6C60 + xray" });
+        }
+      } catch (e) {
+        effectiveProxyMode = "cf";
+        preJobLogs.push({ type: "warn", message: `\u26A0 \u5171\u4EAB\u4EE3\u7406\u6C60\u8BFB\u53D6\u5931\u8D25\uFF0C\u81EA\u52A8\u9000\u56DE CF IP \u6C60 + xray: ${String(e).slice(0, 120)}` });
+      }
+    } else if (proxyMode === "cf") {
+      effectiveProxyMode = "cf";
+    }
+    const proxyDisplay = proxy ? proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@") : "\u65E0\u4EE3\u7406";
+    for (const l of preJobLogs) jobQueue.pushLog(jobId, l);
+    jobQueue.pushLog(jobId, { type: "log", message: `\u{1F310} \u4EE3\u7406: ${proxyDisplay}${effectiveProxyMode === "cf" ? " [CF+xray\u4EE3\u7406\u6C60]" : ""}` });
     const { spawn: spawn6 } = await import("child_process");
     const scriptPath = new URL("../outlook_register.py", import.meta.url).pathname;
     const args = [
@@ -78901,79 +78932,125 @@ async function runScheduledOutlookReg() {
       "--delay",
       "2"
     ];
-    if (_outlookSched.proxyMode === "cf") args.push("--proxy-mode", "cf");
-    const child = spawn6("python3", args, {
-      env: {
-        ...process.env,
-        PYTHONUNBUFFERED: "1",
-        PLAYWRIGHT_BROWSERS_PATH: "/data/cache/ms-playwright",
-        DISPLAY: process.env.DISPLAY || ":99"
-      }
-    });
+    if (proxyList.length > 1) {
+      args.push("--proxies", proxyList.join(","));
+      jobQueue.pushLog(jobId, { type: "log", message: `\u{1F310} \u4EE3\u7406\u8F6E\u6362\u6C60: ${proxyList.length} \u4E2A\u8282\u70B9` });
+    } else if (proxy) {
+      args.push("--proxy", proxy);
+    }
+    if (effectiveProxyMode === "cf") {
+      args.push("--proxy-mode", "cf");
+      jobQueue.pushLog(jobId, { type: "log", message: `\u2601\uFE0F CF+xray \u4EE3\u7406\u6C60\uFF1A\u5171\u4EAB\u4EE3\u7406\u4E0D\u53EF\u7528\u65F6\u4F5C\u4E3A\u5907\u7528` });
+    }
+    const _spawnEnv = {
+      ...process.env,
+      PYTHONUNBUFFERED: "1",
+      PLAYWRIGHT_BROWSERS_PATH: "/data/cache/ms-playwright",
+      DISPLAY: process.env.DISPLAY || ":99"
+    };
+    const child = spawn6("python3", args, { env: _spawnEnv });
     jobQueue.setChild(jobId, child);
     let lineBuf = "";
+    let jsonBuf = "";
+    let inJson = false;
+    const identityMap = /* @__PURE__ */ new Map();
+    const accounts = [];
     const processLine = (line) => {
-      const t = line.trim();
+      const raw_t = line.trim();
+      if (!raw_t) return;
+      const t = raw_t.replace(/^\[T\+\s*[\d.]+\s*s\]\s*/, "");
       if (!t) return;
-      jobQueue.pushLog(jobId, {
-        type: "log",
-        message: t.length > 600 ? t.slice(0, 600) + " \u2026[truncated]" : t
-      });
       const inlineIdx = t.indexOf("-- INLINE_RESULT --");
-      if (inlineIdx < 0) return;
-      try {
-        const r = JSON.parse(t.slice(inlineIdx + "-- INLINE_RESULT --".length).trim());
-        if (!r.success || !r.email) return;
-        registered++;
-        const em = String(r.email);
-        jobQueue.pushAccount(jobId, { email: em, password: String(r.password ?? "") });
-        (async () => {
-          try {
-            const ar = await queryOne(
-              `INSERT INTO accounts
-                 (platform, email, password, status, token, refresh_token,
-                  cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port, proxy_formatted)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-               ON CONFLICT (platform, email) DO UPDATE SET
-                 password         = EXCLUDED.password,
-                 status           = 'active',
-                 token            = COALESCE(NULLIF(EXCLUDED.token,''),            accounts.token),
-                 refresh_token    = COALESCE(NULLIF(EXCLUDED.refresh_token,''),    accounts.refresh_token),
-                 cookies_json     = COALESCE(NULLIF(EXCLUDED.cookies_json,''),     accounts.cookies_json),
-                 fingerprint_json = COALESCE(NULLIF(EXCLUDED.fingerprint_json,''), accounts.fingerprint_json),
-                 user_agent       = COALESCE(NULLIF(EXCLUDED.user_agent,''),       accounts.user_agent),
-                 exit_ip          = COALESCE(NULLIF(EXCLUDED.exit_ip,''),          accounts.exit_ip),
-                 proxy_port       = COALESCE(NULLIF(EXCLUDED.proxy_port,0),        accounts.proxy_port),
-                 proxy_formatted  = COALESCE(NULLIF(EXCLUDED.proxy_formatted,''),  accounts.proxy_formatted),
-                 updated_at       = NOW()
-               RETURNING id`,
-              [
-                "outlook",
-                em,
-                String(r.password ?? ""),
-                "active",
-                r.access_token || null,
-                r.refresh_token || null,
-                r.cookies_json || null,
-                r.fingerprint_json || null,
-                r.user_agent || null,
-                r.exit_ip || null,
-                r.proxy_port || null,
-                r.proxy_formatted || (r.proxy_port ? `socks5://127.0.0.1:${r.proxy_port}` : null)
-              ]
-            );
-            jobQueue.pushLog(jobId, { type: "success", message: `\u2705 [sched] \u5DF2\u5165\u5E93: ${em} id=${ar?.id}` });
-          } catch (dbErr) {
-            jobQueue.pushLog(jobId, { type: "warn", message: `\u26A0 [sched] \u5165\u5E93\u5931\u8D25(${em}): ${String(dbErr).slice(0, 150)}` });
+      if (inlineIdx >= 0) {
+        try {
+          const r = JSON.parse(t.slice(inlineIdx + "-- INLINE_RESULT --".length).trim());
+          if (r.success && r.email) {
+            registered++;
+            const em = String(r.email);
+            identityMap.set(em, {
+              access_token: String(r.access_token ?? ""),
+              refresh_token: String(r.refresh_token ?? ""),
+              cookies_json: String(r.cookies_json ?? ""),
+              fingerprint_json: String(r.fingerprint_json ?? ""),
+              user_agent: String(r.user_agent ?? ""),
+              exit_ip: String(r.exit_ip ?? ""),
+              proxy_port: Number(r.proxy_port ?? 0),
+              proxy_formatted: String(r.proxy_formatted ?? "")
+            });
+            if (!accounts.find((a) => a.email === em)) accounts.push({ email: em, password: String(r.password ?? "") });
+            jobQueue.pushLog(jobId, { type: "success", message: `\u2705 [sched] \u89E3\u6790\u6210\u529F: ${em}` });
+            (async () => {
+              const _idn = identityMap.get(em);
+              if (!_idn) return;
+              try {
+                const _ar = await queryOne(
+                  `INSERT INTO accounts (platform, email, password, status, token, refresh_token,
+                      cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port, proxy_formatted)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                   ON CONFLICT (platform, email) DO UPDATE SET
+                     password=EXCLUDED.password, status='active',
+                     token=COALESCE(NULLIF(EXCLUDED.token,''), accounts.token),
+                     refresh_token=COALESCE(NULLIF(EXCLUDED.refresh_token,''), accounts.refresh_token),
+                     cookies_json=COALESCE(NULLIF(EXCLUDED.cookies_json,''), accounts.cookies_json),
+                     fingerprint_json=COALESCE(NULLIF(EXCLUDED.fingerprint_json,''), accounts.fingerprint_json),
+                     user_agent=COALESCE(NULLIF(EXCLUDED.user_agent,''), accounts.user_agent),
+                     exit_ip=COALESCE(NULLIF(EXCLUDED.exit_ip,''), accounts.exit_ip),
+                     proxy_port=COALESCE(NULLIF(EXCLUDED.proxy_port,0), accounts.proxy_port),
+                     proxy_formatted=COALESCE(NULLIF(EXCLUDED.proxy_formatted,''), accounts.proxy_formatted),
+                     updated_at=NOW()
+                   RETURNING id`,
+                  [
+                    "outlook",
+                    em,
+                    String(r.password ?? ""),
+                    "active",
+                    _idn.access_token || null,
+                    _idn.refresh_token || null,
+                    _idn.cookies_json || null,
+                    _idn.fingerprint_json || null,
+                    _idn.user_agent || null,
+                    _idn.exit_ip || null,
+                    _idn.proxy_port || null,
+                    _idn.proxy_formatted || (_idn.proxy_port ? `socks5://127.0.0.1/${_idn.proxy_port}` : null)
+                  ]
+                );
+                jobQueue.pushLog(jobId, { type: "success", message: `\u2705 [sched] \u5DF2\u5165\u5E93: ${em} id=${_ar?.id}` });
+              } catch (_e) {
+                jobQueue.pushLog(jobId, { type: "warn", message: `\u26A0 [sched] \u5373\u65F6\u5165\u5E93\u5931\u8D25(${em}): ${String(_e).slice(0, 120)}` });
+              }
+            })().catch(() => {
+            });
           }
-        })();
-      } catch (parseErr) {
-        jobQueue.pushLog(jobId, { type: "warn", message: `\u26A0 [sched] INLINE_RESULT \u89E3\u6790\u5931\u8D25: ${String(parseErr).slice(0, 120)}` });
+        } catch (parseErr) {
+          jobQueue.pushLog(jobId, { type: "warn", message: `\u26A0 [sched] INLINE_RESULT \u89E3\u6790\u5931\u8D25: ${String(parseErr).slice(0, 120)}` });
+        }
+        return;
+      }
+      if (t.startsWith("\u2500\u2500") || t.startsWith("\u{1F680}")) return;
+      if (t === "[" || t === "{" || t === "]" || t === "}") return;
+      if (t.startsWith("{") || t.startsWith("[{") && t.endsWith("}]")) return;
+      if (t.startsWith('"') && t.includes(":")) return;
+      if (/^\s*"(email|username|password|success|error|elapsed|engine)"\s*:/.test(t)) return;
+      let type = "log";
+      if (t.includes("\u26A0")) type = "warn";
+      else if (t.includes("\u274C")) type = "error";
+      else if (t.includes("\u2705") && t.includes("|")) type = "success";
+      else if (t.startsWith("\u2705 \u6210\u529F:")) type = "done";
+      jobQueue.pushLog(jobId, { type, message: t });
+      if (type === "success" && t.includes("@outlook.com")) {
+        const emailM = t.match(/([\w.\-+]+@(?:outlook|hotmail|live)\.com)/);
+        const passM = t.match(/密码:\s*(\S+)/);
+        if (emailM && passM && !accounts.find((a) => a.email === emailM[1])) accounts.push({ email: emailM[1], password: passM[1] });
       }
     };
     await new Promise((resolve) => {
       child.stdout.on("data", (chunk) => {
-        lineBuf += chunk.toString();
+        const raw = chunk.toString();
+        if (raw.includes("\u2500\u2500 JSON \u7ED3\u679C \u2500\u2500") || inJson) {
+          inJson = true;
+          jsonBuf += raw;
+        }
+        lineBuf += raw;
         const parts = lineBuf.split("\n");
         lineBuf = parts.pop() ?? "";
         for (const line of parts) processLine(line);
@@ -78985,8 +79062,34 @@ async function runScheduledOutlookReg() {
           jobQueue.pushLog(jobId, { type: "log", message: "[err] " + msg });
         }
       });
-      child.on("close", (code) => {
+      child.on("close", async (code) => {
         if (lineBuf.trim()) processLine(lineBuf);
+        try {
+          const jsonStart = jsonBuf.indexOf("[");
+          if (jsonStart >= 0) {
+            const cleaned = jsonBuf.slice(jsonStart).split("\n\u2500\u2500 JSON")[0].trim();
+            const parsed = JSON.parse(cleaned);
+            for (const r of parsed) {
+              if (r.success && r.email && r.password) {
+                const em = String(r.email);
+                if (!accounts.find((a) => a.email === em)) accounts.push({ email: em, password: String(r.password) });
+                identityMap.set(em, {
+                  access_token: String(r.access_token ?? ""),
+                  refresh_token: String(r.refresh_token ?? ""),
+                  cookies_json: String(r.cookies_json ?? ""),
+                  fingerprint_json: String(r.fingerprint_json ?? ""),
+                  user_agent: String(r.user_agent ?? ""),
+                  exit_ip: String(r.exit_ip ?? ""),
+                  proxy_port: Number(r.proxy_port ?? 0),
+                  proxy_formatted: String(r.proxy_formatted ?? "")
+                });
+              }
+            }
+          }
+        } catch {
+        }
+        await persistOutlookAccounts(jobId, accounts, identityMap, { proxyList, proxy, sourceTag: "\u5B9A\u65F6\u6CE8\u518C" });
+        for (const acc of accounts) jobQueue.pushAccount(jobId, acc);
         jobQueue.pushLog(jobId, {
           type: "log",
           message: JSON.stringify({ type: "close", code: code ?? -1, registered, ...lastErr ? { error: lastErr } : {} })
