@@ -5507,7 +5507,7 @@ router.post("/tools/outlook/auto-check", async (req, res) => {
       return;
     }
     const totalRow = await query<{ cnt: string }>(
-      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active' AND refresh_token IS NOT NULL AND refresh_token != '' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' AND COALESCE(tags,'') NOT LIKE '%token_invalid%' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%'"
+      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%'"
     );
     const total = parseInt(totalRow[0]?.cnt ?? "0", 10);
     runAutoCheck().catch(() => {});
@@ -6296,14 +6296,12 @@ router.post("/tools/yn-register", async (req, res) => {
 // ══════════════════════════════════════════════════════════════════════════════
 
 interface OutlookScheduleState {
-  enabled:       boolean;
-  targetCount:   number;   // 账号池上限，达到后停止
-  dailyCount:    number;   // 每日目标注册数，随机均匀分布到全天
-  countPerRun:   number;   // 每次触发注册的账号数
-  workers:       number;   // 并行 worker 数
-  floatRatio:    number;   // 随机浮动比例 0.0–0.5，实际数 = dailyCount × (1 ± floatRatio)
-  engine:        string;   // patchright | playwright
-  proxyMode:     string;   // "cf" | ""
+  enabled:      boolean;
+  targetCount:  number;   // 账号池上限，达到后停止
+  dailyCount:   number;   // 每日目标注册数
+  floatRatio:   number;   // 随机浮动比例 0.0–0.5，实际数 = dailyCount × (1 ± floatRatio)
+  engine:       string;   // patchright | playwright
+  proxyMode:    string;   // "cf" | ""
   nextRunAt:    number | null;
   lastRunAt:    number | null;
   lastRunResult: { registered: number; attempted: number; error?: string } | null;
@@ -6313,14 +6311,12 @@ interface OutlookScheduleState {
 }
 
 let _outlookSched: OutlookScheduleState = {
-  enabled:       false,
-  targetCount:   500,
-  dailyCount:    24,
-  countPerRun:   1,
-  workers:       1,
-  floatRatio:    0.2,
-  engine:        "patchright",
-  proxyMode:     "cf",
+  enabled:      false,
+  targetCount:  500,
+  dailyCount:   24,
+  floatRatio:   0.2,
+  engine:       "patchright",
+  proxyMode:    "cf",
   nextRunAt:    null,
   lastRunAt:    null,
   lastRunResult: null,
@@ -6389,7 +6385,7 @@ async function runScheduledOutlookReg(): Promise<void> {
 
   try {
     const rows = await query<{ cnt: string }>(
-      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active' AND refresh_token IS NOT NULL AND refresh_token != '' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' AND COALESCE(tags,'') NOT LIKE '%token_invalid%'"
+      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active'"
     );
     const current = parseInt(rows[0]?.cnt ?? "0", 10);
     if (current >= _outlookSched.targetCount) {
@@ -6444,9 +6440,8 @@ async function runScheduledOutlookReg(): Promise<void> {
     const scriptPath = new URL("../outlook_register.py", import.meta.url).pathname;
     const args = [
       scriptPath,
-      "--count",   String(_outlookSched.countPerRun),
-      "--workers", String(_outlookSched.workers),
-      "--engine",  _outlookSched.engine,
+      "--count",    "1",
+      "--engine",   _outlookSched.engine,
       "--headless", "true",
       "--wait",     "11",
       "--retries",  "4",
@@ -6484,6 +6479,11 @@ async function runScheduledOutlookReg(): Promise<void> {
       const t = raw_t.replace(/^\[T\+\s*[\d.]+\s*s\]\s*/, "");
       if (!t) return;
 
+      jobQueue.pushLog(jobId, {
+        type: "log",
+        message: t.length > 600 ? t.slice(0, 600) + " …[truncated]" : t,
+      });
+
       const inlineIdx = t.indexOf("-- INLINE_RESULT --");
       if (inlineIdx >= 0) {
         try {
@@ -6503,39 +6503,6 @@ async function runScheduledOutlookReg(): Promise<void> {
             });
             if (!accounts.find(a => a.email === em)) accounts.push({ email: em, password: String(r.password ?? "") });
             jobQueue.pushLog(jobId, { type: "success", message: `✅ [sched] 解析成功: ${em}` });
-            // 立即入库：防止进程被 SIGKILL 时 close handler 来不及运行
-            (async () => {
-              const _idn = identityMap.get(em);
-              if (!_idn) return;
-              try {
-                const _ar = await queryOne<{id:number}>(
-                  `INSERT INTO accounts (platform, email, password, status, token, refresh_token,
-                      cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port, proxy_formatted)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-                   ON CONFLICT (platform, email) DO UPDATE SET
-                     password=EXCLUDED.password, status='active',
-                     token=COALESCE(NULLIF(EXCLUDED.token,''), accounts.token),
-                     refresh_token=COALESCE(NULLIF(EXCLUDED.refresh_token,''), accounts.refresh_token),
-                     cookies_json=COALESCE(NULLIF(EXCLUDED.cookies_json,''), accounts.cookies_json),
-                     fingerprint_json=COALESCE(NULLIF(EXCLUDED.fingerprint_json,''), accounts.fingerprint_json),
-                     user_agent=COALESCE(NULLIF(EXCLUDED.user_agent,''), accounts.user_agent),
-                     exit_ip=COALESCE(NULLIF(EXCLUDED.exit_ip,''), accounts.exit_ip),
-                     proxy_port=COALESCE(NULLIF(EXCLUDED.proxy_port,0), accounts.proxy_port),
-                     proxy_formatted=COALESCE(NULLIF(EXCLUDED.proxy_formatted,''), accounts.proxy_formatted),
-                     updated_at=NOW()
-                   RETURNING id`,
-                  ['outlook', em, String(r.password ?? ''), 'active',
-                   _idn.access_token||null, _idn.refresh_token||null,
-                   _idn.cookies_json||null, _idn.fingerprint_json||null,
-                   _idn.user_agent||null, _idn.exit_ip||null,
-                   _idn.proxy_port||null,
-                   _idn.proxy_formatted||(_idn.proxy_port ? `socks5://127.0.0.1/${_idn.proxy_port}` : null)]
-                );
-                jobQueue.pushLog(jobId, {type:'success', message:`✅ [sched] 已入库: ${em} id=${_ar?.id}`});
-              } catch(_e) {
-                jobQueue.pushLog(jobId, {type:'warn', message:`⚠ [sched] 即时入库失败(${em}): ${String(_e).slice(0,120)}`});
-              }
-            })().catch(() => {});
           }
         } catch (parseErr) {
           jobQueue.pushLog(jobId, { type: "warn", message: `⚠ [sched] INLINE_RESULT 解析失败: ${String(parseErr).slice(0, 120)}` });
@@ -6636,7 +6603,7 @@ async function runScheduledOutlookReg(): Promise<void> {
 router.get("/tools/outlook/schedule", async (_req, res) => {
   try {
     const rows = await query<{ cnt: string }>(
-      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active' AND refresh_token IS NOT NULL AND refresh_token != '' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' AND COALESCE(tags,'') NOT LIKE '%token_invalid%'"
+      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active'"
     );
     const currentCount = parseInt(rows[0]?.cnt ?? "0", 10);
     res.json({ success: true, currentCount, ..._outlookSched });
@@ -6647,18 +6614,14 @@ router.get("/tools/outlook/schedule", async (_req, res) => {
 
 // POST /api/tools/outlook/schedule — 热更新配置（启用中也可修改，立即重新生成今日计划）
 router.post("/tools/outlook/schedule", async (req, res) => {
-  const { enabled, targetCount, dailyCount, countPerRun, workers, floatRatio, engine, proxyMode } =
+  const { enabled, targetCount, dailyCount, floatRatio, engine, proxyMode } =
     req.body as Partial<OutlookScheduleState>;
 
   if (typeof enabled     === "boolean") _outlookSched.enabled     = enabled;
   if (typeof targetCount === "number" && targetCount >= 1)
     _outlookSched.targetCount = Math.floor(targetCount);
-  if (typeof dailyCount === "number" && dailyCount >= 1)
-    _outlookSched.dailyCount = Math.min(288, Math.floor(dailyCount));
-  if (typeof countPerRun === "number" && countPerRun >= 1)
-    _outlookSched.countPerRun = Math.min(50, Math.floor(countPerRun));
-  if (typeof workers === "number" && workers >= 1)
-    _outlookSched.workers = Math.min(16, Math.floor(workers));
+  if (typeof dailyCount  === "number" && dailyCount  >= 1)
+    _outlookSched.dailyCount  = Math.min(288, Math.floor(dailyCount));
   if (typeof floatRatio  === "number")
     _outlookSched.floatRatio  = Math.min(0.5, Math.max(0, floatRatio));
   if (typeof engine    === "string" && ["patchright", "playwright"].includes(engine))
@@ -6672,7 +6635,7 @@ router.post("/tools/outlook/schedule", async (req, res) => {
 
   try {
     const rows = await query<{ cnt: string }>(
-      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active' AND refresh_token IS NOT NULL AND refresh_token != '' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' AND COALESCE(tags,'') NOT LIKE '%token_invalid%'"
+      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active'"
     );
     const currentCount = parseInt(rows[0]?.cnt ?? "0", 10);
     res.json({ success: true, currentCount, ..._outlookSched });

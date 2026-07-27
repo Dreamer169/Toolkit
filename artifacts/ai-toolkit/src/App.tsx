@@ -110,10 +110,11 @@ import GpRegister from "@/pages/GpRegister";
 import YnRegister from "@/pages/YnRegister";
 import CodexControl from "@/pages/CodexControl";
 import Ip2freeProxy from "@/pages/Ip2freeProxy";
+import BrowserUsePool from "@/pages/BrowserUsePool";
 
   const queryClient = new QueryClient();
 
-  type Tab = "vscode" | "turb-register" | "home" | "agent" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "machine-reset" | "fingerprint" | "outlook" | "mail-center" | "cursor-register" | "replit-register" | "sub2api" | "team-register" | "openai-pool" | "data-manager" | "full-workflow" | "monitor" | "sms-center" | "captcha" | "waf-bypass" | "unitool-login" | "webshare-register" | "oxylabs-register" | "general-tools" | "gratis-panel" | "gp-register" | "yn-register" | "ip2free-proxy" | "codex-control" | "ar-panel";
+  type Tab = "vscode" | "turb-register" | "home" | "agent" | "email" | "bulk-email" | "free-email" | "keycheck" | "tokencheck" | "ip" | "info" | "machine-reset" | "fingerprint" | "outlook" | "mail-center" | "cursor-register" | "replit-register" | "sub2api" | "team-register" | "openai-pool" | "data-manager" | "full-workflow" | "monitor" | "sms-center" | "captcha" | "waf-bypass" | "unitool-login" | "webshare-register" | "oxylabs-register" | "general-tools" | "gratis-panel" | "gp-register" | "yn-register" | "ip2free-proxy" | "codex-control" | "ar-panel" | "bu-pool";
 
   // ─── 主导航标签（常驻显示）───────────────────────────────────────────────────
   const PRIMARY_TABS: { id: Tab; label: string; icon: string }[] = [
@@ -129,6 +130,7 @@ import Ip2freeProxy from "@/pages/Ip2freeProxy";
     { id: "ar-panel",      label: "Arting 账号池",  icon: "🎨" },
     { id: "gp-register",   label: "GPTree 注册",    icon: "🌲" },
     { id: "yn-register",   label: "Yonoo 注册",     icon: "🌀" },
+    { id: "bu-pool",         label: "BU Key 池",      icon: "🔑" },
   ];
 
   // ─── 更多工具（折叠在下拉菜单中）─────────────────────────────────────────────
@@ -325,6 +327,7 @@ import Ip2freeProxy from "@/pages/Ip2freeProxy";
               {tab === "ip2free-proxy"    && <Ip2freeProxy />}
               {tab === "monitor"           && <Monitor />}
               {tab === "codex-control"     && <CodexControl />}
+              {tab === "bu-pool"           && <BrowserUsePool />}
             </main>
           )}
         </div>

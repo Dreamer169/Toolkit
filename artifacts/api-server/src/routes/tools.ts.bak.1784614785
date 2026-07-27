@@ -1495,243 +1495,6 @@ interface RegJob {
   child?: ReturnType<import("child_process").ChildProcess["kill"] extends (...args: unknown[]) => unknown ? never : never>;
 }
 
-interface OutlookIdentity {
-  access_token: string; refresh_token: string;
-  cookies_json: string; fingerprint_json: string;
-  user_agent: string; exit_ip: string; proxy_port: number; proxy_formatted: string;
-}
-
-/**
- * 统一持久化 Outlook 注册结果：账号库 + 邮箱库 + 档案库 + 自动授权。
- * 供 /tools/outlook/register 和 runScheduledOutlookReg 共用，确保定时注册和
- * 手动注册入库行为完全一致，邮件中心（temp_emails）和档案库都能联动。
- */
-async function persistOutlookAccounts(
-  jobId: string,
-  accounts: Array<{ email: string; password: string }>,
-  identityMap: Map<string, OutlookIdentity>,
-  opts: { proxyList?: string[]; proxy?: string; sourceTag?: string } = {},
-): Promise<void> {
-  const job = await jobQueue.get(jobId);
-  const tokenMap = identityMap;
-  const confirmedAccounts = accounts.filter(acc => identityMap.has(acc.email));
-  const okCount = confirmedAccounts.length;
-  if (okCount === 0) return;
-
-  const _log = (type: string, message: string) => {
-    if (job) job.logs.push({ type, message });
-  };
-  const _logErr = (em: string, label: string, err: unknown) => {
-    _log("warn", `⚠ ${label}(${em}): ${String(err).slice(0, 180)}`);
-  };
-
-  await (async () => {
-    const pendingOAuthRows: { id: number; email: string; password: string }[] = [];
-    for (const acc of confirmedAccounts) {
-      let accountRow: { id: number } | null = null;
-      try {
-        const _idn = identityMap.get(acc.email);
-        accountRow = await queryOne<{ id: number }>(
-          `INSERT INTO accounts (platform, email, password, status, token, refresh_token,
-                                   cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port, proxy_formatted)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-           ON CONFLICT (platform, email) DO UPDATE SET
-             password         = EXCLUDED.password,
-             status           = EXCLUDED.status,
-             token            = COALESCE(NULLIF(EXCLUDED.token,''), accounts.token),
-             refresh_token    = COALESCE(NULLIF(EXCLUDED.refresh_token,''), accounts.refresh_token),
-             cookies_json     = COALESCE(NULLIF(EXCLUDED.cookies_json,''), accounts.cookies_json),
-             fingerprint_json = COALESCE(NULLIF(EXCLUDED.fingerprint_json,''), accounts.fingerprint_json),
-             user_agent       = COALESCE(NULLIF(EXCLUDED.user_agent,''), accounts.user_agent),
-             exit_ip          = COALESCE(NULLIF(EXCLUDED.exit_ip,''), accounts.exit_ip),
-             proxy_port       = COALESCE(NULLIF(EXCLUDED.proxy_port, 0), accounts.proxy_port),
-             proxy_formatted  = COALESCE(NULLIF(EXCLUDED.proxy_formatted,''), accounts.proxy_formatted),
-             updated_at       = NOW()
-           RETURNING id`,
-          [
-            "outlook", acc.email, acc.password, "active",
-            _idn?.access_token    || null,
-            _idn?.refresh_token   || null,
-            _idn?.cookies_json     || null,
-            _idn?.fingerprint_json || null,
-            _idn?.user_agent       || null,
-            _idn?.exit_ip          || null,
-            _idn?.proxy_port       || null,
-            (_idn?.proxy_formatted
-              ? _idn.proxy_formatted
-              : (_idn?.proxy_port ? `socks5://127.0.0.1:${_idn.proxy_port}` : null)),
-          ],
-        );
-      } catch (dbErr) {
-        _logErr(acc.email, "账号库保存失败", dbErr);
-        continue;
-      }
-
-      try {
-        const _idn2 = identityMap.get(acc.email);
-        const _tok2 = tokenMap.get(acc.email);
-        const _syncPayload = JSON.stringify({
-          action: "outlook",
-          email: acc.email,
-          password: (acc as { email: string; password?: string }).password || "",
-          token: _tok2?.access_token  || _idn2?.access_token  || null,
-          refresh_token: _tok2?.refresh_token || _idn2?.refresh_token || null,
-          status: "active",
-          proxy: _idn2?.proxy_formatted || (_idn2?.proxy_port ? `socks5://127.0.0.1:${_idn2.proxy_port}` : null),
-          egress_ip: _idn2?.exit_ip || null,
-          user_agent: _idn2?.user_agent || null,
-          fingerprint_json: _idn2?.fingerprint_json || null,
-          cookies_json: _idn2?.cookies_json || null,
-        });
-        import("child_process").then(({ spawn: _spawn }) => {
-          const _cp = _spawn("python3", ["/data/Toolkit/artifacts/api-server/sync_unified_db.py"]);
-          _cp.stdin.write(_syncPayload);
-          _cp.stdin.end();
-        }).catch(() => {});
-      } catch (_) {}
-
-      try {
-        await execute(
-          `INSERT INTO temp_emails (address,password,provider,status,notes)
-           VALUES ($1,$2,$3,$4,$5)
-           ON CONFLICT (address) DO UPDATE SET password=EXCLUDED.password,status=EXCLUDED.status,notes=EXCLUDED.notes`,
-          [acc.email, acc.password, "outlook", "active", `Outlook 自动注册${opts.sourceTag ? " · " + opts.sourceTag : ""}`],
-        );
-      } catch (emailErr) { _logErr(acc.email, "邮箱库同步失败", emailErr); }
-
-      try {
-        const _idnArc = identityMap.get(acc.email);
-        const archiveProxy = _idnArc?.exit_ip
-          ? `socks5://127.0.0.1:${_idnArc.proxy_port}#cf=${_idnArc.exit_ip}`
-          : (opts.proxyList && opts.proxyList.length > 0 ? opts.proxyList[0] : (opts.proxy || null));
-        const fpJsonForArchive = _idnArc?.fingerprint_json && _idnArc.fingerprint_json.startsWith("{")
-          ? _idnArc.fingerprint_json : null;
-        const cookiesJsonForArchive = _idnArc?.cookies_json && _idnArc.cookies_json.startsWith("{")
-          ? _idnArc.cookies_json : null;
-        const idnDataForArchive = _idnArc?.user_agent
-          ? JSON.stringify({ user_agent: _idnArc.user_agent, exit_ip: _idnArc.exit_ip, proxy_port: _idnArc.proxy_port })
-          : null;
-        await execute(
-          `INSERT INTO archives (platform,email,password,token,refresh_token,proxy_used,identity_data,fingerprint,cookies,status,notes)
-           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11)
-           ON CONFLICT (platform,email) DO UPDATE SET
-             password      = EXCLUDED.password,
-             token         = COALESCE(NULLIF(EXCLUDED.token,''), archives.token),
-             refresh_token = COALESCE(NULLIF(EXCLUDED.refresh_token,''), archives.refresh_token),
-             proxy_used    = COALESCE(NULLIF(EXCLUDED.proxy_used,''), archives.proxy_used),
-             identity_data = COALESCE(EXCLUDED.identity_data, archives.identity_data),
-             fingerprint   = COALESCE(EXCLUDED.fingerprint, archives.fingerprint),
-             cookies       = COALESCE(EXCLUDED.cookies, archives.cookies),
-             status        = EXCLUDED.status,
-             updated_at    = NOW()`,
-          [
-            "outlook", acc.email, acc.password,
-            _idnArc?.access_token  || null,
-            _idnArc?.refresh_token || null,
-            archiveProxy,
-            idnDataForArchive,
-            fpJsonForArchive,
-            cookiesJsonForArchive,
-            "active", `Outlook 自动注册${opts.sourceTag ? " · " + opts.sourceTag : ""}`,
-          ]
-        );
-        _log("log", `[档案库] ${acc.email} 已保存 (cookies=${cookiesJsonForArchive ? cookiesJsonForArchive.length : 0}B fp=${fpJsonForArchive ? fpJsonForArchive.length : 0}B)`);
-      } catch (archErr) { _logErr(acc.email, "档案库保存失败", archErr); }
-
-      try {
-        const tok = tokenMap.get(acc.email);
-        const inlineAccess = tok?.access_token || undefined;
-        const inlineRefresh = tok?.refresh_token || undefined;
-        if (inlineAccess || inlineRefresh) {
-          await execute(
-            "UPDATE accounts SET token=$1, refresh_token=$2, status='active', updated_at=NOW() WHERE email=$3 AND platform='outlook'",
-            [inlineAccess ?? null, inlineRefresh ?? null, acc.email],
-          );
-          _log("success", `[key] ${acc.email} in-browser OAuth 授权成功`);
-        } else if (accountRow?.id) {
-          pendingOAuthRows.push({ id: accountRow.id, email: acc.email, password: (acc as { email: string; password?: string }).password || "" });
-          _log("warn", `[warn] ${acc.email} 未内联到 token，正在自动申请设备码`);
-        } else {
-          _log("warn", `[warn] ${acc.email} 未内联到 token，需手动设备码授权`);
-        }
-      } catch (authErr) { _logErr(acc.email, "保存 token 异常", authErr); }
-    }
-
-    if (pendingOAuthRows.length > 0) {
-      try {
-        const { sessionId, sessionList } = await createBatchOAuthSessions(pendingOAuthRows);
-        _log("log", `🔐 已自动创建邮箱授权会话: ${sessionId}`);
-        for (const s of sessionList) {
-          if (s.status === "pending") {
-            _log("warn", `🔐 ${s.email} 设备码: ${s.userCode} · 打开 ${s.verificationUri} 输入后会自动入库 token`);
-          } else {
-            _log("warn", `🔐 ${s.email} 设备码申请失败: ${s.errorMsg ?? "未知错误"}`);
-          }
-        }
-        try {
-          const autoPayload = sessionList
-            .filter((s: BatchOAuthSession) => s.status === "pending")
-            .map((s: BatchOAuthSession) => {
-              const row = pendingOAuthRows.find(r => r.email === s.email);
-              const _idn = identityMap.get(s.email);
-              return { accountId: s.accountId, email: s.email, password: row?.password || "", userCode: s.userCode,
-                deviceCode: s.deviceCode, dbUrl: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost/toolkit',
-                cookiesJson: _idn?.cookies_json || "" };
-            })
-            .filter((x: { password: string }) => x.password);
-          if (autoPayload.length > 0) {
-            const { spawn: spawnAuto } = await import('child_process');
-            const autoScript = new URL('../auto_device_code.py', import.meta.url).pathname;
-            const _net = await import('net');
-            const _probePort = (port: number, timeoutMs = 1500): Promise<boolean> => new Promise((resolve) => {
-              const sock = _net.createConnection({ host: '127.0.0.1', port, timeout: timeoutMs });
-              let done = false;
-              const finish = (ok: boolean) => { if (done) return; done = true; try { sock.destroy(); } catch {} resolve(ok); };
-              sock.once('connect', () => finish(true));
-              sock.once('error', () => finish(false));
-              sock.once('timeout', () => finish(false));
-            });
-            const _pendingPorts = Array.from(new Set(
-              autoPayload.map(a => identityMap.get(a.email)?.proxy_port || 0).filter(p => p > 0)
-            ));
-            let _aliveProxyPort = 0;
-            for (const _p of _pendingPorts) { if (await _probePort(_p)) { _aliveProxyPort = _p; break; } }
-            const RESIDENTIAL_PORTS_FOR_AUTH = [10851, 10853, 10854, 10857, 10859];
-            let _autoProxy = _aliveProxyPort > 0 ? `socks5://127.0.0.1:${_aliveProxyPort}` : "";
-            let _proxyTag = _aliveProxyPort > 0 ? "per-account-alive" : "residential-fallback";
-            if (!_autoProxy) {
-              for (const rp of RESIDENTIAL_PORTS_FOR_AUTH) { if (await _probePort(rp)) { _autoProxy = `socks5://127.0.0.1:${rp}`; break; } }
-            }
-            _log("log", `🌐 自动授权代理: ${_autoProxy} [${_proxyTag}]`);
-            const autoProc = spawnAuto(
-              'python3', [autoScript, JSON.stringify(autoPayload), _autoProxy],
-              { stdio: ["ignore", "pipe", "pipe"], env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: '1' } }
-            );
-            _log("log", `🤖 自动完成 ${autoPayload.length} 个账号的设备码授权…`);
-            autoProc.stdout?.on('data', (d: Buffer) => {
-              for (const line of d.toString().split('\n').filter(Boolean)) {
-                _log("log", `[auto-auth] ${line}`);
-              }
-            });
-            autoProc.stderr?.on('data', (d2: Buffer) => {
-              for (const el of d2.toString().split('\n').filter(Boolean)) {
-                const et = el.trim();
-                if (et && et.length > 5 && !et.includes('DeprecationWarning') && !et.includes('FutureWarning'))
-                  _log("log", '[auto-auth-sys] ' + et.slice(0, 200));
-              }
-            });
-            autoProc.on('close', (code: number | null) => {
-              _log(code === 0 ? 'success' : 'warn', '🤖 自动授权完成 (code=' + code + ') — token 已由 Python 在 CF proxy 内兑换入库');
-              if (job) PersistenceManager.save(job).catch(() => {});
-            });
-          }
-        } catch (autoErr) { _log("warn", `⚠ 启动自动设备码完成失败: ${autoErr}`); }
-      } catch (oauthErr) { _log("warn", `⚠ 自动申请设备码失败: ${oauthErr}`); }
-    }
-    _log("log", `📦 已保存账号库 + 邮箱库，并尝试授权 ${okCount} 个账号`);
-  })();
-}
-
 
 // 启动注册任务，立即返回 jobId
 // ── 完整工作流 Step 2/2：Outlook 注册主入口 ───────────────────────────────────
@@ -2043,9 +1806,266 @@ router.post("/tools/outlook/register", async (req, res) => {
         }
       }
     } catch {}
-    // 统一持久化：账号库 + 邮箱库 + 档案库 + 自动授权
-    const okCount = job.accounts.filter(acc => identityMap.has(acc.email)).length;
-    await persistOutlookAccounts(jobId, job.accounts, identityMap, { proxyList, proxy, sourceTag: "手动注册" });
+    // 兼容: 老代码可能用 tokenMap, 提供别名
+    const tokenMap = identityMap;
+
+    // close 阶段只持久化 INLINE_RESULT 确认过的账号（identityMap 有 entry）
+    // 以 INLINE_RESULT 为唯一权威来源，✅ 行 regex 仅作最终 fallback
+    const confirmedAccounts = job.accounts.filter(acc => identityMap.has(acc.email));
+    const okCount = confirmedAccounts.length;
+
+    // ── 持久化到数据库 + 立即 ROPC 自动授权 ────────────────────────────────
+    if (okCount > 0) {
+      await (async () => {
+        const pendingOAuthRows: { id: number; email: string; password: string }[] = [];
+        for (const acc of confirmedAccounts) {
+          let accountRow: { id: number } | null = null;
+          // 1. 保存到账号库（失败则跳过该账号）
+          try {
+            // identity bundle 同步入库 (cookies/fp/UA/exit_ip/port + token/refresh_token)
+            // 解决: 注册时浏览器指纹/cookies/IP 全丢, retoken 时新指纹访问被微软判 abuse
+            const _idn = identityMap.get(acc.email);
+            accountRow = await queryOne<{ id: number }>(
+              `INSERT INTO accounts (platform, email, password, status, token, refresh_token,
+                                       cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port, proxy_formatted)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+               ON CONFLICT (platform, email) DO UPDATE SET
+                 password         = EXCLUDED.password,
+                 status           = EXCLUDED.status,
+                 token            = COALESCE(NULLIF(EXCLUDED.token,''), accounts.token),
+                 refresh_token    = COALESCE(NULLIF(EXCLUDED.refresh_token,''), accounts.refresh_token),
+                 cookies_json     = COALESCE(NULLIF(EXCLUDED.cookies_json,''), accounts.cookies_json),
+                 fingerprint_json = COALESCE(NULLIF(EXCLUDED.fingerprint_json,''), accounts.fingerprint_json),
+                 user_agent       = COALESCE(NULLIF(EXCLUDED.user_agent,''), accounts.user_agent),
+                 exit_ip          = COALESCE(NULLIF(EXCLUDED.exit_ip,''), accounts.exit_ip),
+                 proxy_port       = COALESCE(NULLIF(EXCLUDED.proxy_port, 0), accounts.proxy_port),
+                 proxy_formatted  = COALESCE(NULLIF(EXCLUDED.proxy_formatted,''), accounts.proxy_formatted),
+                 updated_at       = NOW()
+               RETURNING id`,
+              [
+                "outlook", acc.email, acc.password, "active",
+                _idn?.access_token    || null,
+                _idn?.refresh_token   || null,
+                _idn?.cookies_json     || null,
+                _idn?.fingerprint_json || null,
+                _idn?.user_agent       || null,
+                _idn?.exit_ip          || null,
+                _idn?.proxy_port       || null,
+                // proxy_formatted: 注册时实际使用的完整代理URL（IP一致性锚点）
+                // 优先用 proxy_formatted 字段，fallback 到 proxy_port 重建 socks5://127.0.0.1:PORT
+                (_idn?.proxy_formatted
+                  ? _idn.proxy_formatted
+                  : (_idn?.proxy_port ? `socks5://127.0.0.1:${_idn.proxy_port}` : null)),
+              ],
+            );
+          } catch (dbErr) {
+            job.logs.push({ type: "warn", message: `⚠ 账号库保存失败(${acc.email}): ${dbErr}` });
+            continue;
+          }
+          // ── 统一数据库同步（fire-and-forget，失败不阻断）──
+          try {
+            const _idn2 = identityMap.get(acc.email);
+            const _tok2  = tokenMap.get(acc.email);
+            const _syncPayload = JSON.stringify({
+              action: "outlook",
+              email:         acc.email,
+              password:      (acc as { email: string; password?: string }).password || "",
+              token:         _tok2?.access_token  || _idn2?.access_token  || null,
+              refresh_token: _tok2?.refresh_token || _idn2?.refresh_token || null,
+              status:        "active",
+              proxy: _idn2?.proxy_formatted || (_idn2?.proxy_port ? `socks5://127.0.0.1:${_idn2.proxy_port}` : null),
+              egress_ip:        _idn2?.exit_ip          || null,
+              user_agent:       _idn2?.user_agent        || null,
+              fingerprint_json: _idn2?.fingerprint_json  || null,
+              cookies_json:     _idn2?.cookies_json       || null,
+            });
+            import("child_process").then(({ spawn: _spawn }) => {
+              const _cp = _spawn("python3", ["/data/Toolkit/artifacts/api-server/sync_unified_db.py"]);
+              _cp.stdin.write(_syncPayload);
+              _cp.stdin.end();
+            }).catch(() => {});
+          } catch (_) {}
+          // 2. 同步到邮箱库（独立 try，失败不阻断后续）
+          try {
+            await execute(
+              `INSERT INTO temp_emails (address,password,provider,status,notes)
+               VALUES ($1,$2,$3,$4,$5)
+               ON CONFLICT (address) DO UPDATE SET password=EXCLUDED.password,status=EXCLUDED.status,notes=EXCLUDED.notes`,
+              [acc.email, acc.password, "outlook", "active", "Outlook 自动注册"],
+            );
+          } catch (emailErr) {
+            job.logs.push({ type: "warn", message: `⚠ 邮箱库同步失败(${acc.email}): ${emailErr}` });
+          }
+          // 3. 保存到档案库 (cookies+fingerprint 真持久化)
+          //    archives 表 schema 早就有 cookies/fingerprint/identity_data jsonb 字段, 但历年来一直被
+          //    archiveFingerprint=(job as any).fingerprint=null 写空, retoken 也从没读它. 现在
+          //    archives.cookies/fingerprint 存注册时真实浏览器 storage_state + BrowserProfile dict,
+          //    proxy_used 存实际 CF 出口 IP+port, retoken 可用作 accounts 表丢字段时的 fallback 数据源
+          try {
+            const _idnArc = identityMap.get(acc.email);
+            const archiveProxy = _idnArc?.exit_ip
+              ? `socks5://127.0.0.1:${_idnArc.proxy_port}#cf=${_idnArc.exit_ip}`
+              : (proxyList.length > 0 ? proxyList[0] : (proxy || null));
+            // fingerprint_json/cookies_json 是合法 JSON 字符串, 直接 cast 成 jsonb (PG 自动 cast text->jsonb 失败时报错被 try 截获)
+            const fpJsonForArchive = _idnArc?.fingerprint_json && _idnArc.fingerprint_json.startsWith("{")
+              ? _idnArc.fingerprint_json : null;
+            const cookiesJsonForArchive = _idnArc?.cookies_json && _idnArc.cookies_json.startsWith("{")
+              ? _idnArc.cookies_json : null;
+            const idnDataForArchive = _idnArc?.user_agent
+              ? JSON.stringify({ user_agent: _idnArc.user_agent, exit_ip: _idnArc.exit_ip, proxy_port: _idnArc.proxy_port })
+              : null;
+            await execute(
+              `INSERT INTO archives (platform,email,password,token,refresh_token,proxy_used,identity_data,fingerprint,cookies,status,notes)
+               VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11)
+               ON CONFLICT (platform,email) DO UPDATE SET
+                 password      = EXCLUDED.password,
+                 token         = COALESCE(NULLIF(EXCLUDED.token,''), archives.token),
+                 refresh_token = COALESCE(NULLIF(EXCLUDED.refresh_token,''), archives.refresh_token),
+                 proxy_used    = COALESCE(NULLIF(EXCLUDED.proxy_used,''), archives.proxy_used),
+                 identity_data = COALESCE(EXCLUDED.identity_data, archives.identity_data),
+                 fingerprint   = COALESCE(EXCLUDED.fingerprint, archives.fingerprint),
+                 cookies       = COALESCE(EXCLUDED.cookies, archives.cookies),
+                 status        = EXCLUDED.status,
+                 updated_at    = NOW()`,
+              [
+                "outlook", acc.email, acc.password,
+                _idnArc?.access_token  || null,
+                _idnArc?.refresh_token || null,
+                archiveProxy,
+                idnDataForArchive,
+                fpJsonForArchive,
+                cookiesJsonForArchive,
+                "active", "Outlook 自动注册",
+              ]
+            );
+            job.logs.push({ type: "log", message: `[档案库] ${acc.email} 已保存 (cookies=${cookiesJsonForArchive?cookiesJsonForArchive.length:0}B fp=${fpJsonForArchive?fpJsonForArchive.length:0}B)` });
+          } catch (archErr) {
+            job.logs.push({ type: "warn", message: `⚠ 档案库保存失败(${acc.email}): ${archErr}` });
+          }
+          // 2. In-browser authorization_code flow token
+          //    ROPC (grant_type=password) disabled for personal MS accounts
+          try {
+            const tok           = tokenMap.get(acc.email);
+            const inlineAccess  = tok?.access_token  || undefined;
+            const inlineRefresh = tok?.refresh_token || undefined;
+            // Bug fix: inlineRefresh 存在时也应保存并跳过设备码（防止 refresh_token 被浏览器拦截但 access_token 未捕到时重复授权）
+            if (inlineAccess || inlineRefresh) {
+              // in-browser OAuth 路径显式 status='active'（设备码 fallback path 已补齐）
+              // archives 表通过 PG trigger 自动同步, 无需在此处手写 UPDATE archives.
+              await execute(
+                "UPDATE accounts SET token=$1, refresh_token=$2, status='active', updated_at=NOW() WHERE email=$3 AND platform='outlook'",
+                [inlineAccess ?? null, inlineRefresh ?? null, acc.email],
+              );
+              job.logs.push({ type: "success", message: `[key] ${acc.email} in-browser OAuth 授权成功` });
+            } else if (accountRow?.id) {
+              pendingOAuthRows.push({ id: accountRow.id, email: acc.email, password: (acc as {email:string;password?:string}).password || '' });
+              job.logs.push({ type: "warn", message: `[warn] ${acc.email} 未内联到 token，正在自动申请设备码` });
+            } else {
+              job.logs.push({ type: "warn", message: `[warn] ${acc.email} 未内联到 token，需手动设备码授权` });
+            }
+          } catch (authErr) {
+            job.logs.push({ type: "warn", message: `[err] ${acc.email} 保存 token 异常: ${authErr}` });
+          }
+        }
+        if (pendingOAuthRows.length > 0) {
+          try {
+            const { sessionId, sessionList } = await createBatchOAuthSessions(pendingOAuthRows);
+            job.logs.push({ type: "log", message: `🔐 已自动创建邮箱授权会话: ${sessionId}` });
+            for (const s of sessionList) {
+              if (s.status === "pending") {
+                job.logs.push({ type: "warn", message: `🔐 ${s.email} 设备码: ${s.userCode} · 打开 ${s.verificationUri} 输入后会自动入库 token` });
+              } else {
+                job.logs.push({ type: "warn", message: `🔐 ${s.email} 设备码申请失败: ${s.errorMsg ?? "未知错误"}` });
+              }
+            }
+            // 自动完成设备码授权：用浏览器登录账号并批准，无需人工干预
+            try {
+              const autoPayload = sessionList
+                .filter((s: BatchOAuthSession) => s.status === "pending")
+                .map((s: BatchOAuthSession) => {
+                  const row = pendingOAuthRows.find(r => r.email === s.email);
+                  // Pass deviceCode+dbUrl (token exchange inside Python via CF proxy).
+                  // Pass cookiesJson so the browser loads the registration session and
+                  // skips email/password, going straight to device-confirm → consent.
+                  const _idn = identityMap.get(s.email);
+                  return { accountId: s.accountId, email: s.email, password: row?.password || '', userCode: s.userCode,
+                    deviceCode: s.deviceCode, dbUrl: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost/toolkit',
+                    cookiesJson: _idn?.cookies_json || '' };
+                })
+                .filter((x: { password: string }) => x.password);
+              if (autoPayload.length > 0) {
+                const { spawn: spawnAuto } = await import('child_process');
+                const autoScript = new URL('../auto_device_code.py', import.meta.url).pathname;
+                // Proxy selection: prefer the per-account CF port used during registration
+                // (strict IP consistency); fall back to Python's _pick_cf_proxy() if dead.
+                const _net = await import('net');
+                const _probePort = (port: number, timeoutMs = 1500): Promise<boolean> => new Promise((resolve) => {
+                  const sock = _net.createConnection({ host: '127.0.0.1', port, timeout: timeoutMs });
+                  let done = false;
+                  const finish = (ok: boolean) => { if (done) return; done = true; try { sock.destroy(); } catch {} resolve(ok); };
+                  sock.once('connect', () => finish(true));
+                  sock.once('error', () => finish(false));
+                  sock.once('timeout', () => finish(false));
+                });
+                // 在所有 pending 账号 proxy_port 中找一个还活着的; 都没活就用 Pool A 10820
+                const _pendingPorts = Array.from(new Set(
+                  autoPayload.map(a => identityMap.get(a.email)?.proxy_port || 0).filter(p => p > 0)
+                ));
+                let _aliveProxyPort = 0;
+                for (const _p of _pendingPorts) {
+                  if (await _probePort(_p)) { _aliveProxyPort = _p; break; }
+                }
+                // CF VLESS cannot reach Microsoft URLs; use residential SOCKS5
+                const RESIDENTIAL_PORTS_FOR_AUTH = [10851, 10853, 10854, 10857, 10859];
+                let _autoProxy = _aliveProxyPort > 0 ? `socks5://127.0.0.1:${_aliveProxyPort}` : "";
+                let _proxyTag = _aliveProxyPort > 0 ? "per-account-alive" : "residential-fallback";
+                if (!_autoProxy) {
+                  for (const rp of RESIDENTIAL_PORTS_FOR_AUTH) {
+                    if (await _probePort(rp)) { _autoProxy = `socks5://127.0.0.1:${rp}`; break; }
+                  }
+                }
+                job.logs.push({ type: 'log', message: `🌐 自动授权代理: ${_autoProxy} [${_proxyTag}]` });
+                const autoProc = spawnAuto(
+                  'python3', [autoScript, JSON.stringify(autoPayload), _autoProxy],
+                  { stdio: ["ignore", "pipe", "pipe"], env: { ...(process.env as Record<string,string>), PYTHONUNBUFFERED: '1' } }
+                );
+                job.logs.push({ type: 'log', message: `🤖 自动完成 ${autoPayload.length} 个账号的设备码授权…` });
+                // 解析 Python 的 RESULTS: 行 → 跳过 error/suspended (它们 poll 必 timeout)
+                const _autoResults: Map<string, { status: string; msg: string }> = new Map();
+                autoProc.stdout?.on('data', (d: Buffer) => {
+                  for (const line of d.toString().split('\n').filter(Boolean)) {
+                    job.logs.push({ type: 'log', message: `[auto-auth] ${line}` });
+                    if (line.startsWith('RESULTS:')) {
+                      try {
+                        const arr = JSON.parse(line.slice(8)) as Array<{email:string;status:string;msg:string}>;
+                        for (const r of arr) _autoResults.set(r.email, { status: r.status, msg: r.msg });
+                      } catch { /* ignore parse */ }
+                    }
+                  }
+                });
+                autoProc.stderr?.on('data', (d2: Buffer) => {
+                  const errL = d2.toString().split('\n').filter(Boolean);
+                  for (const el of errL) {
+                    const et = el.trim();
+                    if (et && et.length > 5 && !et.includes('DeprecationWarning') && !et.includes('FutureWarning'))
+                      job.logs.push({ type: 'log', message: '[auto-auth-sys] ' + et.slice(0, 200) });
+                  }
+                });
+                autoProc.on('close', (code: number | null) => {
+                  job.logs.push({ type: code === 0 ? 'success' : 'warn', message: '\u{1F916} \u81EA\u52A8\u6388\u6743\u5B8C\u6210 (code=' + code + ') \u2014 token \u5DF2\u7531 Python \u5728 CF proxy \u5185\u5151\u6362\u5165\u5E93' });
+                  PersistenceManager.save(job).catch(() => {});
+                });
+              }
+            } catch (autoErr) {
+              job.logs.push({ type: 'warn', message: `⚠ 启动自动设备码完成失败: ${autoErr}` });
+            }
+          } catch (oauthErr) {
+            job.logs.push({ type: "warn", message: `⚠ 自动申请设备码失败: ${oauthErr}` });
+          }
+        }
+        job.logs.push({ type: "log", message: `📦 已保存账号库 + 邮箱库，并尝试授权 ${okCount} 个账号` });
+      })();
+    }
 
     // AUTO-LINK: outlook/register -> unitool_pipeline.py
     // DISABLED: chain_v3 (PM2) handles unitool registration autonomously.
@@ -5507,7 +5527,7 @@ router.post("/tools/outlook/auto-check", async (req, res) => {
       return;
     }
     const totalRow = await query<{ cnt: string }>(
-      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active' AND refresh_token IS NOT NULL AND refresh_token != '' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' AND COALESCE(tags,'') NOT LIKE '%token_invalid%' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%'"
+      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%'"
     );
     const total = parseInt(totalRow[0]?.cnt ?? "0", 10);
     runAutoCheck().catch(() => {});
@@ -6296,14 +6316,12 @@ router.post("/tools/yn-register", async (req, res) => {
 // ══════════════════════════════════════════════════════════════════════════════
 
 interface OutlookScheduleState {
-  enabled:       boolean;
-  targetCount:   number;   // 账号池上限，达到后停止
-  dailyCount:    number;   // 每日目标注册数，随机均匀分布到全天
-  countPerRun:   number;   // 每次触发注册的账号数
-  workers:       number;   // 并行 worker 数
-  floatRatio:    number;   // 随机浮动比例 0.0–0.5，实际数 = dailyCount × (1 ± floatRatio)
-  engine:        string;   // patchright | playwright
-  proxyMode:     string;   // "cf" | ""
+  enabled:      boolean;
+  targetCount:  number;   // 账号池上限，达到后停止
+  dailyCount:   number;   // 每日目标注册数
+  floatRatio:   number;   // 随机浮动比例 0.0–0.5，实际数 = dailyCount × (1 ± floatRatio)
+  engine:       string;   // patchright | playwright
+  proxyMode:    string;   // "cf" | ""
   nextRunAt:    number | null;
   lastRunAt:    number | null;
   lastRunResult: { registered: number; attempted: number; error?: string } | null;
@@ -6313,14 +6331,12 @@ interface OutlookScheduleState {
 }
 
 let _outlookSched: OutlookScheduleState = {
-  enabled:       false,
-  targetCount:   500,
-  dailyCount:    24,
-  countPerRun:   1,
-  workers:       1,
-  floatRatio:    0.2,
-  engine:        "patchright",
-  proxyMode:     "cf",
+  enabled:      false,
+  targetCount:  500,
+  dailyCount:   24,
+  floatRatio:   0.2,
+  engine:       "patchright",
+  proxyMode:    "cf",
   nextRunAt:    null,
   lastRunAt:    null,
   lastRunResult: null,
@@ -6389,7 +6405,7 @@ async function runScheduledOutlookReg(): Promise<void> {
 
   try {
     const rows = await query<{ cnt: string }>(
-      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active' AND refresh_token IS NOT NULL AND refresh_token != '' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' AND COALESCE(tags,'') NOT LIKE '%token_invalid%'"
+      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active'"
     );
     const current = parseInt(rows[0]?.cnt ?? "0", 10);
     if (current >= _outlookSched.targetCount) {
@@ -6404,171 +6420,89 @@ async function runScheduledOutlookReg(): Promise<void> {
       message: `[sched] 触发：current=${current} target=${_outlookSched.targetCount} engine=${_outlookSched.engine}`,
     });
 
-    // 复用与手动注册 /tools/outlook/register 相同的代理选取逻辑
-    const proxyMode = ["cf", "shared", ""].includes(_outlookSched.proxyMode) ? _outlookSched.proxyMode : "cf";
-    let proxyList: string[] = [];
-    let proxy = "";
-    let effectiveProxyMode = proxyMode === "cf" ? "cf" : "";
-    const preJobLogs: Array<{ type: string; message: string }> = [];
-
-    if (proxyMode === "shared") {
-      try {
-        const picked = await pickAdaptiveProxy("outlook", 3);
-        if (picked.length > 0) {
-          proxyList = picked.map(p => p.formatted);
-          proxy = proxyList[0];
-          effectiveProxyMode = "";
-          const sourceCounts = picked.reduce<Record<string, number>>((acc, p) => {
-            acc[p.pool] = (acc[p.pool] || 0) + 1;
-            return acc;
-          }, {});
-          const sourceLabel = Object.entries(sourceCounts).map(([k, v]) => `${k}:${v}`).join(", ");
-          preJobLogs.push({ type: "log", message: `🌐 共享代理池已选取 ${picked.length} 个节点（${sourceLabel}）` });
-        } else {
-          effectiveProxyMode = "cf";
-          preJobLogs.push({ type: "warn", message: "⚠ 共享代理池无可用节点，自动退回 CF IP 池 + xray" });
-        }
-      } catch (e) {
-        effectiveProxyMode = "cf";
-        preJobLogs.push({ type: "warn", message: `⚠ 共享代理池读取失败，自动退回 CF IP 池 + xray: ${String(e).slice(0, 120)}` });
-      }
-    } else if (proxyMode === "cf") {
-      effectiveProxyMode = "cf";
-    }
-
-    const proxyDisplay = proxy ? proxy.replace(/:([^:@]{4})[^:@]*@/, ":****@") : "无代理";
-    for (const l of preJobLogs) jobQueue.pushLog(jobId, l);
-    jobQueue.pushLog(jobId, { type: "log", message: `🌐 代理: ${proxyDisplay}${effectiveProxyMode === "cf" ? " [CF+xray代理池]" : ""}` });
-
     const { spawn } = await import("child_process");
     const scriptPath = new URL("../outlook_register.py", import.meta.url).pathname;
     const args = [
       scriptPath,
-      "--count",   String(_outlookSched.countPerRun),
-      "--workers", String(_outlookSched.workers),
-      "--engine",  _outlookSched.engine,
+      "--count",    "1",
+      "--engine",   _outlookSched.engine,
       "--headless", "true",
       "--wait",     "11",
       "--retries",  "4",
       "--delay",    "2",
     ];
-    if (proxyList.length > 1) {
-      args.push("--proxies", proxyList.join(","));
-      jobQueue.pushLog(jobId, { type: "log", message: `🌐 代理轮换池: ${proxyList.length} 个节点` });
-    } else if (proxy) {
-      args.push("--proxy", proxy);
-    }
-    if (effectiveProxyMode === "cf") {
-      args.push("--proxy-mode", "cf");
-      jobQueue.pushLog(jobId, { type: "log", message: `☁️ CF+xray 代理池：共享代理不可用时作为备用` });
-    }
+    if (_outlookSched.proxyMode === "cf") args.push("--proxy-mode", "cf");
 
-    const _spawnEnv: Record<string, string> = {
-      ...process.env as Record<string, string>,
-      PYTHONUNBUFFERED:         "1",
-      PLAYWRIGHT_BROWSERS_PATH: "/data/cache/ms-playwright",
-      DISPLAY:                  process.env.DISPLAY || ":99",
-    };
-    const child = spawn("python3", args, { env: _spawnEnv });
+    const child = spawn("python3", args, {
+      env: {
+        ...(process.env as Record<string, string>),
+        PYTHONUNBUFFERED:         "1",
+        PLAYWRIGHT_BROWSERS_PATH: "/data/cache/ms-playwright",
+        DISPLAY:                  process.env.DISPLAY || ":99",
+      },
+    });
     jobQueue.setChild(jobId, child);
 
     let lineBuf = "";
-    let jsonBuf = "";
-    let inJson = false;
-    const identityMap = new Map<string, OutlookIdentity>();
-    const accounts: Array<{ email: string; password: string }> = [];
 
     const processLine = (line: string): void => {
-      const raw_t = line.trim();
-      if (!raw_t) return;
-      const t = raw_t.replace(/^\[T\+\s*[\d.]+\s*s\]\s*/, "");
+      const t = line.trim();
       if (!t) return;
-
+      jobQueue.pushLog(jobId, {
+        type: "log",
+        message: t.length > 600 ? t.slice(0, 600) + " …[truncated]" : t,
+      });
       const inlineIdx = t.indexOf("-- INLINE_RESULT --");
-      if (inlineIdx >= 0) {
-        try {
-          const r = JSON.parse(t.slice(inlineIdx + "-- INLINE_RESULT --".length).trim()) as Record<string, unknown>;
-          if (r.success && r.email) {
-            registered++;
-            const em = String(r.email);
-            identityMap.set(em, {
-              access_token:     String(r.access_token     ?? ""),
-              refresh_token:    String(r.refresh_token    ?? ""),
-              cookies_json:     String(r.cookies_json     ?? ""),
-              fingerprint_json: String(r.fingerprint_json ?? ""),
-              user_agent:       String(r.user_agent       ?? ""),
-              exit_ip:          String(r.exit_ip          ?? ""),
-              proxy_port:       Number(r.proxy_port       ?? 0),
-              proxy_formatted:  String(r.proxy_formatted  ?? ""),
-            });
-            if (!accounts.find(a => a.email === em)) accounts.push({ email: em, password: String(r.password ?? "") });
-            jobQueue.pushLog(jobId, { type: "success", message: `✅ [sched] 解析成功: ${em}` });
-            // 立即入库：防止进程被 SIGKILL 时 close handler 来不及运行
-            (async () => {
-              const _idn = identityMap.get(em);
-              if (!_idn) return;
-              try {
-                const _ar = await queryOne<{id:number}>(
-                  `INSERT INTO accounts (platform, email, password, status, token, refresh_token,
-                      cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port, proxy_formatted)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-                   ON CONFLICT (platform, email) DO UPDATE SET
-                     password=EXCLUDED.password, status='active',
-                     token=COALESCE(NULLIF(EXCLUDED.token,''), accounts.token),
-                     refresh_token=COALESCE(NULLIF(EXCLUDED.refresh_token,''), accounts.refresh_token),
-                     cookies_json=COALESCE(NULLIF(EXCLUDED.cookies_json,''), accounts.cookies_json),
-                     fingerprint_json=COALESCE(NULLIF(EXCLUDED.fingerprint_json,''), accounts.fingerprint_json),
-                     user_agent=COALESCE(NULLIF(EXCLUDED.user_agent,''), accounts.user_agent),
-                     exit_ip=COALESCE(NULLIF(EXCLUDED.exit_ip,''), accounts.exit_ip),
-                     proxy_port=COALESCE(NULLIF(EXCLUDED.proxy_port,0), accounts.proxy_port),
-                     proxy_formatted=COALESCE(NULLIF(EXCLUDED.proxy_formatted,''), accounts.proxy_formatted),
-                     updated_at=NOW()
-                   RETURNING id`,
-                  ['outlook', em, String(r.password ?? ''), 'active',
-                   _idn.access_token||null, _idn.refresh_token||null,
-                   _idn.cookies_json||null, _idn.fingerprint_json||null,
-                   _idn.user_agent||null, _idn.exit_ip||null,
-                   _idn.proxy_port||null,
-                   _idn.proxy_formatted||(_idn.proxy_port ? `socks5://127.0.0.1/${_idn.proxy_port}` : null)]
-                );
-                jobQueue.pushLog(jobId, {type:'success', message:`✅ [sched] 已入库: ${em} id=${_ar?.id}`});
-              } catch(_e) {
-                jobQueue.pushLog(jobId, {type:'warn', message:`⚠ [sched] 即时入库失败(${em}): ${String(_e).slice(0,120)}`});
-              }
-            })().catch(() => {});
+      if (inlineIdx < 0) return;
+      try {
+        const r = JSON.parse(t.slice(inlineIdx + "-- INLINE_RESULT --".length).trim()) as Record<string, unknown>;
+        if (!r.success || !r.email) return;
+        registered++;
+        const em = String(r.email);
+        jobQueue.pushAccount(jobId, { email: em, password: String(r.password ?? "") });
+        (async () => {
+          try {
+            const ar = await queryOne<{ id: number }>(
+              `INSERT INTO accounts
+                 (platform, email, password, status, token, refresh_token,
+                  cookies_json, fingerprint_json, user_agent, exit_ip, proxy_port, proxy_formatted)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+               ON CONFLICT (platform, email) DO UPDATE SET
+                 password         = EXCLUDED.password,
+                 status           = 'active',
+                 token            = COALESCE(NULLIF(EXCLUDED.token,''),            accounts.token),
+                 refresh_token    = COALESCE(NULLIF(EXCLUDED.refresh_token,''),    accounts.refresh_token),
+                 cookies_json     = COALESCE(NULLIF(EXCLUDED.cookies_json,''),     accounts.cookies_json),
+                 fingerprint_json = COALESCE(NULLIF(EXCLUDED.fingerprint_json,''), accounts.fingerprint_json),
+                 user_agent       = COALESCE(NULLIF(EXCLUDED.user_agent,''),       accounts.user_agent),
+                 exit_ip          = COALESCE(NULLIF(EXCLUDED.exit_ip,''),          accounts.exit_ip),
+                 proxy_port       = COALESCE(NULLIF(EXCLUDED.proxy_port,0),        accounts.proxy_port),
+                 proxy_formatted  = COALESCE(NULLIF(EXCLUDED.proxy_formatted,''),  accounts.proxy_formatted),
+                 updated_at       = NOW()
+               RETURNING id`,
+              ["outlook", em, String(r.password ?? ""), "active",
+               (r.access_token     as string) || null,
+               (r.refresh_token    as string) || null,
+               (r.cookies_json     as string) || null,
+               (r.fingerprint_json as string) || null,
+               (r.user_agent       as string) || null,
+               (r.exit_ip          as string) || null,
+               (r.proxy_port       as number) || null,
+               (r.proxy_formatted  as string) || (r.proxy_port ? `socks5://127.0.0.1:${r.proxy_port}` : null)]
+            );
+            jobQueue.pushLog(jobId, { type: "success", message: `✅ [sched] 已入库: ${em} id=${ar?.id}` });
+          } catch (dbErr) {
+            jobQueue.pushLog(jobId, { type: "warn", message: `⚠ [sched] 入库失败(${em}): ${String(dbErr).slice(0, 150)}` });
           }
-        } catch (parseErr) {
-          jobQueue.pushLog(jobId, { type: "warn", message: `⚠ [sched] INLINE_RESULT 解析失败: ${String(parseErr).slice(0, 120)}` });
-        }
-        return;
-      }
-
-      if (t.startsWith("──") || t.startsWith("🚀")) return;
-      if (t === "[" || t === "{" || t === "]" || t === "}") return;
-      if (t.startsWith("{") || (t.startsWith("[{") && t.endsWith("}]"))) return;
-      if (t.startsWith('"') && t.includes(":")) return;
-      if (/^\s*"(email|username|password|success|error|elapsed|engine)"\s*:/.test(t)) return;
-
-      let type = "log";
-      if (t.includes("⚠"))                         type = "warn";
-      else if (t.includes("❌"))                    type = "error";
-      else if (t.includes("✅") && t.includes("|")) type = "success";
-      else if (t.startsWith("✅ 成功:"))             type = "done";
-
-      jobQueue.pushLog(jobId, { type, message: t });
-
-      if (type === "success" && t.includes("@outlook.com")) {
-        const emailM = t.match(/([\w.\-+]+@(?:outlook|hotmail|live)\.com)/);
-        const passM  = t.match(/密码:\s*(\S+)/);
-        if (emailM && passM && !accounts.find(a => a.email === emailM[1])) accounts.push({ email: emailM[1], password: passM[1] });
+        })();
+      } catch (parseErr) {
+        jobQueue.pushLog(jobId, { type: "warn", message: `⚠ [sched] INLINE_RESULT 解析失败: ${String(parseErr).slice(0, 120)}` });
       }
     };
 
     await new Promise<void>((resolve) => {
       child.stdout.on("data", (chunk: Buffer) => {
-        const raw = chunk.toString();
-        if (raw.includes("── JSON 结果 ──") || inJson) { inJson = true; jsonBuf += raw; }
-        lineBuf += raw;
+        lineBuf += chunk.toString();
         const parts = lineBuf.split("\n");
         lineBuf = parts.pop() ?? "";
         for (const line of parts) processLine(line);
@@ -6580,34 +6514,9 @@ async function runScheduledOutlookReg(): Promise<void> {
           jobQueue.pushLog(jobId, { type: "log", message: "[err] " + msg });
         }
       });
-      child.on("close", async (code: number | null) => {
+      child.on("close", (code: number | null) => {
         if (lineBuf.trim()) processLine(lineBuf);
-        try {
-          const jsonStart = jsonBuf.indexOf("[");
-          if (jsonStart >= 0) {
-            const cleaned = jsonBuf.slice(jsonStart).split("\n── JSON")[0].trim();
-            const parsed = JSON.parse(cleaned) as Array<Record<string, unknown>>;
-            for (const r of parsed) {
-              if (r.success && r.email && r.password) {
-                const em = String(r.email);
-                if (!accounts.find(a => a.email === em)) accounts.push({ email: em, password: String(r.password) });
-                identityMap.set(em, {
-                  access_token:     String(r.access_token     ?? ""),
-                  refresh_token:    String(r.refresh_token    ?? ""),
-                  cookies_json:     String(r.cookies_json     ?? ""),
-                  fingerprint_json: String(r.fingerprint_json ?? ""),
-                  user_agent:       String(r.user_agent       ?? ""),
-                  exit_ip:          String(r.exit_ip          ?? ""),
-                  proxy_port:       Number(r.proxy_port       ?? 0),
-                  proxy_formatted:  String(r.proxy_formatted  ?? ""),
-                });
-              }
-            }
-          }
-        } catch {}
-        // 统一持久化：与手动注册完全一致（账号库 + 邮箱库 + 档案库 + 自动授权）
-        await persistOutlookAccounts(jobId, accounts, identityMap, { proxyList, proxy, sourceTag: "定时注册" });
-        for (const acc of accounts) jobQueue.pushAccount(jobId, acc);
+        // close event JSON fallback，供调度端识别结束与结果
         jobQueue.pushLog(jobId, {
           type: "log",
           message: JSON.stringify({ type: "close", code: code ?? -1, registered, ...(lastErr ? { error: lastErr } : {}) }),
@@ -6631,12 +6540,11 @@ async function runScheduledOutlookReg(): Promise<void> {
   }
 }
 
-
 // GET /api/tools/outlook/schedule
 router.get("/tools/outlook/schedule", async (_req, res) => {
   try {
     const rows = await query<{ cnt: string }>(
-      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active' AND refresh_token IS NOT NULL AND refresh_token != '' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' AND COALESCE(tags,'') NOT LIKE '%token_invalid%'"
+      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active'"
     );
     const currentCount = parseInt(rows[0]?.cnt ?? "0", 10);
     res.json({ success: true, currentCount, ..._outlookSched });
@@ -6647,18 +6555,14 @@ router.get("/tools/outlook/schedule", async (_req, res) => {
 
 // POST /api/tools/outlook/schedule — 热更新配置（启用中也可修改，立即重新生成今日计划）
 router.post("/tools/outlook/schedule", async (req, res) => {
-  const { enabled, targetCount, dailyCount, countPerRun, workers, floatRatio, engine, proxyMode } =
+  const { enabled, targetCount, dailyCount, floatRatio, engine, proxyMode } =
     req.body as Partial<OutlookScheduleState>;
 
   if (typeof enabled     === "boolean") _outlookSched.enabled     = enabled;
   if (typeof targetCount === "number" && targetCount >= 1)
     _outlookSched.targetCount = Math.floor(targetCount);
-  if (typeof dailyCount === "number" && dailyCount >= 1)
-    _outlookSched.dailyCount = Math.min(288, Math.floor(dailyCount));
-  if (typeof countPerRun === "number" && countPerRun >= 1)
-    _outlookSched.countPerRun = Math.min(50, Math.floor(countPerRun));
-  if (typeof workers === "number" && workers >= 1)
-    _outlookSched.workers = Math.min(16, Math.floor(workers));
+  if (typeof dailyCount  === "number" && dailyCount  >= 1)
+    _outlookSched.dailyCount  = Math.min(288, Math.floor(dailyCount));
   if (typeof floatRatio  === "number")
     _outlookSched.floatRatio  = Math.min(0.5, Math.max(0, floatRatio));
   if (typeof engine    === "string" && ["patchright", "playwright"].includes(engine))
@@ -6672,7 +6576,7 @@ router.post("/tools/outlook/schedule", async (req, res) => {
 
   try {
     const rows = await query<{ cnt: string }>(
-      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active' AND refresh_token IS NOT NULL AND refresh_token != '' AND COALESCE(tags,'') NOT LIKE '%abuse_mode%' AND COALESCE(tags,'') NOT LIKE '%token_invalid%'"
+      "SELECT COUNT(*)::text AS cnt FROM accounts WHERE platform='outlook' AND status='active'"
     );
     const currentCount = parseInt(rows[0]?.cnt ?? "0", 10);
     res.json({ success: true, currentCount, ..._outlookSched });
