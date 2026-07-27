@@ -17,6 +17,7 @@ interface ProxyEntry {
 interface SchedConfig {
   interval_min: number; interval_large_min: number; large_threshold: number;
   count: number; variance_pct: number; break_min: number; cap: number;
+  resume_at?: number;
 }
 interface Status {
   ok: boolean;

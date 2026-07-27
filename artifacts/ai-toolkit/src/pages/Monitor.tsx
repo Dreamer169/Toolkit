@@ -830,7 +830,7 @@ export default function Monitor() {
                 </tr>
               </thead>
               <tbody>
-                {cfArkose.subnets.map((s, i) => {
+                {cfArkose.subnets.map((s: { subnet: string; ok: number; fail: number; total: number; rate: number }, i: number) => {
                   const risk = s.rate < 20 ? "🔴 极高" : s.rate < 35 ? "🟠 高" : s.rate < 55 ? "🟡 中" : "🟢 低";
                   const rateColor = s.rate < 20 ? "text-red-400" : s.rate < 35 ? "text-orange-400" : s.rate < 55 ? "text-amber-400" : "text-emerald-400";
                   return (

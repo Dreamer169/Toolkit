@@ -1240,7 +1240,7 @@ router.get("/data/unitool-stats", async (req, res) => {
     }
 
     // ── ref_pool_detail（来自已加载 convCache）───────────────────────────────
-    const refPoolDetail: Array<{id:number; email:string; ref_code:string; used:number}> = poolCacheData
+    const refPoolDetail: Array<{id:number; email:string; ref_code:string; used:number}> = (poolCacheData as Array<{id:number; email:string; ref_code:string; used:number}>)
       .filter((e) => typeof e.used === "number")
       .sort((a, b) => b.used - a.used)
       .slice(0, 50);

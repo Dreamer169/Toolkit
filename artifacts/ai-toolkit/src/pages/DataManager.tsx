@@ -97,7 +97,7 @@ function StatsPanel() {
       if (d.success) {
         setCleanupMsg(`✅ 已删除 ${d.deleted} 个账号`);
         setCleanupPreview(null);
-        setTimeout(() => loadStats(), 1500);
+        setTimeout(() => loadUStats(), 1500);
       } else { setCleanupMsg("❌ " + d.error); }
     } catch(e) { setCleanupMsg("❌ 删除失败"); }
     setCleanupBusy(false);

@@ -2138,8 +2138,8 @@ router.get("/tools/jobs", async (_req, res) => {
     status: job.status,
     startedAt: job.startedAt,
     // realLogCount: set by slim loadAll() for DB-only jobs; full logs for in-memory jobs
-    logCount: (job as Record<string,unknown>).realLogCount !== undefined
-      ? (job as Record<string,unknown>).realLogCount as number
+    logCount: (job as unknown as Record<string,unknown>).realLogCount !== undefined
+      ? (job as unknown as Record<string,unknown>).realLogCount as number
       : job.logs.length,
     accountCount: job.accounts.length,
     exitCode: job.exitCode,
@@ -6039,9 +6039,9 @@ router.get("/tools/unitool/token-stats", async (req, res) => {
       "--refresh", "--limit", "100"
     ], { detached: true, stdio: "ignore" });
     child.unref();
-    res.json({ success: true, triggered: true, pid: child.pid });
+    return res.json({ success: true, triggered: true, pid: child.pid });
   } catch (e) {
-    res.status(500).json({ success: false, error: String(e) });
+    return res.status(500).json({ success: false, error: String(e) });
   }
 });
 

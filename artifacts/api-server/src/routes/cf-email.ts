@@ -77,7 +77,7 @@ router.get("/cf-email/:name/statistics", async (req, res) => {
   const inst = INSTANCES.find(i => i.name === req.params["name"]);
   if (!inst) return res.status(404).json({ error: "instance not found" });
   const r = await cfFetch(inst, "/jimhacker/statistics");
-  res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
+  return res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
 });
 
 // GET /api/cf-email/:name/addresses
@@ -86,7 +86,7 @@ router.get("/cf-email/:name/addresses", async (req, res) => {
   if (!inst) return res.status(404).json({ error: "instance not found" });
   const { limit = "20", offset = "0" } = req.query as Record<string, string>;
   const r = await cfFetch(inst, `/jimhacker/address?limit=${limit}&offset=${offset}`);
-  res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
+  return res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
 });
 
 // POST /api/cf-email/:name/addresses
@@ -100,7 +100,7 @@ router.post("/cf-email/:name/addresses", async (req, res) => {
     body: JSON.stringify({ name, domain: domain || inst.domain }),
   });
   const text = await r.text();
-  res.status(r.status).json(r.ok ? JSON.parse(text) : { error: text });
+  return res.status(r.status).json(r.ok ? JSON.parse(text) : { error: text });
 });
 
 // DELETE /api/cf-email/:name/addresses/:id
@@ -109,7 +109,7 @@ router.delete("/cf-email/:name/addresses/:id", async (req, res) => {
   if (!inst) return res.status(404).json({ error: "instance not found" });
   const r = await cfFetch(inst, `/jimhacker/delete_address/${req.params["id"]}`, { method: "DELETE" });
   const text = await r.text();
-  res.status(r.status).json(r.ok ? JSON.parse(text) : { error: text });
+  return res.status(r.status).json(r.ok ? JSON.parse(text) : { error: text });
 });
 
 // DELETE /api/cf-email/:name/addresses/:id/inbox
@@ -117,7 +117,7 @@ router.delete("/cf-email/:name/addresses/:id/inbox", async (req, res) => {
   const inst = INSTANCES.find(i => i.name === req.params["name"]);
   if (!inst) return res.status(404).json({ error: "instance not found" });
   const r = await cfFetch(inst, `/jimhacker/clear_inbox/${req.params["id"]}`, { method: "DELETE" });
-  res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
+  return res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
 });
 
 // GET /api/cf-email/:name/mails
@@ -127,7 +127,7 @@ router.get("/cf-email/:name/mails", async (req, res) => {
   const { limit = "20", offset = "0", address } = req.query as Record<string, string>;
   const qs = new URLSearchParams({ limit, offset, ...(address ? { address } : {}) });
   const r = await cfFetch(inst, `/jimhacker/mails?${qs}`);
-  res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
+  return res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
 });
 
 // DELETE /api/cf-email/:name/mails/:id
@@ -135,7 +135,7 @@ router.delete("/cf-email/:name/mails/:id", async (req, res) => {
   const inst = INSTANCES.find(i => i.name === req.params["name"]);
   if (!inst) return res.status(404).json({ error: "instance not found" });
   const r = await cfFetch(inst, `/jimhacker/mails/${req.params["id"]}`, { method: "DELETE" });
-  res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
+  return res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
 });
 
 // POST /api/cf-email/:name/addresses/:id/reset-password
@@ -143,7 +143,7 @@ router.post("/cf-email/:name/addresses/:id/reset-password", async (req, res) => 
   const inst = INSTANCES.find(i => i.name === req.params["name"]);
   if (!inst) return res.status(404).json({ error: "instance not found" });
   const r = await cfFetch(inst, `/jimhacker/address/${req.params["id"]}/reset_password`, { method: "POST" });
-  res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
+  return res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
 });
 
 // POST /api/cf-email/:name/addresses — create new address (named)
@@ -157,7 +157,7 @@ router.post("/cf-email/:name/new-address", async (req, res) => {
     body: JSON.stringify({ name: addrName, domain: inst.domain }),
   });
   const text = await r.text();
-  res.status(r.status).json(r.ok ? JSON.parse(text) : { error: text });
+  return res.status(r.status).json(r.ok ? JSON.parse(text) : { error: text });
 });
 
 // POST /api/cf-email/:name/send — send mail from a temp address via CF binding
@@ -170,7 +170,7 @@ router.post("/cf-email/:name/send", async (req, res) => {
     body: JSON.stringify(req.body),
   });
   const text = await r.text();
-  res.status(r.status).json(r.ok ? JSON.parse(text) : { error: text });
+  return res.status(r.status).json(r.ok ? JSON.parse(text) : { error: text });
 });
 
 // GET /api/cf-email/:name/account-settings
@@ -178,7 +178,7 @@ router.get("/cf-email/:name/account-settings", async (req, res) => {
   const inst = INSTANCES.find(i => i.name === req.params["name"]);
   if (!inst) return res.status(404).json({ error: "instance not found" });
   const r = await cfFetch(inst, "/jimhacker/account_settings");
-  res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
+  return res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
 });
 
 // POST /api/cf-email/:name/account-settings
@@ -190,7 +190,7 @@ router.post("/cf-email/:name/account-settings", async (req, res) => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req.body),
   });
-  res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
+  return res.status(r.status).json(r.ok ? await r.json() : { error: await r.text() });
 });
 
 export default router;
