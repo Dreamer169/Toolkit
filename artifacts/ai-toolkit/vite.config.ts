@@ -6,6 +6,7 @@ import path from "path";
 const rawPort = process.env.PORT;
 const port = rawPort ? Number(rawPort) : 3000;
 const basePath = process.env.BASE_PATH ?? "/";
+const page = (name: string) => path.resolve(import.meta.dirname, "src", "pages", `${name}.tsx`);
 
 export default defineConfig({
   base: basePath,
@@ -46,21 +47,21 @@ export default defineConfig({
           "vendor-utils": ["lucide-react", "clsx", "tailwind-merge", "sonner", "date-fns"],
           // 面板页（懒加载候选）
           "panels": [
-            "./src/pages/GratisPanel",
-            "./src/pages/ArPanel",
-            "./src/pages/Monitor",
-            "./src/pages/MailCenter",
-            "./src/pages/GeneralTools",
-            "./src/pages/DataManager",
+            page("GratisPanel"),
+            page("ArPanel"),
+            page("Monitor"),
+            page("MailCenter"),
+            page("GeneralTools"),
+            page("DataManager"),
           ],
           // 注册工具页
           "register-pages": [
-            "./src/pages/CursorRegister",
-            "./src/pages/ReplitRegister",
-            "./src/pages/WebshareRegister",
-            "./src/pages/OxylabsRegister",
-            "./src/pages/GpRegister",
-            "./src/pages/YnRegister",
+            page("CursorRegister"),
+            page("ReplitRegister"),
+            page("WebshareRegister"),
+            page("OxylabsRegister"),
+            page("GpRegister"),
+            page("YnRegister"),
           ],
         },
       },
